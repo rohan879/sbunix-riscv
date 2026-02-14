@@ -1,0 +1,44 @@
+### /opt/shared binary architecture checks (file)
+
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcc:
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcc: ELF 64-bit LSB executable, x86-64, version 1 (GNU/Linux), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=4bbae109667b267612fcd72902c6b1eb5ed819f1, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcc:
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcc: ELF 64-bit LSB executable, x86-64, version 1 (GNU/Linux), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=4bbae109667b267612fcd72902c6b1eb5ed819f1, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-system-riscv64:
+/opt/shared/qemu/bin/qemu-system-riscv64: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=0733364bf3f2b0555064cd7a4bd5ecfda2f95b16, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-img:
+/opt/shared/qemu/bin/qemu-img: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=300db41934da0b173b1a5f8111007c94a5bb8dc0, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-edid:
+/opt/shared/qemu/bin/qemu-edid: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=321f80af1e8ce3d270a6c362b15c27fcbf64867d, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-ga:
+/opt/shared/qemu/bin/qemu-ga: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=435eafe43fad600bfda635adb8a0908f059c7914, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-img:
+/opt/shared/qemu/bin/qemu-img: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=300db41934da0b173b1a5f8111007c94a5bb8dc0, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-io:
+/opt/shared/qemu/bin/qemu-io: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=40db87eeca360f67809b8665f91b06e2ee21342f, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-nbd:
+/opt/shared/qemu/bin/qemu-nbd: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=39e10d86d8f6c5bcbae05af3ab80ea4af5f3e82d, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-pr-helper:
+/opt/shared/qemu/bin/qemu-pr-helper: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=ae1dbaac2511e058f982153842050e990984a53d, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-storage-daemon:
+/opt/shared/qemu/bin/qemu-storage-daemon: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=00c5a0b7a24a1df3c9f50a65f252468c844b13c1, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-system-riscv32:
+/opt/shared/qemu/bin/qemu-system-riscv32: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=19c452a93fd414c1665c71c4787707a8a3c8f4e8, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-system-riscv64:
+/opt/shared/qemu/bin/qemu-system-riscv64: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=0733364bf3f2b0555064cd7a4bd5ecfda2f95b16, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+/opt/shared/qemu/bin/qemu-vmsr-helper:
+/opt/shared/qemu/bin/qemu-vmsr-helper: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=37098cd8b5c2915bc1319f94379e78f21b04c5c4, for GNU/Linux 3.2.0, with debug_info, not stripped
+

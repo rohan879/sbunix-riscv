@@ -1,0 +1,92 @@
+### Tool versions
+
+## gcc
+path: /usr/bin/gcc
+gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
+Copyright (C) 2023 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+
+## g++
+path: /usr/bin/g++
+g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
+Copyright (C) 2023 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+
+## make
+path: /usr/bin/make
+GNU Make 4.3
+Built for x86_64-pc-linux-gnu
+Copyright (C) 1988-2020 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+
+## ld
+path: /usr/bin/ld
+GNU ld (GNU Binutils for Ubuntu) 2.42
+Copyright (C) 2024 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or (at your option) a later version.
+This program has absolutely no warranty.
+
+## as
+path: /usr/bin/as
+GNU assembler (GNU Binutils for Ubuntu) 2.42
+Copyright (C) 2024 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or later.
+This program has absolutely no warranty.
+
+## ar
+path: /usr/bin/ar
+GNU ar (GNU Binutils for Ubuntu) 2.42
+Copyright (C) 2024 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or (at your option) any later version.
+This program has absolutely no warranty.
+
+## ranlib
+path: /usr/bin/ranlib
+GNU ranlib (GNU Binutils for Ubuntu) 2.42
+Copyright (C) 2024 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or (at your option) any later version.
+This program has absolutely no warranty.
+
+## strip
+path: /usr/bin/strip
+GNU strip (GNU Binutils for Ubuntu) 2.42
+Copyright (C) 2024 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or (at your option) any later version.
+This program has absolutely no warranty.
+
+## python3
+path: /usr/bin/python3
+Python 3.12.3
+
+## git
+path: /usr/bin/git
+git version 2.43.0
+
+## qemu-system-riscv64
+path: /opt/shared/qemu/bin/qemu-system-riscv64
+QEMU emulator version 9.2.0
+Copyright (c) 2003-2024 Fabrice Bellard and the QEMU Project developers
+
+## qemu-img
+path: /opt/shared/qemu/bin/qemu-img
+qemu-img version 9.2.0
+Copyright (c) 2003-2024 Fabrice Bellard and the QEMU Project developers
+
+## riscv64-unknown-elf-gcc
+path: /opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcc
+riscv64-unknown-elf-gcc () 15.2.0
+Copyright (C) 2025 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+

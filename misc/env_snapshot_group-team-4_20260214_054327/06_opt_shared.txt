@@ -1,0 +1,208 @@
+### /opt/shared top-level listing
+$ bash -lc ls -la /opt/shared
+
+total 40
+drwxr-xr-x 10 root root 4096 Feb  8 04:35 .
+drwxr-xr-x  3 root root 4096 Feb 11 18:47 ..
+drwxr-xr-x  2 root root 4096 Jan 29 00:12 bin
+drwxr-xr-x  3 root root 4096 Feb  7 20:54 cargo
+drwxr-xr-x  2 root root 4096 Jan 29 00:12 materials
+drwxr-xr-x  7 root root 4096 Jan 29 01:37 qemu
+drwxr-xr-x  8 root root 4096 Jan 29 02:54 riscv-toolchain
+drwxr-xr-x  6 root root 4096 Feb  7 20:52 rust
+drwxr-xr-x  8 root root 4096 Feb  8 04:35 sbunix-skeleton
+drwxr-xr-x  4 root root 4096 Feb  7 20:53 zig
+
+### /opt/shared tree (bounded depth)
+$ bash -lc find /opt/shared -maxdepth 3 -print | head -n 2000
+
+/opt/shared
+/opt/shared/cargo
+/opt/shared/cargo/.package-cache
+/opt/shared/cargo/env
+/opt/shared/cargo/.global-cache
+/opt/shared/cargo/.package-cache-mutate
+/opt/shared/cargo/bin
+/opt/shared/cargo/bin/cargo
+/opt/shared/cargo/bin/rls
+/opt/shared/cargo/bin/clippy-driver
+/opt/shared/cargo/bin/rustfmt
+/opt/shared/cargo/bin/cargo-fmt
+/opt/shared/cargo/bin/rust-gdbgui
+/opt/shared/cargo/bin/rust-analyzer
+/opt/shared/cargo/bin/rust-gdb
+/opt/shared/cargo/bin/cargo-clippy
+/opt/shared/cargo/bin/rustc
+/opt/shared/cargo/bin/rustdoc
+/opt/shared/cargo/bin/rustup
+/opt/shared/cargo/bin/rust-lldb
+/opt/shared/cargo/bin/cargo-miri
+/opt/shared/materials
+/opt/shared/zig
+/opt/shared/zig/README.md
+/opt/shared/zig/doc
+/opt/shared/zig/doc/langref.html
+/opt/shared/zig/lib
+/opt/shared/zig/lib/compiler_rt.zig
+/opt/shared/zig/lib/fuzzer.zig
+/opt/shared/zig/lib/include
+/opt/shared/zig/lib/libunwind
+/opt/shared/zig/lib/fuzzer
+/opt/shared/zig/lib/tsan
+/opt/shared/zig/lib/ubsan_rt.zig
+/opt/shared/zig/lib/libcxxabi
+/opt/shared/zig/lib/docs
+/opt/shared/zig/lib/compiler
+/opt/shared/zig/lib/libcxx
+/opt/shared/zig/lib/std
+/opt/shared/zig/lib/zig.h
+/opt/shared/zig/lib/libc
+/opt/shared/zig/lib/compiler_rt
+/opt/shared/zig/lib/c.zig
+/opt/shared/zig/lib/init
+/opt/shared/zig/zig
+/opt/shared/zig/LICENSE
+/opt/shared/rust
+/opt/shared/rust/downloads
+/opt/shared/rust/toolchains
+/opt/shared/rust/toolchains/stable-x86_64-unknown-linux-gnu
+/opt/shared/rust/tmp
+/opt/shared/rust/update-hashes
+/opt/shared/rust/update-hashes/stable-x86_64-unknown-linux-gnu
+/opt/shared/rust/settings.toml
+/opt/shared/qemu
+/opt/shared/qemu/share
+/opt/shared/qemu/share/applications
+/opt/shared/qemu/share/icons
+/opt/shared/qemu/share/qemu
+/opt/shared/qemu/include
+/opt/shared/qemu/include/qemu-plugin.h
+/opt/shared/qemu/var
+/opt/shared/qemu/var/run
+/opt/shared/qemu/libexec
+/opt/shared/qemu/libexec/qemu-bridge-helper
+/opt/shared/qemu/bin
+/opt/shared/qemu/bin/qemu-edid
+/opt/shared/qemu/bin/qemu-pr-helper
+/opt/shared/qemu/bin/qemu-io
+/opt/shared/qemu/bin/qemu-nbd
+/opt/shared/qemu/bin/qemu-vmsr-helper
+/opt/shared/qemu/bin/qemu-ga
+/opt/shared/qemu/bin/qemu-system-riscv32
+/opt/shared/qemu/bin/qemu-system-riscv64
+/opt/shared/qemu/bin/qemu-img
+/opt/shared/qemu/bin/qemu-storage-daemon
+/opt/shared/riscv-toolchain
+/opt/shared/riscv-toolchain/share
+/opt/shared/riscv-toolchain/share/gdb
+/opt/shared/riscv-toolchain/share/man
+/opt/shared/riscv-toolchain/share/info
+/opt/shared/riscv-toolchain/share/locale
+/opt/shared/riscv-toolchain/share/gcc-15.2.0
+/opt/shared/riscv-toolchain/riscv64-unknown-elf
+/opt/shared/riscv-toolchain/riscv64-unknown-elf/include
+/opt/shared/riscv-toolchain/riscv64-unknown-elf/lib
+/opt/shared/riscv-toolchain/riscv64-unknown-elf/bin
+/opt/shared/riscv-toolchain/include
+/opt/shared/riscv-toolchain/include/sim
+/opt/shared/riscv-toolchain/include/gdb
+/opt/shared/riscv-toolchain/lib
+/opt/shared/riscv-toolchain/lib/bfd-plugins
+/opt/shared/riscv-toolchain/lib/gcc
+/opt/shared/riscv-toolchain/lib/libcc1.so
+/opt/shared/riscv-toolchain/lib/libcc1.so.0.0.0
+/opt/shared/riscv-toolchain/lib/libcc1.so.0
+/opt/shared/riscv-toolchain/lib/libriscv64-unknown-elf-sim.a
+/opt/shared/riscv-toolchain/lib/libcc1.la
+/opt/shared/riscv-toolchain/libexec
+/opt/shared/riscv-toolchain/libexec/gcc
+/opt/shared/riscv-toolchain/bin
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-objcopy
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-run
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-c++
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-ranlib
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-size
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gdb
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-strip
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcov
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-addr2line
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcc-15.2.0
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-c++filt
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-readelf
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcc-ar
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gprof
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-ar
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcov-tool
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcc-nm
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gstack
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-as
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-g++
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-cpp
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-ld
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-lto-dump
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-nm
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-elfedit
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcov-dump
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcc-ranlib
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gdb-add-index
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-objdump
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-gcc
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-ld.bfd
+/opt/shared/riscv-toolchain/bin/riscv64-unknown-elf-strings
+/opt/shared/sbunix-skeleton
+/opt/shared/sbunix-skeleton/build.zig
+/opt/shared/sbunix-skeleton/Makefile
+/opt/shared/sbunix-skeleton/rootfs
+/opt/shared/sbunix-skeleton/rootfs/etc
+/opt/shared/sbunix-skeleton/Cargo.lock
+/opt/shared/sbunix-skeleton/.gitignore
+/opt/shared/sbunix-skeleton/libc
+/opt/shared/sbunix-skeleton/libc/include
+/opt/shared/sbunix-skeleton/libc/exit.c
+/opt/shared/sbunix-skeleton/libc/printf.c
+/opt/shared/sbunix-skeleton/libc/crt.S
+/opt/shared/sbunix-skeleton/.cargo
+/opt/shared/sbunix-skeleton/.cargo/config.toml
+/opt/shared/sbunix-skeleton/kernel
+/opt/shared/sbunix-skeleton/kernel/include
+/opt/shared/sbunix-skeleton/kernel/kernel.rs
+/opt/shared/sbunix-skeleton/kernel/printk.zig
+/opt/shared/sbunix-skeleton/kernel/kernel.ld
+/opt/shared/sbunix-skeleton/kernel/printk.c
+/opt/shared/sbunix-skeleton/kernel/start.S
+/opt/shared/sbunix-skeleton/kernel/printk.rs
+/opt/shared/sbunix-skeleton/kernel/kernel.c
+/opt/shared/sbunix-skeleton/kernel/kernel.zig
+/opt/shared/sbunix-skeleton/Cargo.toml
+/opt/shared/sbunix-skeleton/tools
+/opt/shared/sbunix-skeleton/tools/sourceme.sh
+/opt/shared/sbunix-skeleton/tools/mkfs.c
+/opt/shared/sbunix-skeleton/bin
+/opt/shared/sbunix-skeleton/bin/echo
+/opt/shared/bin
+
+### Listing /opt/shared/riscv-toolchain
+$ bash -lc ls -la /opt/shared/riscv-toolchain
+
+total 32
+drwxr-xr-x  8 root root 4096 Jan 29 02:54 .
+drwxr-xr-x 10 root root 4096 Feb  8 04:35 ..
+drwxr-xr-x  2 root root 4096 Jan 29 03:13 bin
+drwxr-xr-x  4 root root 4096 Jan 29 01:46 include
+drwxr-xr-x  4 root root 4096 Jan 29 03:13 lib
+drwxr-xr-x  3 root root 4096 Jan 29 02:54 libexec
+drwxr-xr-x  5 root root 4096 Jan 29 02:55 riscv64-unknown-elf
+drwxr-xr-x  7 root root 4096 Jan 29 03:13 share
+
+### Listing /opt/shared/qemu
+$ bash -lc ls -la /opt/shared/qemu
+
+total 28
+drwxr-xr-x  7 root root 4096 Jan 29 01:37 .
+drwxr-xr-x 10 root root 4096 Feb  8 04:35 ..
+drwxr-xr-x  2 root root 4096 Jan 29 01:37 bin
+drwxr-xr-x  2 root root 4096 Jan 29 01:37 include
+drwxr-xr-x  2 root root 4096 Jan 29 01:37 libexec
+drwxr-xr-x  5 root root 4096 Jan 29 01:37 share
+drwxr-xr-x  3 root root 4096 Jan 29 01:37 var
+
