@@ -1,3 +1,8 @@
+# Development
+
+- All development should take place on seperate branches
+- Changes and updates should be tested (locally) prior to being merged into main
+
 # Commit Message Prefixes
 
 | Prefix | Meaning |
