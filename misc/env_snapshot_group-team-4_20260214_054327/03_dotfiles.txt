@@ -1,8 +1,0 @@
-### Dotfiles presence
-FOUND: /home/student/.bashrc
-FOUND: /home/student/.profile
-MISSING: /home/student/.bash_aliases
-MISSING: /home/student/.zshrc
-MISSING: /home/student/.zprofile
-MISSING: /home/student/.config
-
