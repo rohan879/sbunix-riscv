@@ -5,3 +5,4 @@
 #define readaddr(addr) (*((volatile unsigned char *)(addr)))
 
 void uart_write(char bt);
+char uart_read(void);
