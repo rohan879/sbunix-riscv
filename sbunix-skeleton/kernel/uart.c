@@ -7,3 +7,10 @@ void uart_write(char bt) {
     }
     writeaddr(UART_THR_RBR, bt);
 }
+
+char uart_read(void) {
+    while ((readaddr(UART_LSR) & 0x01) == 0) {
+        // spin
+    }
+    return readaddr(UART_THR_RBR);
+}
