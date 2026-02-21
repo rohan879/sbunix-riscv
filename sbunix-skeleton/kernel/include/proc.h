@@ -56,7 +56,33 @@ struct trapframe {
   /* 224 */ uint64_t gp;
   /* 232 */ uint64_t tp;
   /* 240 */ uint64_t sp;
-  /* 248 */ uint64_t epc; // We can use the extra space for SEPC if we save it
+  /* 248 */ uint64_t epc;
 };
+
+enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+
+// Per-process state
+struct proc {
+  enum procstate state;        // Process state
+  pid_t pid;                   // Process ID
+  struct proc *parent;         // Parent process
+  void *kstack;                // Virtual address of kernel stack
+  uint64_t sz;                 // Size of process memory (bytes)
+  pagetable_t pagetable;       // User page table
+  struct trapframe *trapframe; // data page for trampoline.S
+  struct context context;      // swtch() here to run process
+  char name[16];               // Process name (debugging)
+};
+
+void            procinit(void);
+struct proc*    allocproc(void);
+void            userinit(void);
+void            scheduler(void) __attribute__((noreturn));
+void            yield(void);
+void            forkret(void);
+void            swtch(struct context*, struct context*);
+void            trap_restore(struct trapframe*);
+
+extern struct proc *current_proc;
 
 #endif

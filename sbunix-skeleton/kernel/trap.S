@@ -1,5 +1,6 @@
 .align 4
 .global kernel_trap_handler
+.global trap_restore
 
 .extern trap_handler
 
@@ -69,8 +70,15 @@ _got_user_sp:
   mv a0, sp
   call trap_handler
 
+  # After trap_handler returns, jump to restore
+  mv a0, sp
+  j trap_restore
+
   # --- Restore ---
-  
+trap_restore:
+  # a0 points to the trapframe
+  mv sp, a0
+
   # Restore sepc
   ld t0, 248(sp)
   csrw sepc, t0
@@ -100,7 +108,7 @@ _got_user_sp:
   ld s5, 168(sp)
   ld s6, 176(sp)
   ld s7, 184(sp)
-  sd s8, 192(sp)
+  ld s8, 192(sp)
   ld s9, 200(sp)
   ld s10, 208(sp)
   ld s11, 216(sp)
@@ -108,17 +116,17 @@ _got_user_sp:
   ld tp, 232(sp)
 
   # Final stack restore
-  csrr t0, sscratch
-  beqz t0, _ret_kernel
-
-_ret_user:
-  # Restore sscratch and swap
   ld t0, 240(sp)
-  csrw sscratch, t0
-  addi sp, sp, 256
-  csrrw sp, sscratch, sp
-  sret
+  li t1, 0x80000000
+  blt t0, t1, _ret_user
 
 _ret_kernel:
   addi sp, sp, 256
+  sret
+
+_ret_user:
+  # Restore sscratch and swap
+  csrw sscratch, t0
+  addi sp, sp, 256
+  csrrw sp, sscratch, sp
   sret

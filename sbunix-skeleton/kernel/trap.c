@@ -15,22 +15,25 @@ void trap_handler(struct trapframe *tf) {
         int size = ((*instr & 0x3) == 0x3) ? 4 : 2;
 
         if (tf->a7 == SYS_write) {
+            // ssize_t write(int fildes, const void *buf, size_t nbyte);
             char *buf = (char *)tf->a1;
-            int len = tf->a2;
-            for (int i = 0; i < len; i++) {
+            size_t len = (size_t)tf->a2;
+            size_t i;
+            for (i = 0; i < len; i++) {
                 printk("%c", buf[i]);
             }
-            tf->a0 = len;
+            tf->a0 = (uint64_t)i; // Return number of bytes written
         } else if (tf->a7 == SYS_read) {
+            // ssize_t read(int fildes, void *buf, size_t nbyte);
             char *buf = (char *)tf->a1;
-            int len = tf->a2;
-            int i;
+            size_t len = (size_t)tf->a2;
+            size_t i;
             for (i = 0; i < len; i++) {
                 buf[i] = uart_read();
             }
-            tf->a0 = i;
+            tf->a0 = (uint64_t)i; // Return number of bytes read
         } else if (tf->a7 == SYS_exit) {
-            int status = tf->a0;
+            int status = (int)tf->a0;
             printk("\nProcess exited with status %d. Halting CPU.\n", status);
             while(1) {}
         } else {
