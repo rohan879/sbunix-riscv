@@ -4,6 +4,7 @@
 #include <proc.h>
 #include <syscall.h>
 #include <uart.h>
+#include <plic.h>
 
 #define TIMER_FREQ 10000000UL  // 10 MHz timebase
 
@@ -47,6 +48,20 @@ static void display_time(void) {
     printk("\033[u");
 }
 
+static void handle_external_interrupt(void) {
+    int irq = plic_claim();
+    if (irq == UART_IRQ) {
+        int c;
+        while ((c = uart_getc()) != -1) {
+            // Consume received characters
+            (void)c;
+        }
+        plic_complete(irq);
+    } else if (irq != 0) {
+        plic_complete(irq);
+    }
+}
+
 static void handle_timer_interrupt(void) {
     ticks++;
     display_time();
@@ -62,7 +77,7 @@ void trap_handler(struct trapframe *tf) {
         if (cause == SCAUSE_S_TIMER_INT) {
             handle_timer_interrupt();
         } else if (cause == SCAUSE_S_EXTERNAL_INT) {
-            // External interrupt - handled in commit 2
+            handle_external_interrupt();
         } else {
             printk("Unknown interrupt: scause=0x%lx\n", cause);
         }

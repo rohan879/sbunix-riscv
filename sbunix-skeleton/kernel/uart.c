@@ -14,3 +14,13 @@ char uart_read(void) {
     }
     return readaddr(UART_THR_RBR);
 }
+
+void uart_intr_init(void) {
+    writeaddr(UART_IER, UART_IER_RX);
+}
+
+int uart_getc(void) {
+    if (readaddr(UART_LSR) & 0x01)
+        return readaddr(UART_THR_RBR);
+    return -1;
+}
