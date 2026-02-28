@@ -5,6 +5,8 @@
 #include <exec.h>
 #include <vm.h>
 #include <proc.h>
+#include <trap.h>
+#include <riscv.h>
 
 // Declare symbols for the embedded tarfs
 extern char _tarfs_start[];
@@ -15,7 +17,11 @@ void boot(void) {
   
   kinit();
   kvminit();
-  
+
+  timer_init();
+  w_sie(r_sie() | SIE_STIE);
+  w_sstatus(r_sstatus() | SSTATUS_SIE);
+
   procinit();
   userinit();
 

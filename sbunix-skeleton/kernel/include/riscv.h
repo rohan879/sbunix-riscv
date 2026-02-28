@@ -51,6 +51,32 @@ typedef uint64_t *pagetable_t; // 512 PTEs
 #define SSTATUS_SPP (1L << 8)  // Previous mode, 1=Supervisor, 0=User
 #define SSTATUS_SPIE (1L << 5) // Supervisor Previous Interrupt Enable
 #define SSTATUS_SUM (1L << 18) // Supervisor User Memory access
+#define SSTATUS_SIE  (1L << 1)
+
+#define SIE_SSIE (1L << 1)
+#define SIE_STIE (1L << 5)
+#define SIE_SEIE (1L << 9)
+
+#define SCAUSE_INTERRUPT      (1UL << 63)
+#define SCAUSE_S_TIMER_INT    (SCAUSE_INTERRUPT | 5)
+#define SCAUSE_S_EXTERNAL_INT (SCAUSE_INTERRUPT | 9)
+#define SCAUSE_ECALL_U        8
+
+static inline unsigned long r_sie() {
+    unsigned long x;
+    asm volatile("csrr %0, sie" : "=r" (x));
+    return x;
+}
+
+static inline void w_sie(unsigned long x) {
+    asm volatile("csrw sie, %0" : : "r" (x));
+}
+
+static inline unsigned long r_time() {
+    unsigned long x;
+    asm volatile("rdtime %0" : "=r" (x));
+    return x;
+}
 
 static inline unsigned long r_scause() {
     unsigned long x;
