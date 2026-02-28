@@ -10,6 +10,7 @@
 
 static unsigned long boot_time;
 static unsigned long ticks;
+static unsigned char last_key = 0;
 
 static inline void sbi_set_timer(unsigned long stime) {
     register unsigned long a0 asm("a0") = stime;
@@ -31,6 +32,19 @@ static void print_two_digits(unsigned long n) {
     printk("%lu%lu", n / 10, n % 10);
 }
 
+static void display_key(void) {
+    printk("\033[1;72H");
+    if (last_key == 0) {
+        printk("  ");
+    } else if (last_key <= 0x1F) {
+        printk("^%c", last_key + '@');
+    } else if (last_key == 0x7F) {
+        printk("^?");
+    } else {
+        printk("%c ", last_key);
+    }
+}
+
 static void display_time(void) {
     unsigned long elapsed = (r_time() - boot_time) / TIMER_FREQ;
     unsigned long hours = elapsed / 3600;
@@ -44,6 +58,7 @@ static void display_time(void) {
     print_two_digits(minutes);
     printk(":");
     print_two_digits(seconds);
+    display_key();
     // Restore cursor
     printk("\033[u");
 }
@@ -53,9 +68,9 @@ static void handle_external_interrupt(void) {
     if (irq == UART_IRQ) {
         int c;
         while ((c = uart_getc()) != -1) {
-            // Consume received characters
-            (void)c;
+            last_key = (unsigned char)c;
         }
+        display_time();
         plic_complete(irq);
     } else if (irq != 0) {
         plic_complete(irq);
