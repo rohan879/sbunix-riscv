@@ -53,7 +53,7 @@ cd /tmp
 Inside the same `sbush`, type (or copy the commands below):
 
 ```bash
-export PATH=~/CSE506/sbunix-skeleton/build/rootfs/bin
+export PATH=/<path-to-directory>/CSE506/sbunix-skeleton/build/rootfs/bin
 
 echo Hello World
 ```
@@ -61,7 +61,7 @@ echo Hello World
 ## `cat`
 
 ```bash
-export PATH=~/CSE506/sbunix-skeleton/build/rootfs/bin
+export PATH=/<path-to-directory>/CSE506/sbunix-skeleton/build/rootfs/bin
 
 # Read a file
 cat /etc/hostname
@@ -73,7 +73,7 @@ cat
 ## `ls`
 
 ```bash
-export PATH=~/CSE506/sbunix-skeleton/build/rootfs/bin
+export PATH=/<path-to-directory>/CSE506/sbunix-skeleton/build/rootfs/bin
 
 ls /tmp
 ls /home
@@ -100,7 +100,7 @@ Then run:
 
 ```bash
 # Run it (set PATH so echo is found)
-qemu-riscv64 -E PATH=~/CSE506/sbunix-skeleton/build/rootfs/bin build/rootfs/bin/sbush /tmp/test.sh
+qemu-riscv64 -E PATH=/<path-to-directory>/CSE506/sbunix-skeleton/build/rootfs/bin build/rootfs/bin/sbush /tmp/test.sh
 ```
 
 NOTE: The `-E` flag sets environment variables for the emulated binary, so you don't need to export PATH inside the script.
@@ -115,7 +115,7 @@ qemu-riscv64 build/rootfs/bin/sbush
 Then type:
 ```bash
 export PS1=myshell$
-export PATH=~/CSE506/sbunix-skeleton/build/rootfs/bin
+export PATH=/<path-to-directory>/CSE506/sbunix-skeleton/build/rootfs/bin
 echo this should work
 set FOO bar
 ```
@@ -135,7 +135,7 @@ echo hello &
 ## Pipes
 
 ```bash
-export PATH=~/CSE506/sbunix-skeleton/build/rootfs/bin
+export PATH=/<path-to-directory>/CSE506/sbunix-skeleton/build/rootfs/bin
 
 echo hello | cat
 echo hello | cat | cat
