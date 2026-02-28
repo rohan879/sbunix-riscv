@@ -25,21 +25,24 @@
 - [x] `printk` with `%c %d %x %s %p` format specifiers
 - [x] Output via NS16550 UART at `0x10000000`
 
-## Warm-up Project 2 (Part 2): Timer Interrupt
+## Warm-up Project 2 (Part 2): Timer Interrupt — DONE
 
-- [ ] Set up `stvec` trap vector and trap handler dispatching on `scause`
-- [ ] Timer interrupt via CLINT or SBI timer extension (`sbi_set_timer`)
-- [ ] Track time since boot
-- [ ] Display time since boot in lower-right corner of console
-- [ ] (Optional) Read RTC for real-world time
+- [x] Set up `stvec` trap vector and trap handler dispatching on `scause`
+- [x] Timer interrupt via SBI timer extension (`sbi_set_timer`)
+- [x] Track time since boot
+- [x] Display time since boot at top-right of console (row 1, col 60) using VT100 escapes
 
-## Warm-up Project 2 (Part 3): Keyboard Interrupt
+## Warm-up Project 2 (Part 3): Keyboard Interrupt — DONE
 
-- [ ] UART RX interrupt via PLIC (no PS/2 on RISC-V virt; keyboard input arrives as UART bytes)
-- [ ] Display last pressed glyph next to clock
-- [ ] Handle Shift (interpret ASCII bytes from UART)
-- [ ] Handle Control key (show as `^C`; byte `0x03` etc.)
-- [ ] No local echo
+- [x] UART RX interrupt via PLIC (no PS/2 on RISC-V virt; keyboard input arrives as UART bytes)
+- [x] Display last pressed glyph next to clock (row 1, col 72)
+- [x] Handle Shift (terminal sends shifted ASCII — displayed directly)
+- [x] Handle Control key (show as `^C`, `^A`, etc.; caret notation for 0x00-0x1F and 0x7F)
+- [x] No local echo (interrupt handler only updates status bar, does not echo to main output)
+
+## Bugs / Issues
+
+- BUG: Kernel syscall numbers (`kernel/include/syscall.h`) do not match libc's Linux RISC-V ABI numbers (`libc/include/syscall.h`). User processes send Linux numbers (e.g. write=64, read=63) but kernel expects custom numbers (write=1, read=3), causing "Unknown syscall" at runtime.
 
 ## Warm-up Project 3 (Part 1): Device Discovery
 
@@ -60,13 +63,13 @@
 
 - [x] OpenSBI handoff, UART printing
 - [ ] Parse DTB pointer from `a1`
-- [ ] Set `stvec` trap vector
+- [x] Set `stvec` trap vector
 
 ### 2. Trap/Interrupt Subsystem
 
-- [ ] Exception entry/exit (`sepc`/`scause`/`stval` dispatch)
-- [ ] Timer interrupts (CLINT or SBI)
-- [ ] External interrupts via PLIC
+- [x] Exception entry/exit (`sepc`/`scause`/`stval` dispatch)
+- [x] Timer interrupts (SBI)
+- [x] External interrupts via PLIC
 - [ ] Minimal scheduler tick for preemption
 
 ### 3. Memory Subsystem
