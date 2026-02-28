@@ -6,6 +6,10 @@ environ: .quad 0
 
 .section .text
 _start:
+.option push
+.option norelax
+    la   gp, __global_pointer$
+.option pop
     ld   a0, 0(sp)          # argc
     addi a1, sp, 8          # argv
     addi a2, a0, 1
