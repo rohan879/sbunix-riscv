@@ -5,24 +5,24 @@ CSE506, Operating Systems with Prof. Ferdman
 
 ```bash
 # 1. Build succeeds with -Wall -Werror (already confirmed)
-  make
+make
 
-  # 2. sbush is a valid RISC-V ELF
-  file build/rootfs/bin/sbush
+# 2. sbush is a valid RISC-V ELF
+file build/rootfs/bin/sbush
 
-  # 3. It disassembles correctly (has real code, not just stubs)
-  riscv64-unknown-elf-objdump -d build/rootfs/bin/sbush | head -40
+# 3. It disassembles correctly (has real code, not just stubs)
+riscv64-unknown-elf-objdump -d build/rootfs/bin/sbush | head -40
 
-  # 4. echo, cat, ls all build (no libc regression)
-  file build/rootfs/bin/echo
-  file build/rootfs/bin/cat
-  file build/rootfs/bin/ls
+# 4. echo, cat, ls all build (no libc regression)
+file build/rootfs/bin/echo
+file build/rootfs/bin/cat
+file build/rootfs/bin/ls
 
-  # 5. sbush is packed into the tarfs
-  tar tf build/rootfs.tar | grep sbush
+# 5. sbush is packed into the tarfs
+tar tf build/rootfs.tar | grep sbush
 
-  # 6. Key symbols are present (main, execute_line, parse_line, etc.)
-  riscv64-unknown-elf-nm build/rootfs/bin/sbush | grep -E 'main|parse_line|execute_pipeline|env_init'
+# 6. Key symbols are present (main, execute_line, parse_line, etc.)
+riscv64-unknown-elf-nm build/rootfs/bin/sbush | grep -E 'main|parse_line|execute_pipeline|env_init'
 ```
 
 ## `cd`
@@ -53,7 +53,7 @@ cd /tmp
 Inside the same `sbush`, type (or copy the commands below):
 
 ```bash
-export PATH=/home/adebayo/CSE506/sbunix-skeleton/build/rootfs/bin
+export PATH=~/CSE506/sbunix-skeleton/build/rootfs/bin
 
 echo Hello World
 ```
@@ -61,7 +61,7 @@ echo Hello World
 ## `cat`
 
 ```bash
-export PATH=/home/adebayo/CSE506/sbunix-skeleton/build/rootfs/bin
+export PATH=~/CSE506/sbunix-skeleton/build/rootfs/bin
 
 # Read a file
 cat /etc/hostname
@@ -73,7 +73,7 @@ cat
 ## `ls`
 
 ```bash
-export PATH=/home/adebayo/CSE506/sbunix-skeleton/build/rootfs/bin
+export PATH=~/CSE506/sbunix-skeleton/build/rootfs/bin
 
 ls /tmp
 ls /home
@@ -115,7 +115,7 @@ qemu-riscv64 build/rootfs/bin/sbush
 Then type:
 ```bash
 export PS1=myshell$
-export PATH=/home/adebayo/CSE506/sbunix-skeleton/build/rootfs/bin
+export PATH=~/CSE506/sbunix-skeleton/build/rootfs/bin
 echo this should work
 set FOO bar
 ```
@@ -135,7 +135,7 @@ echo hello &
 ## Pipes
 
 ```bash
-export PATH=/home/adebayo/CSE506/sbunix-skeleton/build/rootfs/bin
+export PATH=~/CSE506/sbunix-skeleton/build/rootfs/bin
 
 echo hello | cat
 echo hello | cat | cat
