@@ -1,7 +1,7 @@
 #include <stdlib.h>
-
-extern void _exit(int status);
+#include <syscall.h>
 
 void exit(int status) {
-    _exit(status);
+    syscall(SYS_exit_group, status);
+    __builtin_unreachable();
 }
