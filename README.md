@@ -140,3 +140,54 @@ export PATH=/<path-to-directory>/CSE506/sbunix-skeleton/build/rootfs/bin
 echo hello | cat
 echo hello | cat | cat
 ```
+
+# Warm-up Project 2 (Timer + Keyboard Interrupts)
+
+## Build and Run
+
+```bash
+cd sbunix-skeleton
+source tools/sourceme.sh
+make clean && make
+make qemu
+```
+
+Exit QEMU with `Ctrl-A` then `X`.
+
+## What to Observe
+
+### 1. Timer Interrupt (HH:MM:SS clock)
+
+After boot, a clock appears at the top-right of the terminal (row 1, column 60) and updates every second:
+
+```
+                                                           00:00:05
+```
+
+This is driven by an SBI timer interrupt firing once per second. The clock shows elapsed time since boot.
+
+### 2. Keyboard Interrupt (key glyph display)
+
+Type any key while QEMU is running. The last pressed key appears at row 1, column 72 (just after the clock):
+
+- Printable keys (`a`, `A`, `1`, etc.) display as-is
+- Control keys display as caret notation: `Ctrl-C` → `^C`, `Ctrl-A` → `^A`
+- `DEL` (0x7F) displays as `^?`
+
+**Note:** `Ctrl-A` is QEMU's escape prefix, so to test `^A` display you would need a different key. Try `Ctrl-C`, `Ctrl-D`, etc.
+
+### 3. Kernel boot still works
+
+You should see the normal boot sequence:
+
+```
+Booting SBUnix
+kinit: initializing memory from 0x80216000 to 0x88000000
+kinit: memory initialized.
+kvminit: paging enabled.
+Starting scheduler...
+```
+
+### Known Issue
+
+The kernel's syscall numbers (`kernel/include/syscall.h`) do not match the libc's Linux RISC-V ABI numbers (`libc/include/syscall.h`), so user processes report "Unknown syscall" at runtime. This is a pre-existing issue unrelated to WP2.
