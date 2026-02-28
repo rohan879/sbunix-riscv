@@ -24,7 +24,6 @@
 
 - [x] `printk` with `%c %d %x %s %p` format specifiers
 - [x] Output via NS16550 UART at `0x10000000`
-- [ ] (Optional) SBI console putchar as alternative early output path
 
 ## Warm-up Project 2 (Part 2): Timer Interrupt
 
