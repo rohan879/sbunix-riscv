@@ -1,18 +1,11 @@
-.global write
-write:
-  li a7, 1 # SYS_write
-  ecall
-  ret
-
-.global read
-read:
-  li a7, 3 # SYS_read
-  ecall
-  ret
-
-.global _exit
-_exit:
-  li a7, 2 # SYS_exit
-  ecall
-  # exit should not return
-  1: j 1b
+.global syscall
+syscall:
+    mv a7, a0      # syscall number -> a7
+    mv a0, a1      # shift args down
+    mv a1, a2
+    mv a2, a3
+    mv a3, a4
+    mv a4, a5
+    mv a5, a6
+    ecall
+    ret
