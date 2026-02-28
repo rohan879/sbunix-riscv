@@ -1,24 +1,24 @@
 # SBUnix TODO — RISC-V
 
-## Warm-up Project 1 (Part 1): Shell (sbush)
+## Warm-up Project 1 (Part 1): Shell (sbush) — DONE
 
-- [ ] `bin/sbush`: interactive shell binary (cross-compiled for RV64)
-- [ ] Change directory (`cd /path`)
-- [ ] Execute binaries (search PATH)
-- [ ] Execute scripts (files starting with `#!sbush`)
-- [ ] Set and use `PATH` and `PS1` environment variables
-- [ ] Background processes (`ls &`)
-- [ ] Pipes (`cat /path | grep word`)
-- [ ] Testing: QEMU user-mode (`qemu-riscv64`) or inside kernel once exec/ELF loading works
+- [x] `bin/sbush`: interactive shell binary (cross-compiled for RV64)
+- [x] Change directory (`cd /path`)
+- [x] Execute binaries (search PATH)
+- [x] Execute scripts (files starting with `#!sbush`)
+- [x] Set and use `PATH` and `PS1` environment variables
+- [x] Background processes (`ls &`)
+- [x] Pipes (`cat /path | grep word`)
+- [x] Testing: QEMU user-mode (`qemu-riscv64`) or inside kernel once exec/ELF loading works
 
-## Warm-up Project 1 (Part 2): Standard Library (sblibc)
+## Warm-up Project 1 (Part 2): Standard Library (sblibc) — DONE
 
-- [ ] Syscall wrappers using RISC-V Linux ABI (number in `a7`, args `a0`-`a5`, `ecall`, return in `a0`)
+- [x] Syscall wrappers using RISC-V Linux ABI (number in `a7`, args `a0`-`a5`, `ecall`, return in `a0`)
   - Syscall table: https://gpages.juszkiewicz.com.pl/syscalls-table/syscalls.html
   - Use `clone` (not fork), `openat` (not open), `pipe2` (not pipe), `dup3` (not dup2)
-- [ ] Implement all libc functions needed by sbush
-- [ ] `libc/crt.S`: proper C runtime startup (set up argc/argv, call main, call exit)
-- [ ] `bin/ls` and `bin/cat` as test binaries (compiled for RV64)
+- [x] Implement all libc functions needed by sbush
+- [x] `libc/crt.S`: proper C runtime startup (set up argc/argv, call main, call exit)
+- [x] `bin/ls` and `bin/cat` as test binaries (compiled for RV64)
 
 ## Warm-up Project 2 (Part 1): Kernel printf() — DONE
 
