@@ -73,7 +73,15 @@ int exec(char *path) {
     // 7. Initialize trapframe
     memset(tf, 0, sizeof(*tf));
     tf->epc = ehdr->e_entry;
-    tf->sp = MAXVA;
+
+    // Set up initial stack: crt.S expects [argc, argv..., NULL, envp..., NULL]
+    // For no args/env: [0, NULL, NULL] = 24 bytes, padded to 32 for alignment
+    uint64_t *stack_top = (uint64_t *)(sp_mem + PAGE_SIZE);
+    stack_top[-1] = 0;  // padding
+    stack_top[-2] = 0;  // envp[0] = NULL
+    stack_top[-3] = 0;  // argv[0] = NULL
+    stack_top[-4] = 0;  // argc = 0
+    tf->sp = MAXVA - 32;
 
     return 0; 
 }
