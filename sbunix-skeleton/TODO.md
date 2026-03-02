@@ -40,25 +40,25 @@
 - [x] Handle Control key (show as `^C`, `^A`, etc.; caret notation for 0x00-0x1F and 0x7F)
 - [x] No local echo (interrupt handler only updates status bar, does not echo to main output)
 
-## Warm-up Project 3 (Part 1): Device Discovery
+## Warm-up Project 3 (Part 1): Device Discovery — DONE
 
-- [ ] Parse DTB (passed in `a1` at boot) to enumerate devices
+- [x] Parse DTB (passed in `a1` at boot) to enumerate devices
   - UART, PLIC, CLINT, virtio-mmio regions, PCIe host bridge
   - RISC-V equivalent of x86 PCI config space walk
-- [ ] Locate the virtio-blk block device
+- [x] Locate the virtio-blk block device
 
-## Warm-up Project 3 (Part 2): Block Device (virtio-blk)
+## Warm-up Project 3 (Part 2): Block Device (virtio-blk) — DONE
 
-- [ ] virtio-blk driver over virtio-mmio (replaces AHCI on x86)
-- [ ] Write 100 x 4KB blocks (block N filled with byte N)
-- [ ] Read back and verify correctness
+- [x] virtio-blk driver over virtio-mmio (replaces AHCI on x86)
+- [x] Write 100 x 4KB blocks (block N filled with byte N)
+- [x] Read back and verify correctness
 
 ## Final Project — Plan of Attack
 
 ### 1. Boot + Early Console (partially done)
 
 - [x] OpenSBI handoff, UART printing
-- [ ] Parse DTB pointer from `a1`
+- [x] Parse DTB pointer from `a1`
 - [x] Set `stvec` trap vector
 
 ### 2. Trap/Interrupt Subsystem
