@@ -2,8 +2,6 @@
 #include <printk.h>
 #include <riscv.h>
 
-#define NULL ((void *)0)
-
 extern char _kernel_end[]; // Symbol from linker script
 
 struct run {

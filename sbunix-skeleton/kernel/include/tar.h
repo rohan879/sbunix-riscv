@@ -2,7 +2,6 @@
 #define _TAR_H
 
 #include <riscv.h>
-#define NULL ((void *)0)
 
 struct posix_header {
   char name[100];

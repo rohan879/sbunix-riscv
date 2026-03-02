@@ -1,9 +1,9 @@
 #include <proc.h>
 #include <kalloc.h>
 #include <riscv.h>
+#include <string.h>
 #include <vm.h>
 #include <printk.h>
-#include <tar.h> // For NULL
 #include <exec.h>
 
 struct proc proc[64];
@@ -11,15 +11,6 @@ struct proc *current_proc = NULL;
 struct context scheduler_context;
 
 int nextpid = 1;
-
-// --- Static implementations of standard library functions ---
-static void *memset(void *s, int c, size_t n) {
-    unsigned char *p = s;
-    while (n--) {
-        *p++ = (unsigned char)c;
-    }
-    return s;
-}
 
 void procinit(void) {
   struct proc *p;

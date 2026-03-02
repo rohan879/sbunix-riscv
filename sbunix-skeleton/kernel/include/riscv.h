@@ -11,6 +11,10 @@ typedef unsigned long  size_t;
 typedef long           ssize_t;
 typedef int            pid_t;
 
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
 // For qemu virt machine, physical memory starts at 0x80000000 and is 128MB.
 #define PHYSTOP 0x88000000
 

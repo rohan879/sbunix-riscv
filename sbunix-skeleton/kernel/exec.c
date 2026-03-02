@@ -1,20 +1,12 @@
 #include <exec.h>
 #include <printk.h>
+#include <string.h>
 #include <tar.h>
 #include <elf.h>
 #include <kalloc.h>
 #include <riscv.h>
 #include <vm.h>
 #include <proc.h>
-
-// --- Static implementations of standard library functions ---
-static void *memset(void *s, int c, size_t n) {
-    unsigned char *p = s;
-    while (n--) {
-        *p++ = (unsigned char)c;
-    }
-    return s;
-}
 
 extern char _tarfs_start[];
 extern char _tarfs_end[];
