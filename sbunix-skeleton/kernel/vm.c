@@ -64,8 +64,9 @@ void kvminit(void) {
     // uart registers
     kvmmap(0x10000000, 0x10000000, PAGE_SIZE, PTE_R | PTE_W);
 
-    // virtio mmio disk interface
-    kvmmap(0x10001000, 0x10001000, PAGE_SIZE, PTE_R | PTE_W);
+    // virtio mmio disk interfaces (8 slots: 0x10001000 - 0x10008000)
+    for (uint64_t a = 0x10001000; a <= 0x10008000; a += 0x1000)
+        kvmmap(a, a, PAGE_SIZE, PTE_R | PTE_W);
 
     // PLIC
     kvmmap(0x0c000000, 0x0c000000, 0x400000, PTE_R | PTE_W);

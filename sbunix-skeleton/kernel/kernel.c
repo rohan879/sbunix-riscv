@@ -9,6 +9,7 @@
 #include <riscv.h>
 #include <plic.h>
 #include <dtb.h>
+#include <virtio_blk.h>
 
 // Declare symbols for the embedded tarfs
 extern char _tarfs_start[];
@@ -30,6 +31,8 @@ void boot(uint64_t hartid, void *dtb) {
   uart_intr_init();
   w_sie(r_sie() | SIE_STIE | SIE_SEIE);
   w_sstatus(r_sstatus() | SSTATUS_SIE);
+
+  virtio_blk_test();
 
   procinit();
   userinit();

@@ -164,7 +164,7 @@ void dtb_print_devices(void) {
     printk("dtb: discovered %d devices:\n", dtb_devices.ndevices);
     for (int i = 0; i < dtb_devices.ndevices; i++) {
         struct dtb_device *d = &dtb_devices.devices[i];
-        printk("  [%d] %-12s @ 0x%lx  size=0x%lx  irq=%d\n",
+        printk("  [%d] %s @ 0x%lx  size=0x%lx  irq=%d\n",
                i, devtype_name(d->type), d->base_addr, d->size, d->irq);
     }
 }
