@@ -119,6 +119,16 @@ void trap_handler(struct trapframe *tf) {
                     buf[i] = uart_read();
                 }
                 tf->a0 = (uint64_t)i;
+            } else if (tf->a7 == SYS_getcwd) {
+                char *buf = (char *)tf->a0;
+                size_t size = (size_t)tf->a1;
+                if (buf && size >= 2) {
+                    buf[0] = '/';
+                    buf[1] = '\0';
+                }
+                tf->a0 = (uint64_t)buf;
+            } else if (tf->a7 == SYS_wait4) {
+                tf->a0 = (uint64_t)-1;
             } else if (tf->a7 == SYS_exit || tf->a7 == SYS_exit_group) {
                 int status = (int)tf->a0;
                 printk("\nProcess exited with status %d. Halting CPU.\n", status);
