@@ -8,14 +8,20 @@
 #include <trap.h>
 #include <riscv.h>
 #include <plic.h>
+#include <dtb.h>
 
 // Declare symbols for the embedded tarfs
 extern char _tarfs_start[];
 extern char _tarfs_end[];
 
-void boot(void) {
-  printk("Booting SBUnix\n");
-  
+void boot(uint64_t hartid, void *dtb) {
+  printk("Booting SBUnix (hart %ld)\n", (long)hartid);
+
+  /* Parse DTB before kinit — the DTB lives in memory that the page
+     allocator will hand out once kinit runs. */
+  dtb_parse(dtb);
+  dtb_print_devices();
+
   kinit();
   kvminit();
 
