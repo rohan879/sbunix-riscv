@@ -40,10 +40,6 @@
 - [x] Handle Control key (show as `^C`, `^A`, etc.; caret notation for 0x00-0x1F and 0x7F)
 - [x] No local echo (interrupt handler only updates status bar, does not echo to main output)
 
-## Bugs / Issues
-
-- BUG: Kernel syscall numbers (`kernel/include/syscall.h`) do not match libc's Linux RISC-V ABI numbers (`libc/include/syscall.h`). User processes send Linux numbers (e.g. write=64, read=63) but kernel expects custom numbers (write=1, read=3), causing "Unknown syscall" at runtime.
-
 ## Warm-up Project 3 (Part 1): Device Discovery
 
 - [ ] Parse DTB (passed in `a1` at boot) to enumerate devices
