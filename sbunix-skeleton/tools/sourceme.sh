@@ -2,7 +2,7 @@
 # Usage: source tools/sourceme.sh
 
 # RISC-V GCC cross-compiler and QEMU
-export PATH="/opt/shared/riscv-toolchain/bin:/opt/shared/qemu/bin:$PATH"
+export PATH="/mnt/data/Class_Materials/Sem2/OS/Project/Work/opt/shared/riscv-toolchain/bin:/mnt/data/Class_Materials/Sem2/OS/Project/Work/opt/shared/qemu/bin:$PATH"
 
 # Rust toolchain
 export RUSTUP_HOME="/opt/shared/rust"
