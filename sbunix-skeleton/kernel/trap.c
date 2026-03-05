@@ -138,6 +138,13 @@ void trap_handler(struct trapframe *tf) {
             }
 
             tf->epc += size;
+        } else if (cause == SCAUSE_LOAD_PAGE_FAULT || 
+                   cause == SCAUSE_STORE_PAGE_FAULT ||
+                   cause == SCAUSE_INST_PAGE_FAULT) {
+            printk("Page fault at epc 0x%lx, stval 0x%lx, cause %lu\n", 
+                   tf->epc, stval, cause);
+            printk("Killing process due to page fault\n");
+            while(1) {}  // halt for now
         } else {
             printk("UNEXPECTED TRAP! scause: 0x%lx, epc: 0x%lx, tval: 0x%lx\n",
                    cause, tf->epc, stval);

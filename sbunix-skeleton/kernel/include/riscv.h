@@ -66,6 +66,9 @@ typedef uint64_t *pagetable_t; // 512 PTEs
 #define SCAUSE_S_TIMER_INT    (SCAUSE_INTERRUPT | 5)
 #define SCAUSE_S_EXTERNAL_INT (SCAUSE_INTERRUPT | 9)
 #define SCAUSE_ECALL_U        8
+#define SCAUSE_INST_PAGE_FAULT   12
+#define SCAUSE_LOAD_PAGE_FAULT   13
+#define SCAUSE_STORE_PAGE_FAULT  15
 
 static inline unsigned long r_sie() {
     unsigned long x;
