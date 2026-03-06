@@ -1153,6 +1153,72 @@ pipe_eof:
         unsigned int  written = 0;
         unsigned long seen    = 0;
 
+        /* Helper: emit one dirent into ubuf.  Returns 1 on success, 0 if no room. */
+#define EMIT_DIRENT(name_, ino_, dtype_) do { \
+    int _nl = strlen(name_); \
+    int _rl = (19 + _nl + 1 + 7) & ~7; \
+    if (written + _rl > count) goto getdents_done; \
+    char *_d = ubuf + written; \
+    memset(_d, 0, _rl); \
+    uint64_t _ino = (uint64_t)(ino_); \
+    int64_t  _off = (int64_t)(seen + 1); \
+    uint16_t _rlen = (uint16_t)_rl; \
+    uint8_t  _dt   = (uint8_t)(dtype_); \
+    memcpy(_d +  0, &_ino,  8); \
+    memcpy(_d +  8, &_off,  8); \
+    memcpy(_d + 16, &_rlen, 2); \
+    memcpy(_d + 18, &_dt,   1); \
+    memcpy(_d + 19, (name_), _nl + 1); \
+    written += _rl; \
+    current_proc->ofile[fd].tar_offset = seen + 1; \
+} while (0)
+
+        /* Synthetic "." entry (seen index 0) */
+        if (seen >= skip) {
+            uint64_t dot_ino = (uint64_t)((char *)dir_hdr - _tarfs_start) / 512 + 1;
+            EMIT_DIRENT(".", dot_ino, 4 /* DT_DIR */);
+        }
+        seen++;
+
+        /* Synthetic ".." entry (seen index 1) */
+        if (seen >= skip) {
+            /* Find parent directory header for inode number */
+            uint64_t dotdot_ino = 1; /* default: root */
+            if (dirpath_len > 0) {
+                /* Strip last component from dirpath to get parent path */
+                char parentpath[256];
+                int pl = dirpath_len - 1;
+                while (pl > 0 && dirpath[pl] != '/') pl--;
+                if (pl == 0) {
+                    /* Parent is root — its tar entry is "./" */
+                    parentpath[0] = '\0';
+                } else {
+                    memcpy(parentpath, dirpath, pl);
+                    parentpath[pl] = '\0';
+                }
+                /* Search tarfs for the parent header */
+                struct posix_header *ph = (struct posix_header *)_tarfs_start;
+                while ((char *)ph < _tarfs_end) {
+                    if (ph->name[0] == '\0') break;
+                    if (strncmp(ph->magic, "ustar", 5) == 0) {
+                        const char *pn = ph->name;
+                        if (pn[0] == '.' && pn[1] == '/') pn += 2;
+                        int pnl = strlen(pn);
+                        if (pnl > 0 && pn[pnl-1] == '/') pnl--;
+                        if (pnl == (int)strlen(parentpath) &&
+                            memcmp(pn, parentpath, pnl) == 0) {
+                            dotdot_ino = (uint64_t)((char *)ph - _tarfs_start) / 512 + 1;
+                            break;
+                        }
+                    }
+                    unsigned long fsz3 = tar_get_file_size(ph);
+                    ph = (struct posix_header *)((char *)ph + 512 + ((fsz3 + 511) & ~511UL));
+                }
+            }
+            EMIT_DIRENT("..", dotdot_ino, 4 /* DT_DIR */);
+        }
+        seen++;
+
         struct posix_header *hdr = (struct posix_header *)_tarfs_start;
         while ((char *)hdr < _tarfs_end && written + 32 <= count) {
             if (hdr->name[0] == '\0') break;
@@ -1217,6 +1283,7 @@ pipe_eof:
             unsigned long fsz2 = tar_get_file_size(hdr);
             hdr = (struct posix_header *)((char *)hdr + 512 + ((fsz2 + 511) & ~511UL));
         }
+getdents_done:
         tf->a0 = (uint64_t)written;
 
     } else if (sysnum == SYS_nanosleep) {
