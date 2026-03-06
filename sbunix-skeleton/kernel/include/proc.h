@@ -72,6 +72,7 @@ struct proc {
   struct trapframe *trapframe; // data page for trampoline.S
   struct context context;      // swtch() here to run process
   char name[16];               // Process name (debugging)
+  int waiting_for_uart;        // 1 if sleeping waiting for UART input
 };
 
 void            procinit(void);
@@ -82,7 +83,10 @@ void            yield(void);
 void            forkret(void);
 void            swtch(struct context*, struct context*);
 void            trap_restore(struct trapframe*);
+void            uart_wakeup(void);
 
 extern struct proc *current_proc;
+extern struct proc proc[64];
+extern struct context scheduler_context;
 
 #endif

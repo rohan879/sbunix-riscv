@@ -45,11 +45,18 @@ int exec(char *path) {
         }
     }
 
-    // 4. User Stack
-    uint64_t stack_va = MAXVA - PAGE_SIZE;
-    char *sp_mem = kalloc();
-    if(!sp_mem) return -1;
-    if(uvmmap(pagetable, stack_va, (uint64_t)sp_mem, PAGE_SIZE, PTE_R | PTE_W | PTE_U) < 0) return -1;
+    // 4. User Stack — allocate 8 pages (32 KB) to accommodate deep call stacks
+    #define USER_STACK_PAGES 8
+    uint64_t stack_va = MAXVA - (USER_STACK_PAGES * PAGE_SIZE);
+    char *top_page_mem = NULL;
+    for (int pg = 0; pg < USER_STACK_PAGES; pg++) {
+        char *sp_mem = kalloc();
+        if (!sp_mem) return -1;
+        uint64_t vaddr = stack_va + pg * PAGE_SIZE;
+        if (uvmmap(pagetable, vaddr, (uint64_t)sp_mem, PAGE_SIZE, PTE_R | PTE_W | PTE_U) < 0) return -1;
+        if (pg == USER_STACK_PAGES - 1)
+            top_page_mem = sp_mem;  /* remember physical addr of topmost page */
+    }
     
     // 5. Identity map kernel and ALL RAM (No PTE_U)
     // This ensures kernel code, data, AND dynamically allocated pages (like kstack)
@@ -71,7 +78,7 @@ int exec(char *path) {
 
     // Set up initial stack: crt.S expects [argc, argv..., NULL, envp..., NULL]
     // For no args/env: [0, NULL, NULL] = 24 bytes, padded to 32 for alignment
-    uint64_t *stack_top = (uint64_t *)(sp_mem + PAGE_SIZE);
+    uint64_t *stack_top = (uint64_t *)(top_page_mem + PAGE_SIZE);
     stack_top[-1] = 0;  // padding
     stack_top[-2] = 0;  // envp[0] = NULL
     stack_top[-3] = 0;  // argv[0] = NULL

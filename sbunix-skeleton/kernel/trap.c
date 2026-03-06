@@ -68,8 +68,10 @@ static void handle_external_interrupt(void) {
     if (irq == UART_IRQ) {
         int c;
         while ((c = uart_getc()) != -1) {
+            uart_enqueue(c);
             last_key = (unsigned char)c;
         }
+        uart_wakeup();
         display_time();
         plic_complete(irq);
     } else if (irq != 0) {
@@ -115,8 +117,42 @@ void trap_handler(struct trapframe *tf) {
                 char *buf = (char *)tf->a1;
                 size_t len = (size_t)tf->a2;
                 size_t i;
-                for (i = 0; i < len; i++) {
-                    buf[i] = uart_read();
+                for (i = 0; i < len; ) {
+                    char c;
+                    /* Sleep until a byte is available in the ring buffer. */
+                    while (uart_dequeue(&c) != 0) {
+                        /* Nothing in buffer — yield to scheduler.
+                         * The UART interrupt will call uart_wakeup() when a
+                         * byte arrives, which sets us back to RUNNABLE.
+                         * sret (in the scheduler's swtch path) re-enables SIE
+                         * so the interrupt can actually fire. */
+                        if (current_proc) {
+                            current_proc->waiting_for_uart = 1;
+                            current_proc->state = SLEEPING;
+                            swtch(&current_proc->context, &scheduler_context);
+                            /* Woken up — retry dequeue */
+                        }
+                    }
+
+                    /* Translate CR -> LF so that Enter terminates the line. */
+                    if (c == '\r')
+                        c = '\n';
+
+                    /* Echo the character back to the terminal. */
+                    if (c == '\x7f' || c == '\x08') {
+                        /* Backspace / DEL: erase previous character on terminal */
+                        uart_putc('\x08');
+                        uart_putc(' ');
+                        uart_putc('\x08');
+                    } else {
+                        uart_putc(c);
+                    }
+
+                    buf[i++] = c;
+
+                    /* For line-buffered reads, stop after newline. */
+                    if (c == '\n')
+                        break;
                 }
                 tf->a0 = (uint64_t)i;
             } else if (tf->a7 == SYS_getcwd) {

@@ -7,6 +7,8 @@
 #define readaddr(addr) (*((volatile unsigned char *)(addr)))
 
 void uart_write(char bt);
-char uart_read(void);
 void uart_intr_init(void);
 int  uart_getc(void);
+void uart_putc(int c);
+int  uart_enqueue(char c);
+int  uart_dequeue(char *c);

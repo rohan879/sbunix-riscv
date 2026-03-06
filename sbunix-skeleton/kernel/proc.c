@@ -115,18 +115,49 @@ void yield(void) {
   }
 }
 
+// Wake any process sleeping on UART input.
+void uart_wakeup(void) {
+  struct proc *p;
+  for (p = proc; p < &proc[64]; p++) {
+    if (p->state == SLEEPING && p->waiting_for_uart) {
+      p->waiting_for_uart = 0;
+      p->state = RUNNABLE;
+    }
+  }
+}
+
 void scheduler(void) {
   struct proc *p;
 
+  /* Ensure sscratch = 0 so that any interrupt taken while we are in the
+   * scheduler is recognised as a kernel-mode trap by trap.S. */
+  asm volatile("csrw sscratch, zero");
+
   for(;;){
+    /* Enable supervisor interrupts so that UART/timer IRQs can fire
+     * while we are spinning looking for a RUNNABLE process.
+     * sstatus.SIE was cleared when the last user ecall trapped into the
+     * kernel; we must re-enable it here or UART wakeups can never arrive. */
+    w_sstatus(r_sstatus() | SSTATUS_SIE);
+
     for(p = proc; p < &proc[64]; p++) {
       if(p->state == RUNNABLE) {
         p->state = RUNNING;
         current_proc = p;
-        
+
+        /* Disable interrupts before switching to user process context.
+         * The user process may resume inside trap_handler (e.g., from a
+         * sleep in SYS_read).  Interrupts must be off there to avoid
+         * re-entrant trap corruption.  The user's sret will restore SIE
+         * from sstatus.SPIE when it actually returns to user mode. */
+        w_sstatus(r_sstatus() & ~SSTATUS_SIE);
+
         swtch(&scheduler_context, &p->context);
 
         current_proc = 0;
+
+        /* Re-clear sscratch now that we are back in scheduler context. */
+        asm volatile("csrw sscratch, zero");
       }
     }
   }
