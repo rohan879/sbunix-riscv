@@ -61,6 +61,17 @@ struct trapframe {
 
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+/* Maximum open file descriptors per process */
+#define NOFILE 16
+
+/* Simple file descriptor table entry */
+struct file {
+  int used;        // 1 if slot occupied
+  int pipe_read;   // 1 if this is the read end of a pipe
+  int pipe_write;  // 1 if this is the write end of a pipe
+  int pipe_id;     // which pipe (index into kernel pipe table)
+};
+
 // Per-process state
 struct proc {
   enum procstate state;        // Process state
@@ -72,14 +83,17 @@ struct proc {
   struct trapframe *trapframe; // data page for trampoline.S
   struct context context;      // swtch() here to run process
   char name[16];               // Process name (debugging)
-  int waiting_for_uart;        // 1 if sleeping waiting for UART input
+  int waiting_for_uart;        // 1 if sleeping for UART input; 2 if timed sleep
+  uint64_t sleep_until;        // for timed sleep: wake when ticks >= this value
+  int exit_status;             // exit status (for wait4)
+  char cwd[256];               // current working directory
+  struct file ofile[NOFILE];   // open file descriptors
 };
 
 void            procinit(void);
 struct proc*    allocproc(void);
 void            userinit(void);
 void            scheduler(void) __attribute__((noreturn));
-void            yield(void);
 void            forkret(void);
 void            swtch(struct context*, struct context*);
 void            trap_restore(struct trapframe*);

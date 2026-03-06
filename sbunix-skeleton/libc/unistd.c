@@ -57,3 +57,10 @@ void _exit(int status) {
     syscall(SYS_exit_group, status);
     __builtin_unreachable();
 }
+
+unsigned int sleep(unsigned int seconds) {
+    /* struct timespec { uint64_t tv_sec; uint64_t tv_nsec; } */
+    unsigned long req[2] = { seconds, 0 };
+    syscall(SYS_nanosleep, req, 0);
+    return 0;
+}

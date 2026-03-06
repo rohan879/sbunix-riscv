@@ -42,6 +42,8 @@ int exec(char *path) {
         if (phdr->p_type == PT_LOAD) {
             if(uvmalloc(pagetable, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz, PTE_W|PTE_X|PTE_R) == 0) return -1;
             if(uvmcopyin(pagetable, phdr->p_vaddr, elf_data + phdr->p_offset, phdr->p_filesz) < 0) return -1;
+            uint64_t seg_end = phdr->p_vaddr + phdr->p_memsz;
+            if (seg_end > sz) sz = seg_end;
         }
     }
 
@@ -71,6 +73,11 @@ int exec(char *path) {
     // TODO: cleanup old pagetable
     current_proc->pagetable = pagetable;
     current_proc->sz = sz;
+
+    // Switch satp to the new page table immediately so that trap_restore's
+    // sret enters user mode with the correct address space.
+    w_satp(MAKE_SATP(pagetable));
+    sfence_vma();
 
     // 7. Initialize trapframe
     memset(tf, 0, sizeof(*tf));

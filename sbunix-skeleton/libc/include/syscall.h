@@ -16,6 +16,7 @@
 #define SYS_write 64
 #define SYS_exit 93
 #define SYS_exit_group 94
+#define SYS_nanosleep 101
 #define SYS_getpid 172
 #define SYS_clone 220
 #define SYS_execve 221

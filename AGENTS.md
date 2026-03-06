@@ -27,7 +27,7 @@ make clean        # Remove build artifacts
 ### Running
 
 ```bash
-make qemu        # Build if needed and run kernel in QEMU (exit with Ctrl-A X)
+make qemu        # Build if needed and run kernel in QEMU (exit by pressing Ctrl-A then X)
 qemu-riscv64 build/rootfs/bin/sbush  # Run shell in user-mode emulation
 ```
 
@@ -157,7 +157,96 @@ Example: `BF: fix null pointer in allocproc`
 
 ## Important Notes
 
-1. **Pre-existing issue**: Kernel syscall numbers (`kernel/include/syscall.h`) do not match libc's Linux RISC-V ABI numbers - this causes "Unknown syscall" errors
+1. **Pre-existing issue**: Kernel syscall numbers (`kernel/include/syscall.h`) do not match libc's Linux RISC-V ABI numbers - this causes "Unknown syscall" errors (now fixed in recent work)
 2. **No automated tests**: All testing is manual
 3. **Development branches**: Work on separate branches, test locally before merging
 4. **Cross-compilation**: All binaries must be built for RISC-V target
+
+## Recent Session Work (CSE506 Spring 2026)
+
+### Completed Features
+
+#### 1. `nanosleep` Syscall (SYS_nanosleep = 101)
+- Kernel handler (`kernel/trap.c:849-862`) sets `p->sleep_until = ticks + tv_sec` and `waiting_for_uart = 2`
+- Timer interrupt wakes timed-sleep processes when `ticks >= sleep_until`
+- `libc/unistd.c` provides `sleep()` wrapper using `timespec` struct
+
+#### 2. Ctrl-C Support
+- Kernel `handle_external_interrupt` kills all non-init processes when `0x03` is received
+- Two code paths:
+  - **Children killed** (`killed_any=1`): kernel prints `^C\n` for visual feedback, does NOT enqueue `0x03`
+  - **Shell idle** (`!killed_any`): kernel enqueues `0x03` for `read_line` to handle
+- `read_line` (`bin/sbush/sbush.c:14-52`) now prints `^C\n` when it receives `0x03`, then uses `goto restart:` to reprint the prompt cleanly
+- Ctrl-C during sleep: wakes sleep and kills the child process; shell returns to REPL
+
+#### 3. Backspace in Shell
+- `read_line` handles `0x7f` and `0x08` with proper echo (`\x08 \x08` sequence)
+- Guard `if (i > 0)` prevents erasing past the prompt
+
+#### 4. `exit` Builtin
+- Calls `SYS_exit` or `SYS_exit_group`
+- When pid==1 (init) exits: kernel prints "System halted (init exited with status N)." and calls SBI shutdown
+- Non-init processes become `ZOMBIE` and are reaped by parent
+
+#### 5. Syscall ABI Alignment (kernel/include/syscall.h)
+- Kernel `syscall.h` was missing most syscall numbers; added the full set matching the Linux RISC-V ABI:
+  `SYS_getcwd(17)`, `SYS_chdir(49)`, `SYS_openat(56)`, `SYS_close(57)`, `SYS_pipe2(59)`,
+  `SYS_getdents64(61)`, `SYS_dup3(24)`, `SYS_getpid(172)`, `SYS_clone(220)`, `SYS_execve(221)`,
+  `SYS_nanosleep(101)`, plus `AT_FDCWD` and `SIGCHLD` constants
+- Libc `syscall.h` and `unistd.h` updated to match: added `SYS_nanosleep = 101` and `sleep()` declaration
+- Resolved pre-existing mismatch that caused "Unknown syscall" errors for most userspace operations
+
+#### 6. `sleep` Binary (bin/sleep/sleep.c)
+- New `sleep` binary replaces any prior stub; uses libc `sleep()` which calls `SYS_nanosleep`
+- `simple_atou()` parses the seconds argument; prints usage error if no argument given
+
+#### 7. `exec` Fix (kernel/exec.c)
+- Track `sz` (process image size) correctly by updating it to `max(sz, segment_end)` for each PT_LOAD segment
+- Switch `satp` to the new page table immediately after `exec()` builds it, before `trap_restore`'s `sret`, so the new address space is active on entry to user mode
+
+#### 8. UART FIFO Constants (kernel/include/uart.h, kernel/uart.c)
+- Added `UART_FCR` register address and FIFO control bit definitions (`FIFO_EN`, `RX_RESET`, `TX_RESET`, `TRIG_1`)
+- Added comment to `uart_intr_init()` clarifying that it enables RX interrupts
+
+### Dead Code Removed
+
+1. **`kpipe.nread` field** (`kernel/trap.c:30`) — declared and initialized but never read; removed from struct and `alloc_pipe()`
+2. **`yield()` function** (`kernel/proc.c:120-125`) — declared in `proc.h` but never called anywhere; removed with declaration
+3. **Ghost declarations** (`kernel/include/vm.h:13,17`) — `uvmfirst()` and `uvminit()` declared but never implemented or called; removed
+
+### Known Remaining Dead Code (Low Priority)
+
+- **Display time functions** (`kernel/trap.c:104-137`): `print_two_digits()`, `display_key()`, `display_time()` run on every timer tick and UART interrupt but serve only cosmetic VT100 status bar (no functional impact)
+- **Unreachable `while(1){}` guards** after `swtch()` and `trap_restore()` in `trap.c` — intentional panic guards; left in place
+- **`SYS_getdents64` unimplemented** — `ls` utility calls this syscall (61) but kernel has no handler, making `ls_dir()` permanently unreachable
+- **`set` builtin** (`bin/sbush/builtin.c`) — silently succeeds for wrong argument counts instead of printing error
+
+### Testing Notes
+
+All regression tests pass:
+```
+echo hello                          # Simple command
+echo hello | cat                    # Single pipe
+echo hello world | cat | cat        # Multi-pipe chains
+cd /bin && echo in_bin              # Note: shell does not support && syntax; use separate commands
+sleep 2                             # Waits ~2 seconds (scheduler-based, not busy-wait)
+sleep 10 (then Ctrl-C)             # Kills sleep, returns to prompt with "^C\n"
+Ctrl-C at idle prompt              # Prints "^C\n", reprints prompt on new line
+exit                                # Cleanly halts the system
+```
+
+### Important Code Patterns
+
+**Kernel read path for stdin** (`trap.c:506-533`):
+- Returns one raw byte per `SYS_read` call
+- `\r` is converted to `\n` by kernel
+- `0x03` (Ctrl-C) may arrive either via interrupt (prints `^C\n` in kernel if children exist) or via direct poll (no kernel print; `read_line` handles it)
+
+**Process wait logic** (`trap.c:292-323`):
+- `sys_wait4` sleeps with `waiting_for_uart = 0` (not a UART-input sleep)
+- External interrupt wakes all `SLEEPING` processes, allowing `waitpid` to return when children exit
+
+**Pipe design** (`trap.c:22-54`):
+- Fixed-size circular buffer (PIPE_BUF = 4096 bytes)
+- Writers block if full; readers block if empty
+- Refcounts track open read/write ends; pipe deallocated when both reach 0

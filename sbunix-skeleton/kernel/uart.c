@@ -39,6 +39,7 @@ int uart_dequeue(char *c) {
 }
 
 void uart_intr_init(void) {
+    /* Enable RX interrupts */
     writeaddr(UART_IER, UART_IER_RX);
 }
 

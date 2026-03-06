@@ -22,5 +22,6 @@ int     execve(const char *path, char *const argv[], char *const envp[]);
 int     chdir(const char *path);
 char   *getcwd(char *buf, size_t size);
 void    _exit(int status) __attribute__((noreturn));
+unsigned int sleep(unsigned int seconds);
 
 #endif

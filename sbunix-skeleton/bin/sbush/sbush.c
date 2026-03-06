@@ -7,17 +7,47 @@ void execute_line(char *line) {
         execute_pipeline(&pl);
 }
 
-static int read_line(char *buf, int max) {
+/* Read a line from stdin with echo and line editing.
+ * Prints the prompt (ps1) before reading.  Handles Ctrl-C by printing a
+ * fresh prompt and restarting the line, so callers never see a -2 return.
+ * Returns the number of characters in buf (excluding NUL), or -1 on EOF. */
+static int read_line(char *buf, int max, const char *ps1) {
+restart:
+    write(STDOUT_FILENO, ps1, strlen(ps1));
     int i = 0;
     while (i < max - 1) {
         char c;
         ssize_t n = read(STDIN_FILENO, &c, 1);
         if (n <= 0)
             return -1;
+
+        if (c == '\x03') {
+            /* Ctrl-C: print "^C\n" here (kernel may not have, e.g. when input
+             * arrives via the direct UART poll path rather than the interrupt
+             * handler).  Move to a fresh line then restart the prompt. */
+            write(STDOUT_FILENO, "^C\n", 3);
+            i = 0;
+            goto restart;
+        }
+
+        if (c == '\x7f' || c == '\x08') {
+            /* Backspace: erase last typed character; i > 0 prevents
+             * erasing past the start of input (i.e. into the prompt). */
+            if (i > 0) {
+                i--;
+                write(STDOUT_FILENO, "\x08 \x08", 3);
+            }
+            continue;
+        }
+
         if (c == '\n') {
+            write(STDOUT_FILENO, "\n", 1);
             buf[i] = '\0';
             return i;
         }
+
+        /* Echo and store printable characters */
+        write(STDOUT_FILENO, &c, 1);
         buf[i++] = c;
     }
     buf[i] = '\0';
@@ -52,10 +82,10 @@ int main(int argc, char *argv[], char *envp[]) {
     while (1) {
         reap_zombies();
         char *ps1 = var_get("PS1");
-        if (ps1)
-            write(STDOUT_FILENO, ps1, strlen(ps1));
-        if (read_line(line, sizeof(line)) < 0)
-            break;
+        if (!ps1) ps1 = "sbush$ ";
+        int r = read_line(line, sizeof(line), ps1);
+        if (r == -1)
+            break;       /* EOF */
         execute_line(line);
     }
 

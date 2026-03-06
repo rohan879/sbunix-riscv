@@ -41,7 +41,20 @@ void forkret(void) {
 
 // Helper to start the first process
 void init_starter(void) {
-    exec("./bin/sbush");
+    int ret = exec("./bin/sbush");
+    if (ret < 0)
+        printk("init_starter: exec failed\n");
+
+    /* Pre-populate stdin(0), stdout(1), stderr(2) as "used" so that
+     * alloc_fd() never hands them out to pipes or other files.
+     * These fds point to the UART (no pipe). */
+    for (int i = 0; i < 3; i++) {
+        current_proc->ofile[i].used      = 1;
+        current_proc->ofile[i].pipe_read  = 0;
+        current_proc->ofile[i].pipe_write = 0;
+        current_proc->ofile[i].pipe_id    = -1;
+    }
+
     // Now we must jump to user mode!
     forkret();
 }
@@ -74,14 +87,10 @@ found:
     return 0;
   }
 
-  // An empty page table.
-  p->pagetable = uvmcreate();
-  if(p->pagetable == 0){
-    kfree(p->kstack);
-    kfree(p->trapframe);
-    p->state = UNUSED;
-    return 0;
-  }
+  // Use kernel page table initially; exec() will install a user page table.
+  // This ensures the scheduler can safely switch satp to this process's
+  // page table before the process has run exec().
+  p->pagetable = kernel_pagetable;
 
   // Set up new context to start executing at forkret
   memset(&p->context, 0, sizeof(p->context));
@@ -105,14 +114,6 @@ void userinit(void) {
   // We'll set the name for debugging.
   const char *name = "sbush";
   for(int i=0; i<6; i++) p->name[i] = name[i];
-}
-
-// Give up the CPU for one scheduling round.
-void yield(void) {
-  if(current_proc) {
-    current_proc->state = RUNNABLE;
-    swtch(&current_proc->context, &scheduler_context);
-  }
 }
 
 // Wake any process sleeping on UART input.
@@ -151,6 +152,27 @@ void scheduler(void) {
          * re-entrant trap corruption.  The user's sret will restore SIE
          * from sstatus.SPIE when it actually returns to user mode. */
         w_sstatus(r_sstatus() & ~SSTATUS_SIE);
+
+        /* Always switch to this process's page table before resuming it.
+         * This is required for both new processes (which also go through
+         * forkret) and existing processes waking from a kernel sleep.
+         * Without this, satp may still point to the last process that
+         * ran through forkret (e.g. a forked child), causing the resumed
+         * process to execute with the wrong address space. */
+        w_satp(MAKE_SATP(p->pagetable));
+        sfence_vma();
+
+        /* Point sscratch at this process's kernel stack top so that
+         * trap.S can correctly identify user-mode vs kernel-mode traps. */
+        asm volatile("csrw sscratch, %0"
+                     : : "r" ((char *)p->kstack + PAGE_SIZE));
+
+        /* Ensure SUM is set so kernel can access user-mapped pages. */
+        unsigned long s = r_sstatus();
+        s |= SSTATUS_SUM;
+        s &= ~SSTATUS_SPP;   /* return to user mode on sret */
+        s |= SSTATUS_SPIE;   /* enable interrupts on sret */
+        w_sstatus(s);
 
         swtch(&scheduler_context, &p->context);
 
