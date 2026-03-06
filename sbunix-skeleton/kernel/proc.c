@@ -120,11 +120,12 @@ void userinit(void) {
   for(int i=0; i<6; i++) p->name[i] = name[i];
 }
 
-// Wake any process sleeping on UART input.
+// Wake any process sleeping on UART input (waiting_for_uart==1 only).
+// Do NOT wake timed-sleep processes (waiting_for_uart==2).
 void uart_wakeup(void) {
   struct proc *p;
   for (p = proc; p < &proc[64]; p++) {
-    if (p->state == SLEEPING && p->waiting_for_uart) {
+    if (p->state == SLEEPING && p->waiting_for_uart == 1) {
       p->waiting_for_uart = 0;
       p->state = RUNNABLE;
     }

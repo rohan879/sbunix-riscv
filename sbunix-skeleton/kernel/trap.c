@@ -186,9 +186,12 @@ static void handle_external_interrupt(void) {
             last_key = (unsigned char)c;
         }
         uart_wakeup();
-        /* Also wake any process sleeping in wait4 so it can reap zombies */
+        /* Also wake any process sleeping in wait4 so it can reap zombies.
+         * Only wake waitpid sleepers (waiting_for_uart==0); do NOT wake
+         * timed sleeps (waiting_for_uart==2) or UART-input sleeps (==1,
+         * already handled by uart_wakeup above). */
         for (struct proc *p = proc; p < &proc[64]; p++) {
-            if (p->state == SLEEPING)
+            if (p->state == SLEEPING && p->waiting_for_uart == 0)
                 p->state = RUNNABLE;
         }
         #ifdef TIMER_DISPLAY
@@ -573,9 +576,10 @@ void trap_handler(struct trapframe *tf) {
                     pipes[pid].wpos++;
                 }
                 written += n;
-                /* Wake any sleeping readers now that data is available */
+                /* Wake any sleeping readers now that data is available (not timed sleeps) */
                 for (struct proc *p = proc; p < &proc[64]; p++) {
-                    if (p->state == SLEEPING && p != current_proc)
+                    if (p->state == SLEEPING && p != current_proc &&
+                        p->waiting_for_uart != 2)
                         p->state = RUNNABLE;
                 }
             }
@@ -630,9 +634,10 @@ void trap_handler(struct trapframe *tf) {
                 buf[read_bytes] = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
                 pipes[pid].rpos++;
                 read_bytes++;
-                /* Wake any writers that might be blocked */
+                /* Wake any writers that might be blocked (not timed sleeps) */
                 for (struct proc *p = proc; p < &proc[64]; p++) {
-                    if (p->state == SLEEPING && p != current_proc)
+                    if (p->state == SLEEPING && p != current_proc &&
+                        p->waiting_for_uart != 2)
                         p->state = RUNNABLE;
                 }
                 break; /* return what's available */
@@ -713,18 +718,20 @@ pipe_eof:
                 pipes[pid].read_open--;
                 if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
                     pipes[pid].used = 0;
-                /* Wake any sleeping writers */
+                /* Wake any sleeping pipe readers/writers (not timed sleeps) */
                 for (struct proc *p = proc; p < &proc[64]; p++) {
-                    if (p->state == SLEEPING) p->state = RUNNABLE;
+                    if (p->state == SLEEPING && p->waiting_for_uart != 2)
+                        p->state = RUNNABLE;
                 }
             }
             if (current_proc->ofile[fd].pipe_write && pid >= 0) {
                 pipes[pid].write_open--;
                 if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
                     pipes[pid].used = 0;
-                /* Wake any sleeping readers */
+                /* Wake any sleeping pipe readers/writers (not timed sleeps) */
                 for (struct proc *p = proc; p < &proc[64]; p++) {
-                    if (p->state == SLEEPING) p->state = RUNNABLE;
+                    if (p->state == SLEEPING && p->waiting_for_uart != 2)
+                        p->state = RUNNABLE;
                 }
             }
             current_proc->ofile[fd].used = 0;
@@ -1338,9 +1345,11 @@ getdents_done:
                 current_proc->parent->state == SLEEPING) {
                 current_proc->parent->state = RUNNABLE;
             }
-            /* Also wake any process waiting in wait4 */
+            /* Also wake any process waiting in wait4 (waiting_for_uart==0).
+             * Do NOT wake timed-sleep processes (waiting_for_uart==2). */
             for (struct proc *p = proc; p < &proc[64]; p++) {
-                if (p->state == SLEEPING && p != current_proc)
+                if (p->state == SLEEPING && p != current_proc &&
+                    p->waiting_for_uart == 0)
                     p->state = RUNNABLE;
             }
             swtch(&current_proc->context, &scheduler_context);
@@ -1423,6 +1432,42 @@ getdents_done:
     } else if (sysnum == SYS_mprotect) {
         /* mprotect stub — always succeed */
         tf->a0 = 0;
+
+    } else if (sysnum == SYS_ps) {
+        /* ps(struct ps_entry *buf, int maxentries) -> number of entries written
+         * struct ps_entry { int32_t pid; int32_t ppid; char state; char name[15]; }
+         * = 20 bytes, padded to 24 for alignment. */
+        uint8_t *buf      = (uint8_t *)tf->a0;
+        int      maxn     = (int)tf->a1;
+        int      written  = 0;
+        if (buf && maxn > 0) {
+            for (struct proc *p = proc; p < &proc[64]; p++) {
+                if (p->state == UNUSED) continue;
+                if (written >= maxn) break;
+                /* encode state as single letter */
+                char st;
+                switch (p->state) {
+                    case SLEEPING:  st = 'S'; break;
+                    case RUNNABLE:  st = 'R'; break;
+                    case RUNNING:   st = 'R'; break;
+                    case ZOMBIE:    st = 'Z'; break;
+                    default:        st = '?'; break;
+                }
+                uint8_t *e = buf + written * 24;
+                int32_t pid_  = (int32_t)p->pid;
+                int32_t ppid_ = (int32_t)(p->parent ? p->parent->pid : 0);
+                memset(e, 0, 24);
+                memcpy(e + 0, &pid_,  4);
+                memcpy(e + 4, &ppid_, 4);
+                e[8] = (uint8_t)st;
+                /* copy name, max 15 chars */
+                int nl = strlen(p->name);
+                if (nl > 15) nl = 15;
+                memcpy(e + 9, p->name, nl);
+                written++;
+            }
+        }
+        tf->a0 = (uint64_t)written;
 
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);

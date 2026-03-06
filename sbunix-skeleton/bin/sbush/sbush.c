@@ -2,9 +2,11 @@
 #include <stdlib.h>
 
 void execute_line(char *line) {
-    struct pipeline pl;
-    if (parse_line(line, &pl) > 0)
-        execute_pipeline(&pl);
+    /* static: struct cmdlist is ~130 KB; placing it on the stack overflows
+     * the 32 KB user stack.  The shell is single-threaded so static is safe. */
+    static struct cmdlist cl;
+    if (parse_line(line, &cl) > 0)
+        execute_cmdlist(&cl);
 }
 
 /* Read a line from stdin with echo and line editing.

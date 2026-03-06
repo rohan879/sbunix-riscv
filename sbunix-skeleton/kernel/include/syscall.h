@@ -39,6 +39,9 @@
 #define SYS_mmap        222
 #define SYS_mprotect    226
 
+/* Custom / teaching-OS extensions */
+#define SYS_ps          500   /* snapshot process table */
+
 /* mmap flags (must match libc/include/sys/mman.h) */
 #define MAP_FIXED     0x10
 #define MAP_ANONYMOUS 0x20

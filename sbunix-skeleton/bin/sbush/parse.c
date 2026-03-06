@@ -67,17 +67,13 @@ static int tokenize(char *str, struct command *cmd) {
 }
 
 /* -----------------------------------------------------------------------
- * Glob pattern matching: match a single filename component against a
- * pattern that may contain '*' (matches any sequence of chars) and '?'
- * (matches exactly one char).  No '/' in either string.
+ * Glob pattern matching
  * ---------------------------------------------------------------------- */
 static int glob_match(const char *pat, const char *name) {
     while (*pat) {
         if (*pat == '*') {
-            /* skip consecutive stars */
             while (*pat == '*') pat++;
-            if (!*pat) return 1;          /* trailing * matches anything */
-            /* try each possible match position */
+            if (!*pat) return 1;
             while (*name) {
                 if (glob_match(pat, name))
                     return 1;
@@ -97,20 +93,6 @@ static int glob_match(const char *pat, const char *name) {
     return *name == '\0';
 }
 
-/* -----------------------------------------------------------------------
- * Expand a single glob token (possibly containing '*' or '?').
- *
- * Strategy:
- *   - Split the pattern into dir-part and base-part at the last '/'.
- *   - opendir the dir-part, iterate entries, match each against base-part.
- *   - Sort matches and append them to cmd->argv[].
- *   - If no matches are found, leave the original token unchanged (POSIX
- *     "no match" behaviour = pass through literally).
- *
- * All matched strings are appended into the static glob_strbuf pool so
- * they have stable addresses for argv[].
- * ---------------------------------------------------------------------- */
-
 #define GLOB_MAX_MATCHES 64
 #define GLOB_STRBUF_SZ   4096
 
@@ -127,20 +109,17 @@ static char *glob_strdup(const char *s) {
     return p;
 }
 
-/* Compare function for qsort on char* array */
 static int str_ptr_cmp(const void *a, const void *b) {
     return strcmp(*(const char **)a, *(const char **)b);
 }
 
 static void glob_expand_token(const char *token, struct command *cmd) {
-    /* Only bother if the token contains a wildcard */
     if (!strchr(token, '*') && !strchr(token, '?')) {
         if (cmd->argc < MAX_ARGS - 1)
             cmd->argv[cmd->argc++] = (char *)token;
         return;
     }
 
-    /* Split into dir and base */
     char dirpart[512];
     char basepart[256];
     const char *slash = strrchr(token, '/');
@@ -163,7 +142,6 @@ static void glob_expand_token(const char *token, struct command *cmd) {
 
     DIR *d = opendir(dirpart);
     if (!d) {
-        /* pass through literally */
         if (cmd->argc < MAX_ARGS - 1)
             cmd->argv[cmd->argc++] = (char *)token;
         return;
@@ -174,13 +152,11 @@ static void glob_expand_token(const char *token, struct command *cmd) {
 
     struct dirent *de;
     while ((de = readdir(d)) != NULL && nmatches < GLOB_MAX_MATCHES) {
-        /* skip hidden files unless pattern starts with '.' */
         if (de->d_name[0] == '.' && basepart[0] != '.')
             continue;
         if (!glob_match(basepart, de->d_name))
             continue;
 
-        /* build full path */
         char fullpath[512];
         if (strcmp(dirpart, ".") == 0) {
             snprintf(fullpath, sizeof(fullpath), "%s", de->d_name);
@@ -197,24 +173,18 @@ static void glob_expand_token(const char *token, struct command *cmd) {
     closedir(d);
 
     if (nmatches == 0) {
-        /* no matches — pass through literally */
         if (cmd->argc < MAX_ARGS - 1)
             cmd->argv[cmd->argc++] = (char *)token;
         return;
     }
 
-    /* sort matches */
     qsort(matches, nmatches, sizeof(char *), str_ptr_cmp);
 
     for (int i = 0; i < nmatches && cmd->argc < MAX_ARGS - 1; i++)
         cmd->argv[cmd->argc++] = (char *)matches[i];
 }
 
-/* -----------------------------------------------------------------------
- * Expand all glob tokens in a command's argv[].
- * ---------------------------------------------------------------------- */
 static void glob_expand_cmd(struct command *cmd) {
-    /* Check if any token has a wildcard; if not, skip entirely */
     int has_glob = 0;
     for (int i = 0; i < cmd->argc; i++) {
         if (strchr(cmd->argv[i], '*') || strchr(cmd->argv[i], '?')) {
@@ -224,16 +194,13 @@ static void glob_expand_cmd(struct command *cmd) {
     }
     if (!has_glob) return;
 
-    /* Reset glob string pool */
     glob_strbuf_pos = 0;
 
-    /* Save original argv */
     char *orig[MAX_ARGS];
     int norig = cmd->argc;
     for (int i = 0; i < norig; i++)
         orig[i] = cmd->argv[i];
 
-    /* Rebuild argv with expansions */
     cmd->argc = 0;
     for (int i = 0; i < norig; i++)
         glob_expand_token(orig[i], cmd);
@@ -241,16 +208,70 @@ static void glob_expand_cmd(struct command *cmd) {
     cmd->argv[cmd->argc] = NULL;
 }
 
-int parse_line(char *line, struct pipeline *pl) {
+/* -----------------------------------------------------------------------
+ * parse_pipeline: parse one pipeline segment (already split on ; && ||)
+ * into a struct pipeline.  Returns 1 if any commands were found, else 0.
+ * ---------------------------------------------------------------------- */
+static int parse_pipeline(char *seg, struct pipeline *pl) {
+    pl->ncmds = 0;
+    pl->background = 0;
+    pl->connector  = CONN_NONE;
+
+    /* strip trailing whitespace */
+    int len = strlen(seg);
+    while (len > 0 && (seg[len-1] == ' ' || seg[len-1] == '\t'))
+        seg[--len] = '\0';
+
+    /* trailing & means background */
+    if (len > 0 && seg[len-1] == '&') {
+        pl->background = 1;
+        seg[--len] = '\0';
+        while (len > 0 && (seg[len-1] == ' ' || seg[len-1] == '\t'))
+            seg[--len] = '\0';
+    }
+
+    /* split on unquoted | */
+    char *p = seg;
+    while (p && pl->ncmds < MAX_PIPES) {
+        char *pipe_pos = NULL;
+        /* find unquoted | (but not ||) */
+        char *scan = p;
+        int in_q = 0;
+        while (*scan) {
+            if (*scan == '"') { in_q = !in_q; scan++; continue; }
+            if (!in_q && *scan == '|' && *(scan+1) != '|') {
+                pipe_pos = scan;
+                break;
+            }
+            scan++;
+        }
+        if (pipe_pos)
+            *pipe_pos = '\0';
+        if (tokenize(p, &pl->cmds[pl->ncmds]) > 0) {
+            glob_expand_cmd(&pl->cmds[pl->ncmds]);
+            pl->ncmds++;
+        }
+        p = pipe_pos ? pipe_pos + 1 : NULL;
+    }
+
+    return pl->ncmds > 0;
+}
+
+/* -----------------------------------------------------------------------
+ * parse_line: split the line on unquoted ;, &&, || and fill a cmdlist.
+ * Returns number of pipelines parsed (0 = empty line).
+ * ---------------------------------------------------------------------- */
+int parse_line(char *line, struct cmdlist *cl) {
+    cl->npl = 0;
+
     /* strip comment */
     char *hash = strchr(line, '#');
-    if (hash)
-        *hash = '\0';
+    if (hash) *hash = '\0';
 
-    /* strip trailing whitespace/newline */
+    /* strip trailing whitespace / newline */
     int len = strlen(line);
-    while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t' ||
-                        line[len - 1] == '\n' || line[len - 1] == '\r'))
+    while (len > 0 && (line[len-1] == ' ' || line[len-1] == '\t' ||
+                        line[len-1] == '\n' || line[len-1] == '\r'))
         line[--len] = '\0';
 
     if (len == 0)
@@ -259,30 +280,56 @@ int parse_line(char *line, struct pipeline *pl) {
     /* expand variables */
     expand_vars(line);
     len = strlen(line);
+    if (len == 0)
+        return 0;
 
-    /* check for background */
-    pl->background = 0;
-    if (len > 0 && line[len - 1] == '&') {
-        pl->background = 1;
-        line[--len] = '\0';
-        while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t'))
-            line[--len] = '\0';
-    }
+    /*
+     * Scan for unquoted ;, &&, ||.
+     * We build a list of (start, connector) pairs.
+     */
+    char *seg_start = line;
+    char *p = line;
+    int   in_q = 0;
 
-    /* split on pipes */
-    pl->ncmds = 0;
-    char *seg = line;
-    while (seg && pl->ncmds < MAX_PIPES) {
-        char *pipe_pos = strchr(seg, '|');
-        if (pipe_pos)
-            *pipe_pos = '\0';
-        if (tokenize(seg, &pl->cmds[pl->ncmds]) > 0) {
-            /* expand globs for this command */
-            glob_expand_cmd(&pl->cmds[pl->ncmds]);
-            pl->ncmds++;
+    while (*p && cl->npl < MAX_CMDLIST) {
+        if (*p == '"') { in_q = !in_q; p++; continue; }
+        if (in_q)       { p++; continue; }
+
+        int connector = CONN_NONE;
+        int skip = 0;
+
+        if (*p == '&' && *(p+1) == '&') {
+            connector = CONN_AND; skip = 2;
+        } else if (*p == '|' && *(p+1) == '|') {
+            connector = CONN_OR;  skip = 2;
+        } else if (*p == ';') {
+            connector = CONN_SEQ; skip = 1;
         }
-        seg = pipe_pos ? pipe_pos + 1 : NULL;
+
+        if (connector != CONN_NONE) {
+            *p = '\0';  /* terminate segment */
+            struct pipeline *pl = &cl->pl[cl->npl];
+            if (parse_pipeline(seg_start, pl)) {
+                pl->connector = connector;
+                cl->npl++;
+            }
+            p += skip;
+            /* skip leading spaces after separator */
+            while (*p == ' ' || *p == '\t') p++;
+            seg_start = p;
+        } else {
+            p++;
+        }
     }
 
-    return pl->ncmds;
+    /* last (or only) segment */
+    if (*seg_start && cl->npl < MAX_CMDLIST) {
+        struct pipeline *pl = &cl->pl[cl->npl];
+        if (parse_pipeline(seg_start, pl)) {
+            pl->connector = CONN_NONE;
+            cl->npl++;
+        }
+    }
+
+    return cl->npl;
 }

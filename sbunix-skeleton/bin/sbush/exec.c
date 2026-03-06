@@ -1,14 +1,15 @@
 #include "sbush.h"
 #include <stdlib.h>
 
-void execute_pipeline(struct pipeline *pl) {
+/* Run one pipeline; return its exit status (last command's status).
+ * For background pipelines returns 0 immediately. */
+int execute_pipeline(struct pipeline *pl) {
     if (pl->ncmds == 0)
-        return;
+        return 0;
 
-    /* single builtin — run in-process */
-    if (pl->ncmds == 1 && is_builtin(pl->cmds[0].argv[0])) {
-        run_builtin(&pl->cmds[0]);
-        return;
+    /* single builtin — run in-process (unless it's in a pipe) */
+    if (pl->ncmds == 1 && !pl->background && is_builtin(pl->cmds[0].argv[0])) {
+        return run_builtin(&pl->cmds[0]);
     }
 
     pid_t pids[MAX_PIPES];
@@ -18,15 +19,15 @@ void execute_pipeline(struct pipeline *pl) {
         int pipefd[2] = {-1, -1};
         if (i < pl->ncmds - 1) {
             if (pipe(pipefd) < 0) {
-                printf("sbush: pipe failed\n");
-                return;
+                dprintf(2, "sbush: pipe failed\n");
+                return 1;
             }
         }
 
         pid_t pid = fork();
         if (pid < 0) {
-            printf("sbush: fork failed\n");
-            return;
+            dprintf(2, "sbush: fork failed\n");
+            return 1;
         }
 
         if (pid == 0) {
@@ -42,7 +43,6 @@ void execute_pipeline(struct pipeline *pl) {
             if (pipefd[0] >= 0)
                 close(pipefd[0]);
 
-            /* handle builtins in pipeline child */
             if (is_builtin(pl->cmds[i].argv[0])) {
                 int ret = run_builtin(&pl->cmds[i]);
                 exit(ret);
@@ -50,12 +50,12 @@ void execute_pipeline(struct pipeline *pl) {
 
             char *path = resolve_path(pl->cmds[i].argv[0]);
             if (!path) {
-                printf("sbush: %s: command not found\n", pl->cmds[i].argv[0]);
+                dprintf(2, "sbush: %s: command not found\n", pl->cmds[i].argv[0]);
                 exit(127);
             }
             char **envp = build_environ();
             execve(path, pl->cmds[i].argv, envp);
-            printf("sbush: %s: exec failed\n", pl->cmds[i].argv[0]);
+            dprintf(2, "sbush: %s: exec failed\n", pl->cmds[i].argv[0]);
             exit(126);
         }
 
@@ -67,8 +67,39 @@ void execute_pipeline(struct pipeline *pl) {
         prev_fd = pipefd[0];
     }
 
-    if (!pl->background) {
-        for (int i = 0; i < pl->ncmds; i++)
-            waitpid(pids[i], NULL, 0);
+    if (pl->background) {
+        /* don't wait; shell continues immediately */
+        if (prev_fd >= 0) close(prev_fd);
+        return 0;
+    }
+
+    /* wait for all processes; return exit status of last */
+    int last_status = 0;
+    for (int i = 0; i < pl->ncmds; i++) {
+        int status = 0;
+        waitpid(pids[i], &status, 0);
+        if (i == pl->ncmds - 1)
+            last_status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    }
+    return last_status;
+}
+
+/* Execute a full command list, honouring ;, &&, || connectors. */
+void execute_cmdlist(struct cmdlist *cl) {
+    int last_status = 0;
+    for (int i = 0; i < cl->npl; i++) {
+        struct pipeline *pl = &cl->pl[i];
+
+        /* Decide whether to run this pipeline based on previous connector */
+        if (i > 0) {
+            int prev_conn = cl->pl[i-1].connector;
+            if (prev_conn == CONN_AND && last_status != 0)
+                continue;   /* skip: previous failed */
+            if (prev_conn == CONN_OR  && last_status == 0)
+                continue;   /* skip: previous succeeded */
+            /* CONN_SEQ always runs */
+        }
+
+        last_status = execute_pipeline(pl);
     }
 }

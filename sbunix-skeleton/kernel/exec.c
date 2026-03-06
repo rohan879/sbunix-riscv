@@ -74,6 +74,23 @@ int exec(char *path) {
     current_proc->pagetable = pagetable;
     current_proc->sz = sz;
 
+    /* Update process name from the last component of the path */
+    {
+        const char *base = path;
+        const char *p = path;
+        while (*p) {
+            if (*p == '/')
+                base = p + 1;
+            p++;
+        }
+        int ni = 0;
+        while (base[ni] && ni < (int)sizeof(current_proc->name) - 1) {
+            current_proc->name[ni] = base[ni];
+            ni++;
+        }
+        current_proc->name[ni] = '\0';
+    }
+
     // Switch satp to the new page table immediately so that trap_restore's
     // sret enters user mode with the correct address space.
     w_satp(MAKE_SATP(pagetable));

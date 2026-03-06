@@ -44,6 +44,9 @@
 #define SYS_munmap      215
 #define SYS_mprotect    226
 
+/* Custom / teaching-OS extensions */
+#define SYS_ps          500   /* snapshot process table */
+
 /* I/O control */
 #define SYS_ioctl       29
 #define SYS_fcntl       25
