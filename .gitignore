@@ -56,4 +56,3 @@ dkms.conf
 
 .vscode/settings.json
 sbunix-skeleton/tools/sourceme.sh
-.gitignore
