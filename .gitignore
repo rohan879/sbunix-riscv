@@ -55,4 +55,3 @@ dkms.conf
 *.dwo
 
 .vscode/settings.json
-sbunix-skeleton/tools/sourceme.sh
