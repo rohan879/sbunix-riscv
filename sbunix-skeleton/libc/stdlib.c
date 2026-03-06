@@ -217,8 +217,8 @@ void qsort(void *base, size_t nmemb, size_t size,
 
         long i = lo, j = hi - 1;
         while (1) {
-            while (compar(b + (++i) * size, pivot) < 0 && i < hi) {}
-            while (compar(b + (--j) * size, pivot) > 0 && j > lo) {}
+            do { i++; } while (i < hi  && compar(b + i * size, pivot) < 0);
+            do { j--; } while (j > lo  && compar(b + j * size, pivot) > 0);
             if (i >= j)
                 break;
             swap_bytes(b + i * size, b + j * size, size);

@@ -1075,6 +1075,15 @@ pipe_eof:
         to_tarfs_path(resolved, tarpath);
         struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
         if (!hdr) {
+            /* retry with trailing '/' for directories stored as "path/" in tarfs */
+            int tplen = strlen(tarpath);
+            if (tplen > 0 && tplen < 254 && tarpath[tplen - 1] != '/') {
+                tarpath[tplen]     = '/';
+                tarpath[tplen + 1] = '\0';
+                hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+            }
+        }
+        if (!hdr) {
             tf->a0 = (uint64_t)-1;
         } else {
             memset(st, 0, 128);

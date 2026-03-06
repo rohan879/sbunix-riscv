@@ -53,3 +53,7 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+.vscode/settings.json
+sbunix-skeleton/tools/sourceme.sh
+.gitignore

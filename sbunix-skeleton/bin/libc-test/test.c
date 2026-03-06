@@ -4,7 +4,7 @@
  * Exercises every libc module and prints PASS/FAIL for each test.
  * All tested syscalls are now implemented in the kernel.
  *
- * Run from the shell:  test
+ * Run from the shell:  libc-test
  */
 
 #include <stdio.h>
