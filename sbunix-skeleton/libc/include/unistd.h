@@ -7,21 +7,54 @@
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
 
+/* access() mode bits */
+#define F_OK  0  /* test for file existence */
+#define X_OK  1  /* test for execute permission */
+#define W_OK  2  /* test for write permission */
+#define R_OK  4  /* test for read permission */
+
+/* lseek() whence values */
+#define SEEK_SET  0  /* seek from beginning of file */
+#define SEEK_CUR  1  /* seek from current position */
+#define SEEK_END  2  /* seek from end of file */
+
 extern char **environ;
 
+/* Basic I/O */
 ssize_t read(int fd, void *buf, size_t count);
 ssize_t write(int fd, const void *buf, size_t count);
-int     open(const char *path, int flags);
+int     open(const char *path, int flags, ...);
 int     close(int fd);
+int     dup(int oldfd);
 int     dup2(int oldfd, int newfd);
 int     pipe(int fds[2]);
+off_t   lseek(int fd, off_t offset, int whence);
+
+/* Process management */
 pid_t   fork(void);
-pid_t   waitpid(pid_t pid, int *status, int options);
 pid_t   getpid(void);
+pid_t   getppid(void);
 int     execve(const char *path, char *const argv[], char *const envp[]);
+int     execv(const char *path, char *const argv[]);
+int     execvp(const char *file, char *const argv[]);
+pid_t   waitpid(pid_t pid, int *status, int options);
+void    _exit(int status) __attribute__((noreturn));
+
+/* Filesystem */
 int     chdir(const char *path);
 char   *getcwd(char *buf, size_t size);
-void    _exit(int status) __attribute__((noreturn));
-unsigned int sleep(unsigned int seconds);
+int     unlink(const char *path);
+int     rmdir(const char *path);
+int     link(const char *oldpath, const char *newpath);
+int     rename(const char *oldpath, const char *newpath);
+int     access(const char *path, int mode);
 
-#endif
+/* Time */
+unsigned int sleep(unsigned int seconds);
+int          usleep(unsigned int usecs);
+
+/* Miscellaneous */
+uid_t   getuid(void);
+gid_t   getgid(void);
+
+#endif /* _UNISTD_H */

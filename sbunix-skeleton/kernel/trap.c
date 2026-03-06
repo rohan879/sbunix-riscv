@@ -355,34 +355,84 @@ static void to_tarfs_path(const char *path, char *out) {
     out[i] = '\0';
 }
 
+/* Normalize an absolute path in-place: collapse "." and ".." components.
+ * Input must already be absolute (start with '/').  Result is written to out. */
+static void normalize_path(const char *in, char *out) {
+    /* Use a small stack of component offsets into out[] */
+    /* We build the result into out directly, tracking segment starts. */
+    char tmp[256];
+    int tlen = 0;
+    const char *p = in;
+
+    /* Skip leading slash — we'll add it back */
+    while (*p == '/') p++;
+
+    tmp[tlen++] = '/';
+    /* Stack of segment-end positions in tmp (indices of the '/' before each segment) */
+    int stack[64];
+    int depth = 0;
+
+    while (*p) {
+        /* Find end of this component */
+        const char *start = p;
+        while (*p && *p != '/') p++;
+        int clen = (int)(p - start);
+
+        if (clen == 0 || (clen == 1 && start[0] == '.')) {
+            /* "." or empty — skip */
+        } else if (clen == 2 && start[0] == '.' && start[1] == '.') {
+            /* ".." — pop last segment */
+            if (depth > 0) {
+                tlen = stack[--depth];
+            }
+        } else {
+            /* Normal component — push */
+            stack[depth++] = tlen; /* save position before adding '/' + component */
+            if (tlen > 1) tmp[tlen++] = '/'; /* add separator (root already has '/') */
+            if (tlen + clen < 255) {
+                memcpy(tmp + tlen, start, clen);
+                tlen += clen;
+            }
+        }
+
+        /* skip slashes between components */
+        while (*p == '/') p++;
+    }
+
+    tmp[tlen] = '\0';
+    /* Result: if only the root slash remains, that's "/" */
+    memcpy(out, tmp, tlen + 1);
+}
+
 /* Resolve a path against cwd.  Result in out[256]. */
 static void resolve_path(const char *cwd, const char *path, char *out) {
+    char raw[512]; /* intermediate buffer before normalization */
+    int rlen;
+
     if (path[0] == '/') {
         /* absolute */
-        int len = strlen(path);
-        if (len > 255) len = 255;
-        memcpy(out, path, len);
-        out[len] = '\0';
+        rlen = strlen(path);
+        if (rlen > 511) rlen = 511;
+        memcpy(raw, path, rlen);
+        raw[rlen] = '\0';
     } else {
-        /* relative */
+        /* relative — prepend cwd */
         int cwdlen = strlen(cwd);
         int pathlen = strlen(path);
-        if (cwdlen + 1 + pathlen > 255) {
+        if (cwdlen + 1 + pathlen > 510) {
             out[0] = '/'; out[1] = '\0';
             return;
         }
-        memcpy(out, cwd, cwdlen);
+        memcpy(raw, cwd, cwdlen);
         if (cwdlen == 0 || cwd[cwdlen-1] != '/') {
-            out[cwdlen] = '/';
-            cwdlen++;
+            raw[cwdlen++] = '/';
         }
-        memcpy(out + cwdlen, path, pathlen);
-        out[cwdlen + pathlen] = '\0';
+        memcpy(raw + cwdlen, path, pathlen);
+        raw[cwdlen + pathlen] = '\0';
     }
-    /* Normalize: remove trailing slash unless root */
-    int len = strlen(out);
-    while (len > 1 && out[len-1] == '/')
-        out[--len] = '\0';
+
+    /* Normalize: collapse "." and ".." components */
+    normalize_path(raw, out);
 }
 
 /* Check if a path exists as a directory in the tarfs.
@@ -466,7 +516,34 @@ void trap_handler(struct trapframe *tf) {
 
     long sysnum = (long)tf->a7;
 
-    if (sysnum == SYS_write) {
+    /* ---- SYS_brk: heap / program-break management ---- */
+    if (sysnum == SYS_brk) {
+        uint64_t new_brk = tf->a0;
+        uint64_t cur_sz  = current_proc->sz;
+
+        if (new_brk == 0) {
+            /* Query: return current break */
+            tf->a0 = cur_sz;
+        } else if (new_brk < cur_sz) {
+            /* Shrink heap (ignore for simplicity; return current brk) */
+            tf->a0 = cur_sz;
+        } else {
+            /* Grow heap: map new pages starting from the next page boundary
+             * above the current break, so we never re-map already-mapped pages.
+             * Heap pages must be writable (PTE_W). */
+            uint64_t heap_start = (cur_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+            uint64_t rounded    = (new_brk + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+            if (heap_start < rounded) {
+                if (uvmalloc(current_proc->pagetable, heap_start, rounded, PTE_W) == 0) {
+                    tf->a0 = cur_sz; /* allocation failed; return old brk */
+                    goto syscall_done;
+                }
+            }
+            current_proc->sz = new_brk;
+            tf->a0 = new_brk;
+        }
+
+    } else if (sysnum == SYS_write) {
         int fd = (int)tf->a0;
         char *buf = (char *)tf->a1;
         size_t len = (size_t)tf->a2;
@@ -564,7 +641,22 @@ pipe_eof:
             tf->a0 = (uint64_t)read_bytes;
         } else {
             /* Try reading from a tar file if the fd is a plain file */
-            tf->a0 = (uint64_t)0; /* EOF for unknown fds */
+            if (fd >= 0 && fd < NOFILE && current_proc->ofile[fd].used &&
+                !current_proc->ofile[fd].pipe_read &&
+                !current_proc->ofile[fd].pipe_write &&
+                current_proc->ofile[fd].tar_data) {
+                unsigned long off  = current_proc->ofile[fd].tar_offset;
+                unsigned long fsz  = current_proc->ofile[fd].tar_size;
+                unsigned long avail = (off < fsz) ? (fsz - off) : 0;
+                unsigned long n    = (len < avail) ? len : avail;
+                if (n > 0) {
+                    memcpy(buf, current_proc->ofile[fd].tar_data + off, n);
+                    current_proc->ofile[fd].tar_offset += n;
+                }
+                tf->a0 = (uint64_t)n;
+            } else {
+                tf->a0 = (uint64_t)0; /* EOF for unknown fds */
+            }
         }
 
     } else if (sysnum == SYS_openat) {
@@ -583,8 +675,18 @@ pipe_eof:
         resolve_path(current_proc->cwd, path, resolved);
         to_tarfs_path(resolved, tarpath);
 
-        /* Look up in tarfs */
+        /* Look up in tarfs — try exact match first, then with trailing '/'
+         * (tar directories are stored with a trailing slash) */
         struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+        if (!hdr && tarpath[0] != '\0') {
+            /* Append trailing slash and retry */
+            int tplen = strlen(tarpath);
+            if (tplen < 254) {
+                tarpath[tplen]   = '/';
+                tarpath[tplen+1] = '\0';
+                hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+            }
+        }
         if (!hdr) {
             tf->a0 = (uint64_t)-1;
         } else {
@@ -592,10 +694,13 @@ pipe_eof:
             if (fd < 0) {
                 tf->a0 = (uint64_t)-1;
             } else {
-                current_proc->ofile[fd].used = 1;
-                current_proc->ofile[fd].pipe_read = 0;
+                current_proc->ofile[fd].used       = 1;
+                current_proc->ofile[fd].pipe_read  = 0;
                 current_proc->ofile[fd].pipe_write = 0;
-                current_proc->ofile[fd].pipe_id = -1;
+                current_proc->ofile[fd].pipe_id    = -1;
+                current_proc->ofile[fd].tar_offset = 0;
+                current_proc->ofile[fd].tar_size   = tar_get_file_size(hdr);
+                current_proc->ofile[fd].tar_data   = (char *)hdr + sizeof(struct posix_header);
                 tf->a0 = (uint64_t)fd;
             }
         }
@@ -854,6 +959,257 @@ pipe_eof:
     } else if (sysnum == SYS_getpid) {
         tf->a0 = current_proc ? (uint64_t)current_proc->pid : 0;
 
+    } else if (sysnum == SYS_getppid) {
+        if (current_proc && current_proc->parent)
+            tf->a0 = (uint64_t)current_proc->parent->pid;
+        else
+            tf->a0 = 1; /* init is own parent by convention */
+
+    } else if (sysnum == SYS_getuid) {
+        tf->a0 = 0; /* always root */
+
+    } else if (sysnum == SYS_getgid) {
+        tf->a0 = 0; /* always root */
+
+    } else if (sysnum == SYS_kill) {
+        pid_t target = (pid_t)(int)tf->a0;
+        /* int sig = (int)tf->a1; -- only SIGKILL is meaningful here */
+        if (target <= 0) {
+            tf->a0 = (uint64_t)-1;
+            goto syscall_done;
+        }
+        int found = 0;
+        for (struct proc *p = proc; p < &proc[64]; p++) {
+            if (p->state != UNUSED && p->pid == target) {
+                p->exit_status = 128 + 9; /* killed by SIGKILL */
+                p->state = ZOMBIE;
+                if (p->parent && p->parent->state == SLEEPING)
+                    p->parent->state = RUNNABLE;
+                found = 1;
+                break;
+            }
+        }
+        tf->a0 = found ? 0 : (uint64_t)-1;
+
+    } else if (sysnum == SYS_clock_gettime) {
+        /* clock_gettime(clockid_t, struct timespec *)
+         * struct timespec: { int64_t tv_sec; int64_t tv_nsec; }
+         * We report ticks as seconds (each tick = 1s). */
+        int64_t *ts = (int64_t *)tf->a1;
+        if (ts) {
+            ts[0] = (int64_t)ticks;   /* tv_sec */
+            ts[1] = 0;                 /* tv_nsec */
+            tf->a0 = 0;
+        } else {
+            tf->a0 = (uint64_t)-1;
+        }
+
+    } else if (sysnum == SYS_lseek) {
+        int fd      = (int)tf->a0;
+        long offset = (long)tf->a1;
+        int whence  = (int)tf->a2;
+        if (fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used ||
+            current_proc->ofile[fd].pipe_read || current_proc->ofile[fd].pipe_write) {
+            tf->a0 = (uint64_t)-1;
+        } else {
+            unsigned long fsz = current_proc->ofile[fd].tar_size;
+            unsigned long cur = current_proc->ofile[fd].tar_offset;
+            long new_off;
+            if (whence == 0)       /* SEEK_SET */ new_off = offset;
+            else if (whence == 1)  /* SEEK_CUR */ new_off = (long)cur + offset;
+            else if (whence == 2)  /* SEEK_END */ new_off = (long)fsz + offset;
+            else { tf->a0 = (uint64_t)-1; goto syscall_done; }
+            if (new_off < 0) new_off = 0;
+            if ((unsigned long)new_off > fsz) new_off = (long)fsz;
+            current_proc->ofile[fd].tar_offset = (unsigned long)new_off;
+            tf->a0 = (uint64_t)new_off;
+        }
+
+    } else if (sysnum == SYS_fstat) {
+        /* fstat(int fd, struct stat *st)
+         * Minimal struct stat layout (RISC-V Linux ABI, first fields):
+         *   0:  uint64_t st_dev
+         *   8:  uint64_t st_ino
+         *  16:  uint32_t st_mode
+         *  20:  uint32_t st_nlink
+         *  24:  uint32_t st_uid
+         *  28:  uint32_t st_gid
+         *  32:  uint64_t st_rdev
+         *  40:  int64_t  pad0
+         *  48:  int64_t  st_size
+         *  56:  int32_t  st_blksize
+         *  60:  int32_t  pad1
+         *  64:  int64_t  st_blocks
+         */
+        int fd = (int)tf->a0;
+        uint8_t *st = (uint8_t *)tf->a1;
+        if (!st || fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used) {
+            tf->a0 = (uint64_t)-1;
+        } else {
+            memset(st, 0, 128); /* zero the whole stat struct */
+            unsigned long fsz = current_proc->ofile[fd].tar_size;
+            /* st_mode: S_IFREG | 0644 = 0x81A4 */
+            uint32_t mode = 0x81A4;
+            uint32_t nlink = 1;
+            int64_t  size  = (int64_t)fsz;
+            int32_t  blksz = 512;
+            int64_t  blks  = ((int64_t)fsz + 511) / 512;
+            memcpy(st + 16, &mode,  4);
+            memcpy(st + 20, &nlink, 4);
+            memcpy(st + 48, &size,  8);
+            memcpy(st + 56, &blksz, 4);
+            memcpy(st + 64, &blks,  8);
+            tf->a0 = 0;
+        }
+
+    } else if (sysnum == SYS_newfstatat) {
+        /* newfstatat(AT_FDCWD, path, struct stat *, flags) */
+        const char *path = (const char *)tf->a1;
+        uint8_t *st = (uint8_t *)tf->a2;
+        if (!path || !st) {
+            tf->a0 = (uint64_t)-1;
+            goto syscall_done;
+        }
+        char resolved[256], tarpath[256];
+        resolve_path(current_proc->cwd, path, resolved);
+        to_tarfs_path(resolved, tarpath);
+        struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+        if (!hdr) {
+            tf->a0 = (uint64_t)-1;
+        } else {
+            memset(st, 0, 128);
+            unsigned long fsz = tar_get_file_size(hdr);
+            uint32_t mode = (hdr->typeflag == '5') ? (uint32_t)(0x4000 | 0755)
+                                                    : (uint32_t)(0x8000 | 0644);
+            uint32_t nlink = 1;
+            int64_t  size  = (int64_t)fsz;
+            int32_t  blksz = 512;
+            int64_t  blks  = ((int64_t)fsz + 511) / 512;
+            memcpy(st + 16, &mode,  4);
+            memcpy(st + 20, &nlink, 4);
+            memcpy(st + 48, &size,  8);
+            memcpy(st + 56, &blksz, 4);
+            memcpy(st + 64, &blks,  8);
+            tf->a0 = 0;
+        }
+
+    } else if (sysnum == SYS_getdents64) {
+        /* getdents64(int fd, struct linux_dirent64 *buf, unsigned int count)
+         * struct linux_dirent64:
+         *   uint64_t d_ino
+         *   int64_t  d_off
+         *   uint16_t d_reclen
+         *   uint8_t  d_type
+         *   char     d_name[]  (NUL-terminated, padded to 8-byte boundary)
+         */
+        int fd            = (int)tf->a0;
+        char *ubuf        = (char *)tf->a1;
+        unsigned int count = (unsigned int)tf->a2;
+
+        /* fd must be an open "directory" — we accept any tarfs-backed fd
+         * whose tar_data points at a directory header, OR we treat the
+         * fd itself as a directory cursor by storing a scan position.
+         * Simplest approach: we repurpose tar_offset as "bytes of dirents
+         * already returned" and scan the tarfs from scratch each time,
+         * skipping entries we already emitted. */
+
+        if (fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used ||
+            current_proc->ofile[fd].pipe_read || current_proc->ofile[fd].pipe_write) {
+            tf->a0 = (uint64_t)-1;
+            goto syscall_done;
+        }
+
+        /* We need to know which directory path this fd refers to.
+         * We stored tar_data pointing to the header; for a directory entry
+         * the header name IS the directory path. For now, walk the tarfs
+         * and find entries whose parent directory matches. */
+
+        /* Recover the directory path from the stored tar header */
+        struct posix_header *dir_hdr = (struct posix_header *)
+            (current_proc->ofile[fd].tar_data - sizeof(struct posix_header));
+        /* Compute the canonical dir path from the tar name (strip "./", ensure trailing /) */
+        char dirpath[256];
+        {
+            const char *n = dir_hdr->name;
+            if (n[0] == '.' && n[1] == '/') n += 2;
+            /* strip trailing slash */
+            int nl = strlen(n);
+            if (nl > 0 && n[nl-1] == '/') nl--;
+            memcpy(dirpath, n, nl);
+            dirpath[nl] = '\0';
+        }
+        int dirpath_len = strlen(dirpath);
+
+        unsigned long skip = current_proc->ofile[fd].tar_offset;
+        unsigned int  written = 0;
+        unsigned long seen    = 0;
+
+        struct posix_header *hdr = (struct posix_header *)_tarfs_start;
+        while ((char *)hdr < _tarfs_end && written + 32 <= count) {
+            if (hdr->name[0] == '\0') break;
+            if (strncmp(hdr->magic, "ustar", 5) != 0) {
+                hdr = (struct posix_header *)((char *)hdr + 512);
+                continue;
+            }
+
+            /* Strip "./" prefix from tar name */
+            const char *ename = hdr->name;
+            if (ename[0] == '.' && ename[1] == '/') ename += 2;
+
+            /* Remove trailing slash for comparison */
+            char clean[100];
+            int elen = strlen(ename);
+            if (elen > 0 && ename[elen-1] == '/') elen--;
+            memcpy(clean, ename, elen);
+            clean[elen] = '\0';
+
+            /* Check if this entry's parent is dirpath */
+            int is_child = 0;
+            if (dirpath_len == 0) {
+                /* Root directory: direct children have no '/' in clean */
+                is_child = (elen > 0 && strchr(clean, '/') == (void *)0);
+            } else {
+                /* Child if clean starts with "dirpath/" and has no further '/' */
+                if (elen > dirpath_len + 1 &&
+                    memcmp(clean, dirpath, dirpath_len) == 0 &&
+                    clean[dirpath_len] == '/') {
+                    const char *rest = clean + dirpath_len + 1;
+                    is_child = (strchr(rest, '/') == (void *)0 && rest[0] != '\0');
+                }
+            }
+
+            if (is_child) {
+                if (seen >= skip) {
+                    /* Emit this dirent */
+                    const char *basename = clean + (dirpath_len > 0 ? dirpath_len + 1 : 0);
+                    int namelen = strlen(basename);
+                    /* reclen = 8+8+2+1+1 + namelen + 1, rounded to 8 */
+                    int reclen = (19 + namelen + 1 + 7) & ~7;
+                    if (written + reclen > count) break;
+
+                    char *d = ubuf + written;
+                    memset(d, 0, reclen);
+                    uint64_t ino  = (uint64_t)((char *)hdr - _tarfs_start) / 512 + 1;
+                    int64_t  doff = (int64_t)(seen + 1);
+                    uint16_t rlen = (uint16_t)reclen;
+                    uint8_t  dtype = (hdr->typeflag == '5') ? 4 : 8; /* DT_DIR=4, DT_REG=8 */
+                    memcpy(d +  0, &ino,   8);
+                    memcpy(d +  8, &doff,  8);
+                    memcpy(d + 16, &rlen,  2);
+                    memcpy(d + 18, &dtype, 1);
+                    memcpy(d + 19, basename, namelen + 1);
+                    written += reclen;
+                    current_proc->ofile[fd].tar_offset = seen + 1;
+                }
+                seen++;
+            }
+
+            /* Advance to next tar entry */
+            unsigned long fsz2 = tar_get_file_size(hdr);
+            hdr = (struct posix_header *)((char *)hdr + 512 + ((fsz2 + 511) & ~511UL));
+        }
+        tf->a0 = (uint64_t)written;
+
     } else if (sysnum == SYS_nanosleep) {
         /* nanosleep(const struct timespec *req, struct timespec *rem)
          * struct timespec: { uint64_t tv_sec; uint64_t tv_nsec; }
@@ -914,6 +1270,83 @@ pipe_eof:
             swtch(&current_proc->context, &scheduler_context);
         }
         while(1) {}
+
+    } else if (sysnum == SYS_mmap) {
+        /* mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
+         * Only MAP_ANONYMOUS supported.  Returns VA on success, (uint64_t)-1 on failure. */
+        uint64_t addr  = tf->a0;
+        uint64_t len   = tf->a1;
+        /* int prot  = (int)tf->a2; -- ignored beyond PROT_READ|PROT_WRITE */
+        int      flags = (int)tf->a3;
+        /* int fd = (int)tf->a4;  -- must be -1 for MAP_ANONYMOUS */
+        /* off_t off = tf->a5;    -- must be 0 for MAP_ANONYMOUS */
+
+        /* Round len up to page boundary */
+        len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        if (len == 0) {
+            tf->a0 = (uint64_t)-1;
+            goto syscall_done;
+        }
+
+        /* Choose virtual address */
+        uint64_t va;
+        if (flags & MAP_FIXED) {
+            va = addr & ~(uint64_t)(PAGE_SIZE - 1);
+        } else {
+            /* Lazily initialise mmap_base to a safe region above the heap */
+            if (current_proc->mmap_base == 0)
+                current_proc->mmap_base = 0x20000000UL; /* 512 MB */
+            va = current_proc->mmap_base;
+            current_proc->mmap_base += len;
+        }
+
+        /* Allocate a free slot in mmap_regions[] */
+        int slot = -1;
+        for (int i = 0; i < NMMAP; i++) {
+            if (current_proc->mmap_regions[i].va == 0) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) {
+            tf->a0 = (uint64_t)-1;
+            goto syscall_done;
+        }
+
+        /* Map zeroed pages */
+        if (uvmalloc(current_proc->pagetable, va, va + len, PTE_W) == 0) {
+            tf->a0 = (uint64_t)-1;
+            goto syscall_done;
+        }
+
+        current_proc->mmap_regions[slot].va  = va;
+        current_proc->mmap_regions[slot].len = len;
+        tf->a0 = va;
+
+    } else if (sysnum == SYS_munmap) {
+        /* munmap(void *addr, size_t len) */
+        uint64_t addr = tf->a0;
+        uint64_t len  = tf->a1;
+
+        len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+
+        /* Find matching region */
+        int found = 0;
+        for (int i = 0; i < NMMAP; i++) {
+            if (current_proc->mmap_regions[i].va == addr) {
+                uvmunmap(current_proc->pagetable, addr, current_proc->mmap_regions[i].len);
+                sfence_vma();
+                current_proc->mmap_regions[i].va  = 0;
+                current_proc->mmap_regions[i].len = 0;
+                found = 1;
+                break;
+            }
+        }
+        tf->a0 = found ? 0 : (uint64_t)-1;
+
+    } else if (sysnum == SYS_mprotect) {
+        /* mprotect stub — always succeed */
+        tf->a0 = 0;
 
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);

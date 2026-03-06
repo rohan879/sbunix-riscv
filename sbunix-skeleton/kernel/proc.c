@@ -97,6 +97,10 @@ found:
   p->context.ra = (uint64_t)forkret;
   p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
 
+  // Initialize mmap tracking fields
+  memset(p->mmap_regions, 0, sizeof(p->mmap_regions));
+  p->mmap_base = 0; /* lazily set on first mmap call */
+
   return p;
 }
 

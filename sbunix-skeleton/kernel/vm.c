@@ -126,6 +126,22 @@ int uvmmap(pagetable_t pagetable, uint64_t va, uint64_t pa, uint64_t sz, int per
     return mappages(pagetable, va, sz, pa, perm | PTE_U);
 }
 
+// Unmap and free physical pages for a user virtual address range [va, va+len).
+// va and len must be page-aligned.  Silently skips pages that are not mapped.
+void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len) {
+    uint64_t a;
+    pte_t *pte;
+
+    for (a = va; a < va + len; a += PAGE_SIZE) {
+        pte = walk(pagetable, a, 0);
+        if (pte == 0 || (*pte & PTE_V) == 0)
+            continue;           /* not mapped — skip */
+        uint64_t pa = PTE2PA(*pte);
+        kfree((void *)pa);
+        *pte = 0;               /* clear the PTE */
+    }
+}
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.

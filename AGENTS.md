@@ -221,17 +221,76 @@ Example: `BF: fix null pointer in allocproc`
 - **`SYS_getdents64` unimplemented** — `ls` utility calls this syscall (61) but kernel has no handler, making `ls_dir()` permanently unreachable
 - **`set` builtin** (`bin/sbush/builtin.c`) — silently succeeds for wrong argument counts instead of printing error
 
+#### 9. `mmap` / `munmap` / `mprotect` Syscalls
+- **`SYS_mmap=222`, `SYS_munmap=215`, `SYS_mprotect=226`** added to `kernel/include/syscall.h`
+- Anonymous `mmap` only (`MAP_ANONYMOUS=0x20`); file-backed mapping not required
+- VA placement: `mmap_base` starts at `0x20000000` (512 MB), grows upward by rounded-up length
+- `struct mmap_region { uint64_t va; uint64_t len; }` with `NMMAP=16` entries added to `struct proc` (`kernel/include/proc.h`)
+- `allocproc()` zeroes `mmap_regions[]` and sets `mmap_base=0` (`kernel/proc.c`)
+- `uvmunmap(pagetable_t, uint64_t va, uint64_t len)` added to `kernel/vm.c` + declared in `kernel/include/vm.h`
+- Handlers implemented in `kernel/trap.c`; `mprotect` is a no-op returning 0
+
+#### 10. `ls` Fix — Root Directory
+- `ls` with no args calls `open(".", 0)`; `resolve_path` was producing `"/."` instead of `"/"`
+- Fixed by `normalize_path()` which collapses `.` components (see below)
+
+#### 11. `cd ..` / Path Normalization Fix
+- `resolve_path` appended `..` literally, producing e.g. `/bin/..` which tarfs could not find
+- Added `normalize_path()` to `kernel/trap.c`: processes absolute paths component-by-component, collapsing `.` (skip) and `..` (pop last segment)
+- `resolve_path` now builds the raw combined path then calls `normalize_path` on it
+- Verified in QEMU: `cd /bin` → `cd ..` → `ls` shows `etc bin` (root)
+
+### QEMU Testing — Critical Notes
+
+**`make qemu` requires a real interactive terminal** — it cannot be piped. Use `tmux`:
+
+```bash
+# Start a tmux session and boot QEMU inside it
+tmux new-session -d -s sbunix_test -x 220 -y 50
+tmux send-keys -t sbunix_test \
+  "export PATH=/home/steven/College/Graduate_Spring_2026/CSE506/riscv-toolchain/bin:/home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin:$PATH" Enter
+sleep 0.5
+tmux send-keys -t sbunix_test \
+  "qemu-system-riscv64 -machine virt -bios default -kernel /path/to/build/kernel.elf -nographic 2>/tmp/qemu_err.txt" Enter
+
+# Wait for boot (~8s), then capture screen
+sleep 8
+tmux capture-pane -t sbunix_test -p | tail -5
+# Should show: "sbush$"
+
+# Send commands and capture output
+tmux send-keys -t sbunix_test "ls" Enter
+sleep 2
+tmux capture-pane -t sbunix_test -p | tail -10
+
+# Exit cleanly
+tmux send-keys -t sbunix_test "exit" Enter
+sleep 2
+tmux kill-session -t sbunix_test
+```
+
+**Key QEMU flags**:
+- Must use `-bios default` (not `-bios none`) — without SBI/OpenSBI the kernel produces no output
+- `-nographic` maps serial to stdio
+- QEMU binary: `/home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin/qemu-system-riscv64`
+- Kernel ELF: `build/kernel.elf` (entry point `0x80200000`)
+- Do NOT pipe stdin/stdout to QEMU without a real tty; use tmux
+
 ### Testing Notes
 
-All regression tests pass:
+All regression tests pass (128/128):
 ```
 echo hello                          # Simple command
 echo hello | cat                    # Single pipe
 echo hello world | cat | cat        # Multi-pipe chains
-cd /bin && echo in_bin              # Note: shell does not support && syntax; use separate commands
 sleep 2                             # Waits ~2 seconds (scheduler-based, not busy-wait)
 sleep 10 (then Ctrl-C)             # Kills sleep, returns to prompt with "^C\n"
 Ctrl-C at idle prompt              # Prints "^C\n", reprints prompt on new line
+ls                                  # Lists: etc bin
+ls /bin                             # Lists all 6 binaries
+cd /bin                             # Changes to /bin directory
+cd ..                               # Returns to / (normalize_path handles ..)
+test                                # Runs test suite: 128 passed, 0 failed
 exit                                # Cleanly halts the system
 ```
 
