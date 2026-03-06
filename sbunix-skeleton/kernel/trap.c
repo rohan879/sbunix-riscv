@@ -99,6 +99,7 @@ static void timer_set_next(void) {
     sbi_set_timer(r_time() + TIMER_FREQ);
 }
 
+#ifdef TIMER_DISPLAY
 static void print_two_digits(unsigned long n) {
     printk("%lu%lu", n / 10, n % 10);
 }
@@ -133,6 +134,7 @@ static void display_time(void) {
     // Restore cursor
     printk("\033[u");
 }
+#endif
 
 /* ------------------------------------------------------------------ */
 /* UART / interrupt                                                     */
@@ -189,7 +191,9 @@ static void handle_external_interrupt(void) {
             if (p->state == SLEEPING)
                 p->state = RUNNABLE;
         }
+        #ifdef TIMER_DISPLAY
         display_time();
+        #endif
         plic_complete(irq);
     } else if (irq != 0) {
         plic_complete(irq);
@@ -198,7 +202,9 @@ static void handle_external_interrupt(void) {
 
 static void handle_timer_interrupt(void) {
     ticks++;
+    #ifdef TIMER_DISPLAY
     display_time();
+    #endif
     timer_set_next();
     /* Wake processes whose timed sleep has expired */
     for (struct proc *p = proc; p < &proc[64]; p++) {
