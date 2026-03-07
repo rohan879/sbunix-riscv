@@ -106,6 +106,43 @@
 - [ ] fork(clone) + exec + wait on `/etc/rc`
 - [~] Then exec sbush — userinit() starts sbush directly, no /etc/rc execution yet
 
+## POSIX Shell Completeness (sbush)
+
+Shell basics (cd, PATH, pipes, background, scripts) are done. These remain for POSIX compliance:
+
+### Signal Handling
+
+- [ ] Install `SIGINT` handler — forward to foreground process group, don't kill shell
+- [ ] Install `SIGTSTP` (^Z) handler — suspend foreground process
+- [ ] Handle `SIGCHLD` — reap background children automatically
+
+### Job Control
+
+- [ ] `jobs` builtin — list background/stopped jobs
+- [ ] `fg` builtin — resume stopped job in foreground
+- [ ] `bg` builtin — resume stopped job in background
+- [ ] Set process groups for pipelines (`setpgid`) and terminal control (`tcsetpgrp`)
+
+### Redirections
+
+- [ ] Output redirect: `cmd > file`, `cmd >> file`
+- [ ] Input redirect: `cmd < file`
+- [ ] Stderr redirect: `cmd 2> file`, `cmd 2>&1`
+
+### Variable / Expansion
+
+- [ ] `$?` — exit status of last command
+- [ ] `$!` — PID of last background process
+- [ ] `$$` — PID of shell itself
+- [ ] Double-quote variable expansion (`"$VAR"` preserves spaces)
+- [ ] Single-quote literal strings (`'no $expansion'`)
+- [ ] Backslash escapes (`\"`, `\\`, `\n`)
+
+### Globbing
+
+- [ ] `*` wildcard expansion (match any string)
+- [ ] `?` wildcard expansion (match single character)
+
 ## Libc Header Completeness (Feedback-Driven)
 
 Scored 13/49 tests (20/100 points). Build compiles and runs, but missing headers and declarations at standard POSIX paths caused most test failures.
