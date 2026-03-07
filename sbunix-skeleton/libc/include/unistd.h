@@ -57,4 +57,12 @@ int          usleep(unsigned int usecs);
 uid_t   getuid(void);
 gid_t   getgid(void);
 
+/* Terminal / process group */
+int     isatty(int fd);
+pid_t   setsid(void);
+pid_t   getpgrp(void);
+int     setpgid(pid_t pid, pid_t pgid);
+pid_t   tcgetpgrp(int fd);
+int     tcsetpgrp(int fd, pid_t pgrp);
+
 #endif /* _UNISTD_H */

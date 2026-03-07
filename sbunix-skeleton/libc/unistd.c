@@ -148,3 +148,39 @@ int ioctl(int fd, unsigned long request, ...) {
     va_end(ap);
     return (int)syscall(SYS_ioctl, fd, request, arg);
 }
+
+int isatty(int fd) {
+    /* Try TIOCGWINSZ ioctl; if kernel supports it, fd is a tty */
+    char buf[8];
+    long ret = syscall(SYS_ioctl, fd, 0x5413, buf);
+    if (ret == 0)
+        return 1;
+    /* Fallback: assume stdin/stdout/stderr are ttys */
+    if (fd >= 0 && fd <= 2)
+        return 1;
+    return 0;
+}
+
+pid_t setsid(void) {
+    /* No kernel support yet -- return current PID as stub */
+    return getpid();
+}
+
+pid_t getpgrp(void) {
+    return getpid();
+}
+
+int setpgid(pid_t pid, pid_t pgid) {
+    (void)pid; (void)pgid;
+    return 0;
+}
+
+pid_t tcgetpgrp(int fd) {
+    (void)fd;
+    return getpid();
+}
+
+int tcsetpgrp(int fd, pid_t pgrp) {
+    (void)fd; (void)pgrp;
+    return 0;
+}
