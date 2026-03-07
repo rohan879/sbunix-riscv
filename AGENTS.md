@@ -153,7 +153,7 @@ From `contrib.md`, use these prefixes:
 | BLD    | Build changes |
 | CHORE  | Miscellaneous |
 
-Example: `BF: fix null pointer in allocproc`
+Example: `BF: Fix null pointer in allocproc`
 
 ## Important Notes
 
