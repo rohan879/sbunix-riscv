@@ -833,18 +833,19 @@ pipe_eof:
     } else if (sysnum == SYS_execve) {
         const char *path = (const char *)tf->a0;
         char **argv = (char **)tf->a1;
-        /* char **envp = (char **)tf->a2; -- ignored for now */
+        char **envp = (char **)tf->a2;
 
         if (!path) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
 
-        /* ---- Copy argv strings into kernel-heap buffers BEFORE exec() ----
-         * argv pointers live in the old user address space.  After exec()
-         * replaces the page table those VA→PA mappings no longer exist.
-         * We allocate a 4K page for string data to avoid kernel stack overflow. */
+        /* ---- Copy argv and envp strings into kernel-heap buffers BEFORE exec()
+         * argv/envp pointers live in the old user address space.  After exec()
+         * replaces the page table those VA->PA mappings no longer exist.
+         * We allocate 4K pages for string data to avoid kernel stack overflow. */
         #define EXECVE_MAXARGS  32
+        #define EXECVE_MAXENVS  32
 
         /* Use kalloc() for the large string buffer to avoid stack overflow */
         char *kstrbuf = (char *)kalloc();
@@ -866,6 +867,24 @@ pipe_eof:
                 memcpy(kstrbuf + kstroff, s, slen);
                 kstroff += slen;
                 kargc++;
+            }
+        }
+
+        /* Copy envp strings from user space (before exec destroys old page table) */
+        char *kenvbuf = (char *)kalloc();
+        int kenvc = 0;
+        int kenvoff = 0;
+        int kenvoff_arr[EXECVE_MAXENVS];
+
+        if (kenvbuf && envp) {
+            while (kenvc < EXECVE_MAXENVS && envp[kenvc]) {
+                const char *s = envp[kenvc];
+                int slen = strlen(s) + 1;
+                if (kenvoff + slen > (int)PAGE_SIZE) break;
+                kenvoff_arr[kenvc] = kenvoff;
+                memcpy(kenvbuf + kenvoff, s, slen);
+                kenvoff += slen;
+                kenvc++;
             }
         }
 
@@ -894,27 +913,33 @@ pipe_eof:
         }
         if (ret < 0) {
             kfree(kstrbuf);
+            if (kenvbuf) kfree(kenvbuf);
             tf->a0 = (uint64_t)-1;
             return;
         }
 
-        /* ---- Set up the new user stack with argc/argv ---- */
+        /* ---- Set up the new user stack with argc/argv/envp ---- */
         /* Stack layout at sp (growing down from MAXVA-32):
-         *   sp+0:              argc (8 bytes)
-         *   sp+8:              argv[0..argc-1] pointers ((argc+1)*8 bytes)
-         *   sp+8+(argc+1)*8:   string data (kstroff bytes)
+         *   sp+0:                              argc (8 bytes)
+         *   sp+8:                              argv[0..argc-1] + NULL ((argc+1)*8)
+         *   sp+8+(argc+1)*8:                   envp[0..envc-1] + NULL ((envc+1)*8)
+         *   sp+8+(argc+1)*8+(envc+1)*8:        argv string data (kstroff bytes)
+         *   sp+8+(argc+1)*8+(envc+1)*8+kstroff: envp string data (kenvoff bytes)
          */
         {
             struct trapframe *newtf = current_proc->trapframe;
 
-            int ptr_area = (kargc + 1) * 8;
-            int header   = 8;
-            int total    = header + ptr_area + kstroff;
+            int argv_ptrs_sz = (kargc + 1) * 8;
+            int envp_ptrs_sz = (kenvc + 1) * 8;
+            int header       = 8;
+            int total        = header + argv_ptrs_sz + envp_ptrs_sz + kstroff + kenvoff;
             total = (total + 15) & ~15;
 
-            uint64_t sp       = MAXVA - 32 - total;
-            uint64_t str_base = sp + header + ptr_area;
-            uint64_t ptr_base = sp + header;
+            uint64_t sp            = MAXVA - 32 - total;
+            uint64_t argv_ptr_base = sp + header;
+            uint64_t envp_ptr_base = sp + header + argv_ptrs_sz;
+            uint64_t argv_str_base = sp + header + argv_ptrs_sz + envp_ptrs_sz;
+            uint64_t envp_str_base = argv_str_base + kstroff;
 
             /* Use kalloc for kbuf too to avoid stack overflow */
             char *kbuf = (char *)kalloc();
@@ -925,21 +950,39 @@ pipe_eof:
                 memcpy(kbuf + off, &u_argc, 8); off += 8;
 
                 /* argv pointers */
-                uint64_t argv_ptrs[EXECVE_MAXARGS + 1];
+                uint64_t ptrs[EXECVE_MAXARGS > EXECVE_MAXENVS ?
+                              EXECVE_MAXARGS + 1 : EXECVE_MAXENVS + 1];
                 int str_off2 = 0;
                 for (int i = 0; i < kargc; i++) {
-                    argv_ptrs[i] = str_base + str_off2;
+                    ptrs[i] = argv_str_base + str_off2;
                     int slen = strlen(kstrbuf + kstroff_arr[i]) + 1;
                     str_off2 += slen;
                 }
-                argv_ptrs[kargc] = 0;
-                memcpy(kbuf + off, argv_ptrs, (kargc + 1) * 8);
-                off += (kargc + 1) * 8;
+                ptrs[kargc] = 0;
+                memcpy(kbuf + off, ptrs, argv_ptrs_sz);
+                off += argv_ptrs_sz;
 
-                /* string data */
+                /* envp pointers */
+                str_off2 = 0;
+                for (int i = 0; i < kenvc; i++) {
+                    ptrs[i] = envp_str_base + str_off2;
+                    int slen = strlen(kenvbuf + kenvoff_arr[i]) + 1;
+                    str_off2 += slen;
+                }
+                ptrs[kenvc] = 0;
+                memcpy(kbuf + off, ptrs, envp_ptrs_sz);
+                off += envp_ptrs_sz;
+
+                /* argv string data */
                 if (kstroff > 0) {
                     memcpy(kbuf + off, kstrbuf, kstroff);
                     off += kstroff;
+                }
+
+                /* envp string data */
+                if (kenvoff > 0) {
+                    memcpy(kbuf + off, kenvbuf, kenvoff);
+                    off += kenvoff;
                 }
 
                 uvmcopyin(current_proc->pagetable, sp, kbuf, off);
@@ -948,10 +991,12 @@ pipe_eof:
 
             newtf->sp = sp;
             newtf->a0 = (uint64_t)kargc;
-            newtf->a1 = ptr_base;
+            newtf->a1 = argv_ptr_base;
+            newtf->a2 = envp_ptr_base;
         }
 
         kfree(kstrbuf);
+        if (kenvbuf) kfree(kenvbuf);
 
         /* exec updated the trapframe; trap_restore will sret into new process */
         trap_restore(current_proc->trapframe);
