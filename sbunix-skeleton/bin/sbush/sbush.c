@@ -135,9 +135,21 @@ static void notify_jobs(void) {
 
 static void reap_zombies(void) {
     notify_jobs();
-    /* also reap non-job zombies */
-    while (waitpid(-1, NULL, WNOHANG) > 0)
-        ;
+    /* Reap any remaining zombies and update job table */
+    int status;
+    pid_t p;
+    while ((p = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
+        struct job *j = job_find_pid(p);
+        if (j) {
+            if (WIFSTOPPED(status)) {
+                j->state = JOB_STOPPED;
+            } else {
+                printf("[%d] Done\t%s\n", j->id, j->cmd);
+                j->pid = 0;
+                j->id = 0;
+            }
+        }
+    }
 }
 
 int main(int argc, char *argv[], char *envp[]) {
