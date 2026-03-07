@@ -9,15 +9,21 @@
 /* File system */
 #define SYS_getcwd      17
 #define SYS_dup3        24
+#define SYS_mkdirat     34
+#define SYS_unlinkat    35
+#define SYS_linkat      37
+#define SYS_faccessat   48
 #define SYS_chdir       49
 #define SYS_openat      56
 #define SYS_close       57
 #define SYS_pipe2       59
 #define SYS_getdents64  61
+#define SYS_lseek       62
 #define SYS_read        63
 #define SYS_write       64
-#define SYS_fstat       80
 #define SYS_newfstatat  79
+#define SYS_fstat       80
+#define SYS_renameat2   276
 
 /* Process */
 #define SYS_exit        93
@@ -51,7 +57,12 @@
 #define SYS_ioctl       29
 #define SYS_fcntl       25
 
+/* Process groups */
+#define SYS_setpgid     154
+#define SYS_setsid      157
+
 /* Misc */
+#define SYS_umask       166
 #define SYS_getuid      174
 #define SYS_getgid      176
 

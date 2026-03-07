@@ -86,7 +86,7 @@ int dup(int oldfd) {
 }
 
 off_t lseek(int fd, off_t offset, int whence) {
-    return (off_t)syscall(/* SYS_lseek = 62 */ 62, fd, offset, whence);
+    return (off_t)syscall(SYS_lseek, fd, offset, whence);
 }
 
 pid_t getppid(void) {
@@ -108,28 +108,24 @@ int usleep(unsigned int usecs) {
 }
 
 int unlink(const char *path) {
-    /* SYS_unlinkat = 35 */
-    return (int)syscall(35, AT_FDCWD, path, 0);
+    return (int)syscall(SYS_unlinkat, AT_FDCWD, path, 0);
 }
 
 int rmdir(const char *path) {
-    /* SYS_unlinkat with AT_REMOVEDIR flag = 0x200 */
-    return (int)syscall(35, AT_FDCWD, path, 0x200);
+    /* AT_REMOVEDIR = 0x200 */
+    return (int)syscall(SYS_unlinkat, AT_FDCWD, path, 0x200);
 }
 
 int link(const char *oldpath, const char *newpath) {
-    /* SYS_linkat = 37 */
-    return (int)syscall(37, AT_FDCWD, oldpath, AT_FDCWD, newpath, 0);
+    return (int)syscall(SYS_linkat, AT_FDCWD, oldpath, AT_FDCWD, newpath, 0);
 }
 
 int rename(const char *oldpath, const char *newpath) {
-    /* SYS_renameat2 = 276 */
-    return (int)syscall(276, AT_FDCWD, oldpath, AT_FDCWD, newpath, 0);
+    return (int)syscall(SYS_renameat2, AT_FDCWD, oldpath, AT_FDCWD, newpath, 0);
 }
 
 int access(const char *path, int mode) {
-    /* SYS_faccessat = 48 */
-    return (int)syscall(48, AT_FDCWD, path, mode, 0);
+    return (int)syscall(SYS_faccessat, AT_FDCWD, path, mode, 0);
 }
 
 int execv(const char *path, char *const argv[]) {
