@@ -1469,6 +1469,35 @@ getdents_done:
         }
         tf->a0 = (uint64_t)written;
 
+    } else if (sysnum == SYS_ioctl) {
+        int fd = (int)tf->a0;
+        unsigned long request = tf->a1;
+        uint64_t argp = tf->a2;
+
+        if (request == 0x5413) { /* TIOCGWINSZ */
+            if (fd >= 0 && fd <= 2) {
+                /* stdin/stdout/stderr are the UART terminal */
+                if (argp) {
+                    /* Write a default 80x24 winsize struct to user memory */
+                    struct { uint16_t row, col, xpix, ypix; } ws = {24, 80, 0, 0};
+                    pte_t *pte = walk(current_proc->pagetable, argp, 0);
+                    if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                        uint64_t pa = PTE2PA(*pte) + (argp & 0xFFF);
+                        memcpy((void *)pa, &ws, sizeof(ws));
+                    }
+                }
+                tf->a0 = 0; /* success - it IS a terminal */
+            } else {
+                tf->a0 = (uint64_t)-25; /* -ENOTTY */
+            }
+        } else if (request == 0x540F) { /* TIOCGPGRP */
+            tf->a0 = (uint64_t)current_proc->pid;
+        } else if (request == 0x5410) { /* TIOCSPGRP */
+            tf->a0 = 0;
+        } else {
+            tf->a0 = (uint64_t)-25; /* -ENOTTY for unknown ioctls */
+        }
+
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);
         tf->a0 = (uint64_t)-1;
