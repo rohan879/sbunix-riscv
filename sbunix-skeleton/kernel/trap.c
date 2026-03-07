@@ -1640,6 +1640,21 @@ getdents_done:
         }
         tf->a0 = hdr ? 0 : (uint64_t)-2; /* 0 or -ENOENT */
 
+    } else if (sysnum == SYS_unlinkat) {
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_linkat) {
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_renameat2) {
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_mkdirat) {
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_umask) {
+        tf->a0 = 0022; /* return old umask, always 022 */
+
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);
         tf->a0 = (uint64_t)-1;
