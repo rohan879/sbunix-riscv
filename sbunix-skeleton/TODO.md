@@ -66,45 +66,45 @@
 - [x] Exception entry/exit (`sepc`/`scause`/`stval` dispatch)
 - [x] Timer interrupts (SBI)
 - [x] External interrupts via PLIC
-- [ ] Minimal scheduler tick for preemption
+- [x] Minimal scheduler tick for preemption
 
 ### 3. Memory Subsystem
 
-- [ ] Physical page allocator (page descriptors, free list)
-- [ ] Sv39 page tables (3-level, managed via `satp` CSR)
-- [ ] Enable/disable virtual memory
+- [x] Physical page allocator (page descriptors, free list)
+- [x] Sv39 page tables (3-level, managed via `satp` CSR)
+- [x] Enable/disable virtual memory
 - [ ] `kmalloc`
 
 ### 4. Process Subsystem
 
-- [ ] Kernel threads
-- [ ] Context switch (RISC-V register save/restore)
-- [ ] User-mode entry (U-mode), per-process page tables
+- [x] Kernel threads
+- [x] Context switch (RISC-V register save/restore)
+- [x] User-mode entry (U-mode), per-process page tables
 
 ### 5. User-level Subsystem
 
 - [ ] VMAs / vm_map_entry tracking
-- [ ] COW fork (via `clone`), auto-growing stack, graceful SEGV
-- [ ] Page fault handler (`scause` exception codes)
+- [~] COW fork (via `clone`), auto-growing stack, graceful SEGV — fork works (full copy, not COW)
+- [~] Page fault handler (`scause` exception codes) — handles stack growth faults
 
 ### 6. I/O Subsystem
 
-- [ ] Syscall dispatch (`ecall` → `scause` environment-call-from-U-mode)
-- [ ] `read(stdin)`, `write(stdout)`, `write(stderr)` via UART terminal
+- [x] Syscall dispatch (`ecall` → `scause` environment-call-from-U-mode)
+- [x] `read(stdin)`, `write(stdout)`, `write(stderr)` via UART terminal
 - [ ] VFS layer
-- [ ] tarfs: `open`, `read`, `close`, `opendir`, `readdir`, `closedir`
+- [x] tarfs: `open`, `read`, `close`, `opendir`, `readdir`, `closedir`
   - Embedded in `.tarfs` section (`_tarfs_start` / `_tarfs_end`)
 
 ### 7. Userspace Binaries
 
-- [ ] `bin/echo`, `bin/sleep`, `bin/cat`, `bin/ls`
-- [ ] `bin/kill` (`kill -9`), `bin/ps`
-- [ ] `bin/sbush` (full shell)
+- [x] `bin/echo`, `bin/sleep`, `bin/cat`, `bin/ls`
+- [x] `bin/kill` (`kill -9`), `bin/ps`
+- [x] `bin/sbush` (full shell)
 
 ### 8. /bin/init
 
 - [ ] fork(clone) + exec + wait on `/etc/rc`
-- [ ] Then exec sbush
+- [~] Then exec sbush — userinit() starts sbush directly, no /etc/rc execution yet
 
 ## Grading Targets
 
