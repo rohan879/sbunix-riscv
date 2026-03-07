@@ -83,7 +83,7 @@
 
 ### 5. User-level Subsystem
 
-- [ ] VMAs / vm_map_entry tracking
+- [x] VMAs / vm_map_entry tracking — `struct vm_area` linked list in `kernel/vm.c`, integrated with exec/mmap/munmap/fork/exit
 - [x] COW fork (via `clone`) — PTE_COW (RSW bit 8), page refcounting in kalloc
 - [x] Auto-growing stack — page fault handler extends stack down by up to 16 pages
 - [x] Page fault handler (`scause` 13/15) — COW faults, stack auto-grow, mmap demand paging
@@ -92,7 +92,7 @@
 
 - [x] Syscall dispatch (`ecall` → `scause` environment-call-from-U-mode)
 - [x] `read(stdin)`, `write(stdout)`, `write(stderr)` via UART terminal
-- [ ] VFS layer
+- [x] VFS layer — `kernel/vfs.c` with mount table, `struct vfs_ops`, `struct open_file` refcounting; tarfs adapter (`kernel/tarfs_vfs.c`), devfs (`kernel/devfs.c`)
 - [x] tarfs: `open`, `read`, `close`, `opendir`, `readdir`, `closedir`
   - Embedded in `.tarfs` section (`_tarfs_start` / `_tarfs_end`)
 
@@ -104,8 +104,8 @@
 
 ### 8. /bin/init
 
-- [ ] fork(clone) + exec + wait on `/etc/rc`
-- [~] Then exec sbush — userinit() starts sbush directly, no /etc/rc execution yet
+- [x] fork(clone) + exec + wait on `/etc/rc` — `bin/init/init.c` forks+execs `/bin/sbush /etc/rc`
+- [x] Then exec sbush — `init` respawns interactive shell after rc completes; `userinit()` now boots `/bin/init`
 
 ## POSIX Shell Completeness (sbush)
 
@@ -113,16 +113,16 @@ Shell basics (cd, PATH, pipes, background, scripts) are done. These remain for P
 
 ### Signal Handling
 
-- [ ] Install `SIGINT` handler — forward to foreground process group, don't kill shell
-- [ ] Install `SIGTSTP` (^Z) handler — suspend foreground process
-- [ ] Handle `SIGCHLD` — reap background children automatically
+- [x] Install `SIGINT` handler — forwards to `fg_pid` via `sigaction(SA_RESTART)` in `sbush.c`
+- [x] Install `SIGTSTP` (^Z) handler — forwards to `fg_pid`, shell itself never stops
+- [x] Handle `SIGCHLD` — `sigchld_handler` reaps via `waitpid(WNOHANG|WUNTRACED)`, updates job table
 
 ### Job Control
 
 - [x] `jobs` builtin — list background/stopped jobs (`bin/sbush/jobs.c`)
 - [x] `fg` builtin — resume stopped job in foreground
 - [x] `bg` builtin — resume stopped job in background
-- [ ] Set process groups for pipelines (`setpgid`) and terminal control (`tcsetpgrp`)
+- [x] Set process groups for pipelines (`setpgid`) and terminal control (`tcsetpgrp`) — first child calls `setpgid(0,0)`, others join; parent uses `tcsetpgrp` for foreground
 
 ### Redirections
 
@@ -223,16 +223,25 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 
 ### Remaining Kernel Work
 
-- [ ] Shell-side signal handlers (SIGINT, SIGTSTP, SIGCHLD) — infrastructure exists, shell needs to install
-- [ ] Process groups for pipelines — `setpgid`/`tcsetpgrp` stubs exist, shell doesn't use yet
-- [ ] VFS layer — abstract tarfs behind common interface
-- [ ] `/bin/init` runs `/etc/rc` before exec'ing sbush
+- [x] Shell-side signal handlers (SIGINT, SIGTSTP, SIGCHLD) — installed in `sbush.c` via `sigaction`
+- [x] Process groups for pipelines — `setpgid`/`tcsetpgrp` used in `exec.c` for pipeline job control
+- [x] VFS layer — `kernel/vfs.c` + `tarfs_vfs.c` + `devfs.c` with mount table and `open_file` refcounting
+- [x] `/bin/init` runs `/etc/rc` before exec'ing sbush — `bin/init/init.c`
+
+### Still Open
+
+- [ ] Kernel SIGCHLD generation — kernel does not set `parent->sigpending |= (1 << SIGCHLD)` on child exit; shell works around this with polling `waitpid` in `reap_zombies()`
+- [ ] devfs integration for stdin/stdout/stderr — fd 0/1/2 still handled as special UART case, not routed through `/dev/console` VFS ops
+- [ ] On-disk read/write file system (ext2 or similar over virtio-blk)
+- [ ] On-disk swap and paging
+- [ ] TCP/IP networking via lwIP
+- [ ] Multi-core support
 
 ## Grading Targets
 
-- [ ] Cooperative multi-tasking + all functional requirements (50 pts)
-- [ ] Preemptive multi-tasking (+10 pts)
-- [ ] Signals (INT on ^C, ALARM, SEGV) and pipes (+10 pts)
+- [x] Cooperative multi-tasking + all functional requirements (50 pts) — scheduler, fork, exec, wait, pipes, VFS, tarfs, user binaries all working
+- [x] Preemptive multi-tasking (+10 pts) — timer-driven scheduler tick, round-robin preemption
+- [~] Signals (INT on ^C, ALARM, SEGV) and pipes (+10 pts) — SIGINT/SIGTSTP/SIGCHLD handlers work; pipes work; kernel doesn't generate SIGCHLD on exit yet
 - [ ] On-disk r/w file system (+10 pts)
 - [ ] On-disk swap and paging (+10 pts)
 - [ ] TCP/IP networking via lwIP (+10 pts)
