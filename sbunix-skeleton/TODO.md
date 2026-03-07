@@ -140,24 +140,24 @@ Shell basics (cd, PATH, pipes, background, scripts) are done. These remain for P
 
 ### Globbing
 
-- [ ] `*` wildcard expansion (match any string)
-- [ ] `?` wildcard expansion (match single character)
+- [x] `*` wildcard expansion (match any string) — implemented in `parse.c:72-209`
+- [x] `?` wildcard expansion (match single character) — implemented in `parse.c:72-209`
 
 ## Libc Header Completeness (Feedback-Driven)
 
 Scored 13/49 tests (20/100 points). Build compiles and runs, but missing headers and declarations at standard POSIX paths caused most test failures.
 
-### Create `libc/include/sys/` Directory
+### `libc/include/sys/` Directory
 
-POSIX tests use `#include <sys/...>` — this directory does not exist yet.
+Directory exists with 4 complete headers. Remaining items need creation.
 
-- [ ] `mkdir -p libc/include/sys`
+- [x] `mkdir -p libc/include/sys` — already exists
 - [ ] Create `sys/time.h` — `struct timeval`, `gettimeofday()`, `timersub`/`timeradd` macros
 - [ ] Create `sys/syscall.h` — include/re-export syscall numbers
-- [ ] Create `sys/types.h` — `pid_t`, `uid_t`, `gid_t`, `off_t`, `ssize_t`, `size_t`, `mode_t`
-- [ ] Create `sys/stat.h` — `struct stat`, `S_ISREG`/`S_ISDIR` macros, `fstat()`/`stat()` declarations
-- [ ] Create `sys/wait.h` — `waitpid()`, `WIFEXITED`/`WEXITSTATUS`/`WIFSIGNALED`/`WTERMSIG` macros
-- [ ] Create `sys/mman.h` — `mmap()`/`munmap()` declarations, `PROT_*`/`MAP_*` constants
+- [x] `sys/types.h` — `pid_t`, `uid_t`, `gid_t`, `off_t`, `ssize_t`, `size_t`, `mode_t`
+- [x] `sys/stat.h` — `struct stat`, `S_ISREG`/`S_ISDIR` macros, `fstat()`/`stat()` declarations
+- [x] `sys/wait.h` — `waitpid()`, `WIFEXITED`/`WEXITSTATUS`/`WIFSIGNALED`/`WTERMSIG` macros
+- [x] `sys/mman.h` — `mmap()`/`munmap()` declarations, `PROT_*`/`MAP_*` constants
 - [ ] Create `sys/ioctl.h` — `ioctl()` declaration, `TIOCGWINSZ`/`struct winsize`
 
 ### Missing Declarations in Existing Headers
@@ -166,17 +166,17 @@ POSIX tests use `#include <sys/...>` — this directory does not exist yet.
 - [ ] `unistd.h` — add: `isatty()`, `setsid()`, `getpgrp()`, `setpgid()`, `tcgetpgrp()`, `tcsetpgrp()`
 - [ ] `signal.h` — add: `sighandler_t` typedef, `sig_atomic_t` typedef
 - [ ] `stdlib.h` — add: `setenv()`, `unsetenv()`, `putenv()`
-- [ ] `errno.h` — add: `errno` global/macro, standard error constants (`ENOENT`, `EBADF`, `ENOMEM`, etc.)
-- [ ] `fcntl.h` — add: `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, `O_APPEND`, `AT_FDCWD`
-- [ ] `dirent.h` — add: `struct dirent`, `DIR` typedef (if not already present)
+- [x] `errno.h` — complete (45 error codes, extern errno)
+- [x] `fcntl.h` — complete (`O_*` flags, `AT_FDCWD`, fcntl commands)
+- [x] `dirent.h` — complete (`struct dirent`, `DIR`, opendir/readdir/closedir)
 
 ### Corresponding Libc Implementations
 
 - [ ] Implement missing string functions in `libc/string.c`
 - [ ] Implement `isatty()` in `libc/unistd.c`
 - [ ] Implement `setenv()`/`unsetenv()`/`putenv()` in `libc/stdlib.c`
-- [ ] Implement `stat()`/`fstat()` syscall wrappers in libc
-- [ ] Implement `waitpid()` wrapper with `W*` macros
+- [x] `stat()`/`fstat()` syscall wrappers in libc
+- [x] `waitpid()` wrapper with `W*` macros
 - [ ] Add `isatty`/`ioctl` syscall handling in `kernel/trap.c`
 
 ## Grading Targets
