@@ -58,6 +58,8 @@ int run_builtin(struct command *cmd);
 /* exec.c */
 int  execute_pipeline(struct pipeline *pl);
 void execute_cmdlist(struct cmdlist *cl);
+extern int   last_exit_status;
+extern pid_t last_bg_pid;
 
 /* script.c */
 int run_script(const char *path);

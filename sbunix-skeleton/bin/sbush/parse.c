@@ -9,23 +9,51 @@ static void expand_vars(char *line) {
     char *src = line;
     char *dst = expand_buf;
     char *end = expand_buf + MAX_LINE - 1;
+    int in_sq = 0;
 
     while (*src && dst < end) {
-        if (*src == '$') {
+        if (*src == '\'' ) {
+            in_sq = !in_sq;
+            *dst++ = *src++;
+        } else if (*src == '$' && !in_sq) {
             src++;
-            char name[64];
-            int i = 0;
-            while (*src && ((*src >= 'a' && *src <= 'z') ||
-                            (*src >= 'A' && *src <= 'Z') ||
-                            (*src >= '0' && *src <= '9') ||
-                            *src == '_') && i < 63) {
-                name[i++] = *src++;
-            }
-            name[i] = '\0';
-            char *val = var_get(name);
-            if (val) {
-                while (*val && dst < end)
-                    *dst++ = *val++;
+            if (*src == '?') {
+                /* $? -- last exit status */
+                src++;
+                char tmp[16];
+                itoa(last_exit_status, tmp, 10);
+                for (char *v = tmp; *v && dst < end; )
+                    *dst++ = *v++;
+            } else if (*src == '!') {
+                /* $! -- last background PID */
+                src++;
+                char tmp[16];
+                itoa((int)last_bg_pid, tmp, 10);
+                for (char *v = tmp; *v && dst < end; )
+                    *dst++ = *v++;
+            } else if (*src == '$') {
+                /* $$ -- shell PID */
+                src++;
+                char tmp[16];
+                itoa((int)getpid(), tmp, 10);
+                for (char *v = tmp; *v && dst < end; )
+                    *dst++ = *v++;
+            } else {
+                /* $NAME -- regular variable */
+                char name[64];
+                int i = 0;
+                while (*src && ((*src >= 'a' && *src <= 'z') ||
+                                (*src >= 'A' && *src <= 'Z') ||
+                                (*src >= '0' && *src <= '9') ||
+                                *src == '_') && i < 63) {
+                    name[i++] = *src++;
+                }
+                name[i] = '\0';
+                char *val = var_get(name);
+                if (val) {
+                    while (*val && dst < end)
+                        *dst++ = *val++;
+                }
             }
         } else {
             *dst++ = *src++;
