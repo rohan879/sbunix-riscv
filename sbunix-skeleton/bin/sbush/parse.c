@@ -82,6 +82,13 @@ static int tokenize(char *str, struct command *cmd) {
                 p++;
             if (*p == '"')
                 *p++ = '\0';
+        } else if (*p == '\'') {
+            p++;
+            cmd->argv[cmd->argc++] = p;
+            while (*p && *p != '\'')
+                p++;
+            if (*p == '\'')
+                *p++ = '\0';
         } else {
             cmd->argv[cmd->argc++] = p;
             while (*p && *p != ' ' && *p != '\t')
@@ -264,10 +271,11 @@ static int parse_pipeline(char *seg, struct pipeline *pl) {
         char *pipe_pos = NULL;
         /* find unquoted | (but not ||) */
         char *scan = p;
-        int in_q = 0;
+        int in_dq = 0, in_sq = 0;
         while (*scan) {
-            if (*scan == '"') { in_q = !in_q; scan++; continue; }
-            if (!in_q && *scan == '|' && *(scan+1) != '|') {
+            if (*scan == '"'  && !in_sq) { in_dq = !in_dq; scan++; continue; }
+            if (*scan == '\'' && !in_dq) { in_sq = !in_sq; scan++; continue; }
+            if (!in_dq && !in_sq && *scan == '|' && *(scan+1) != '|') {
                 pipe_pos = scan;
                 break;
             }
@@ -317,11 +325,12 @@ int parse_line(char *line, struct cmdlist *cl) {
      */
     char *seg_start = line;
     char *p = line;
-    int   in_q = 0;
+    int   in_dq = 0, in_sq = 0;
 
     while (*p && cl->npl < MAX_CMDLIST) {
-        if (*p == '"') { in_q = !in_q; p++; continue; }
-        if (in_q)       { p++; continue; }
+        if (*p == '"'  && !in_sq) { in_dq = !in_dq; p++; continue; }
+        if (*p == '\'' && !in_dq) { in_sq = !in_sq; p++; continue; }
+        if (in_dq || in_sq) { p++; continue; }
 
         int connector = CONN_NONE;
         int skip = 0;
