@@ -73,7 +73,7 @@
 - [x] Physical page allocator (page descriptors, free list)
 - [x] Sv39 page tables (3-level, managed via `satp` CSR)
 - [x] Enable/disable virtual memory
-- [ ] `kmalloc`
+- [x] `kmalloc` — power-of-two slab allocator in `kernel/kmalloc.c` (16–2048 byte buckets)
 
 ### 4. Process Subsystem
 
@@ -84,8 +84,9 @@
 ### 5. User-level Subsystem
 
 - [ ] VMAs / vm_map_entry tracking
-- [~] COW fork (via `clone`), auto-growing stack, graceful SEGV — fork works (full copy, not COW)
-- [~] Page fault handler (`scause` exception codes) — handles stack growth faults
+- [x] COW fork (via `clone`) — PTE_COW (RSW bit 8), page refcounting in kalloc
+- [x] Auto-growing stack — page fault handler extends stack down by up to 16 pages
+- [x] Page fault handler (`scause` 13/15) — COW faults, stack auto-grow, mmap demand paging
 
 ### 6. I/O Subsystem
 
@@ -118,66 +119,114 @@ Shell basics (cd, PATH, pipes, background, scripts) are done. These remain for P
 
 ### Job Control
 
-- [ ] `jobs` builtin — list background/stopped jobs
-- [ ] `fg` builtin — resume stopped job in foreground
-- [ ] `bg` builtin — resume stopped job in background
+- [x] `jobs` builtin — list background/stopped jobs (`bin/sbush/jobs.c`)
+- [x] `fg` builtin — resume stopped job in foreground
+- [x] `bg` builtin — resume stopped job in background
 - [ ] Set process groups for pipelines (`setpgid`) and terminal control (`tcsetpgrp`)
 
 ### Redirections
 
-- [ ] Output redirect: `cmd > file`, `cmd >> file`
-- [ ] Input redirect: `cmd < file`
-- [ ] Stderr redirect: `cmd 2> file`, `cmd 2>&1`
+- [x] Output redirect: `cmd > file`, `cmd >> file`
+- [x] Input redirect: `cmd < file`
+- [x] Stderr redirect: `cmd 2> file`, `cmd 2>&1`
 
 ### Variable / Expansion
 
-- [ ] `$?` — exit status of last command
-- [ ] `$!` — PID of last background process
-- [ ] `$$` — PID of shell itself
-- [ ] Double-quote variable expansion (`"$VAR"` preserves spaces)
-- [ ] Single-quote literal strings (`'no $expansion'`)
-- [ ] Backslash escapes (`\"`, `\\`, `\n`)
+- [x] `$?` — exit status of last command (deferred expansion per-pipeline)
+- [x] `$!` — PID of last background process
+- [x] `$$` — PID of shell itself
+- [x] Double-quote variable expansion (`"$VAR"` preserves spaces)
+- [x] Single-quote literal strings (`'no $expansion'`)
+- [x] Backslash escapes (`\"`, `\\`, `\n`, `\t`, `\$`)
 
 ### Globbing
 
 - [x] `*` wildcard expansion (match any string) — implemented in `parse.c:72-209`
 - [x] `?` wildcard expansion (match single character) — implemented in `parse.c:72-209`
 
-## Libc Header Completeness (Feedback-Driven)
+## Libc Header Completeness (Feedback-Driven) — DONE
 
-Scored 13/49 tests (20/100 points). Build compiles and runs, but missing headers and declarations at standard POSIX paths caused most test failures.
+Originally scored 13/49 tests (20/100 points). All missing headers, declarations, and implementations have been added.
 
-### `libc/include/sys/` Directory
+### `libc/include/sys/` Directory — Complete
 
-Directory exists with 4 complete headers. Remaining items need creation.
+All 7 sys/ headers exist with full content.
 
 - [x] `mkdir -p libc/include/sys` — already exists
-- [ ] Create `sys/time.h` — `struct timeval`, `gettimeofday()`, `timersub`/`timeradd` macros
-- [ ] Create `sys/syscall.h` — include/re-export syscall numbers
+- [x] `sys/time.h` — `struct timeval`, `gettimeofday()`, `timersub`/`timeradd`/`timercmp` macros
+- [x] `sys/syscall.h` — re-exports all `SYS_*`, adds `__NR_*` POSIX aliases
 - [x] `sys/types.h` — `pid_t`, `uid_t`, `gid_t`, `off_t`, `ssize_t`, `size_t`, `mode_t`
 - [x] `sys/stat.h` — `struct stat`, `S_ISREG`/`S_ISDIR` macros, `fstat()`/`stat()` declarations
 - [x] `sys/wait.h` — `waitpid()`, `WIFEXITED`/`WEXITSTATUS`/`WIFSIGNALED`/`WTERMSIG` macros
 - [x] `sys/mman.h` — `mmap()`/`munmap()` declarations, `PROT_*`/`MAP_*` constants
-- [ ] Create `sys/ioctl.h` — `ioctl()` declaration, `TIOCGWINSZ`/`struct winsize`
+- [x] `sys/ioctl.h` — `ioctl()`, `struct winsize`, `TIOCGWINSZ`/`TIOCSWINSZ`/`TIOCGPGRP`/`TIOCSPGRP`
 
 ### Missing Declarations in Existing Headers
 
-- [ ] `string.h` — add: `memmove()`, `memchr()`, `strdup()`, `strndup()`, `strncat()`, `strspn()`, `strcspn()`, `strpbrk()`, `strtok()`
-- [ ] `unistd.h` — add: `isatty()`, `setsid()`, `getpgrp()`, `setpgid()`, `tcgetpgrp()`, `tcsetpgrp()`
-- [ ] `signal.h` — add: `sighandler_t` typedef, `sig_atomic_t` typedef
-- [ ] `stdlib.h` — add: `setenv()`, `unsetenv()`, `putenv()`
+- [x] `string.h` — added: `memmove`, `memchr`, `strdup`, `strndup`, `strncat`, `strspn`, `strcspn`, `strpbrk`, `strtok`, `strerror`
+- [x] `unistd.h` — added: `isatty`, `setsid`, `getpgrp`, `setpgid`, `tcgetpgrp`, `tcsetpgrp`
+- [x] `signal.h` — added: `sighandler_t` typedef, `sig_atomic_t` typedef
+- [x] `stdlib.h` — added: `setenv`, `unsetenv`, `putenv`
 - [x] `errno.h` — complete (45 error codes, extern errno)
 - [x] `fcntl.h` — complete (`O_*` flags, `AT_FDCWD`, fcntl commands)
 - [x] `dirent.h` — complete (`struct dirent`, `DIR`, opendir/readdir/closedir)
 
 ### Corresponding Libc Implementations
 
-- [ ] Implement missing string functions in `libc/string.c`
-- [ ] Implement `isatty()` in `libc/unistd.c`
-- [ ] Implement `setenv()`/`unsetenv()`/`putenv()` in `libc/stdlib.c`
+- [x] Implement missing string functions in `libc/string.c` — all 10 functions
+- [x] Implement `isatty()` in `libc/unistd.c` — ioctl probe + fd 0-2 fallback
+- [x] Implement `setenv()`/`unsetenv()`/`putenv()` in `libc/stdlib.c` — static env storage
 - [x] `stat()`/`fstat()` syscall wrappers in libc
 - [x] `waitpid()` wrapper with `W*` macros
-- [ ] Add `isatty`/`ioctl` syscall handling in `kernel/trap.c`
+- [x] `ioctl` syscall handling in `kernel/trap.c` — SYS_ioctl(29), TIOCGWINSZ returns 80x24
+
+## Kernel Syscall Stubs (Feedback-Driven)
+
+Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
+
+- [x] `SYS_ioctl` (29) — TIOCGWINSZ returns 80x24, TIOCGPGRP/TIOCSPGRP handled, unknown → -ENOTTY
+- [x] `SYS_rt_sigaction` (134) — stores/retrieves sigaction per process, rejects SIGKILL/SIGSTOP
+- [x] `SYS_rt_sigprocmask` (135) — SIG_BLOCK/SIG_UNBLOCK/SIG_SETMASK on `proc->sigmask`
+- [x] `SYS_gettimeofday` (169) — kernel `ticks` → `tv_sec`, `tv_usec=0`
+- [x] `SYS_fcntl` (25) — F_GETFD/F_SETFD/F_GETFL/F_SETFL stubs
+- [x] `SYS_faccessat` (48) — resolves path in tarfs, returns 0 or -ENOENT
+- [x] `SYS_unlinkat` (35), `SYS_linkat` (37), `SYS_renameat2` (276), `SYS_mkdirat` (34) — return -EROFS
+- [x] `SYS_umask` (166) — returns 022
+- [x] `execve` envp fix — copies envp strings before destroying old page table
+
+## Kernel Architecture Features
+
+### Signal Delivery
+
+- [x] Signal trampoline page at `SIG_TRAMPOLINE_VA` (0x3FFFFFF000) — `kernel/sigtramp.S`
+- [x] `deliver_signal()` — saves trapframe, diverts to handler, sets ra to trampoline
+- [x] `SYS_rt_sigreturn` (139) — restores saved trapframe
+- [x] `SYS_kill` uses `sigpending` bits for non-SIGKILL signals
+- [x] Per-process `sigactions[32]`, `sigmask`, `sigpending` in `struct proc`
+
+### Sub-page Allocator
+
+- [x] `kmalloc(size)` / `kmfree(ptr, size)` — `kernel/kmalloc.c`
+- [x] 8 power-of-two bucket sizes: 16, 32, 64, 128, 256, 512, 1024, 2048 bytes
+- [x] Each bucket backed by freelist carved from kalloc'd pages
+
+### COW Fork + Page Refcounting
+
+- [x] `copy_pagetable_cow()` — marks writable user pages read-only + PTE_COW in both parent/child
+- [x] Page refcount array in `kalloc.c` — `kalloc()` sets refcount=1, `kfree()` frees when refcount=0
+- [x] Page fault handler: COW fault allocates new page + copies if refcount > 1
+
+### Stack Auto-Grow + Demand Paging
+
+- [x] Page fault extends stack down by up to 16 pages when fault is near stack bottom
+- [x] Demand paging for mmap regions — lazily maps pages on first access
+
+### Remaining Kernel Work
+
+- [ ] Shell-side signal handlers (SIGINT, SIGTSTP, SIGCHLD) — infrastructure exists, shell needs to install
+- [ ] Process groups for pipelines — `setpgid`/`tcsetpgrp` stubs exist, shell doesn't use yet
+- [ ] VFS layer — abstract tarfs behind common interface
+- [ ] `/bin/init` runs `/etc/rc` before exec'ing sbush
 
 ## Grading Targets
 
