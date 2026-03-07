@@ -1590,6 +1590,24 @@ getdents_done:
         }
         tf->a0 = 0;
 
+    } else if (sysnum == SYS_fcntl) {
+        int fd = (int)tf->a0;
+        int cmd = (int)tf->a1;
+
+        if (fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used) {
+            tf->a0 = (uint64_t)-9; /* -EBADF */
+        } else if (cmd == 1) { /* F_GETFD */
+            tf->a0 = 0;
+        } else if (cmd == 2) { /* F_SETFD */
+            tf->a0 = 0;
+        } else if (cmd == 3) { /* F_GETFL */
+            tf->a0 = 2; /* O_RDWR */
+        } else if (cmd == 4) { /* F_SETFL */
+            tf->a0 = 0;
+        } else {
+            tf->a0 = (uint64_t)-22; /* -EINVAL */
+        }
+
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);
         tf->a0 = (uint64_t)-1;
