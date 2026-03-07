@@ -356,12 +356,6 @@ int parse_line(char *line, struct cmdlist *cl) {
     if (len == 0)
         return 0;
 
-    /* expand variables */
-    expand_vars(line);
-    len = strlen(line);
-    if (len == 0)
-        return 0;
-
     /*
      * Scan for unquoted ;, &&, ||.
      * We build a list of (start, connector) pairs.
@@ -389,10 +383,11 @@ int parse_line(char *line, struct cmdlist *cl) {
         if (connector != CONN_NONE) {
             *p = '\0';  /* terminate segment */
             struct pipeline *pl = &cl->pl[cl->npl];
-            if (parse_pipeline(seg_start, pl)) {
-                pl->connector = connector;
-                cl->npl++;
-            }
+            strncpy(pl->raw, seg_start, MAX_LINE - 1);
+            pl->raw[MAX_LINE - 1] = '\0';
+            pl->connector = connector;
+            pl->ncmds = 0;
+            cl->npl++;
             p += skip;
             /* skip leading spaces after separator */
             while (*p == ' ' || *p == '\t') p++;
@@ -405,11 +400,17 @@ int parse_line(char *line, struct cmdlist *cl) {
     /* last (or only) segment */
     if (*seg_start && cl->npl < MAX_CMDLIST) {
         struct pipeline *pl = &cl->pl[cl->npl];
-        if (parse_pipeline(seg_start, pl)) {
-            pl->connector = CONN_NONE;
-            cl->npl++;
-        }
+        strncpy(pl->raw, seg_start, MAX_LINE - 1);
+        pl->raw[MAX_LINE - 1] = '\0';
+        pl->connector = CONN_NONE;
+        pl->ncmds = 0;
+        cl->npl++;
     }
 
     return cl->npl;
+}
+
+int expand_and_parse_pipeline(char *seg, struct pipeline *pl) {
+    expand_vars(seg);
+    return parse_pipeline(seg, pl);
 }

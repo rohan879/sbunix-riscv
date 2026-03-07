@@ -95,7 +95,7 @@ static void print_entry(const char *dirpath, const char *name) {
 /* -----------------------------------------------------------------------
  * List one directory
  * ---------------------------------------------------------------------- */
-static void ls_dir(const char *path) {
+static int ls_dir(const char *path) {
     DIR *d = opendir(path);
     if (!d) {
         /* might be a regular file */
@@ -112,13 +112,11 @@ static void ls_dir(const char *path) {
                 fmt_size(st.st_size, szbuf, sizeof(szbuf));
                 printf("%s %3d %s %s\n",
                        modestr, (int)st.st_nlink, szbuf, name);
-            } else {
-                printf("ls: cannot access '%s'\n", path);
+                return 0;
             }
-        } else {
-            printf("ls: cannot access '%s'\n", path);
         }
-        return;
+        printf("ls: cannot access '%s'\n", path);
+        return 1;
     }
 
     /* Collect entries so we can sort them (static to avoid stack overflow) */
@@ -151,6 +149,7 @@ static void ls_dir(const char *path) {
 
     for (int i = 0; i < count; i++)
         print_entry(path, names[i]);
+    return 0;
 }
 
 /* -----------------------------------------------------------------------
@@ -188,17 +187,19 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    int ret = 0;
     if (npaths == 0) {
-        ls_dir(".");
+        ret = ls_dir(".");
     } else if (npaths == 1) {
-        ls_dir(paths[0]);
+        ret = ls_dir(paths[0]);
     } else {
         for (int i = 0; i < npaths; i++) {
             printf("%s:\n", paths[i]);
-            ls_dir(paths[i]);
+            if (ls_dir(paths[i]))
+                ret = 1;
             if (i + 1 < npaths)
                 printf("\n");
         }
     }
-    return 0;
+    return ret;
 }

@@ -166,7 +166,18 @@ void execute_cmdlist(struct cmdlist *cl) {
             /* CONN_SEQ always runs */
         }
 
+        /* Expand variables and parse now (deferred from parse_line) */
+        char buf[MAX_LINE];
+        strncpy(buf, pl->raw, MAX_LINE - 1);
+        buf[MAX_LINE - 1] = '\0';
+        int saved_conn = pl->connector;
+        if (!expand_and_parse_pipeline(buf, pl)) {
+            pl->connector = saved_conn;
+            continue;
+        }
+        pl->connector = saved_conn;
+
         status = execute_pipeline(pl);
+        last_exit_status = status;
     }
-    last_exit_status = status;
 }

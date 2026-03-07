@@ -33,6 +33,7 @@ struct pipeline {
     int  ncmds;
     int  background;  /* trailing & */
     int  connector;   /* CONN_* — how this pipeline connects to the next */
+    char raw[MAX_LINE]; /* raw segment text for deferred expansion */
 };
 
 /* A command list: one or more pipelines joined by ;, &&, || */
@@ -73,6 +74,7 @@ char **build_environ(void);
 
 /* parse.c */
 int parse_line(char *line, struct cmdlist *cl);
+int expand_and_parse_pipeline(char *seg, struct pipeline *pl);
 
 /* path.c */
 char *resolve_path(const char *cmd);
