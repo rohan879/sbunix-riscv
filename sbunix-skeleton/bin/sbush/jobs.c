@@ -63,12 +63,10 @@ void job_list(void) {
 void job_reap(void) {
     for (int i = 0; i < MAX_JOBS; i++) {
         if (jobs[i].pid == 0) continue;
-        int status;
-        pid_t ret = waitpid(jobs[i].pid, &status, WNOHANG);
-        if (ret > 0) {
-            jobs[i].state = JOB_DONE;
+        if (jobs[i].state == JOB_DONE) {
             printf("[%d] Done\t%s\n", jobs[i].id, jobs[i].cmd);
             jobs[i].pid = 0;
+            jobs[i].id = 0;
         }
     }
 }

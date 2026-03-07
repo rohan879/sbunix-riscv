@@ -18,6 +18,7 @@ int execute_pipeline(struct pipeline *pl) {
 
     pid_t pids[MAX_PIPES];
     int prev_fd = -1;
+    pid_t pgid = 0;  /* process group for this pipeline */
 
     for (int i = 0; i < pl->ncmds; i++) {
         int pipefd[2] = {-1, -1};
@@ -35,7 +36,19 @@ int execute_pipeline(struct pipeline *pl) {
         }
 
         if (pid == 0) {
-            /* child */
+            /* child: join (or create) the pipeline's process group */
+            setpgid(0, pgid);  /* pgid==0 for first child creates new group */
+
+            /* Restore default signal dispositions in children */
+            struct sigaction sa;
+            sa.sa_handler = SIG_DFL;
+            sa.sa_mask = 0;
+            sa.sa_flags = 0;
+            sa.sa_restorer = NULL;
+            sigaction(SIGINT, &sa, NULL);
+            sigaction(SIGTSTP, &sa, NULL);
+            sigaction(SIGCHLD, &sa, NULL);
+
             if (prev_fd >= 0) {
                 dup2(prev_fd, STDIN_FILENO);
                 close(prev_fd);
@@ -112,6 +125,11 @@ int execute_pipeline(struct pipeline *pl) {
             exit(126);
         }
 
+        /* parent: set the child into the pipeline process group (race-free) */
+        if (i == 0)
+            pgid = pid;  /* first child's PID becomes the group ID */
+        setpgid(pid, pgid);
+
         pids[i] = pid;
         if (prev_fd >= 0)
             close(prev_fd);
@@ -139,14 +157,52 @@ int execute_pipeline(struct pipeline *pl) {
         return 0;
     }
 
+    /* Foreground pipeline: give terminal to the pipeline process group */
+    tcsetpgrp(STDIN_FILENO, pgid);
+
+    /* Track foreground PID for signal forwarding */
+    fg_pid = pgid;
+
     /* wait for all processes; return exit status of last */
     int last_status = 0;
     for (int i = 0; i < pl->ncmds; i++) {
         int status = 0;
-        waitpid(pids[i], &status, 0);
-        if (i == pl->ncmds - 1)
+        waitpid(pids[i], &status, WUNTRACED);
+        if (WIFSTOPPED(status)) {
+            /* Child was stopped (e.g. by SIGTSTP / Ctrl-Z).
+             * Add it to the job table as stopped. */
+            char jobcmd[128] = "";
+            int jlen = 0;
+            for (int j = 0; j < pl->cmds[i].argc && jlen < 100; j++) {
+                if (j > 0) jobcmd[jlen++] = ' ';
+                const char *a = pl->cmds[i].argv[j];
+                while (*a && jlen < 126)
+                    jobcmd[jlen++] = *a++;
+            }
+            jobcmd[jlen] = '\0';
+            /* Check if already in job table (e.g. from SIGCHLD handler) */
+            struct job *existing = job_find_pid(pids[i]);
+            if (existing) {
+                existing->state = JOB_STOPPED;
+            } else {
+                job_add(pids[i], jobcmd);
+                job_set_state(pids[i], JOB_STOPPED);
+            }
+            /* Find the job to print notification */
+            struct job *sj = job_find_pid(pids[i]);
+            if (sj)
+                printf("[%d] Stopped\t%s\n", sj->id, sj->cmd);
+            if (i == pl->ncmds - 1)
+                last_status = 128 + WSTOPSIG(status);
+        } else if (i == pl->ncmds - 1) {
             last_status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+        }
     }
+
+    /* Reclaim terminal for the shell */
+    fg_pid = 0;
+    tcsetpgrp(STDIN_FILENO, getpgrp());
+
     return last_status;
 }
 

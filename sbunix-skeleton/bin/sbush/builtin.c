@@ -73,15 +73,40 @@ int run_builtin(struct command *cmd) {
             printf("fg: no such job\n");
             return 1;
         }
+        /* Give terminal to the job's process group */
+        tcsetpgrp(STDIN_FILENO, j->pid);
+        /* Track as foreground for signal forwarding */
+        fg_pid = j->pid;
+        /* Resume the stopped process */
+        kill(j->pid, SIGCONT);
+        j->state = JOB_RUNNING;
+        printf("%s\n", j->cmd);
         int status;
-        waitpid(j->pid, &status, 0);
+        waitpid(j->pid, &status, WUNTRACED);
+        /* Reclaim terminal */
+        fg_pid = 0;
+        tcsetpgrp(STDIN_FILENO, getpgrp());
+        if (WIFSTOPPED(status)) {
+            j->state = JOB_STOPPED;
+            printf("[%d] Stopped\t%s\n", j->id, j->cmd);
+            return 128 + WSTOPSIG(status);
+        }
         job_remove(j->pid);
         return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
     }
 
     if (strcmp(cmd->argv[0], "bg") == 0) {
-        printf("bg: not yet implemented (needs kernel signal support)\n");
-        return 1;
+        int id = cmd->argc > 1 ? atoi(cmd->argv[1]) : -1;
+        struct job *j = (id > 0) ? job_find(id) : NULL;
+        if (!j) {
+            printf("bg: no such job\n");
+            return 1;
+        }
+        /* Resume in background — no terminal change, no wait */
+        kill(j->pid, SIGCONT);
+        j->state = JOB_RUNNING;
+        printf("[%d] %s &\n", j->id, j->cmd);
+        return 0;
     }
 
     return 1;
