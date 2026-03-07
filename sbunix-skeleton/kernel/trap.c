@@ -1575,6 +1575,21 @@ getdents_done:
         }
         tf->a0 = 0;
 
+    } else if (sysnum == SYS_gettimeofday) {
+        uint64_t tv_uaddr = tf->a0;
+        /* a1 = timezone pointer, ignored */
+        if (tv_uaddr) {
+            struct { int64_t sec; int64_t usec; } tv;
+            tv.sec = (int64_t)ticks;
+            tv.usec = 0;
+            pte_t *pte = walk(current_proc->pagetable, tv_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (tv_uaddr & 0xFFF);
+                memcpy((void *)pa, &tv, sizeof(tv));
+            }
+        }
+        tf->a0 = 0;
+
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);
         tf->a0 = (uint64_t)-1;
