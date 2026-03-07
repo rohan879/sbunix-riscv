@@ -1,0 +1,56 @@
+#ifndef _VFS_H
+#define _VFS_H
+
+#include <riscv.h>
+
+/* Forward declarations */
+struct stat;
+struct dirent;
+
+struct vfs_ops {
+  int (*open)(const char *path, int flags, void **private);
+  int64_t (*read)(void *private, char *buf, uint64_t count, int64_t *offset);
+  int64_t (*write)(void *private, const char *buf, uint64_t count, int64_t *offset);
+  int (*close)(void *private);
+  int (*stat)(const char *path, uint8_t *st);
+  int (*readdir)(void *private, char *buf, unsigned int count, int64_t *offset);
+  int (*mkdir)(const char *path, int mode);
+  int (*unlink)(const char *path);
+};
+
+/* Open file description -- stored in proc->ofile[] */
+struct open_file {
+  struct vfs_ops *ops;
+  void *private;
+  int64_t offset;
+  int flags;
+  int refcount;   /* for dup/fork sharing */
+  /* pipe fields -- pipes bypass VFS */
+  int is_pipe;
+  int pipe_read;
+  int pipe_write;
+  int pipe_id;
+};
+
+/* Filesystem mount point */
+struct mount {
+  const char *path;     /* mount path prefix (e.g., "/", "/dev") */
+  int path_len;
+  struct vfs_ops *ops;
+};
+
+/* Maximum open file descriptions system-wide */
+#define NFILE 128
+
+/* VFS functions */
+struct open_file *vfs_alloc_file(void);
+void vfs_free_file(struct open_file *f);
+struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath);
+void vfs_register_mount(const char *path, struct vfs_ops *ops);
+void vfs_init(void);
+
+/* Filesystem ops (defined in their respective .c files) */
+extern struct vfs_ops tarfs_ops;
+extern struct vfs_ops devfs_ops;
+
+#endif

@@ -5,6 +5,7 @@
 #include <exec.h>
 #include <vm.h>
 #include <proc.h>
+#include <vfs.h>
 #include <trap.h>
 #include <riscv.h>
 #include <plic.h>
@@ -35,6 +36,7 @@ void boot(uint64_t hartid, void *dtb) {
   virtio_blk_test();
 
   procinit();
+  vfs_init();
   userinit();
 
   printk("Starting scheduler...\n");
