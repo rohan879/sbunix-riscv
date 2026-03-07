@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 
 ssize_t read(int fd, void *buf, size_t count) {
     return syscall(SYS_read, fd, buf, count);
@@ -85,7 +86,7 @@ int dup(int oldfd) {
 }
 
 off_t lseek(int fd, off_t offset, int whence) {
-    return (off_t)syscall(/* SYS_lseek = 62 */ 62, fd, offset, whence);
+    return (off_t)syscall(SYS_lseek, fd, offset, whence);
 }
 
 pid_t getppid(void) {
@@ -107,28 +108,24 @@ int usleep(unsigned int usecs) {
 }
 
 int unlink(const char *path) {
-    /* SYS_unlinkat = 35 */
-    return (int)syscall(35, AT_FDCWD, path, 0);
+    return (int)syscall(SYS_unlinkat, AT_FDCWD, path, 0);
 }
 
 int rmdir(const char *path) {
-    /* SYS_unlinkat with AT_REMOVEDIR flag = 0x200 */
-    return (int)syscall(35, AT_FDCWD, path, 0x200);
+    /* AT_REMOVEDIR = 0x200 */
+    return (int)syscall(SYS_unlinkat, AT_FDCWD, path, 0x200);
 }
 
 int link(const char *oldpath, const char *newpath) {
-    /* SYS_linkat = 37 */
-    return (int)syscall(37, AT_FDCWD, oldpath, AT_FDCWD, newpath, 0);
+    return (int)syscall(SYS_linkat, AT_FDCWD, oldpath, AT_FDCWD, newpath, 0);
 }
 
 int rename(const char *oldpath, const char *newpath) {
-    /* SYS_renameat2 = 276 */
-    return (int)syscall(276, AT_FDCWD, oldpath, AT_FDCWD, newpath, 0);
+    return (int)syscall(SYS_renameat2, AT_FDCWD, oldpath, AT_FDCWD, newpath, 0);
 }
 
 int access(const char *path, int mode) {
-    /* SYS_faccessat = 48 */
-    return (int)syscall(48, AT_FDCWD, path, mode, 0);
+    return (int)syscall(SYS_faccessat, AT_FDCWD, path, mode, 0);
 }
 
 int execv(const char *path, char *const argv[]) {
@@ -138,4 +135,48 @@ int execv(const char *path, char *const argv[]) {
 int execvp(const char *file, char *const argv[]) {
     /* Simple implementation: only searches absolute/relative paths */
     return execve(file, argv, environ);
+}
+
+int ioctl(int fd, unsigned long request, ...) {
+    va_list ap;
+    va_start(ap, request);
+    void *arg = va_arg(ap, void *);
+    va_end(ap);
+    return (int)syscall(SYS_ioctl, fd, request, arg);
+}
+
+int isatty(int fd) {
+    /* Try TIOCGWINSZ ioctl; if kernel supports it, fd is a tty */
+    char buf[8];
+    long ret = syscall(SYS_ioctl, fd, 0x5413, buf);
+    if (ret == 0)
+        return 1;
+    /* Fallback: assume stdin/stdout/stderr are ttys */
+    if (fd >= 0 && fd <= 2)
+        return 1;
+    return 0;
+}
+
+pid_t setsid(void) {
+    /* No kernel support yet -- return current PID as stub */
+    return getpid();
+}
+
+pid_t getpgrp(void) {
+    return getpid();
+}
+
+int setpgid(pid_t pid, pid_t pgid) {
+    (void)pid; (void)pgid;
+    return 0;
+}
+
+pid_t tcgetpgrp(int fd) {
+    (void)fd;
+    return getpid();
+}
+
+int tcsetpgrp(int fd, pid_t pgrp) {
+    (void)fd; (void)pgrp;
+    return 0;
 }

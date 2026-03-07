@@ -45,6 +45,12 @@
 /* sigset_t — bitmask of signals */
 typedef unsigned long sigset_t;
 
+/* sig_atomic_t — integer type that can be accessed atomically */
+typedef volatile int sig_atomic_t;
+
+/* sighandler_t — convenience typedef for signal handler functions */
+typedef void (*sighandler_t)(int);
+
 /* sigaction flags */
 #define SA_NOCLDSTOP 0x00000001
 #define SA_NOCLDWAIT 0x00000002

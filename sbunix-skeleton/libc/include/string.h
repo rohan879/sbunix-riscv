@@ -16,5 +16,15 @@ char  *strstr(const char *haystack, const char *needle);
 void  *memset(void *s, int c, size_t n);
 void  *memcpy(void *dst, const void *src, size_t n);
 int    memcmp(const void *s1, const void *s2, size_t n);
+void  *memmove(void *dst, const void *src, size_t n);
+void  *memchr(const void *s, int c, size_t n);
+char  *strdup(const char *s);
+char  *strndup(const char *s, size_t n);
+char  *strncat(char *dst, const char *src, size_t n);
+size_t strspn(const char *s, const char *accept);
+size_t strcspn(const char *s, const char *reject);
+char  *strpbrk(const char *s, const char *accept);
+char  *strtok(char *str, const char *delim);
+char  *strerror(int errnum);
 
 #endif

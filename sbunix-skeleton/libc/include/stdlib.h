@@ -34,6 +34,9 @@ long labs(long x);
 
 /* Environment */
 char *getenv(const char *name);
+int    setenv(const char *name, const char *value, int overwrite);
+int    unsetenv(const char *name);
+int    putenv(char *string);
 
 /* Sorting and searching */
 void  qsort(void *base, size_t nmemb, size_t size,

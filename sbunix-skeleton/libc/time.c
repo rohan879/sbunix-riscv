@@ -36,3 +36,19 @@ time_t time(time_t *t) {
         *t = ts.tv_sec;
     return ts.tv_sec;
 }
+
+/*
+ * gettimeofday() — get time of day with microsecond resolution.
+ * Wraps clock_gettime(CLOCK_REALTIME) and converts to struct timeval.
+ */
+int gettimeofday(struct timeval *tv, void *tz) {
+    (void)tz;
+    if (!tv)
+        return -1;
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) < 0)
+        return -1;
+    tv->tv_sec = ts.tv_sec;
+    tv->tv_usec = ts.tv_nsec / 1000;
+    return 0;
+}
