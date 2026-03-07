@@ -106,6 +106,42 @@
 - [ ] fork(clone) + exec + wait on `/etc/rc`
 - [~] Then exec sbush — userinit() starts sbush directly, no /etc/rc execution yet
 
+## Libc Header Completeness (Feedback-Driven)
+
+Scored 13/49 tests (20/100 points). Build compiles and runs, but missing headers and declarations at standard POSIX paths caused most test failures.
+
+### Create `libc/include/sys/` Directory
+
+POSIX tests use `#include <sys/...>` — this directory does not exist yet.
+
+- [ ] `mkdir -p libc/include/sys`
+- [ ] Create `sys/time.h` — `struct timeval`, `gettimeofday()`, `timersub`/`timeradd` macros
+- [ ] Create `sys/syscall.h` — include/re-export syscall numbers
+- [ ] Create `sys/types.h` — `pid_t`, `uid_t`, `gid_t`, `off_t`, `ssize_t`, `size_t`, `mode_t`
+- [ ] Create `sys/stat.h` — `struct stat`, `S_ISREG`/`S_ISDIR` macros, `fstat()`/`stat()` declarations
+- [ ] Create `sys/wait.h` — `waitpid()`, `WIFEXITED`/`WEXITSTATUS`/`WIFSIGNALED`/`WTERMSIG` macros
+- [ ] Create `sys/mman.h` — `mmap()`/`munmap()` declarations, `PROT_*`/`MAP_*` constants
+- [ ] Create `sys/ioctl.h` — `ioctl()` declaration, `TIOCGWINSZ`/`struct winsize`
+
+### Missing Declarations in Existing Headers
+
+- [ ] `string.h` — add: `memmove()`, `memchr()`, `strdup()`, `strndup()`, `strncat()`, `strspn()`, `strcspn()`, `strpbrk()`, `strtok()`
+- [ ] `unistd.h` — add: `isatty()`, `setsid()`, `getpgrp()`, `setpgid()`, `tcgetpgrp()`, `tcsetpgrp()`
+- [ ] `signal.h` — add: `sighandler_t` typedef, `sig_atomic_t` typedef
+- [ ] `stdlib.h` — add: `setenv()`, `unsetenv()`, `putenv()`
+- [ ] `errno.h` — add: `errno` global/macro, standard error constants (`ENOENT`, `EBADF`, `ENOMEM`, etc.)
+- [ ] `fcntl.h` — add: `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, `O_APPEND`, `AT_FDCWD`
+- [ ] `dirent.h` — add: `struct dirent`, `DIR` typedef (if not already present)
+
+### Corresponding Libc Implementations
+
+- [ ] Implement missing string functions in `libc/string.c`
+- [ ] Implement `isatty()` in `libc/unistd.c`
+- [ ] Implement `setenv()`/`unsetenv()`/`putenv()` in `libc/stdlib.c`
+- [ ] Implement `stat()`/`fstat()` syscall wrappers in libc
+- [ ] Implement `waitpid()` wrapper with `W*` macros
+- [ ] Add `isatty`/`ioctl` syscall handling in `kernel/trap.c`
+
 ## Grading Targets
 
 - [ ] Cooperative multi-tasking + all functional requirements (50 pts)
