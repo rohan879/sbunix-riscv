@@ -6,6 +6,18 @@
 #include <syscall.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <signal.h>
+
+/* Wait macros not provided by syscall.h but needed for job control */
+#ifndef WUNTRACED
+#define WUNTRACED  2
+#endif
+#ifndef WIFSTOPPED
+#define WIFSTOPPED(s)   (((s) & 0xff) == 0x7f)
+#endif
+#ifndef WSTOPSIG
+#define WSTOPSIG(s)     (((s) >> 8) & 0xff)
+#endif
 
 #define MAX_LINE  1024
 #define MAX_ARGS  64
@@ -94,3 +106,7 @@ int run_script(const char *path);
 
 /* sbush.c */
 void execute_line(char *line);
+
+/* signal globals (sbush.c) */
+extern volatile sig_atomic_t fg_pid;
+extern volatile sig_atomic_t g_sigchld_flag;
