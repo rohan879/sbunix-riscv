@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 
 ssize_t read(int fd, void *buf, size_t count) {
     return syscall(SYS_read, fd, buf, count);
@@ -138,4 +139,12 @@ int execv(const char *path, char *const argv[]) {
 int execvp(const char *file, char *const argv[]) {
     /* Simple implementation: only searches absolute/relative paths */
     return execve(file, argv, environ);
+}
+
+int ioctl(int fd, unsigned long request, ...) {
+    va_list ap;
+    va_start(ap, request);
+    void *arg = va_arg(ap, void *);
+    va_end(ap);
+    return (int)syscall(SYS_ioctl, fd, request, arg);
 }
