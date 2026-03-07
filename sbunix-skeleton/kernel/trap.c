@@ -833,18 +833,19 @@ pipe_eof:
     } else if (sysnum == SYS_execve) {
         const char *path = (const char *)tf->a0;
         char **argv = (char **)tf->a1;
-        /* char **envp = (char **)tf->a2; -- ignored for now */
+        char **envp = (char **)tf->a2;
 
         if (!path) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
 
-        /* ---- Copy argv strings into kernel-heap buffers BEFORE exec() ----
-         * argv pointers live in the old user address space.  After exec()
-         * replaces the page table those VA→PA mappings no longer exist.
-         * We allocate a 4K page for string data to avoid kernel stack overflow. */
+        /* ---- Copy argv and envp strings into kernel-heap buffers BEFORE exec()
+         * argv/envp pointers live in the old user address space.  After exec()
+         * replaces the page table those VA->PA mappings no longer exist.
+         * We allocate 4K pages for string data to avoid kernel stack overflow. */
         #define EXECVE_MAXARGS  32
+        #define EXECVE_MAXENVS  32
 
         /* Use kalloc() for the large string buffer to avoid stack overflow */
         char *kstrbuf = (char *)kalloc();
@@ -866,6 +867,24 @@ pipe_eof:
                 memcpy(kstrbuf + kstroff, s, slen);
                 kstroff += slen;
                 kargc++;
+            }
+        }
+
+        /* Copy envp strings from user space (before exec destroys old page table) */
+        char *kenvbuf = (char *)kalloc();
+        int kenvc = 0;
+        int kenvoff = 0;
+        int kenvoff_arr[EXECVE_MAXENVS];
+
+        if (kenvbuf && envp) {
+            while (kenvc < EXECVE_MAXENVS && envp[kenvc]) {
+                const char *s = envp[kenvc];
+                int slen = strlen(s) + 1;
+                if (kenvoff + slen > (int)PAGE_SIZE) break;
+                kenvoff_arr[kenvc] = kenvoff;
+                memcpy(kenvbuf + kenvoff, s, slen);
+                kenvoff += slen;
+                kenvc++;
             }
         }
 
@@ -894,27 +913,33 @@ pipe_eof:
         }
         if (ret < 0) {
             kfree(kstrbuf);
+            if (kenvbuf) kfree(kenvbuf);
             tf->a0 = (uint64_t)-1;
             return;
         }
 
-        /* ---- Set up the new user stack with argc/argv ---- */
+        /* ---- Set up the new user stack with argc/argv/envp ---- */
         /* Stack layout at sp (growing down from MAXVA-32):
-         *   sp+0:              argc (8 bytes)
-         *   sp+8:              argv[0..argc-1] pointers ((argc+1)*8 bytes)
-         *   sp+8+(argc+1)*8:   string data (kstroff bytes)
+         *   sp+0:                              argc (8 bytes)
+         *   sp+8:                              argv[0..argc-1] + NULL ((argc+1)*8)
+         *   sp+8+(argc+1)*8:                   envp[0..envc-1] + NULL ((envc+1)*8)
+         *   sp+8+(argc+1)*8+(envc+1)*8:        argv string data (kstroff bytes)
+         *   sp+8+(argc+1)*8+(envc+1)*8+kstroff: envp string data (kenvoff bytes)
          */
         {
             struct trapframe *newtf = current_proc->trapframe;
 
-            int ptr_area = (kargc + 1) * 8;
-            int header   = 8;
-            int total    = header + ptr_area + kstroff;
+            int argv_ptrs_sz = (kargc + 1) * 8;
+            int envp_ptrs_sz = (kenvc + 1) * 8;
+            int header       = 8;
+            int total        = header + argv_ptrs_sz + envp_ptrs_sz + kstroff + kenvoff;
             total = (total + 15) & ~15;
 
-            uint64_t sp       = MAXVA - 32 - total;
-            uint64_t str_base = sp + header + ptr_area;
-            uint64_t ptr_base = sp + header;
+            uint64_t sp            = MAXVA - 32 - total;
+            uint64_t argv_ptr_base = sp + header;
+            uint64_t envp_ptr_base = sp + header + argv_ptrs_sz;
+            uint64_t argv_str_base = sp + header + argv_ptrs_sz + envp_ptrs_sz;
+            uint64_t envp_str_base = argv_str_base + kstroff;
 
             /* Use kalloc for kbuf too to avoid stack overflow */
             char *kbuf = (char *)kalloc();
@@ -925,21 +950,39 @@ pipe_eof:
                 memcpy(kbuf + off, &u_argc, 8); off += 8;
 
                 /* argv pointers */
-                uint64_t argv_ptrs[EXECVE_MAXARGS + 1];
+                uint64_t ptrs[EXECVE_MAXARGS > EXECVE_MAXENVS ?
+                              EXECVE_MAXARGS + 1 : EXECVE_MAXENVS + 1];
                 int str_off2 = 0;
                 for (int i = 0; i < kargc; i++) {
-                    argv_ptrs[i] = str_base + str_off2;
+                    ptrs[i] = argv_str_base + str_off2;
                     int slen = strlen(kstrbuf + kstroff_arr[i]) + 1;
                     str_off2 += slen;
                 }
-                argv_ptrs[kargc] = 0;
-                memcpy(kbuf + off, argv_ptrs, (kargc + 1) * 8);
-                off += (kargc + 1) * 8;
+                ptrs[kargc] = 0;
+                memcpy(kbuf + off, ptrs, argv_ptrs_sz);
+                off += argv_ptrs_sz;
 
-                /* string data */
+                /* envp pointers */
+                str_off2 = 0;
+                for (int i = 0; i < kenvc; i++) {
+                    ptrs[i] = envp_str_base + str_off2;
+                    int slen = strlen(kenvbuf + kenvoff_arr[i]) + 1;
+                    str_off2 += slen;
+                }
+                ptrs[kenvc] = 0;
+                memcpy(kbuf + off, ptrs, envp_ptrs_sz);
+                off += envp_ptrs_sz;
+
+                /* argv string data */
                 if (kstroff > 0) {
                     memcpy(kbuf + off, kstrbuf, kstroff);
                     off += kstroff;
+                }
+
+                /* envp string data */
+                if (kenvoff > 0) {
+                    memcpy(kbuf + off, kenvbuf, kenvoff);
+                    off += kenvoff;
                 }
 
                 uvmcopyin(current_proc->pagetable, sp, kbuf, off);
@@ -948,10 +991,12 @@ pipe_eof:
 
             newtf->sp = sp;
             newtf->a0 = (uint64_t)kargc;
-            newtf->a1 = ptr_base;
+            newtf->a1 = argv_ptr_base;
+            newtf->a2 = envp_ptr_base;
         }
 
         kfree(kstrbuf);
+        if (kenvbuf) kfree(kenvbuf);
 
         /* exec updated the trapframe; trap_restore will sret into new process */
         trap_restore(current_proc->trapframe);
@@ -1468,6 +1513,192 @@ getdents_done:
             }
         }
         tf->a0 = (uint64_t)written;
+
+    } else if (sysnum == SYS_ioctl) {
+        int fd = (int)tf->a0;
+        unsigned long request = tf->a1;
+        uint64_t argp = tf->a2;
+
+        if (request == 0x5413) { /* TIOCGWINSZ */
+            if (fd >= 0 && fd <= 2) {
+                /* stdin/stdout/stderr are the UART terminal */
+                if (argp) {
+                    /* Write a default 80x24 winsize struct to user memory */
+                    struct { uint16_t row, col, xpix, ypix; } ws = {24, 80, 0, 0};
+                    pte_t *pte = walk(current_proc->pagetable, argp, 0);
+                    if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                        uint64_t pa = PTE2PA(*pte) + (argp & 0xFFF);
+                        memcpy((void *)pa, &ws, sizeof(ws));
+                    }
+                }
+                tf->a0 = 0; /* success - it IS a terminal */
+            } else {
+                tf->a0 = (uint64_t)-25; /* -ENOTTY */
+            }
+        } else if (request == 0x540F) { /* TIOCGPGRP */
+            tf->a0 = (uint64_t)current_proc->pid;
+        } else if (request == 0x5410) { /* TIOCSPGRP */
+            tf->a0 = 0;
+        } else {
+            tf->a0 = (uint64_t)-25; /* -ENOTTY for unknown ioctls */
+        }
+
+    } else if (sysnum == SYS_rt_sigaction) {
+        int signum = (int)tf->a0;
+        uint64_t act_uaddr = tf->a1;    /* const struct sigaction *act */
+        uint64_t oldact_uaddr = tf->a2; /* struct sigaction *oldact */
+        /* a3 = sigsetsize, ignored */
+
+        if (signum < 1 || signum >= 32 || signum == 9 || signum == 19) {
+            tf->a0 = (uint64_t)-22; /* -EINVAL */
+        } else {
+            /* Return old action if requested */
+            if (oldact_uaddr) {
+                struct {
+                    uint64_t handler; uint64_t mask;
+                    int flags; int pad; uint64_t restorer;
+                } old;
+                old.handler = current_proc->sigactions[signum].handler;
+                old.mask = current_proc->sigactions[signum].mask;
+                old.flags = current_proc->sigactions[signum].flags;
+                old.pad = 0;
+                old.restorer = current_proc->sigactions[signum].restorer;
+                pte_t *pte = walk(current_proc->pagetable, oldact_uaddr, 0);
+                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                    uint64_t pa = PTE2PA(*pte) + (oldact_uaddr & 0xFFF);
+                    memcpy((void *)pa, &old, sizeof(old));
+                }
+            }
+            /* Install new action if provided */
+            if (act_uaddr) {
+                struct {
+                    uint64_t handler; uint64_t mask;
+                    int flags; int pad; uint64_t restorer;
+                } act;
+                pte_t *pte = walk(current_proc->pagetable, act_uaddr, 0);
+                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                    uint64_t pa = PTE2PA(*pte) + (act_uaddr & 0xFFF);
+                    memcpy(&act, (void *)pa, sizeof(act));
+                    current_proc->sigactions[signum].handler = act.handler;
+                    current_proc->sigactions[signum].mask = act.mask;
+                    current_proc->sigactions[signum].flags = act.flags;
+                    current_proc->sigactions[signum].restorer = act.restorer;
+                }
+            }
+            tf->a0 = 0;
+        }
+
+    } else if (sysnum == SYS_rt_sigprocmask) {
+        int how = (int)tf->a0;
+        uint64_t set_uaddr = tf->a1;
+        uint64_t oldset_uaddr = tf->a2;
+        /* a3 = sigsetsize, ignored */
+
+        /* Return old mask if requested */
+        if (oldset_uaddr) {
+            uint64_t oldmask = current_proc->sigmask;
+            pte_t *pte = walk(current_proc->pagetable, oldset_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (oldset_uaddr & 0xFFF);
+                memcpy((void *)pa, &oldmask, sizeof(oldmask));
+            }
+        }
+        /* Apply new mask if provided */
+        if (set_uaddr) {
+            uint64_t newset = 0;
+            pte_t *pte = walk(current_proc->pagetable, set_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (set_uaddr & 0xFFF);
+                memcpy(&newset, (void *)pa, sizeof(newset));
+            }
+            if (how == 0) /* SIG_BLOCK */
+                current_proc->sigmask |= newset;
+            else if (how == 1) /* SIG_UNBLOCK */
+                current_proc->sigmask &= ~newset;
+            else if (how == 2) /* SIG_SETMASK */
+                current_proc->sigmask = newset;
+        }
+        tf->a0 = 0;
+
+    } else if (sysnum == SYS_gettimeofday) {
+        uint64_t tv_uaddr = tf->a0;
+        /* a1 = timezone pointer, ignored */
+        if (tv_uaddr) {
+            struct { int64_t sec; int64_t usec; } tv;
+            tv.sec = (int64_t)ticks;
+            tv.usec = 0;
+            pte_t *pte = walk(current_proc->pagetable, tv_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (tv_uaddr & 0xFFF);
+                memcpy((void *)pa, &tv, sizeof(tv));
+            }
+        }
+        tf->a0 = 0;
+
+    } else if (sysnum == SYS_fcntl) {
+        int fd = (int)tf->a0;
+        int cmd = (int)tf->a1;
+
+        if (fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used) {
+            tf->a0 = (uint64_t)-9; /* -EBADF */
+        } else if (cmd == 1) { /* F_GETFD */
+            tf->a0 = 0;
+        } else if (cmd == 2) { /* F_SETFD */
+            tf->a0 = 0;
+        } else if (cmd == 3) { /* F_GETFL */
+            tf->a0 = 2; /* O_RDWR */
+        } else if (cmd == 4) { /* F_SETFL */
+            tf->a0 = 0;
+        } else {
+            tf->a0 = (uint64_t)-22; /* -EINVAL */
+        }
+
+    } else if (sysnum == SYS_faccessat) {
+        /* faccessat(dirfd, pathname, mode, flags) */
+        const char *path = (const char *)tf->a1;
+        if (!path) {
+            tf->a0 = (uint64_t)-2; /* -ENOENT */
+            goto syscall_done;
+        }
+
+        /* Resolve path against cwd, then convert to tarfs format */
+        char resolved[256];
+        char tarpath[256];
+        resolve_path(current_proc->cwd, path, resolved);
+
+        /* Root directory always exists */
+        if (resolved[0] == '/' && resolved[1] == '\0') {
+            tf->a0 = 0;
+            goto syscall_done;
+        }
+
+        to_tarfs_path(resolved, tarpath);
+        struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+        if (!hdr) {
+            /* Try with trailing '/' for directories */
+            int tplen = strlen(tarpath);
+            if (tplen > 0 && tplen < 254 && tarpath[tplen - 1] != '/') {
+                tarpath[tplen]     = '/';
+                tarpath[tplen + 1] = '\0';
+                hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+            }
+        }
+        tf->a0 = hdr ? 0 : (uint64_t)-2; /* 0 or -ENOENT */
+
+    } else if (sysnum == SYS_unlinkat) {
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_linkat) {
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_renameat2) {
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_mkdirat) {
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_umask) {
+        tf->a0 = 0022; /* return old umask, always 022 */
 
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);

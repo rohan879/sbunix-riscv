@@ -33,6 +33,23 @@
 #define SYS_nanosleep   101
 #define SYS_clock_gettime 113
 
+/* File control / access */
+#define SYS_fcntl       25
+#define SYS_ioctl       29
+#define SYS_mkdirat     34
+#define SYS_unlinkat    35
+#define SYS_linkat      37
+#define SYS_faccessat   48
+#define SYS_umask       166
+#define SYS_renameat2   276
+
+/* Signal */
+#define SYS_rt_sigaction   134
+#define SYS_rt_sigprocmask 135
+
+/* Time */
+#define SYS_gettimeofday   169
+
 /* Memory */
 #define SYS_brk         214
 #define SYS_munmap      215

@@ -101,6 +101,11 @@ found:
   memset(p->mmap_regions, 0, sizeof(p->mmap_regions));
   p->mmap_base = 0; /* lazily set on first mmap call */
 
+  // Initialize signal handling fields
+  memset(p->sigactions, 0, sizeof(p->sigactions));
+  p->sigmask = 0;
+  p->sigpending = 0;
+
   return p;
 }
 
