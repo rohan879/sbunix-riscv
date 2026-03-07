@@ -1543,6 +1543,38 @@ getdents_done:
             tf->a0 = 0;
         }
 
+    } else if (sysnum == SYS_rt_sigprocmask) {
+        int how = (int)tf->a0;
+        uint64_t set_uaddr = tf->a1;
+        uint64_t oldset_uaddr = tf->a2;
+        /* a3 = sigsetsize, ignored */
+
+        /* Return old mask if requested */
+        if (oldset_uaddr) {
+            uint64_t oldmask = current_proc->sigmask;
+            pte_t *pte = walk(current_proc->pagetable, oldset_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (oldset_uaddr & 0xFFF);
+                memcpy((void *)pa, &oldmask, sizeof(oldmask));
+            }
+        }
+        /* Apply new mask if provided */
+        if (set_uaddr) {
+            uint64_t newset = 0;
+            pte_t *pte = walk(current_proc->pagetable, set_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (set_uaddr & 0xFFF);
+                memcpy(&newset, (void *)pa, sizeof(newset));
+            }
+            if (how == 0) /* SIG_BLOCK */
+                current_proc->sigmask |= newset;
+            else if (how == 1) /* SIG_UNBLOCK */
+                current_proc->sigmask &= ~newset;
+            else if (how == 2) /* SIG_SETMASK */
+                current_proc->sigmask = newset;
+        }
+        tf->a0 = 0;
+
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);
         tf->a0 = (uint64_t)-1;
