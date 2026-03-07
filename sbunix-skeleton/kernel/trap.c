@@ -1498,6 +1498,51 @@ getdents_done:
             tf->a0 = (uint64_t)-25; /* -ENOTTY for unknown ioctls */
         }
 
+    } else if (sysnum == SYS_rt_sigaction) {
+        int signum = (int)tf->a0;
+        uint64_t act_uaddr = tf->a1;    /* const struct sigaction *act */
+        uint64_t oldact_uaddr = tf->a2; /* struct sigaction *oldact */
+        /* a3 = sigsetsize, ignored */
+
+        if (signum < 1 || signum >= 32 || signum == 9 || signum == 19) {
+            tf->a0 = (uint64_t)-22; /* -EINVAL */
+        } else {
+            /* Return old action if requested */
+            if (oldact_uaddr) {
+                struct {
+                    uint64_t handler; uint64_t mask;
+                    int flags; int pad; uint64_t restorer;
+                } old;
+                old.handler = current_proc->sigactions[signum].handler;
+                old.mask = current_proc->sigactions[signum].mask;
+                old.flags = current_proc->sigactions[signum].flags;
+                old.pad = 0;
+                old.restorer = current_proc->sigactions[signum].restorer;
+                pte_t *pte = walk(current_proc->pagetable, oldact_uaddr, 0);
+                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                    uint64_t pa = PTE2PA(*pte) + (oldact_uaddr & 0xFFF);
+                    memcpy((void *)pa, &old, sizeof(old));
+                }
+            }
+            /* Install new action if provided */
+            if (act_uaddr) {
+                struct {
+                    uint64_t handler; uint64_t mask;
+                    int flags; int pad; uint64_t restorer;
+                } act;
+                pte_t *pte = walk(current_proc->pagetable, act_uaddr, 0);
+                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                    uint64_t pa = PTE2PA(*pte) + (act_uaddr & 0xFFF);
+                    memcpy(&act, (void *)pa, sizeof(act));
+                    current_proc->sigactions[signum].handler = act.handler;
+                    current_proc->sigactions[signum].mask = act.mask;
+                    current_proc->sigactions[signum].flags = act.flags;
+                    current_proc->sigactions[signum].restorer = act.restorer;
+                }
+            }
+            tf->a0 = 0;
+        }
+
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);
         tf->a0 = (uint64_t)-1;

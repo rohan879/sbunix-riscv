@@ -104,6 +104,15 @@ struct proc {
   /* anonymous mmap tracking */
   struct mmap_region mmap_regions[NMMAP]; // per-process mmap table
   uint64_t mmap_base;          // next VA to use for non-MAP_FIXED mmap
+  /* signal handling */
+  struct kern_sigaction {
+    uint64_t handler;   /* sa_handler function pointer */
+    uint64_t mask;      /* sa_mask */
+    int      flags;     /* sa_flags */
+    uint64_t restorer;  /* sa_restorer */
+  } sigactions[32];             /* one per signal (indices 0-31) */
+  uint64_t sigmask;             /* blocked signal mask */
+  uint64_t sigpending;          /* pending signal bitmask */
 };
 
 void            procinit(void);
