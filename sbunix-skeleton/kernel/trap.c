@@ -1608,6 +1608,38 @@ getdents_done:
             tf->a0 = (uint64_t)-22; /* -EINVAL */
         }
 
+    } else if (sysnum == SYS_faccessat) {
+        /* faccessat(dirfd, pathname, mode, flags) */
+        const char *path = (const char *)tf->a1;
+        if (!path) {
+            tf->a0 = (uint64_t)-2; /* -ENOENT */
+            goto syscall_done;
+        }
+
+        /* Resolve path against cwd, then convert to tarfs format */
+        char resolved[256];
+        char tarpath[256];
+        resolve_path(current_proc->cwd, path, resolved);
+
+        /* Root directory always exists */
+        if (resolved[0] == '/' && resolved[1] == '\0') {
+            tf->a0 = 0;
+            goto syscall_done;
+        }
+
+        to_tarfs_path(resolved, tarpath);
+        struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+        if (!hdr) {
+            /* Try with trailing '/' for directories */
+            int tplen = strlen(tarpath);
+            if (tplen > 0 && tplen < 254 && tarpath[tplen - 1] != '/') {
+                tarpath[tplen]     = '/';
+                tarpath[tplen + 1] = '\0';
+                hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+            }
+        }
+        tf->a0 = hdr ? 0 : (uint64_t)-2; /* 0 or -ENOENT */
+
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);
         tf->a0 = (uint64_t)-1;
