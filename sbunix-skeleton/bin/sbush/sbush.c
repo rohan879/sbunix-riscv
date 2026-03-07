@@ -57,6 +57,8 @@ restart:
 }
 
 static void reap_zombies(void) {
+    job_reap();
+    /* also reap non-job zombies */
     while (waitpid(-1, NULL, WNOHANG) > 0)
         ;
 }

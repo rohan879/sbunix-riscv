@@ -43,6 +43,27 @@ struct cmdlist {
     int             npl;
 };
 
+/* Job control */
+#define MAX_JOBS 16
+
+enum job_state { JOB_RUNNING, JOB_STOPPED, JOB_DONE };
+
+struct job {
+    int            id;       /* job number [1..N] */
+    pid_t          pid;      /* lead process PID */
+    enum job_state state;
+    char           cmd[128]; /* command string for display */
+};
+
+/* jobs.c */
+int         job_add(pid_t pid, const char *cmd);
+void        job_remove(pid_t pid);
+void        job_set_state(pid_t pid, enum job_state state);
+struct job *job_find(int id);
+struct job *job_find_pid(pid_t pid);
+void        job_list(void);
+void        job_reap(void);
+
 /* vars.c */
 void  env_init(char **envp);
 char *var_get(const char *name);

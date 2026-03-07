@@ -123,6 +123,18 @@ int execute_pipeline(struct pipeline *pl) {
     if (pl->background) {
         /* don't wait; shell continues immediately */
         last_bg_pid = pids[pl->ncmds - 1];
+        /* Build command string for job display */
+        char jobcmd[128] = "";
+        int jlen = 0;
+        for (int j = 0; j < pl->cmds[0].argc && jlen < 100; j++) {
+            if (j > 0) jobcmd[jlen++] = ' ';
+            const char *a = pl->cmds[0].argv[j];
+            while (*a && jlen < 126)
+                jobcmd[jlen++] = *a++;
+        }
+        jobcmd[jlen] = '\0';
+        int jid = job_add(last_bg_pid, jobcmd);
+        printf("[%d] %d\n", jid, (int)last_bg_pid);
         if (prev_fd >= 0) close(prev_fd);
         return 0;
     }

@@ -4,7 +4,10 @@ int is_builtin(const char *cmd) {
     return (strcmp(cmd, "cd") == 0 ||
             strcmp(cmd, "export") == 0 ||
             strcmp(cmd, "set") == 0 ||
-            strcmp(cmd, "exit") == 0);
+            strcmp(cmd, "exit") == 0 ||
+            strcmp(cmd, "jobs") == 0 ||
+            strcmp(cmd, "fg") == 0 ||
+            strcmp(cmd, "bg") == 0);
 }
 
 int run_builtin(struct command *cmd) {
@@ -56,6 +59,29 @@ int run_builtin(struct command *cmd) {
             if (neg) code = -code;
         }
         exit(code);
+    }
+
+    if (strcmp(cmd->argv[0], "jobs") == 0) {
+        job_list();
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "fg") == 0) {
+        int id = cmd->argc > 1 ? atoi(cmd->argv[1]) : -1;
+        struct job *j = (id > 0) ? job_find(id) : NULL;
+        if (!j) {
+            printf("fg: no such job\n");
+            return 1;
+        }
+        int status;
+        waitpid(j->pid, &status, 0);
+        job_remove(j->pid);
+        return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    }
+
+    if (strcmp(cmd->argv[0], "bg") == 0) {
+        printf("bg: not yet implemented (needs kernel signal support)\n");
+        return 1;
     }
 
     return 1;
