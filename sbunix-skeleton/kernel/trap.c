@@ -220,28 +220,34 @@ static void handle_timer_interrupt(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* copy_pagetable: deep copy user pages from src to dst               */
+/* copy_pagetable_cow: COW-share user pages from src to dst           */
 /* ------------------------------------------------------------------ */
-static int copy_pagetable(pagetable_t dst, pagetable_t src, uint64_t sz) {
-    /* Walk through user virtual address space and copy PTE_U pages only */
+static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
+    /* Walk through user virtual address space and COW-share PTE_U pages */
     for (uint64_t va = 0; va < sz; va += PAGE_SIZE) {
         pte_t *pte = walk(src, va, 0);
         if (!pte || !(*pte & PTE_V))
             continue;
-        /* Only copy user-accessible pages */
+        /* Only share user-accessible pages */
         if (!(*pte & PTE_U))
             continue;
+
         uint64_t pa = PTE2PA(*pte);
         int flags = PTE_FLAGS(*pte);
 
-        char *mem = kalloc();
-        if (!mem) return -1;
-        memcpy(mem, (void *)pa, PAGE_SIZE);
-        if (mappages(dst, va, PAGE_SIZE, (uint64_t)mem, flags) < 0) {
-            kfree(mem);
-            return -1;
+        if (flags & PTE_W) {
+            /* Writable page: mark read-only + COW in both parent and child */
+            *pte = PA2PTE(pa) | ((flags & ~PTE_W) | PTE_COW | PTE_V);
+            flags = (flags & ~PTE_W) | PTE_COW;
         }
+
+        /* Share the same physical page */
+        page_ref_inc(pa);
+        if (mappages(dst, va, PAGE_SIZE, pa, flags) < 0)
+            return -1;
     }
+    /* Flush TLB since we modified parent PTEs */
+    sfence_vma();
     return 0;
 }
 
@@ -278,12 +284,19 @@ static pid_t sys_clone(void) {
     if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000, PTE_R | PTE_W) < 0) goto bad;
     if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) goto bad;
 
-    /* Copy user pages (code + data segments + stack) - PTE_U filtered */
-    if (copy_pagetable(new_pt, current_proc->pagetable, MAXVA) < 0) goto bad;
+    /* COW-share user pages (code + data segments + stack) */
+    if (copy_pagetable_cow(new_pt, current_proc->pagetable, MAXVA) < 0) goto bad;
+
+    /* Map signal trampoline into child */
+    uvmmap_sigtrampoline(new_pt);
 
     p->pagetable = new_pt;
     p->sz = current_proc->sz;
     p->parent = current_proc;
+
+    /* Copy stack bounds */
+    p->stack_top = current_proc->stack_top;
+    p->stack_bottom = current_proc->stack_bottom;
 
     /* Child's kernel context: resume at forkret which will sret back to user */
     p->context.ra = (uint64_t)forkret;
@@ -564,6 +577,79 @@ void trap_handler(struct trapframe *tf) {
         if (cause == SCAUSE_LOAD_PAGE_FAULT ||
             cause == SCAUSE_STORE_PAGE_FAULT ||
             cause == SCAUSE_INST_PAGE_FAULT) {
+
+            /* --- COW page fault (store fault with COW-marked PTE) --- */
+            if (cause == SCAUSE_STORE_PAGE_FAULT && current_proc) {
+                uint64_t va = PGROUNDDOWN(stval);
+                pte_t *pte = walk(current_proc->pagetable, va, 0);
+
+                if (pte && (*pte & PTE_V) && (*pte & PTE_COW)) {
+                    uint64_t pa = PTE2PA(*pte);
+                    int flags = PTE_FLAGS(*pte);
+
+                    if (page_ref_get(pa) == 1) {
+                        /* Only reference: just make it writable again */
+                        *pte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
+                    } else {
+                        /* Multiple references: allocate new page and copy */
+                        char *newpage = kalloc();
+                        if (!newpage)
+                            goto pagefault_kill;
+                        memcpy(newpage, (void *)pa, PAGE_SIZE);
+                        *pte = PA2PTE((uint64_t)newpage) | ((flags & ~PTE_COW) | PTE_W);
+                        kfree((void *)pa); /* decrement refcount on old page */
+                    }
+                    /* Flush TLB for this VA */
+                    asm volatile("sfence.vma %0, zero" : : "r"(va));
+                    return; /* resume execution */
+                }
+            }
+
+            /* --- Stack auto-grow (any page fault near current stack) --- */
+            if (current_proc && current_proc->stack_top > 0 &&
+                stval >= current_proc->stack_bottom - 16 * PAGE_SIZE &&
+                stval < current_proc->stack_top) {
+                uint64_t va = PGROUNDDOWN(stval);
+                int grew = 0;
+                while (current_proc->stack_bottom > va) {
+                    current_proc->stack_bottom -= PAGE_SIZE;
+                    char *pg = kalloc();
+                    if (!pg) break;
+                    memset(pg, 0, PAGE_SIZE);
+                    mappages(current_proc->pagetable, current_proc->stack_bottom,
+                             PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U);
+                    grew = 1;
+                }
+                if (grew && current_proc->stack_bottom <= va) {
+                    asm volatile("sfence.vma %0, zero" : : "r"(va));
+                    return; /* resume -- page is now mapped */
+                }
+            }
+
+            /* --- Demand paging for mmap regions --- */
+            if (current_proc) {
+                for (int i = 0; i < NMMAP; i++) {
+                    if (current_proc->mmap_regions[i].len == 0) continue;
+                    uint64_t rva  = current_proc->mmap_regions[i].va;
+                    uint64_t rlen = current_proc->mmap_regions[i].len;
+                    if (stval >= rva && stval < rva + rlen) {
+                        uint64_t va = PGROUNDDOWN(stval);
+                        /* Check if page is already mapped */
+                        pte_t *pte = walk(current_proc->pagetable, va, 0);
+                        if (pte && (*pte & PTE_V))
+                            break; /* already mapped, real fault */
+                        char *pg = kalloc();
+                        if (!pg) break;
+                        memset(pg, 0, PAGE_SIZE);
+                        mappages(current_proc->pagetable, va, PAGE_SIZE,
+                                 (uint64_t)pg, PTE_R | PTE_W | PTE_U);
+                        asm volatile("sfence.vma %0, zero" : : "r"(va));
+                        return; /* resume */
+                    }
+                }
+            }
+
+pagefault_kill:
             printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
                    current_proc ? current_proc->pid : -1, tf->epc, stval, cause);
             /* Kill the process */
