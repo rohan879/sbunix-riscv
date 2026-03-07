@@ -41,7 +41,11 @@ void forkret(void) {
 
 // Helper to start the first process
 void init_starter(void) {
-    int ret = exec("./bin/sbush");
+    int ret = exec("./bin/init");
+    if (ret < 0) {
+        printk("init_starter: /bin/init not found, falling back to sbush\n");
+        ret = exec("./bin/sbush");
+    }
     if (ret < 0)
         printk("init_starter: exec failed\n");
 
@@ -121,8 +125,8 @@ void userinit(void) {
   
   p->state = RUNNABLE;
   // We'll set the name for debugging.
-  const char *name = "sbush";
-  for(int i=0; i<6; i++) p->name[i] = name[i];
+  const char *name = "init";
+  for(int i=0; i<5; i++) p->name[i] = name[i];
 }
 
 // Wake any process sleeping on UART input (waiting_for_uart==1 only).

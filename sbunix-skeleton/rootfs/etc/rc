@@ -1,3 +1,2 @@
-#!/bin/sh
-echo Running $0
-exec /bin/sh
+#!/bin/sbush
+echo SBUnix booting...
