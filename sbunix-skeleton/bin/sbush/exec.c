@@ -1,5 +1,6 @@
 #include "sbush.h"
 #include <stdlib.h>
+#include <fcntl.h>
 
 int last_exit_status = 0;
 pid_t last_bg_pid = 0;
@@ -45,6 +46,55 @@ int execute_pipeline(struct pipeline *pl) {
             }
             if (pipefd[0] >= 0)
                 close(pipefd[0]);
+
+            /* Apply file redirections */
+            struct command *c = &pl->cmds[i];
+            if (c->redir_in) {
+                int fd = open(c->redir_in, O_RDONLY);
+                if (fd < 0) {
+                    dprintf(2, "sbush: %s: No such file or directory\n",
+                            c->redir_in);
+                    exit(1);
+                }
+                dup2(fd, STDIN_FILENO);
+                close(fd);
+            }
+            if (c->redir_out) {
+                int fd = open(c->redir_out,
+                              O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd < 0) {
+                    dprintf(2, "sbush: %s: Cannot create file\n",
+                            c->redir_out);
+                    exit(1);
+                }
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+            }
+            if (c->redir_append) {
+                int fd = open(c->redir_append,
+                              O_WRONLY | O_CREAT | O_APPEND, 0644);
+                if (fd < 0) {
+                    dprintf(2, "sbush: %s: Cannot open file\n",
+                            c->redir_append);
+                    exit(1);
+                }
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+            }
+            if (c->redir_err) {
+                int fd = open(c->redir_err,
+                              O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd < 0) {
+                    dprintf(2, "sbush: %s: Cannot create file\n",
+                            c->redir_err);
+                    exit(1);
+                }
+                dup2(fd, STDERR_FILENO);
+                close(fd);
+            }
+            if (c->redir_err_to_out) {
+                dup2(STDOUT_FILENO, STDERR_FILENO);
+            }
 
             if (is_builtin(pl->cmds[i].argv[0])) {
                 int ret = run_builtin(&pl->cmds[i]);

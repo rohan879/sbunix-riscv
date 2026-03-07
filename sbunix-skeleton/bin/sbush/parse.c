@@ -114,6 +114,33 @@ static int tokenize(char *str, struct command *cmd) {
         }
     }
     cmd->argv[cmd->argc] = NULL;
+
+    /* Extract redirections from argv */
+    cmd->redir_in = NULL;
+    cmd->redir_out = NULL;
+    cmd->redir_append = NULL;
+    cmd->redir_err = NULL;
+    cmd->redir_err_to_out = 0;
+
+    int j = 0;
+    for (int i = 0; i < cmd->argc; i++) {
+        if (strcmp(cmd->argv[i], "<") == 0 && i + 1 < cmd->argc) {
+            cmd->redir_in = cmd->argv[++i];
+        } else if (strcmp(cmd->argv[i], ">>") == 0 && i + 1 < cmd->argc) {
+            cmd->redir_append = cmd->argv[++i];
+        } else if (strcmp(cmd->argv[i], ">") == 0 && i + 1 < cmd->argc) {
+            cmd->redir_out = cmd->argv[++i];
+        } else if (strcmp(cmd->argv[i], "2>&1") == 0) {
+            cmd->redir_err_to_out = 1;
+        } else if (strcmp(cmd->argv[i], "2>") == 0 && i + 1 < cmd->argc) {
+            cmd->redir_err = cmd->argv[++i];
+        } else {
+            cmd->argv[j++] = cmd->argv[i];
+        }
+    }
+    cmd->argc = j;
+    cmd->argv[j] = NULL;
+
     return cmd->argc;
 }
 

@@ -21,6 +21,11 @@
 struct command {
     char *argv[MAX_ARGS];
     int   argc;
+    char *redir_in;         /* < file */
+    char *redir_out;        /* > file */
+    char *redir_append;     /* >> file */
+    char *redir_err;        /* 2> file */
+    int   redir_err_to_out; /* 2>&1 */
 };
 
 struct pipeline {
