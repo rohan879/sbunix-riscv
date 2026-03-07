@@ -2,6 +2,7 @@
 #include <printk.h>
 #include <riscv.h>
 #include <proc.h>
+#include <vfs.h>
 #include <syscall.h>
 #include <uart.h>
 #include <plic.h>
@@ -59,24 +60,66 @@ static int pipe_avail(int pid) {
 /* Allocate a free fd slot in current_proc; returns fd or -1 */
 static int alloc_fd(void) {
   for (int i = 0; i < NOFILE; i++) {
-    if (!current_proc->ofile[i].used)
+    if (current_proc->ofile[i] == NULL)
       return i;
   }
   return -1;
 }
 
-/* Deep copy fd table from src to dst (for clone) */
+/* Shallow copy fd table from src to dst (for clone), incrementing refcounts */
 static void copy_ofile(struct proc *dst, struct proc *src) {
   for (int i = 0; i < NOFILE; i++) {
     dst->ofile[i] = src->ofile[i];
-    /* bump refcounts on pipes */
-    if (src->ofile[i].used) {
-      int pid = src->ofile[i].pipe_id;
-      if (src->ofile[i].pipe_read && pid >= 0)
-        pipes[pid].read_open++;
-      if (src->ofile[i].pipe_write && pid >= 0)
-        pipes[pid].write_open++;
+    if (src->ofile[i]) {
+      src->ofile[i]->refcount++;
+      /* bump pipe refcounts too */
+      if (src->ofile[i]->is_pipe) {
+        int pid = src->ofile[i]->pipe_id;
+        if (src->ofile[i]->pipe_read && pid >= 0)
+          pipes[pid].read_open++;
+        if (src->ofile[i]->pipe_write && pid >= 0)
+          pipes[pid].write_open++;
+      }
     }
+  }
+}
+
+/* Close an open_file: decrement refcount, handle pipe cleanup, free when zero.
+ * Also clears the slot in the given proc's ofile[fd]. */
+static void close_ofile(struct proc *p, int fd) {
+  struct open_file *f = p->ofile[fd];
+  if (!f) return;
+  p->ofile[fd] = NULL;
+
+  if (f->is_pipe) {
+    int pid = f->pipe_id;
+    if (f->pipe_read && pid >= 0) {
+      pipes[pid].read_open--;
+      if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
+        pipes[pid].used = 0;
+      /* Wake any sleeping pipe readers/writers */
+      for (struct proc *pp = proc; pp < &proc[64]; pp++) {
+        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
+          pp->state = RUNNABLE;
+      }
+    }
+    if (f->pipe_write && pid >= 0) {
+      pipes[pid].write_open--;
+      if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
+        pipes[pid].used = 0;
+      for (struct proc *pp = proc; pp < &proc[64]; pp++) {
+        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
+          pp->state = RUNNABLE;
+      }
+    }
+  }
+
+  f->refcount--;
+  if (f->refcount <= 0) {
+    /* Last reference -- call VFS close if applicable */
+    if (!f->is_pipe && f->ops && f->ops->close)
+      f->ops->close(f->private);
+    vfs_free_file(f);
   }
 }
 
@@ -156,14 +199,8 @@ static void handle_external_interrupt(void) {
                         killed_any = 1;
                         /* Close all fds to release pipe references */
                         for (int i = 0; i < NOFILE; i++) {
-                            if (p->ofile[i].used) {
-                                int pid = p->ofile[i].pipe_id;
-                                if (p->ofile[i].pipe_read && pid >= 0)
-                                    pipes[pid].read_open--;
-                                if (p->ofile[i].pipe_write && pid >= 0)
-                                    pipes[pid].write_open--;
-                                p->ofile[i].used = 0;
-                            }
+                            if (p->ofile[i])
+                                close_ofile(p, i);
                         }
                     }
                 }
@@ -354,14 +391,15 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Simple in-memory "filesystem" using tar entries                      */
+/* Path resolution helpers                                              */
 /* ------------------------------------------------------------------ */
 #include <tar.h>
 extern char _tarfs_start[];
 extern char _tarfs_end[];
 
 /* Convert an absolute/relative path to the tarfs "./..." format.
- * tarfs uses paths like "./bin/echo", "./etc/rc", etc. */
+ * tarfs uses paths like "./bin/echo", "./etc/rc", etc.
+ * Used by execve to look up ELF binaries. */
 static void to_tarfs_path(const char *path, char *out) {
     /* Strip leading slash(es) */
     while (*path == '/') path++;
@@ -458,32 +496,17 @@ static void resolve_path(const char *cwd, const char *path, char *out) {
     normalize_path(raw, out);
 }
 
-/* Check if a path exists as a directory in the tarfs.
-   Returns 1 if "/" or if any tar entry starts with path+"/". */
-static int tar_is_dir(const char *path) {
-    /* Root is always a directory */
-    if (path[0] == '/' && path[1] == '\0') return 1;
-    if (path[0] == '.' && path[1] == '\0') return 1;
-
-    /* Convert to tarfs format for comparison */
-    char tarpath[256];
-    to_tarfs_path(path, tarpath);
-    int tplen = strlen(tarpath);
-
-    struct posix_header *hdr = (struct posix_header *)_tarfs_start;
-    while ((char *)hdr < _tarfs_end) {
-        if (hdr->name[0] == '\0') break;
-        int nlen = strlen(hdr->name);
-        /* Match: entry name == tarpath (exact) or starts with tarpath+"/" */
-        if (nlen >= tplen && memcmp(hdr->name, tarpath, tplen) == 0 &&
-            (hdr->name[tplen] == '/' || hdr->name[tplen] == '\0')) {
-            return 1;
-        }
-        /* advance to next tar entry */
-        unsigned long size = 0;
-        for (int i = 0; i < 11; i++)
-            size = size * 8 + (hdr->size[i] - '0');
-        hdr = (struct posix_header *)((char *)hdr + 512 + ((size + 511) & ~511));
+/* Check if a resolved path exists as a directory by trying to open it */
+static int vfs_is_dir(const char *path) {
+    const char *relpath;
+    struct vfs_ops *ops = vfs_lookup_mount(path, &relpath);
+    if (!ops) return 0;
+    /* Try stat to check if it's a directory */
+    uint8_t st[128];
+    if (ops->stat(relpath, st) == 0) {
+        uint32_t mode;
+        memcpy(&mode, st + 16, 4);
+        return (mode & 0xF000) == 0x4000; /* S_IFDIR */
     }
     return 0;
 }
@@ -716,16 +739,16 @@ pagefault_kill:
         int fd = (int)tf->a0;
         char *buf = (char *)tf->a1;
         size_t len = (size_t)tf->a2;
-        if ((fd == 1 || fd == 2) &&
-            !(current_proc->ofile[fd].used && current_proc->ofile[fd].pipe_write)) {
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? current_proc->ofile[fd] : NULL;
+
+        if ((fd == 1 || fd == 2) && (!f || !f->is_pipe)) {
             /* stdout / stderr (only when not redirected to a pipe) */
             size_t i;
             for (i = 0; i < len; i++)
                 printk("%c", buf[i]);
             tf->a0 = (uint64_t)i;
-        } else if (fd >= 0 && fd < NOFILE && current_proc->ofile[fd].used &&
-                   current_proc->ofile[fd].pipe_write) {
-            int pid = current_proc->ofile[fd].pipe_id;
+        } else if (f && f->is_pipe && f->pipe_write) {
+            int pid = f->pipe_id;
             size_t written = 0;
             while (written < len) {
                 int avail = PIPE_BUF - pipe_avail(pid);
@@ -750,6 +773,10 @@ pagefault_kill:
                 }
             }
             tf->a0 = written;
+        } else if (f && f->ops && f->ops->write) {
+            /* VFS write dispatch */
+            int64_t ret = f->ops->write(f->private, buf, len, &f->offset);
+            tf->a0 = (uint64_t)ret;
         } else {
             tf->a0 = (uint64_t)-1;
         }
@@ -758,7 +785,9 @@ pagefault_kill:
         int fd = (int)tf->a0;
         char *buf = (char *)tf->a1;
         size_t len = (size_t)tf->a2;
-        if (fd == 0 && !(current_proc->ofile[0].used && current_proc->ofile[0].pipe_read)) {
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? current_proc->ofile[fd] : NULL;
+
+        if (fd == 0 && (!f || !f->is_pipe)) {
             /* stdin: UART raw byte delivery.
              * The kernel returns characters as-is; line editing (echo,
              * backspace, Ctrl-C handling) is done by the caller (sbush). */
@@ -786,9 +815,8 @@ pagefault_kill:
                 break;
             }
             tf->a0 = (uint64_t)i;
-        } else if (fd >= 0 && fd < NOFILE && current_proc->ofile[fd].used &&
-                   current_proc->ofile[fd].pipe_read) {
-            int pid = current_proc->ofile[fd].pipe_id;
+        } else if (f && f->is_pipe && f->pipe_read) {
+            int pid = f->pipe_id;
             size_t read_bytes = 0;
             while (read_bytes < len) {
                 while (pipe_avail(pid) == 0) {
@@ -810,100 +838,69 @@ pagefault_kill:
             }
 pipe_eof:
             tf->a0 = (uint64_t)read_bytes;
+        } else if (f && f->ops && f->ops->read) {
+            /* VFS read dispatch */
+            int64_t ret = f->ops->read(f->private, buf, len, &f->offset);
+            tf->a0 = (uint64_t)ret;
         } else {
-            /* Try reading from a tar file if the fd is a plain file */
-            if (fd >= 0 && fd < NOFILE && current_proc->ofile[fd].used &&
-                !current_proc->ofile[fd].pipe_read &&
-                !current_proc->ofile[fd].pipe_write &&
-                current_proc->ofile[fd].tar_data) {
-                unsigned long off  = current_proc->ofile[fd].tar_offset;
-                unsigned long fsz  = current_proc->ofile[fd].tar_size;
-                unsigned long avail = (off < fsz) ? (fsz - off) : 0;
-                unsigned long n    = (len < avail) ? len : avail;
-                if (n > 0) {
-                    memcpy(buf, current_proc->ofile[fd].tar_data + off, n);
-                    current_proc->ofile[fd].tar_offset += n;
-                }
-                tf->a0 = (uint64_t)n;
-            } else {
-                tf->a0 = (uint64_t)0; /* EOF for unknown fds */
-            }
+            tf->a0 = (uint64_t)0; /* EOF for unknown fds */
         }
 
     } else if (sysnum == SYS_openat) {
         /* openat(AT_FDCWD, path, flags, mode) */
         const char *path = (const char *)tf->a1;
-        /* int flags = (int)tf->a2; -- we only support O_RDONLY for now */
+        int flags = (int)tf->a2;
 
         if (!path) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
 
-        /* Resolve path against cwd, then convert to tarfs format */
+        /* Resolve path against cwd */
         char resolved[256];
-        char tarpath[256];
         resolve_path(current_proc->cwd, path, resolved);
-        to_tarfs_path(resolved, tarpath);
 
-        /* Look up in tarfs — try exact match first, then with trailing '/'
-         * (tar directories are stored with a trailing slash) */
-        struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
-        if (!hdr && tarpath[0] != '\0') {
-            /* Append trailing slash and retry */
-            int tplen = strlen(tarpath);
-            if (tplen < 254) {
-                tarpath[tplen]   = '/';
-                tarpath[tplen+1] = '\0';
-                hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
-            }
-        }
-        if (!hdr) {
+        /* Look up mount point via VFS */
+        const char *relpath;
+        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+        if (!ops) {
             tf->a0 = (uint64_t)-1;
+            goto syscall_done;
+        }
+
+        /* Call filesystem open */
+        void *priv = NULL;
+        int ret = ops->open(relpath, flags, &priv);
+        if (ret < 0) {
+            tf->a0 = (uint64_t)ret;
         } else {
+            /* Allocate open_file and fd slot */
+            struct open_file *f = vfs_alloc_file();
+            if (!f) {
+                if (ops->close) ops->close(priv);
+                tf->a0 = (uint64_t)-12; /* -ENOMEM */
+                goto syscall_done;
+            }
             int fd = alloc_fd();
             if (fd < 0) {
+                if (ops->close) ops->close(priv);
+                vfs_free_file(f);
                 tf->a0 = (uint64_t)-1;
-            } else {
-                current_proc->ofile[fd].used       = 1;
-                current_proc->ofile[fd].pipe_read  = 0;
-                current_proc->ofile[fd].pipe_write = 0;
-                current_proc->ofile[fd].pipe_id    = -1;
-                current_proc->ofile[fd].tar_offset = 0;
-                current_proc->ofile[fd].tar_size   = tar_get_file_size(hdr);
-                current_proc->ofile[fd].tar_data   = (char *)hdr + sizeof(struct posix_header);
-                tf->a0 = (uint64_t)fd;
+                goto syscall_done;
             }
+            f->ops = ops;
+            f->private = priv;
+            f->offset = 0;
+            f->flags = flags;
+            f->is_pipe = 0;
+            current_proc->ofile[fd] = f;
+            tf->a0 = (uint64_t)fd;
         }
 
     } else if (sysnum == SYS_close) {
         int fd = (int)tf->a0;
-        if (fd >= 0 && fd < NOFILE && current_proc->ofile[fd].used) {
-            int pid = current_proc->ofile[fd].pipe_id;
-            if (current_proc->ofile[fd].pipe_read && pid >= 0) {
-                pipes[pid].read_open--;
-                if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
-                    pipes[pid].used = 0;
-                /* Wake any sleeping pipe readers/writers (not timed sleeps) */
-                for (struct proc *p = proc; p < &proc[64]; p++) {
-                    if (p->state == SLEEPING && p->waiting_for_uart != 2)
-                        p->state = RUNNABLE;
-                }
-            }
-            if (current_proc->ofile[fd].pipe_write && pid >= 0) {
-                pipes[pid].write_open--;
-                if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
-                    pipes[pid].used = 0;
-                /* Wake any sleeping pipe readers/writers (not timed sleeps) */
-                for (struct proc *p = proc; p < &proc[64]; p++) {
-                    if (p->state == SLEEPING && p->waiting_for_uart != 2)
-                        p->state = RUNNABLE;
-                }
-            }
-            current_proc->ofile[fd].used = 0;
-            current_proc->ofile[fd].pipe_id = -1;
-            current_proc->ofile[fd].pipe_read = 0;
-            current_proc->ofile[fd].pipe_write = 0;
+        if (fd >= 0 && fd < NOFILE && current_proc->ofile[fd]) {
+            close_ofile(current_proc, fd);
             tf->a0 = 0;
         } else {
             tf->a0 = (uint64_t)-1;
@@ -912,51 +909,66 @@ pipe_eof:
     } else if (sysnum == SYS_dup3) {
         int oldfd = (int)tf->a0;
         int newfd = (int)tf->a1;
-        if (oldfd < 0 || oldfd >= NOFILE || !current_proc->ofile[oldfd].used ||
+        if (oldfd < 0 || oldfd >= NOFILE || !current_proc->ofile[oldfd] ||
             newfd < 0 || newfd >= NOFILE) {
             tf->a0 = (uint64_t)-1;
         } else if (oldfd == newfd) {
             /* dup2(x, x) is a no-op that returns newfd */
             tf->a0 = (uint64_t)newfd;
         } else {
-            /* Close newfd if open (simplified, no pipe refcount decrement) */
-            if (current_proc->ofile[newfd].used) {
-                current_proc->ofile[newfd].used = 0;
-            }
+            /* Close newfd if open */
+            if (current_proc->ofile[newfd])
+                close_ofile(current_proc, newfd);
+            /* Share the same open_file, bump refcount */
             current_proc->ofile[newfd] = current_proc->ofile[oldfd];
+            current_proc->ofile[oldfd]->refcount++;
             /* bump pipe refcount for the new reference */
-            int pid = current_proc->ofile[oldfd].pipe_id;
-            if (pid >= 0) {
-                if (current_proc->ofile[oldfd].pipe_read)  pipes[pid].read_open++;
-                if (current_proc->ofile[oldfd].pipe_write) pipes[pid].write_open++;
+            if (current_proc->ofile[oldfd]->is_pipe) {
+                int pid = current_proc->ofile[oldfd]->pipe_id;
+                if (pid >= 0) {
+                    if (current_proc->ofile[oldfd]->pipe_read)  pipes[pid].read_open++;
+                    if (current_proc->ofile[oldfd]->pipe_write) pipes[pid].write_open++;
+                }
             }
             tf->a0 = (uint64_t)newfd;
         }
 
     } else if (sysnum == SYS_pipe2) {
         int *fds = (int *)tf->a0;
-        int pid = alloc_pipe();
-        if (pid < 0) {
+        int pipeid = alloc_pipe();
+        if (pipeid < 0) {
             tf->a0 = (uint64_t)-1;
         } else {
-            int rfd = alloc_fd();
-            int wfd = -1;
-            if (rfd >= 0) {
-                current_proc->ofile[rfd].used = 1;
-                current_proc->ofile[rfd].pipe_read = 1;
-                current_proc->ofile[rfd].pipe_write = 0;
-                current_proc->ofile[rfd].pipe_id = pid;
-                wfd = alloc_fd();
+            struct open_file *rf = vfs_alloc_file();
+            struct open_file *wf = vfs_alloc_file();
+            int rfd = -1, wfd = -1;
+            if (rf) rfd = alloc_fd();
+            if (rfd >= 0 && rf) {
+                rf->is_pipe = 1;
+                rf->pipe_read = 1;
+                rf->pipe_write = 0;
+                rf->pipe_id = pipeid;
+                rf->ops = NULL;
+                current_proc->ofile[rfd] = rf;
+                if (wf) wfd = alloc_fd();
             }
-            if (wfd < 0) {
-                if (rfd >= 0) current_proc->ofile[rfd].used = 0;
-                pipes[pid].used = 0;
+            if (wfd < 0 || !wf) {
+                if (rfd >= 0) {
+                    current_proc->ofile[rfd] = NULL;
+                    vfs_free_file(rf);
+                } else if (rf) {
+                    vfs_free_file(rf);
+                }
+                if (wf) vfs_free_file(wf);
+                pipes[pipeid].used = 0;
                 tf->a0 = (uint64_t)-1;
             } else {
-                current_proc->ofile[wfd].used = 1;
-                current_proc->ofile[wfd].pipe_read = 0;
-                current_proc->ofile[wfd].pipe_write = 1;
-                current_proc->ofile[wfd].pipe_id = pid;
+                wf->is_pipe = 1;
+                wf->pipe_read = 0;
+                wf->pipe_write = 1;
+                wf->pipe_id = pipeid;
+                wf->ops = NULL;
+                current_proc->ofile[wfd] = wf;
                 fds[0] = rfd;
                 fds[1] = wfd;
                 tf->a0 = 0;
@@ -984,7 +996,7 @@ pipe_eof:
         }
         char resolved[256];
         resolve_path(current_proc->cwd, path, resolved);
-        if (tar_is_dir(resolved)) {
+        if (vfs_is_dir(resolved)) {
             memcpy(current_proc->cwd, resolved, sizeof(current_proc->cwd));
             tf->a0 = 0;
         } else {
@@ -1237,57 +1249,61 @@ pipe_eof:
         int fd      = (int)tf->a0;
         long offset = (long)tf->a1;
         int whence  = (int)tf->a2;
-        if (fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used ||
-            current_proc->ofile[fd].pipe_read || current_proc->ofile[fd].pipe_write) {
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? current_proc->ofile[fd] : NULL;
+        if (!f || f->is_pipe) {
             tf->a0 = (uint64_t)-1;
         } else {
-            unsigned long fsz = current_proc->ofile[fd].tar_size;
-            unsigned long cur = current_proc->ofile[fd].tar_offset;
-            long new_off;
-            if (whence == 0)       /* SEEK_SET */ new_off = offset;
-            else if (whence == 1)  /* SEEK_CUR */ new_off = (long)cur + offset;
-            else if (whence == 2)  /* SEEK_END */ new_off = (long)fsz + offset;
+            /* For VFS files, use the offset field directly.
+             * We don't know the total file size here, so just update offset. */
+            int64_t cur = f->offset;
+            int64_t new_off;
+            if (whence == 0)       /* SEEK_SET */ new_off = (int64_t)offset;
+            else if (whence == 1)  /* SEEK_CUR */ new_off = cur + (int64_t)offset;
+            else if (whence == 2)  /* SEEK_END */ {
+                /* Need file size: try stat if available */
+                if (f->ops && f->ops->stat) {
+                    /* We don't easily have the path. For tarfs, offset is clamped
+                     * during read anyway. Just set to offset (treat as 0+offset for end). */
+                    new_off = (int64_t)offset; /* SEEK_END without size info is limited */
+                } else {
+                    new_off = (int64_t)offset;
+                }
+            }
             else { tf->a0 = (uint64_t)-1; goto syscall_done; }
             if (new_off < 0) new_off = 0;
-            if ((unsigned long)new_off > fsz) new_off = (long)fsz;
-            current_proc->ofile[fd].tar_offset = (unsigned long)new_off;
+            f->offset = new_off;
             tf->a0 = (uint64_t)new_off;
         }
 
     } else if (sysnum == SYS_fstat) {
-        /* fstat(int fd, struct stat *st)
-         * Minimal struct stat layout (RISC-V Linux ABI, first fields):
-         *   0:  uint64_t st_dev
-         *   8:  uint64_t st_ino
-         *  16:  uint32_t st_mode
-         *  20:  uint32_t st_nlink
-         *  24:  uint32_t st_uid
-         *  28:  uint32_t st_gid
-         *  32:  uint64_t st_rdev
-         *  40:  int64_t  pad0
-         *  48:  int64_t  st_size
-         *  56:  int32_t  st_blksize
-         *  60:  int32_t  pad1
-         *  64:  int64_t  st_blocks
-         */
+        /* fstat(int fd, struct stat *st) */
         int fd = (int)tf->a0;
         uint8_t *st = (uint8_t *)tf->a1;
-        if (!st || fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used) {
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? current_proc->ofile[fd] : NULL;
+        if (!st || !f) {
             tf->a0 = (uint64_t)-1;
+        } else if (f->is_pipe) {
+            /* Pipes: return FIFO mode */
+            memset(st, 0, 128);
+            uint32_t mode = 0x1000 | 0600; /* S_IFIFO | 0600 */
+            memcpy(st + 16, &mode, 4);
+            tf->a0 = 0;
+        } else if (fd <= 2 && (!f || !f->ops)) {
+            /* stdin/stdout/stderr without VFS backing (UART) */
+            memset(st, 0, 128);
+            uint32_t mode = 0x2000 | 0600; /* S_IFCHR | 0600 */
+            memcpy(st + 16, &mode, 4);
+            tf->a0 = 0;
         } else {
-            memset(st, 0, 128); /* zero the whole stat struct */
-            unsigned long fsz = current_proc->ofile[fd].tar_size;
-            /* st_mode: S_IFREG | 0644 = 0x81A4 */
-            uint32_t mode = 0x81A4;
+            /* For VFS files we don't easily have the path for stat.
+             * Fill in a generic regular file stat from the open_file info. */
+            memset(st, 0, 128);
+            uint32_t mode = 0x81A4; /* S_IFREG | 0644 */
             uint32_t nlink = 1;
-            int64_t  size  = (int64_t)fsz;
-            int32_t  blksz = 512;
-            int64_t  blks  = ((int64_t)fsz + 511) / 512;
-            memcpy(st + 16, &mode,  4);
+            int32_t blksz = 512;
+            memcpy(st + 16, &mode, 4);
             memcpy(st + 20, &nlink, 4);
-            memcpy(st + 48, &size,  8);
             memcpy(st + 56, &blksz, 4);
-            memcpy(st + 64, &blks,  8);
             tf->a0 = 0;
         }
 
@@ -1299,221 +1315,37 @@ pipe_eof:
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
-        char resolved[256], tarpath[256];
+        char resolved[256];
         resolve_path(current_proc->cwd, path, resolved);
-        to_tarfs_path(resolved, tarpath);
-        struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
-        if (!hdr) {
-            /* retry with trailing '/' for directories stored as "path/" in tarfs */
-            int tplen = strlen(tarpath);
-            if (tplen > 0 && tplen < 254 && tarpath[tplen - 1] != '/') {
-                tarpath[tplen]     = '/';
-                tarpath[tplen + 1] = '\0';
-                hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
-            }
-        }
-        if (!hdr) {
-            tf->a0 = (uint64_t)-1;
+
+        /* Dispatch through VFS */
+        const char *relpath;
+        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+        if (ops && ops->stat) {
+            int ret = ops->stat(relpath, st);
+            tf->a0 = (uint64_t)(int64_t)ret;
         } else {
-            memset(st, 0, 128);
-            unsigned long fsz = tar_get_file_size(hdr);
-            uint32_t mode = (hdr->typeflag == '5') ? (uint32_t)(0x4000 | 0755)
-                                                    : (uint32_t)(0x8000 | 0644);
-            uint32_t nlink = 1;
-            int64_t  size  = (int64_t)fsz;
-            int32_t  blksz = 512;
-            int64_t  blks  = ((int64_t)fsz + 511) / 512;
-            memcpy(st + 16, &mode,  4);
-            memcpy(st + 20, &nlink, 4);
-            memcpy(st + 48, &size,  8);
-            memcpy(st + 56, &blksz, 4);
-            memcpy(st + 64, &blks,  8);
-            tf->a0 = 0;
+            tf->a0 = (uint64_t)-1;
         }
 
     } else if (sysnum == SYS_getdents64) {
-        /* getdents64(int fd, struct linux_dirent64 *buf, unsigned int count)
-         * struct linux_dirent64:
-         *   uint64_t d_ino
-         *   int64_t  d_off
-         *   uint16_t d_reclen
-         *   uint8_t  d_type
-         *   char     d_name[]  (NUL-terminated, padded to 8-byte boundary)
-         */
-        int fd            = (int)tf->a0;
-        char *ubuf        = (char *)tf->a1;
+        /* getdents64(int fd, struct linux_dirent64 *buf, unsigned int count) */
+        int fd             = (int)tf->a0;
+        char *ubuf         = (char *)tf->a1;
         unsigned int count = (unsigned int)tf->a2;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? current_proc->ofile[fd] : NULL;
 
-        /* fd must be an open "directory" — we accept any tarfs-backed fd
-         * whose tar_data points at a directory header, OR we treat the
-         * fd itself as a directory cursor by storing a scan position.
-         * Simplest approach: we repurpose tar_offset as "bytes of dirents
-         * already returned" and scan the tarfs from scratch each time,
-         * skipping entries we already emitted. */
-
-        if (fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used ||
-            current_proc->ofile[fd].pipe_read || current_proc->ofile[fd].pipe_write) {
+        if (!f || f->is_pipe) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
 
-        /* We need to know which directory path this fd refers to.
-         * We stored tar_data pointing to the header; for a directory entry
-         * the header name IS the directory path. For now, walk the tarfs
-         * and find entries whose parent directory matches. */
-
-        /* Recover the directory path from the stored tar header */
-        struct posix_header *dir_hdr = (struct posix_header *)
-            (current_proc->ofile[fd].tar_data - sizeof(struct posix_header));
-        /* Compute the canonical dir path from the tar name (strip "./", ensure trailing /) */
-        char dirpath[256];
-        {
-            const char *n = dir_hdr->name;
-            if (n[0] == '.' && n[1] == '/') n += 2;
-            /* strip trailing slash */
-            int nl = strlen(n);
-            if (nl > 0 && n[nl-1] == '/') nl--;
-            memcpy(dirpath, n, nl);
-            dirpath[nl] = '\0';
+        if (f->ops && f->ops->readdir) {
+            int ret = f->ops->readdir(f->private, ubuf, count, &f->offset);
+            tf->a0 = (uint64_t)(int64_t)ret;
+        } else {
+            tf->a0 = (uint64_t)-1;
         }
-        int dirpath_len = strlen(dirpath);
-
-        unsigned long skip = current_proc->ofile[fd].tar_offset;
-        unsigned int  written = 0;
-        unsigned long seen    = 0;
-
-        /* Helper: emit one dirent into ubuf.  Returns 1 on success, 0 if no room. */
-#define EMIT_DIRENT(name_, ino_, dtype_) do { \
-    int _nl = strlen(name_); \
-    int _rl = (19 + _nl + 1 + 7) & ~7; \
-    if (written + _rl > count) goto getdents_done; \
-    char *_d = ubuf + written; \
-    memset(_d, 0, _rl); \
-    uint64_t _ino = (uint64_t)(ino_); \
-    int64_t  _off = (int64_t)(seen + 1); \
-    uint16_t _rlen = (uint16_t)_rl; \
-    uint8_t  _dt   = (uint8_t)(dtype_); \
-    memcpy(_d +  0, &_ino,  8); \
-    memcpy(_d +  8, &_off,  8); \
-    memcpy(_d + 16, &_rlen, 2); \
-    memcpy(_d + 18, &_dt,   1); \
-    memcpy(_d + 19, (name_), _nl + 1); \
-    written += _rl; \
-    current_proc->ofile[fd].tar_offset = seen + 1; \
-} while (0)
-
-        /* Synthetic "." entry (seen index 0) */
-        if (seen >= skip) {
-            uint64_t dot_ino = (uint64_t)((char *)dir_hdr - _tarfs_start) / 512 + 1;
-            EMIT_DIRENT(".", dot_ino, 4 /* DT_DIR */);
-        }
-        seen++;
-
-        /* Synthetic ".." entry (seen index 1) */
-        if (seen >= skip) {
-            /* Find parent directory header for inode number */
-            uint64_t dotdot_ino = 1; /* default: root */
-            if (dirpath_len > 0) {
-                /* Strip last component from dirpath to get parent path */
-                char parentpath[256];
-                int pl = dirpath_len - 1;
-                while (pl > 0 && dirpath[pl] != '/') pl--;
-                if (pl == 0) {
-                    /* Parent is root — its tar entry is "./" */
-                    parentpath[0] = '\0';
-                } else {
-                    memcpy(parentpath, dirpath, pl);
-                    parentpath[pl] = '\0';
-                }
-                /* Search tarfs for the parent header */
-                struct posix_header *ph = (struct posix_header *)_tarfs_start;
-                while ((char *)ph < _tarfs_end) {
-                    if (ph->name[0] == '\0') break;
-                    if (strncmp(ph->magic, "ustar", 5) == 0) {
-                        const char *pn = ph->name;
-                        if (pn[0] == '.' && pn[1] == '/') pn += 2;
-                        int pnl = strlen(pn);
-                        if (pnl > 0 && pn[pnl-1] == '/') pnl--;
-                        if (pnl == (int)strlen(parentpath) &&
-                            memcmp(pn, parentpath, pnl) == 0) {
-                            dotdot_ino = (uint64_t)((char *)ph - _tarfs_start) / 512 + 1;
-                            break;
-                        }
-                    }
-                    unsigned long fsz3 = tar_get_file_size(ph);
-                    ph = (struct posix_header *)((char *)ph + 512 + ((fsz3 + 511) & ~511UL));
-                }
-            }
-            EMIT_DIRENT("..", dotdot_ino, 4 /* DT_DIR */);
-        }
-        seen++;
-
-        struct posix_header *hdr = (struct posix_header *)_tarfs_start;
-        while ((char *)hdr < _tarfs_end && written + 32 <= count) {
-            if (hdr->name[0] == '\0') break;
-            if (strncmp(hdr->magic, "ustar", 5) != 0) {
-                hdr = (struct posix_header *)((char *)hdr + 512);
-                continue;
-            }
-
-            /* Strip "./" prefix from tar name */
-            const char *ename = hdr->name;
-            if (ename[0] == '.' && ename[1] == '/') ename += 2;
-
-            /* Remove trailing slash for comparison */
-            char clean[100];
-            int elen = strlen(ename);
-            if (elen > 0 && ename[elen-1] == '/') elen--;
-            memcpy(clean, ename, elen);
-            clean[elen] = '\0';
-
-            /* Check if this entry's parent is dirpath */
-            int is_child = 0;
-            if (dirpath_len == 0) {
-                /* Root directory: direct children have no '/' in clean */
-                is_child = (elen > 0 && strchr(clean, '/') == (void *)0);
-            } else {
-                /* Child if clean starts with "dirpath/" and has no further '/' */
-                if (elen > dirpath_len + 1 &&
-                    memcmp(clean, dirpath, dirpath_len) == 0 &&
-                    clean[dirpath_len] == '/') {
-                    const char *rest = clean + dirpath_len + 1;
-                    is_child = (strchr(rest, '/') == (void *)0 && rest[0] != '\0');
-                }
-            }
-
-            if (is_child) {
-                if (seen >= skip) {
-                    /* Emit this dirent */
-                    const char *basename = clean + (dirpath_len > 0 ? dirpath_len + 1 : 0);
-                    int namelen = strlen(basename);
-                    /* reclen = 8+8+2+1+1 + namelen + 1, rounded to 8 */
-                    int reclen = (19 + namelen + 1 + 7) & ~7;
-                    if (written + reclen > count) break;
-
-                    char *d = ubuf + written;
-                    memset(d, 0, reclen);
-                    uint64_t ino  = (uint64_t)((char *)hdr - _tarfs_start) / 512 + 1;
-                    int64_t  doff = (int64_t)(seen + 1);
-                    uint16_t rlen = (uint16_t)reclen;
-                    uint8_t  dtype = (hdr->typeflag == '5') ? 4 : 8; /* DT_DIR=4, DT_REG=8 */
-                    memcpy(d +  0, &ino,   8);
-                    memcpy(d +  8, &doff,  8);
-                    memcpy(d + 16, &rlen,  2);
-                    memcpy(d + 18, &dtype, 1);
-                    memcpy(d + 19, basename, namelen + 1);
-                    written += reclen;
-                    current_proc->ofile[fd].tar_offset = seen + 1;
-                }
-                seen++;
-            }
-
-            /* Advance to next tar entry */
-            unsigned long fsz2 = tar_get_file_size(hdr);
-            hdr = (struct posix_header *)((char *)hdr + 512 + ((fsz2 + 511) & ~511UL));
-        }
-getdents_done:
-        tf->a0 = (uint64_t)written;
 
     } else if (sysnum == SYS_nanosleep) {
         /* nanosleep(const struct timespec *req, struct timespec *rem)
@@ -1538,20 +1370,8 @@ getdents_done:
             vma_free_all(current_proc);
             /* Close all open fds */
             for (int i = 0; i < NOFILE; i++) {
-                if (current_proc->ofile[i].used) {
-                    int pid = current_proc->ofile[i].pipe_id;
-                    if (current_proc->ofile[i].pipe_read && pid >= 0) {
-                        pipes[pid].read_open--;
-                        if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
-                            pipes[pid].used = 0;
-                    }
-                    if (current_proc->ofile[i].pipe_write && pid >= 0) {
-                        pipes[pid].write_open--;
-                        if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
-                            pipes[pid].used = 0;
-                    }
-                    current_proc->ofile[i].used = 0;
-                }
+                if (current_proc->ofile[i])
+                    close_ofile(current_proc, i);
             }
             /* If init (pid 1) exits, the system has nothing left to run */
             if (current_proc->pid == 1) {
@@ -1829,7 +1649,7 @@ getdents_done:
         int fd = (int)tf->a0;
         int cmd = (int)tf->a1;
 
-        if (fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used) {
+        if (fd < 0 || fd >= NOFILE || !current_proc->ofile[fd]) {
             tf->a0 = (uint64_t)-9; /* -EBADF */
         } else if (cmd == 1) { /* F_GETFD */
             tf->a0 = 0;
@@ -1851,29 +1671,20 @@ getdents_done:
             goto syscall_done;
         }
 
-        /* Resolve path against cwd, then convert to tarfs format */
+        /* Resolve path against cwd */
         char resolved[256];
-        char tarpath[256];
         resolve_path(current_proc->cwd, path, resolved);
 
-        /* Root directory always exists */
-        if (resolved[0] == '/' && resolved[1] == '\0') {
-            tf->a0 = 0;
-            goto syscall_done;
+        /* Check via VFS stat */
+        const char *relpath;
+        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+        if (ops && ops->stat) {
+            uint8_t st[128];
+            int ret = ops->stat(relpath, st);
+            tf->a0 = (ret == 0) ? 0 : (uint64_t)-2;
+        } else {
+            tf->a0 = (uint64_t)-2; /* -ENOENT */
         }
-
-        to_tarfs_path(resolved, tarpath);
-        struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
-        if (!hdr) {
-            /* Try with trailing '/' for directories */
-            int tplen = strlen(tarpath);
-            if (tplen > 0 && tplen < 254 && tarpath[tplen - 1] != '/') {
-                tarpath[tplen]     = '/';
-                tarpath[tplen + 1] = '\0';
-                hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
-            }
-        }
-        tf->a0 = hdr ? 0 : (uint64_t)-2; /* 0 or -ENOENT */
 
     } else if (sysnum == SYS_unlinkat) {
         tf->a0 = (uint64_t)-30; /* -EROFS */

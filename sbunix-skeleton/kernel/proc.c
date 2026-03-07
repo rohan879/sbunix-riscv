@@ -1,4 +1,5 @@
 #include <proc.h>
+#include <vfs.h>
 #include <kalloc.h>
 #include <riscv.h>
 #include <string.h>
@@ -49,14 +50,19 @@ void init_starter(void) {
     if (ret < 0)
         printk("init_starter: exec failed\n");
 
-    /* Pre-populate stdin(0), stdout(1), stderr(2) as "used" so that
-     * alloc_fd() never hands them out to pipes or other files.
-     * These fds point to the UART (no pipe). */
+    /* Pre-populate stdin(0), stdout(1), stderr(2) as open_file pointers
+     * so that alloc_fd() never hands them out to pipes or other files.
+     * These fds point to the UART (no VFS ops, handled specially). */
     for (int i = 0; i < 3; i++) {
-        current_proc->ofile[i].used      = 1;
-        current_proc->ofile[i].pipe_read  = 0;
-        current_proc->ofile[i].pipe_write = 0;
-        current_proc->ofile[i].pipe_id    = -1;
+        struct open_file *f = vfs_alloc_file();
+        if (f) {
+            f->ops = NULL; /* UART console, not VFS-backed */
+            f->private = NULL;
+            f->is_pipe = 0;
+            f->offset = 0;
+            f->flags = 0;
+        }
+        current_proc->ofile[i] = f;
     }
 
     // Now we must jump to user mode!
@@ -100,6 +106,10 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64_t)forkret;
   p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
+
+  // Initialize open file table
+  for (int i = 0; i < NOFILE; i++)
+    p->ofile[i] = NULL;
 
   // Initialize VMA list and mmap base
   p->vma_list = NULL;

@@ -2,6 +2,7 @@
 #define _PROC_H
 
 #include <riscv.h>
+#include <vfs.h>
 
 // Saved registers for kernel context switches.
 struct context {
@@ -64,20 +65,10 @@ enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 /* Maximum open file descriptors per process */
 #define NOFILE 16
 
-/* Simple file descriptor table entry */
-struct file {
-  int used;             // 1 if slot occupied
-  int pipe_read;        // 1 if this is the read end of a pipe
-  int pipe_write;       // 1 if this is the write end of a pipe
-  int pipe_id;          // which pipe (index into kernel pipe table)
-  /* tar file fields (used when pipe_read==0 && pipe_write==0 && used==1) */
-  unsigned long tar_offset; // byte offset within file data
-  unsigned long tar_size;   // total file size
-  char *tar_data;           // pointer into tarfs data (after header)
-};
-
-/* Forward declaration for VMA linked list */
+/* Forward declarations */
 struct vm_area;
+struct open_file;
+
 
 /* Signal trampoline is mapped at this user VA in every process */
 #define SIG_TRAMPOLINE_VA  0x3FFFFFF000UL  /* just below top of Sv39 user space */
@@ -102,7 +93,7 @@ struct proc {
   uint64_t sleep_until;        // for timed sleep: wake when ticks >= this value
   int exit_status;             // exit status (for wait4)
   char cwd[256];               // current working directory
-  struct file ofile[NOFILE];   // open file descriptors
+  struct open_file *ofile[NOFILE]; // open file descriptors (VFS)
   /* VMA list for tracking all user memory regions */
   struct vm_area *vma_list;    // sorted linked list of virtual memory areas
   uint64_t mmap_base;          // next VA to use for non-MAP_FIXED mmap
