@@ -469,6 +469,75 @@ static int tar_is_dir(const char *path) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Signal delivery                                                      */
+/* ------------------------------------------------------------------ */
+
+static void deliver_signal(struct trapframe *tf, struct proc *p) {
+    /* Find lowest-numbered pending unblocked signal */
+    uint64_t deliverable = p->sigpending & ~p->sigmask;
+    if (deliverable == 0)
+        return;
+
+    int signum = 0;
+    for (int i = 1; i < 32; i++) {
+        if (deliverable & (1UL << i)) {
+            signum = i;
+            break;
+        }
+    }
+
+    /* Clear from pending */
+    p->sigpending &= ~(1UL << signum);
+
+    uint64_t handler = p->sigactions[signum].handler;
+
+    /* SIG_DFL (0) -- default action */
+    if (handler == 0) {
+        /* Default: ignore for SIGCHLD, SIGURG, SIGWINCH */
+        if (signum == SIGCHLD || signum == SIGURG || signum == SIGWINCH)
+            return;
+        /* Default: terminate process */
+        p->exit_status = 128 + signum;
+        p->state = ZOMBIE;
+        if (p->parent && p->parent->state == SLEEPING)
+            p->parent->state = RUNNABLE;
+        swtch(&p->context, &scheduler_context);
+        return;
+    }
+
+    /* SIG_IGN (1) -- ignore */
+    if (handler == 1)
+        return;
+
+    /* User handler: save trapframe on user stack, redirect execution */
+    uint64_t sp = tf->sp;
+
+    /* Push original trapframe onto user stack */
+    sp -= sizeof(struct trapframe);
+    sp &= ~15UL; /* 16-byte align */
+
+    /* Copy trapframe to user stack via page walk */
+    for (uint64_t off = 0; off < sizeof(struct trapframe); off += 8) {
+        pte_t *pte = walk(p->pagetable, sp + off, 0);
+        if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+            uint64_t pa = PTE2PA(*pte) + ((sp + off) & 0xFFF);
+            *(uint64_t *)pa = *(uint64_t *)((char *)tf + off);
+        }
+    }
+
+    /* Set up trapframe to call handler(signum) with return to trampoline */
+    tf->epc = handler;                   /* jump to signal handler */
+    tf->a0 = (uint64_t)signum;           /* first arg: signal number */
+    tf->sp = sp;                         /* stack points to saved trapframe */
+    tf->ra = SIG_TRAMPOLINE_VA;          /* return address -> trampoline -> sigreturn */
+
+    /* Block this signal during handler execution */
+    p->sigmask |= p->sigactions[signum].mask;
+    if (!(p->sigactions[signum].flags & 0x40000000)) /* SA_NODEFER */
+        p->sigmask |= (1UL << signum);
+}
+
+/* ------------------------------------------------------------------ */
 /* Main trap handler                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -484,6 +553,9 @@ void trap_handler(struct trapframe *tf) {
         } else {
             printk("Unknown interrupt: scause=0x%lx\n", cause);
         }
+        /* Deliver pending signals before returning to user mode */
+        if (current_proc && (current_proc->sigpending & ~current_proc->sigmask))
+            deliver_signal(tf, current_proc);
         return;
     }
 
@@ -1024,24 +1096,35 @@ pipe_eof:
         tf->a0 = 0; /* always root */
 
     } else if (sysnum == SYS_kill) {
-        pid_t target = (pid_t)(int)tf->a0;
-        /* int sig = (int)tf->a1; -- only SIGKILL is meaningful here */
-        if (target <= 0) {
+        pid_t target_pid = (pid_t)(int)tf->a0;
+        int sig = (int)tf->a1;
+        if (target_pid <= 0) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
-        int found = 0;
-        for (struct proc *p = proc; p < &proc[64]; p++) {
-            if (p->state != UNUSED && p->pid == target) {
-                p->exit_status = 128 + 9; /* killed by SIGKILL */
-                p->state = ZOMBIE;
-                if (p->parent && p->parent->state == SLEEPING)
-                    p->parent->state = RUNNABLE;
-                found = 1;
+        struct proc *target = NULL;
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
+                target = &proc[i];
                 break;
             }
         }
-        tf->a0 = found ? 0 : (uint64_t)-1;
+        if (!target) {
+            tf->a0 = (uint64_t)-3; /* -ESRCH */
+        } else {
+            if (sig == 9) { /* SIGKILL -- always kill immediately */
+                target->exit_status = 128 + 9;
+                target->state = ZOMBIE;
+                if (target->parent && target->parent->state == SLEEPING)
+                    target->parent->state = RUNNABLE;
+            } else if (sig > 0 && sig < 32) {
+                target->sigpending |= (1UL << sig);
+                /* Wake target if sleeping so it can handle the signal */
+                if (target->state == SLEEPING)
+                    target->state = RUNNABLE;
+            }
+            tf->a0 = 0;
+        }
 
     } else if (sysnum == SYS_clock_gettime) {
         /* clock_gettime(clockid_t, struct timespec *)
@@ -1620,6 +1703,28 @@ getdents_done:
         }
         tf->a0 = 0;
 
+    } else if (sysnum == SYS_rt_sigreturn) {
+        /* Restore the original trapframe saved on the user stack during
+         * signal delivery.  sp points to the saved trapframe. */
+        uint64_t usp = tf->sp;
+
+        /* Read saved trapframe from user stack */
+        struct trapframe saved;
+        memset(&saved, 0, sizeof(saved));
+        for (uint64_t off = 0; off < sizeof(struct trapframe); off += 8) {
+            pte_t *pte = walk(current_proc->pagetable, usp + off, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + ((usp + off) & 0xFFF);
+                *(uint64_t *)((char *)&saved + off) = *(uint64_t *)pa;
+            }
+        }
+
+        /* Restore the original trapframe */
+        memcpy(tf, &saved, sizeof(struct trapframe));
+        /* Don't modify tf->a0 -- it was already set in the saved frame.
+         * Skip the normal syscall_done return path. */
+        return;
+
     } else if (sysnum == SYS_gettimeofday) {
         uint64_t tv_uaddr = tf->a0;
         /* a1 = timezone pointer, ignored */
@@ -1705,5 +1810,8 @@ getdents_done:
         tf->a0 = (uint64_t)-1;
     }
 syscall_done:
+    /* Deliver pending signals before returning to user mode */
+    if (current_proc && (current_proc->sigpending & ~current_proc->sigmask))
+        deliver_signal(tf, current_proc);
     return;
 }

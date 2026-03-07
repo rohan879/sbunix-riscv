@@ -85,6 +85,14 @@ struct file {
   char *tar_data;           // pointer into tarfs data (after header)
 };
 
+/* Signal trampoline is mapped at this user VA in every process */
+#define SIG_TRAMPOLINE_VA  0x3FFFFFF000UL  /* just below top of Sv39 user space */
+
+/* Signal constants */
+#define SIGCHLD   17
+#define SIGURG    23
+#define SIGWINCH  28
+
 // Per-process state
 struct proc {
   enum procstate state;        // Process state
@@ -113,6 +121,9 @@ struct proc {
   } sigactions[32];             /* one per signal (indices 0-31) */
   uint64_t sigmask;             /* blocked signal mask */
   uint64_t sigpending;          /* pending signal bitmask */
+  /* stack bounds for auto-grow */
+  uint64_t stack_top;            /* top of user stack (highest VA) */
+  uint64_t stack_bottom;         /* lowest allocated stack page */
 };
 
 void            procinit(void);

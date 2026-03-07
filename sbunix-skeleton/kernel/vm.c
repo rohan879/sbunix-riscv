@@ -3,6 +3,7 @@
 #include <riscv.h>
 #include <string.h>
 #include <vm.h>
+#include <proc.h>
 
 pagetable_t kernel_pagetable;
 
@@ -140,6 +141,21 @@ void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len) {
         kfree((void *)pa);
         *pte = 0;               /* clear the PTE */
     }
+}
+
+// Map the signal trampoline page into a user page table.
+extern char sigtrampoline[];
+extern char sigtrampoline_end[];
+
+void uvmmap_sigtrampoline(pagetable_t pagetable) {
+  char *pg = kalloc();
+  if (!pg) return;
+  memset(pg, 0, PAGE_SIZE);
+  uint64_t sz = (uint64_t)(sigtrampoline_end - sigtrampoline);
+  if (sz > PAGE_SIZE) sz = PAGE_SIZE;
+  memcpy(pg, sigtrampoline, sz);
+  mappages(pagetable, SIG_TRAMPOLINE_VA, PAGE_SIZE, (uint64_t)pg,
+           PTE_R | PTE_X | PTE_U);
 }
 
 // Copy from kernel to user.

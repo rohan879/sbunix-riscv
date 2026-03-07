@@ -69,10 +69,17 @@ int exec(char *path) {
     if(mappages(pagetable, 0x2000000, 0x10000, 0x2000000, PTE_R | PTE_W) < 0) return -1;      // CLINT
     if(mappages(pagetable, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) return -1; // PLIC
 
+    // Map signal trampoline page
+    uvmmap_sigtrampoline(pagetable);
+
     // 6. Update process state
     // TODO: cleanup old pagetable
     current_proc->pagetable = pagetable;
     current_proc->sz = sz;
+
+    // Initialize stack bounds for auto-grow
+    current_proc->stack_top = MAXVA;
+    current_proc->stack_bottom = stack_va;
 
     /* Update process name from the last component of the path */
     {
