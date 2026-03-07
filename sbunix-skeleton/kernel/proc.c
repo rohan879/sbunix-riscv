@@ -97,8 +97,8 @@ found:
   p->context.ra = (uint64_t)forkret;
   p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
 
-  // Initialize mmap tracking fields
-  memset(p->mmap_regions, 0, sizeof(p->mmap_regions));
+  // Initialize VMA list and mmap base
+  p->vma_list = NULL;
   p->mmap_base = 0; /* lazily set on first mmap call */
 
   // Initialize signal handling fields

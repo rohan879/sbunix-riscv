@@ -64,15 +64,6 @@ enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 /* Maximum open file descriptors per process */
 #define NOFILE 16
 
-/* Maximum anonymous mmap regions per process */
-#define NMMAP 16
-
-/* One anonymous mmap region */
-struct mmap_region {
-  uint64_t va;   /* base virtual address (page-aligned); 0 = unused */
-  uint64_t len;  /* length in bytes (page-aligned) */
-};
-
 /* Simple file descriptor table entry */
 struct file {
   int used;             // 1 if slot occupied
@@ -84,6 +75,9 @@ struct file {
   unsigned long tar_size;   // total file size
   char *tar_data;           // pointer into tarfs data (after header)
 };
+
+/* Forward declaration for VMA linked list */
+struct vm_area;
 
 /* Signal trampoline is mapped at this user VA in every process */
 #define SIG_TRAMPOLINE_VA  0x3FFFFFF000UL  /* just below top of Sv39 user space */
@@ -109,8 +103,8 @@ struct proc {
   int exit_status;             // exit status (for wait4)
   char cwd[256];               // current working directory
   struct file ofile[NOFILE];   // open file descriptors
-  /* anonymous mmap tracking */
-  struct mmap_region mmap_regions[NMMAP]; // per-process mmap table
+  /* VMA list for tracking all user memory regions */
+  struct vm_area *vma_list;    // sorted linked list of virtual memory areas
   uint64_t mmap_base;          // next VA to use for non-MAP_FIXED mmap
   /* signal handling */
   struct kern_sigaction {

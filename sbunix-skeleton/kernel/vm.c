@@ -1,4 +1,5 @@
 #include <kalloc.h>
+#include <kmalloc.h>
 #include <printk.h>
 #include <riscv.h>
 #include <string.h>
@@ -156,6 +157,153 @@ void uvmmap_sigtrampoline(pagetable_t pagetable) {
   memcpy(pg, sigtrampoline, sz);
   mappages(pagetable, SIG_TRAMPOLINE_VA, PAGE_SIZE, (uint64_t)pg,
            PTE_R | PTE_X | PTE_U);
+}
+
+/* ------------------------------------------------------------------ */
+/* VMA management functions                                             */
+/* ------------------------------------------------------------------ */
+
+/* Add a VMA covering [start, end) with given prot/flags.
+ * Inserts into the sorted linked list, merging with adjacent VMAs
+ * that have matching prot and flags. Returns 0 on success, -1 on error. */
+int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
+  if (start >= end) return -1;
+
+  struct vm_area *vma = (struct vm_area *)kmalloc(sizeof(struct vm_area));
+  if (!vma) return -1;
+
+  vma->start = start;
+  vma->end   = end;
+  vma->prot  = prot;
+  vma->flags = flags;
+  vma->next  = NULL;
+
+  /* Insert into sorted list by start address */
+  struct vm_area **pp = &p->vma_list;
+  while (*pp && (*pp)->start < start)
+    pp = &(*pp)->next;
+  vma->next = *pp;
+  *pp = vma;
+
+  /* Merge with next if they touch and have same prot/flags */
+  while (vma->next && vma->next->start <= vma->end &&
+         vma->next->prot == vma->prot && vma->next->flags == vma->flags) {
+    struct vm_area *nxt = vma->next;
+    if (nxt->end > vma->end)
+      vma->end = nxt->end;
+    vma->next = nxt->next;
+    kmfree(nxt, sizeof(struct vm_area));
+  }
+
+  /* Merge with previous if they touch and have same prot/flags */
+  pp = &p->vma_list;
+  while (*pp && *pp != vma) {
+    struct vm_area *prev = *pp;
+    if (prev->next == vma && prev->end >= vma->start &&
+        prev->prot == vma->prot && prev->flags == vma->flags) {
+      if (vma->end > prev->end)
+        prev->end = vma->end;
+      prev->next = vma->next;
+      kmfree(vma, sizeof(struct vm_area));
+      break;
+    }
+    pp = &(*pp)->next;
+  }
+
+  return 0;
+}
+
+/* Find the VMA containing addr (start <= addr < end), or NULL. */
+struct vm_area *vma_find(struct proc *p, uint64_t addr) {
+  struct vm_area *v = p->vma_list;
+  while (v) {
+    if (addr >= v->start && addr < v->end)
+      return v;
+    v = v->next;
+  }
+  return NULL;
+}
+
+/* Remove VMAs overlapping [start, end). Handle partial overlaps by
+ * splitting. Free removed nodes with kmfree(). Returns 0. */
+int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
+  struct vm_area **pp = &p->vma_list;
+  while (*pp) {
+    struct vm_area *v = *pp;
+
+    /* No overlap: VMA is entirely before the range */
+    if (v->end <= start) {
+      pp = &v->next;
+      continue;
+    }
+    /* No overlap: VMA is entirely after the range */
+    if (v->start >= end)
+      break;
+
+    /* Some overlap exists */
+    if (v->start < start && v->end > end) {
+      /* VMA spans both sides of the range: split into two */
+      struct vm_area *tail = (struct vm_area *)kmalloc(sizeof(struct vm_area));
+      if (tail) {
+        tail->start = end;
+        tail->end   = v->end;
+        tail->prot  = v->prot;
+        tail->flags = v->flags;
+        tail->next  = v->next;
+        v->end = start;
+        v->next = tail;
+      }
+      pp = &tail->next;
+    } else if (v->start < start) {
+      /* VMA starts before range: trim end */
+      v->end = start;
+      pp = &v->next;
+    } else if (v->end > end) {
+      /* VMA ends after range: trim start */
+      v->start = end;
+      pp = &v->next;
+    } else {
+      /* VMA fully within range: remove entirely */
+      *pp = v->next;
+      kmfree(v, sizeof(struct vm_area));
+    }
+  }
+  return 0;
+}
+
+/* Deep copy the VMA list from src to dst process. Used by fork.
+ * Returns 0 on success, -1 on error. */
+int vma_dup(struct proc *src, struct proc *dst) {
+  dst->vma_list = NULL;
+  struct vm_area **dpp = &dst->vma_list;
+  struct vm_area *sv = src->vma_list;
+  while (sv) {
+    struct vm_area *nv = (struct vm_area *)kmalloc(sizeof(struct vm_area));
+    if (!nv) {
+      vma_free_all(dst);
+      return -1;
+    }
+    nv->start = sv->start;
+    nv->end   = sv->end;
+    nv->prot  = sv->prot;
+    nv->flags = sv->flags;
+    nv->next  = NULL;
+    *dpp = nv;
+    dpp = &nv->next;
+    sv = sv->next;
+  }
+  return 0;
+}
+
+/* Free entire VMA list. Used by exec and exit. */
+void vma_free_all(struct proc *p) {
+  struct vm_area *v = p->vma_list;
+  while (v) {
+    struct vm_area *nxt = v->next;
+    kmfree(v, sizeof(struct vm_area));
+    v = nxt;
+  }
+  p->vma_list = NULL;
 }
 
 // Copy from kernel to user.

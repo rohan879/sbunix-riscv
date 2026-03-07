@@ -6,6 +6,7 @@
 #include <uart.h>
 #include <plic.h>
 #include <kalloc.h>
+#include <kmalloc.h>
 #include <string.h>
 #include <vm.h>
 #include <exec.h>
@@ -297,6 +298,12 @@ static pid_t sys_clone(void) {
     /* Copy stack bounds */
     p->stack_top = current_proc->stack_top;
     p->stack_bottom = current_proc->stack_bottom;
+
+    /* Copy mmap_base */
+    p->mmap_base = current_proc->mmap_base;
+
+    /* Deep copy VMA list from parent to child */
+    vma_dup(current_proc, p);
 
     /* Child's kernel context: resume at forkret which will sret back to user */
     p->context.ra = (uint64_t)forkret;
@@ -626,25 +633,26 @@ void trap_handler(struct trapframe *tf) {
                 }
             }
 
-            /* --- Demand paging for mmap regions --- */
+            /* --- Demand paging for VMA regions --- */
             if (current_proc) {
-                for (int i = 0; i < NMMAP; i++) {
-                    if (current_proc->mmap_regions[i].len == 0) continue;
-                    uint64_t rva  = current_proc->mmap_regions[i].va;
-                    uint64_t rlen = current_proc->mmap_regions[i].len;
-                    if (stval >= rva && stval < rva + rlen) {
-                        uint64_t va = PGROUNDDOWN(stval);
-                        /* Check if page is already mapped */
-                        pte_t *pte = walk(current_proc->pagetable, va, 0);
-                        if (pte && (*pte & PTE_V))
-                            break; /* already mapped, real fault */
+                struct vm_area *fvma = vma_find(current_proc, stval);
+                if (fvma) {
+                    uint64_t va = PGROUNDDOWN(stval);
+                    /* Check if page is already mapped */
+                    pte_t *pte = walk(current_proc->pagetable, va, 0);
+                    if (!pte || !(*pte & PTE_V)) {
                         char *pg = kalloc();
-                        if (!pg) break;
-                        memset(pg, 0, PAGE_SIZE);
-                        mappages(current_proc->pagetable, va, PAGE_SIZE,
-                                 (uint64_t)pg, PTE_R | PTE_W | PTE_U);
-                        asm volatile("sfence.vma %0, zero" : : "r"(va));
-                        return; /* resume */
+                        if (pg) {
+                            memset(pg, 0, PAGE_SIZE);
+                            int perm = PTE_U;
+                            if (fvma->prot & PROT_READ)  perm |= PTE_R;
+                            if (fvma->prot & PROT_WRITE) perm |= PTE_W;
+                            if (fvma->prot & PROT_EXEC)  perm |= PTE_X;
+                            mappages(current_proc->pagetable, va, PAGE_SIZE,
+                                     (uint64_t)pg, perm);
+                            asm volatile("sfence.vma %0, zero" : : "r"(va));
+                            return; /* resume */
+                        }
                     }
                 }
             }
@@ -1526,6 +1534,8 @@ getdents_done:
         int status = (int)tf->a0;
         if (current_proc) {
             current_proc->exit_status = status;
+            /* Free VMA list */
+            vma_free_all(current_proc);
             /* Close all open fds */
             for (int i = 0; i < NOFILE; i++) {
                 if (current_proc->ofile[i].used) {
@@ -1575,7 +1585,7 @@ getdents_done:
          * Only MAP_ANONYMOUS supported.  Returns VA on success, (uint64_t)-1 on failure. */
         uint64_t addr  = tf->a0;
         uint64_t len   = tf->a1;
-        /* int prot  = (int)tf->a2; -- ignored beyond PROT_READ|PROT_WRITE */
+        int      prot  = (int)tf->a2;
         int      flags = (int)tf->a3;
         /* int fd = (int)tf->a4;  -- must be -1 for MAP_ANONYMOUS */
         /* off_t off = tf->a5;    -- must be 0 for MAP_ANONYMOUS */
@@ -1599,27 +1609,19 @@ getdents_done:
             current_proc->mmap_base += len;
         }
 
-        /* Allocate a free slot in mmap_regions[] */
-        int slot = -1;
-        for (int i = 0; i < NMMAP; i++) {
-            if (current_proc->mmap_regions[i].va == 0) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot < 0) {
-            tf->a0 = (uint64_t)-1;
-            goto syscall_done;
-        }
-
         /* Map zeroed pages */
         if (uvmalloc(current_proc->pagetable, va, va + len, PTE_W) == 0) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
 
-        current_proc->mmap_regions[slot].va  = va;
-        current_proc->mmap_regions[slot].len = len;
+        /* Track with VMA */
+        if (vma_add(current_proc, va, va + len, prot, flags) < 0) {
+            uvmunmap(current_proc->pagetable, va, len);
+            tf->a0 = (uint64_t)-1;
+            goto syscall_done;
+        }
+
         tf->a0 = va;
 
     } else if (sysnum == SYS_munmap) {
@@ -1629,19 +1631,16 @@ getdents_done:
 
         len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 
-        /* Find matching region */
-        int found = 0;
-        for (int i = 0; i < NMMAP; i++) {
-            if (current_proc->mmap_regions[i].va == addr) {
-                uvmunmap(current_proc->pagetable, addr, current_proc->mmap_regions[i].len);
-                sfence_vma();
-                current_proc->mmap_regions[i].va  = 0;
-                current_proc->mmap_regions[i].len = 0;
-                found = 1;
-                break;
-            }
+        /* Check VMA covers this region */
+        struct vm_area *v = vma_find(current_proc, addr);
+        if (v) {
+            uvmunmap(current_proc->pagetable, addr, len);
+            sfence_vma();
+            vma_remove(current_proc, addr, addr + len);
+            tf->a0 = 0;
+        } else {
+            tf->a0 = (uint64_t)-1;
         }
-        tf->a0 = found ? 0 : (uint64_t)-1;
 
     } else if (sysnum == SYS_mprotect) {
         /* mprotect stub — always succeed */

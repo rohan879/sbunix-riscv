@@ -33,6 +33,9 @@ int exec(char *path) {
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
         ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3) return -1;
 
+    /* Clear old VMAs before loading new binary */
+    vma_free_all(current_proc);
+
     pagetable = uvmcreate();
     if(pagetable == 0) return -1;
 
@@ -44,6 +47,15 @@ int exec(char *path) {
             if(uvmcopyin(pagetable, phdr->p_vaddr, elf_data + phdr->p_offset, phdr->p_filesz) < 0) return -1;
             uint64_t seg_end = phdr->p_vaddr + phdr->p_memsz;
             if (seg_end > sz) sz = seg_end;
+
+            /* Compute VMA protection bits from ELF phdr->p_flags */
+            int vprot = 0;
+            if (phdr->p_flags & 0x4) vprot |= PROT_READ;   /* PF_R */
+            if (phdr->p_flags & 0x2) vprot |= PROT_WRITE;  /* PF_W */
+            if (phdr->p_flags & 0x1) vprot |= PROT_EXEC;   /* PF_X */
+            uint64_t vma_start = PGROUNDDOWN(phdr->p_vaddr);
+            uint64_t vma_end   = PGROUNDUP(phdr->p_vaddr + phdr->p_memsz);
+            vma_add(current_proc, vma_start, vma_end, vprot, MAP_PRIVATE);
         }
     }
 
@@ -60,6 +72,9 @@ int exec(char *path) {
             top_page_mem = sp_mem;  /* remember physical addr of topmost page */
     }
     
+    /* Add a VMA for the user stack region */
+    vma_add(current_proc, stack_va, MAXVA, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+
     // 5. Identity map kernel and ALL RAM (No PTE_U)
     // This ensures kernel code, data, AND dynamically allocated pages (like kstack)
     // are accessible after switching satp.
