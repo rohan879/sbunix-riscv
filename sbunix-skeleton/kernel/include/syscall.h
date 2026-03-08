@@ -41,6 +41,8 @@
 #define SYS_unlinkat    35
 #define SYS_symlinkat   36
 #define SYS_linkat      37
+#define SYS_umount2     39
+#define SYS_mount       40
 #define SYS_faccessat   48
 #define SYS_umask       166
 #define SYS_renameat2   276

@@ -1912,8 +1912,26 @@ static long sys_linkat_handler(struct trapframe *tf) {
 }
 
 static long sys_renameat2_handler(struct trapframe *tf) {
-    (void)tf;
-    return (long)-30;
+    char kold[256], knew[256];
+    if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
+        return (long)-14;
+    if (copyinstr(current_proc->pagetable, knew, tf->a3, sizeof(knew)) < 0)
+        return (long)-14;
+
+    char old_resolved[256], new_resolved[256];
+    resolve_path(current_proc->cwd, kold, old_resolved);
+    resolve_path(current_proc->cwd, knew, new_resolved);
+
+    const char *old_relpath, *new_relpath;
+    struct vfs_ops *old_ops = vfs_lookup_mount(old_resolved, &old_relpath);
+    struct vfs_ops *new_ops = vfs_lookup_mount(new_resolved, &new_relpath);
+
+    if (old_ops != new_ops)
+        return (long)-18; /* EXDEV */
+    if (!old_ops || !old_ops->rename)
+        return (long)-30; /* EROFS */
+
+    return (long)(int64_t)old_ops->rename(old_relpath, new_relpath);
 }
 
 static long sys_mkdirat_handler(struct trapframe *tf) {
@@ -2309,6 +2327,47 @@ static long sys_tgkill_handler(struct trapframe *tf) {
     }
 }
 
+/* Static storage for dynamically mounted paths */
+static char mount_path_storage[8][256];
+static int mount_path_next = 0;
+
+static long sys_mount_handler(struct trapframe *tf) {
+    char ksrc[256], ktgt[256], kfstype[64];
+    if (copyinstr(current_proc->pagetable, ksrc, tf->a0, sizeof(ksrc)) < 0)
+        return (long)-14;
+    if (copyinstr(current_proc->pagetable, ktgt, tf->a1, sizeof(ktgt)) < 0)
+        return (long)-14;
+    if (copyinstr(current_proc->pagetable, kfstype, tf->a2, sizeof(kfstype)) < 0)
+        return (long)-14;
+
+    char resolved[256];
+    resolve_path(current_proc->cwd, ktgt, resolved);
+
+    /* Only ext2 supported */
+    if (strcmp(kfstype, "ext2") != 0)
+        return (long)-19; /* ENODEV */
+
+    if (mount_path_next >= 8)
+        return (long)-12; /* ENOMEM */
+
+    /* Copy path to persistent storage (mount table stores pointers) */
+    int rlen = strlen(resolved);
+    memcpy(mount_path_storage[mount_path_next], resolved, (uint64_t)rlen + 1);
+    vfs_register_mount(mount_path_storage[mount_path_next], &ext2_ops);
+    mount_path_next++;
+    return 0;
+}
+
+static long sys_umount2_handler(struct trapframe *tf) {
+    char ktgt[256];
+    if (copyinstr(current_proc->pagetable, ktgt, tf->a0, sizeof(ktgt)) < 0)
+        return (long)-14;
+
+    char resolved[256];
+    resolve_path(current_proc->cwd, ktgt, resolved);
+    return (long)vfs_unregister_mount(resolved);
+}
+
 static long sys_uname_handler(struct trapframe *tf) {
     /* struct utsname: 5 fields of 65 bytes each = 325 bytes */
     char kbuf[325];
@@ -2393,6 +2452,8 @@ void syscall_init(void) {
     syscall_table[SYS_ftruncate]       = sys_ftruncate_handler;
     syscall_table[SYS_tgkill]          = sys_tgkill_handler;
     syscall_table[SYS_uname]           = sys_uname_handler;
+    syscall_table[SYS_mount]           = sys_mount_handler;
+    syscall_table[SYS_umount2]         = sys_umount2_handler;
 }
 
 /* ------------------------------------------------------------------ */

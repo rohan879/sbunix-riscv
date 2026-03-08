@@ -1488,6 +1488,67 @@ static int ext2_readlink(const char *path, char *buf, int bufsiz) {
     return copylen;
 }
 
+static int ext2_rename(const char *oldpath, const char *newpath) {
+    if (!ext2_mounted)
+        return -1;
+
+    while (*oldpath == '/') oldpath++;
+    while (*newpath == '/') newpath++;
+
+    /* Parse both paths */
+    char old_parent_path[256], new_parent_path[256];
+    const char *old_basename = path_parent(oldpath, old_parent_path, sizeof(old_parent_path));
+    const char *new_basename = path_parent(newpath, new_parent_path, sizeof(new_parent_path));
+
+    if (old_basename[0] == '\0' || new_basename[0] == '\0')
+        return -22;
+
+    struct ext2_inode_mem *old_parent = ext2_namei(old_parent_path);
+    if (!old_parent)
+        return -2;
+
+    /* Look up old entry */
+    uint32_t ino;
+    if (ext2_dir_lookup(old_parent, old_basename, &ino) < 0) {
+        icache_release(old_parent);
+        return -2; /* ENOENT */
+    }
+
+    /* Get the inode to determine file type */
+    struct ext2_inode_mem *ip = icache_get(ino);
+    if (!ip) {
+        icache_release(old_parent);
+        return -1;
+    }
+    uint8_t ft = (ip->type == EXT2_TYPE_DIR) ? EXT2_FT_DIR :
+                 (ip->type == EXT2_TYPE_SYMLINK) ? EXT2_FT_SYMLINK : EXT2_FT_FILE;
+    icache_release(ip);
+
+    struct ext2_inode_mem *new_parent = ext2_namei(new_parent_path);
+    if (!new_parent) {
+        icache_release(old_parent);
+        return -2;
+    }
+
+    /* If new name exists, remove it */
+    uint32_t existing;
+    if (ext2_dir_lookup(new_parent, new_basename, &existing) == 0) {
+        ext2_dir_remove(new_parent, new_basename);
+    }
+
+    /* Add new entry, remove old */
+    int ret = ext2_dir_add(new_parent, new_basename, ino, ft);
+    if (ret == 0)
+        ext2_dir_remove(old_parent, old_basename);
+
+    icache_writeback(new_parent);
+    icache_writeback(old_parent);
+    icache_release(new_parent);
+    icache_release(old_parent);
+    bcache_sync();
+    return ret;
+}
+
 static int ext2_rmdir(const char *path) {
   if (!ext2_mounted)
     return -1;
@@ -1594,7 +1655,7 @@ struct vfs_ops ext2_ops = {
   .rmdir    = ext2_rmdir,
   .symlink  = ext2_symlink,
   .readlink = ext2_readlink,
-  .rename   = 0,
+  .rename   = ext2_rename,
 };
 
 /* ================================================================== */
