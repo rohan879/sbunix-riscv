@@ -1229,8 +1229,11 @@ pipe_eof:
             if (sig == 9) { /* SIGKILL -- always kill immediately */
                 target->exit_status = 128 + 9;
                 target->state = ZOMBIE;
-                if (target->parent && target->parent->state == SLEEPING)
-                    target->parent->state = RUNNABLE;
+                if (target->parent) {
+                    target->parent->sigpending |= (1UL << SIGCHLD);
+                    if (target->parent->state == SLEEPING)
+                        target->parent->state = RUNNABLE;
+                }
             } else if (sig > 0 && sig < 32) {
                 target->sigpending |= (1UL << sig);
                 /* Wake target if sleeping so it can handle the signal */
@@ -1392,10 +1395,11 @@ pipe_eof:
                 while (1) {}
             }
             current_proc->state = ZOMBIE;
-            /* Wake parent if it's waiting */
-            if (current_proc->parent &&
-                current_proc->parent->state == SLEEPING) {
-                current_proc->parent->state = RUNNABLE;
+            /* Notify parent via SIGCHLD and wake it */
+            if (current_proc->parent) {
+                current_proc->parent->sigpending |= (1UL << SIGCHLD);
+                if (current_proc->parent->state == SLEEPING)
+                    current_proc->parent->state = RUNNABLE;
             }
             /* Also wake any process waiting in wait4 (waiting_for_uart==0).
              * Do NOT wake timed-sleep processes (waiting_for_uart==2). */
