@@ -55,7 +55,7 @@
 
 ## Final Project — Plan of Attack
 
-### 1. Boot + Early Console (partially done)
+### 1. Boot + Early Console — DONE
 
 - [x] OpenSBI handoff, UART printing
 - [x] Parse DTB pointer from `a1`
@@ -66,7 +66,7 @@
 - [x] Exception entry/exit (`sepc`/`scause`/`stval` dispatch)
 - [x] Timer interrupts (SBI)
 - [x] External interrupts via PLIC
-- [x] Minimal scheduler tick for preemption
+- [x] Minimal scheduler tick for preemption — `handle_timer_interrupt()` yields RUNNING process via `swtch()` for round-robin
 
 ### 3. Memory Subsystem
 
@@ -101,6 +101,9 @@
 - [x] `bin/echo`, `bin/sleep`, `bin/cat`, `bin/ls`
 - [x] `bin/kill` (`kill -9`), `bin/ps`
 - [x] `bin/sbush` (full shell)
+- [x] `bin/spin` — preemptive scheduling test (two CPU-bound fork'd loops)
+- [x] `bin/alarmtest` — SIGALRM test (`alarm(2)` + sigaction handler)
+- [x] `bin/segvtest` — SIGSEGV test (NULL deref caught by user signal handler)
 
 ### 8. /bin/init
 
@@ -164,7 +167,7 @@ All 7 sys/ headers exist with full content.
 ### Missing Declarations in Existing Headers
 
 - [x] `string.h` — added: `memmove`, `memchr`, `strdup`, `strndup`, `strncat`, `strspn`, `strcspn`, `strpbrk`, `strtok`, `strerror`
-- [x] `unistd.h` — added: `isatty`, `setsid`, `getpgrp`, `setpgid`, `tcgetpgrp`, `tcsetpgrp`
+- [x] `unistd.h` — added: `isatty`, `setsid`, `getpgrp`, `setpgid`, `tcgetpgrp`, `tcsetpgrp`, `alarm`
 - [x] `signal.h` — added: `sighandler_t` typedef, `sig_atomic_t` typedef
 - [x] `stdlib.h` — added: `setenv`, `unsetenv`, `putenv`
 - [x] `errno.h` — complete (45 error codes, extern errno)
@@ -193,6 +196,7 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] `SYS_unlinkat` (35), `SYS_linkat` (37), `SYS_renameat2` (276), `SYS_mkdirat` (34) — return -EROFS
 - [x] `SYS_umask` (166) — returns 022
 - [x] `execve` envp fix — copies envp strings before destroying old page table
+- [x] `SYS_alarm` (200) — custom syscall; sets `proc->alarm_ticks`, returns remaining seconds from previous alarm
 
 ## Kernel Architecture Features
 
@@ -203,6 +207,11 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] `SYS_rt_sigreturn` (139) — restores saved trapframe
 - [x] `SYS_kill` uses `sigpending` bits for non-SIGKILL signals
 - [x] Per-process `sigactions[32]`, `sigmask`, `sigpending` in `struct proc`
+- [x] SIGCHLD delivery on child exit — `SYS_exit`, `SYS_kill` SIGKILL, and `deliver_signal` SIG_DFL paths all set `parent->sigpending |= (1 << SIGCHLD)`
+- [x] SIGSEGV delivery via signal machinery — page fault handler sets `sigpending |= (1 << SIGSEGV)` and calls `deliver_signal()` instead of direct kill; user handlers can catch it
+- [x] `SYS_alarm` (200) — sets per-process `alarm_ticks`; timer handler checks expiry and delivers SIGALRM (signal 14)
+- [x] `deliver_signal()` SIG_DFL cleanup — calls `vma_free_all()` + `close_ofile()` for all fds before marking ZOMBIE (mirrors `SYS_exit` path)
+- [x] Ctrl-C delivers SIGINT via `sigpending` instead of force-killing processes — lets sigaction handlers run properly
 
 ### Sub-page Allocator
 
@@ -230,7 +239,7 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 
 ### Still Open
 
-- [ ] Kernel SIGCHLD generation — kernel does not set `parent->sigpending |= (1 << SIGCHLD)` on child exit; shell works around this with polling `waitpid` in `reap_zombies()`
+- [x] Kernel SIGCHLD generation — `SYS_exit`, SIGKILL, and `deliver_signal` SIG_DFL all set `parent->sigpending |= (1 << SIGCHLD)` on child death
 - [ ] devfs integration for stdin/stdout/stderr — fd 0/1/2 still handled as special UART case, not routed through `/dev/console` VFS ops
 - [ ] On-disk read/write file system (ext2 or similar over virtio-blk)
 - [ ] On-disk swap and paging
@@ -240,8 +249,8 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 ## Grading Targets
 
 - [x] Cooperative multi-tasking + all functional requirements (50 pts) — scheduler, fork, exec, wait, pipes, VFS, tarfs, user binaries all working
-- [x] Preemptive multi-tasking (+10 pts) — timer-driven scheduler tick, round-robin preemption
-- [~] Signals (INT on ^C, ALARM, SEGV) and pipes (+10 pts) — SIGINT/SIGTSTP/SIGCHLD handlers work; pipes work; kernel doesn't generate SIGCHLD on exit yet
+- [x] Preemptive multi-tasking (+10 pts) — timer-driven scheduler tick yields RUNNING processes via `swtch()`; tested with `bin/spin` (two CPU-bound fork'd loops both complete)
+- [x] Signals (INT on ^C, ALARM, SEGV) and pipes (+10 pts) — SIGINT via `sigpending`, SIGALRM via `alarm()` syscall, SIGSEGV via `deliver_signal()`, SIGCHLD on exit; pipes work; tested with `spin`, `alarmtest`, `segvtest`
 - [ ] On-disk r/w file system (+10 pts)
 - [ ] On-disk swap and paging (+10 pts)
 - [ ] TCP/IP networking via lwIP (+10 pts)
