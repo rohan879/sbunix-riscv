@@ -2061,7 +2061,28 @@ pipe_eof:
         }
 
     } else if (sysnum == SYS_prlimit64) {
-        tf->a0 = (uint64_t)-38; /* -ENOSYS */
+        /* prlimit64(pid, resource, new_rlim, old_rlim) */
+        int resource = (int)tf->a1;
+        uint64_t old_uaddr = tf->a3;
+        if (old_uaddr) {
+            uint64_t rlim[2];
+            if (resource == 3) { /* RLIMIT_STACK */
+                rlim[0] = 8 * 1024 * 1024; /* 8MB */
+                rlim[1] = 0xFFFFFFFFFFFFFFFFULL; /* RLIM_INFINITY */
+            } else if (resource == 7) { /* RLIMIT_NOFILE */
+                rlim[0] = 16;
+                rlim[1] = 16;
+            } else {
+                rlim[0] = 0xFFFFFFFFFFFFFFFFULL;
+                rlim[1] = 0xFFFFFFFFFFFFFFFFULL;
+            }
+            pte_t *pte = walk(current_proc->pagetable, old_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (old_uaddr & 0xFFF);
+                memcpy((void *)pa, rlim, 16);
+            }
+        }
+        tf->a0 = 0;
 
     } else if (sysnum == SYS_getrandom) {
         /* getrandom(void *buf, size_t buflen, unsigned int flags) */
