@@ -107,6 +107,8 @@ struct proc* allocproc(void) {
 
 found:
   p->pid = nextpid++;
+  p->pgid = p->pid;
+  p->sid = p->pid;
   p->state = SLEEPING;
 
   // Allocate a trapframe page.

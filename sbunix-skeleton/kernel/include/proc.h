@@ -106,6 +106,8 @@ struct shared_sigactions {
 struct proc {
   enum procstate state;        // Process state
   pid_t pid;                   // Process ID
+  pid_t pgid;                  // Process group ID
+  pid_t sid;                   // Session ID
   struct proc *parent;         // Parent process
   void *kstack;                // Virtual address of kernel stack
   uint64_t sz;                 // Size of process memory (bytes)

@@ -2099,16 +2099,51 @@ pipe_eof:
         tf->a0 = (uint64_t)buflen;
 
     } else if (sysnum == SYS_setpgid) {
-        tf->a0 = 0;
+        pid_t target = (pid_t)tf->a0;
+        pid_t pgid = (pid_t)tf->a1;
+        if (target == 0) target = current_proc->pid;
+        if (pgid == 0) pgid = target;
+        tf->a0 = (uint64_t)-3; /* -ESRCH */
+        for (struct proc *p = proc; p < &proc[64]; p++) {
+            if (p->pid == target && p->state != UNUSED) {
+                p->pgid = pgid;
+                tf->a0 = 0;
+                break;
+            }
+        }
 
     } else if (sysnum == SYS_setsid) {
+        current_proc->sid = current_proc->pid;
+        current_proc->pgid = current_proc->pid;
         tf->a0 = (uint64_t)current_proc->pid;
 
     } else if (sysnum == SYS_getpgid) {
-        tf->a0 = (uint64_t)current_proc->pid;
+        pid_t target = (pid_t)tf->a0;
+        if (target == 0) {
+            tf->a0 = (uint64_t)current_proc->pgid;
+        } else {
+            tf->a0 = (uint64_t)-3; /* -ESRCH */
+            for (struct proc *p = proc; p < &proc[64]; p++) {
+                if (p->pid == target && p->state != UNUSED) {
+                    tf->a0 = (uint64_t)p->pgid;
+                    break;
+                }
+            }
+        }
 
     } else if (sysnum == SYS_getsid) {
-        tf->a0 = (uint64_t)current_proc->pid;
+        pid_t target = (pid_t)tf->a0;
+        if (target == 0) {
+            tf->a0 = (uint64_t)current_proc->sid;
+        } else {
+            tf->a0 = (uint64_t)-3; /* -ESRCH */
+            for (struct proc *p = proc; p < &proc[64]; p++) {
+                if (p->pid == target && p->state != UNUSED) {
+                    tf->a0 = (uint64_t)p->sid;
+                    break;
+                }
+            }
+        }
 
     } else if (sysnum == SYS_alarm) {
         /* alarm(unsigned int seconds) — schedule SIGALRM after `seconds`.
