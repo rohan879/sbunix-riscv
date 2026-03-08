@@ -429,8 +429,11 @@ void vma_free_all(struct proc *p) {
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
 // Handles both 4KB pages and 2MB super pages.
-int uvmcopyin(pagetable_t pagetable, uint64_t dstva, char *src, uint64_t len) {
+int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
+  char *s = (char *)src;
   while (len > 0) {
+    if (dstva >= MAXVA)
+      return -1;
     int level;
     pte_t *pte = walk_super(pagetable, dstva, &level);
     if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
@@ -444,11 +447,76 @@ int uvmcopyin(pagetable_t pagetable, uint64_t dstva, char *src, uint64_t len) {
       n = len;
 
     // Copy to physical address directly since we are in kernel 1:1 map
-    memcpy((void *)pa0, src, n);
+    memcpy((void *)pa0, s, n);
 
     len -= n;
-    src += n;
+    s += n;
     dstva = va0 + page_size;
   }
   return 0;
+}
+
+// Copy from user virtual address srcva to kernel buffer dst.
+// Returns 0 on success, -1 on error (unmapped/invalid user page).
+int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len) {
+  char *d = (char *)dst;
+  while (len > 0) {
+    if (srcva >= MAXVA)
+      return -1;
+    int level;
+    pte_t *pte = walk_super(pagetable, srcva, &level);
+    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+      return -1;
+
+    uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
+    uint64_t va0 = (level == 1) ? SPGROUNDDOWN(srcva) : PGROUNDDOWN(srcva);
+    uint64_t pa0 = PTE2PA(*pte) + (srcva - va0);
+    uint64_t n = page_size - (srcva - va0);
+    if (n > len)
+      n = len;
+
+    memcpy(d, (void *)pa0, n);
+
+    len -= n;
+    d += n;
+    srcva = va0 + page_size;
+  }
+  return 0;
+}
+
+// Copy null-terminated string from user virtual address srcva to kernel buffer dst.
+// Copies at most max bytes (including the null). Returns 0 if null found, -1 otherwise.
+int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
+  int got_null = 0;
+  while (max > 0) {
+    if (srcva >= MAXVA)
+      return -1;
+    int level;
+    pte_t *pte = walk_super(pagetable, srcva, &level);
+    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+      return -1;
+
+    uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
+    uint64_t va0 = (level == 1) ? SPGROUNDDOWN(srcva) : PGROUNDDOWN(srcva);
+    uint64_t pa0 = PTE2PA(*pte) + (srcva - va0);
+    uint64_t n = page_size - (srcva - va0);
+    if (n > max)
+      n = max;
+
+    char *p = (char *)pa0;
+    for (uint64_t i = 0; i < n; i++) {
+      *dst = p[i];
+      if (p[i] == '\0') {
+        got_null = 1;
+        break;
+      }
+      dst++;
+    }
+    if (got_null)
+      break;
+
+    max -= n;
+    srcva = va0 + page_size;
+  }
+  return got_null ? 0 : -1;
 }

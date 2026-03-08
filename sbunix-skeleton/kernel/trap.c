@@ -740,14 +740,9 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     sp -= sizeof(struct trapframe);
     sp &= ~15UL; /* 16-byte align */
 
-    /* Copy trapframe to user stack via page walk */
-    for (uint64_t off = 0; off < sizeof(struct trapframe); off += 8) {
-        pte_t *pte = walk(p->pagetable, sp + off, 0);
-        if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-            uint64_t pa = PTE2PA(*pte) + ((sp + off) & 0xFFF);
-            *(uint64_t *)pa = *(uint64_t *)((char *)tf + off);
-        }
-    }
+    /* Copy trapframe to user stack via copyout */
+    if (copyout(p->pagetable, sp, tf, sizeof(struct trapframe)) < 0)
+        return; /* can't deliver signal -- just drop it */
 
     /* Set up trapframe to call handler(signum) with return to trampoline */
     tf->epc = handler;                   /* jump to signal handler */
@@ -936,7 +931,7 @@ pagefault_kill:
 
     } else if (sysnum == SYS_write) {
         int fd = (int)tf->a0;
-        char *buf = (char *)tf->a1;
+        uint64_t ubuf = tf->a1;
         size_t len = (size_t)tf->a2;
         struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
@@ -953,11 +948,21 @@ pagefault_kill:
                 }
                 int n = len - written;
                 if (n > avail) n = avail;
-                for (int i = 0; i < n; i++) {
-                    pipes[pid].buf[pipes[pid].wpos % PIPE_BUF] = buf[written + i];
-                    pipes[pid].wpos++;
+                /* Copy user data to kernel staging buffer, then to pipe */
+                char kchunk[512];
+                while (n > 0) {
+                    int chunk = n > (int)sizeof(kchunk) ? (int)sizeof(kchunk) : n;
+                    if (copyin(current_proc->pagetable, kchunk, ubuf + written, chunk) < 0) {
+                        tf->a0 = (written > 0) ? (uint64_t)written : (uint64_t)-14;
+                        goto syscall_done;
+                    }
+                    for (int i = 0; i < chunk; i++) {
+                        pipes[pid].buf[pipes[pid].wpos % PIPE_BUF] = kchunk[i];
+                        pipes[pid].wpos++;
+                    }
+                    written += chunk;
+                    n -= chunk;
                 }
-                written += n;
                 /* Wake any sleeping readers now that data is available (not timed sleeps) */
                 for (struct proc *p = proc; p < &proc[64]; p++) {
                     if (p->state == SLEEPING && p != current_proc &&
@@ -967,16 +972,29 @@ pagefault_kill:
             }
             tf->a0 = written;
         } else if (f && f->ops && f->ops->write) {
-            /* VFS write dispatch */
-            int64_t ret = f->ops->write(f->private, buf, len, &f->offset);
-            tf->a0 = (uint64_t)ret;
+            /* VFS write dispatch via kernel staging buffer */
+            char kbuf[512];
+            int64_t total = 0;
+            while ((size_t)total < len) {
+                uint64_t chunk = len - total;
+                if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+                if (copyin(current_proc->pagetable, kbuf, ubuf + total, chunk) < 0) {
+                    tf->a0 = (total > 0) ? (uint64_t)total : (uint64_t)-14;
+                    goto syscall_done;
+                }
+                int64_t ret = f->ops->write(f->private, kbuf, chunk, &f->offset);
+                if (ret < 0) { tf->a0 = (total > 0) ? (uint64_t)total : (uint64_t)ret; goto syscall_done; }
+                total += ret;
+                if ((uint64_t)ret < chunk) break;
+            }
+            tf->a0 = (uint64_t)total;
         } else {
             tf->a0 = (uint64_t)-1;
         }
 
     } else if (sysnum == SYS_read) {
         int fd = (int)tf->a0;
-        char *buf = (char *)tf->a1;
+        uint64_t ubuf = tf->a1;
         size_t len = (size_t)tf->a2;
         struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
@@ -990,9 +1008,15 @@ pagefault_kill:
                     current_proc->state = SLEEPING;
                     swtch(&current_proc->context, &scheduler_context);
                 }
-                buf[read_bytes] = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
-                pipes[pid].rpos++;
-                read_bytes++;
+                {
+                    char kc = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
+                    pipes[pid].rpos++;
+                    if (copyout(current_proc->pagetable, ubuf + read_bytes, &kc, 1) < 0) {
+                        tf->a0 = (read_bytes > 0) ? (uint64_t)read_bytes : (uint64_t)-14;
+                        goto syscall_done;
+                    }
+                    read_bytes++;
+                }
                 /* Wake any writers that might be blocked (not timed sleeps) */
                 for (struct proc *p = proc; p < &proc[64]; p++) {
                     if (p->state == SLEEPING && p != current_proc &&
@@ -1004,26 +1028,40 @@ pagefault_kill:
 pipe_eof:
             tf->a0 = (uint64_t)read_bytes;
         } else if (f && f->ops && f->ops->read) {
-            /* VFS read dispatch */
-            int64_t ret = f->ops->read(f->private, buf, len, &f->offset);
-            tf->a0 = (uint64_t)ret;
+            /* VFS read dispatch via kernel staging buffer */
+            char kbuf[512];
+            int64_t total = 0;
+            while ((size_t)total < len) {
+                uint64_t chunk = len - total;
+                if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+                int64_t ret = f->ops->read(f->private, kbuf, chunk, &f->offset);
+                if (ret < 0) { tf->a0 = (total > 0) ? (uint64_t)total : (uint64_t)ret; goto syscall_done; }
+                if (ret == 0) break;
+                if (copyout(current_proc->pagetable, ubuf + total, kbuf, ret) < 0) {
+                    tf->a0 = (total > 0) ? (uint64_t)total : (uint64_t)-14;
+                    goto syscall_done;
+                }
+                total += ret;
+                if ((uint64_t)ret < chunk) break;
+            }
+            tf->a0 = (uint64_t)total;
         } else {
             tf->a0 = (uint64_t)0; /* EOF for unknown fds */
         }
 
     } else if (sysnum == SYS_openat) {
         /* openat(AT_FDCWD, path, flags, mode) */
-        const char *path = (const char *)tf->a1;
         int flags = (int)tf->a2;
 
-        if (!path) {
-            tf->a0 = (uint64_t)-1;
+        char kpath[256];
+        if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
+            tf->a0 = (uint64_t)-14; /* -EFAULT */
             goto syscall_done;
         }
 
         /* Resolve path against cwd */
         char resolved[256];
-        resolve_path(current_proc->cwd, path, resolved);
+        resolve_path(current_proc->cwd, kpath, resolved);
 
         /* Look up mount point via VFS */
         const char *relpath;
@@ -1107,7 +1145,6 @@ pipe_eof:
         }
 
     } else if (sysnum == SYS_pipe2) {
-        int *fds = (int *)tf->a0;
         int pipeid = alloc_pipe();
         if (pipeid < 0) {
             tf->a0 = (uint64_t)-1;
@@ -1143,33 +1180,40 @@ pipe_eof:
                 wf->pipe_id = pipeid;
                 wf->ops = NULL;
                 ftab[wfd] = wf;
-                fds[0] = rfd;
-                fds[1] = wfd;
+                int kfds[2] = { rfd, wfd };
+                if (copyout(current_proc->pagetable, tf->a0, kfds, sizeof(kfds)) < 0) {
+                    close_ofile(current_proc, rfd);
+                    close_ofile(current_proc, wfd);
+                    tf->a0 = (uint64_t)-14;
+                    goto syscall_done;
+                }
                 tf->a0 = 0;
             }
         }
 
     } else if (sysnum == SYS_getcwd) {
-        char *buf = (char *)tf->a0;
         size_t sz = (size_t)tf->a1;
         const char *cwd = current_proc->cwd;
         if (!cwd[0]) cwd = "/";
         int len = strlen(cwd);
-        if (buf && (size_t)(len + 1) <= sz) {
-            memcpy(buf, cwd, len + 1);
-            tf->a0 = (uint64_t)buf;
+        if (tf->a0 && (size_t)(len + 1) <= sz) {
+            if (copyout(current_proc->pagetable, tf->a0, (void *)cwd, len + 1) < 0) {
+                tf->a0 = (uint64_t)-14;
+                goto syscall_done;
+            }
+            tf->a0 = tf->a0; /* return buf pointer */
         } else {
             tf->a0 = (uint64_t)0;
         }
 
     } else if (sysnum == SYS_chdir) {
-        const char *path = (const char *)tf->a0;
-        if (!path) {
-            tf->a0 = (uint64_t)-1;
+        char kpath[256];
+        if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
+            tf->a0 = (uint64_t)-14; /* -EFAULT */
             goto syscall_done;
         }
         char resolved[256];
-        resolve_path(current_proc->cwd, path, resolved);
+        resolve_path(current_proc->cwd, kpath, resolved);
         if (vfs_is_dir(resolved)) {
             memcpy(current_proc->cwd, resolved, sizeof(current_proc->cwd));
             tf->a0 = 0;
@@ -1183,14 +1227,15 @@ pipe_eof:
         tf->a0 = (uint64_t)child;
 
     } else if (sysnum == SYS_execve) {
-        const char *path = (const char *)tf->a0;
-        char **argv = (char **)tf->a1;
-        char **envp = (char **)tf->a2;
-
-        if (!path) {
-            tf->a0 = (uint64_t)-1;
+        /* Copy path from user space */
+        char kpath[256];
+        if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
+            tf->a0 = (uint64_t)-14; /* -EFAULT */
             goto syscall_done;
         }
+
+        uint64_t uargv = tf->a1;
+        uint64_t uenvp = tf->a2;
 
         /* ---- Copy argv and envp strings into kernel-heap buffers BEFORE exec()
          * argv/envp pointers live in the old user address space.  After exec()
@@ -1210,13 +1255,19 @@ pipe_eof:
         int kstroff = 0;
         int kstroff_arr[EXECVE_MAXARGS];
 
-        if (argv) {
-            while (kargc < EXECVE_MAXARGS && argv[kargc]) {
-                const char *s = argv[kargc];
-                int slen = strlen(s) + 1;
+        if (uargv) {
+            while (kargc < EXECVE_MAXARGS) {
+                uint64_t uptr;
+                if (copyin(current_proc->pagetable, &uptr, uargv + (uint64_t)kargc * 8, 8) < 0)
+                    break;
+                if (uptr == 0) break;
+                char tmpstr[256];
+                if (copyinstr(current_proc->pagetable, tmpstr, uptr, sizeof(tmpstr)) < 0)
+                    break;
+                int slen = strlen(tmpstr) + 1;
                 if (kstroff + slen > (int)PAGE_SIZE) break;
                 kstroff_arr[kargc] = kstroff;
-                memcpy(kstrbuf + kstroff, s, slen);
+                memcpy(kstrbuf + kstroff, tmpstr, slen);
                 kstroff += slen;
                 kargc++;
             }
@@ -1228,24 +1279,22 @@ pipe_eof:
         int kenvoff = 0;
         int kenvoff_arr[EXECVE_MAXENVS];
 
-        if (kenvbuf && envp) {
-            while (kenvc < EXECVE_MAXENVS && envp[kenvc]) {
-                const char *s = envp[kenvc];
-                int slen = strlen(s) + 1;
+        if (kenvbuf && uenvp) {
+            while (kenvc < EXECVE_MAXENVS) {
+                uint64_t uptr;
+                if (copyin(current_proc->pagetable, &uptr, uenvp + (uint64_t)kenvc * 8, 8) < 0)
+                    break;
+                if (uptr == 0) break;
+                char tmpstr[256];
+                if (copyinstr(current_proc->pagetable, tmpstr, uptr, sizeof(tmpstr)) < 0)
+                    break;
+                int slen = strlen(tmpstr) + 1;
                 if (kenvoff + slen > (int)PAGE_SIZE) break;
                 kenvoff_arr[kenvc] = kenvoff;
-                memcpy(kenvbuf + kenvoff, s, slen);
+                memcpy(kenvbuf + kenvoff, tmpstr, slen);
                 kenvoff += slen;
                 kenvc++;
             }
-        }
-
-        /* Also copy the path before exec() changes the address space */
-        char kpath[256];
-        {
-            int plen = strlen(path);
-            if (plen > 255) plen = 255;
-            memcpy(kpath, path, plen + 1);
         }
 
         /* Resolve path relative to cwd, then convert to tarfs format */
@@ -1337,7 +1386,7 @@ pipe_eof:
                     off += kenvoff;
                 }
 
-                uvmcopyin(current_proc->pagetable, sp, kbuf, off);
+                copyout(current_proc->pagetable, sp, kbuf, off);
                 kfree(kbuf);
             }
 
@@ -1356,9 +1405,16 @@ pipe_eof:
 
     } else if (sysnum == SYS_wait4) {
         pid_t wpid   = (pid_t)(int)tf->a0;
-        int *wstatus = (int *)tf->a1;
         int options  = (int)tf->a2;
-        tf->a0 = (uint64_t)sys_wait4(wpid, wstatus, options);
+        int kwstatus = 0;
+        pid_t ret = sys_wait4(wpid, tf->a1 ? &kwstatus : NULL, options);
+        if (ret > 0 && tf->a1) {
+            if (copyout(current_proc->pagetable, tf->a1, &kwstatus, sizeof(kwstatus)) < 0) {
+                tf->a0 = (uint64_t)-14;
+                goto syscall_done;
+            }
+        }
+        tf->a0 = (uint64_t)ret;
 
     } else if (sysnum == SYS_getpid) {
         tf->a0 = current_proc ? (uint64_t)current_proc->pid : 0;
@@ -1417,16 +1473,13 @@ pipe_eof:
         if (ts_uaddr) {
             int64_t sec, nsec;
             get_wall_time(&sec, &nsec);
-            struct { int64_t tv_sec; int64_t tv_nsec; } ts;
-            ts.tv_sec = sec;
-            ts.tv_nsec = nsec;
-            pte_t *pte = walk(current_proc->pagetable, ts_uaddr, 0);
-            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-                uint64_t pa = PTE2PA(*pte) + (ts_uaddr & 0xFFF);
-                memcpy((void *)pa, &ts, sizeof(ts));
-                tf->a0 = 0;
-            } else {
+            struct { int64_t tv_sec; int64_t tv_nsec; } kts;
+            kts.tv_sec = sec;
+            kts.tv_nsec = nsec;
+            if (copyout(current_proc->pagetable, ts_uaddr, &kts, 16) < 0) {
                 tf->a0 = (uint64_t)-14; /* -EFAULT */
+            } else {
+                tf->a0 = 0;
             }
         } else {
             tf->a0 = (uint64_t)-14; /* -EFAULT */
@@ -1465,29 +1518,41 @@ pipe_eof:
     } else if (sysnum == SYS_fstat) {
         /* fstat(int fd, struct stat *st) */
         int fd = (int)tf->a0;
-        uint8_t *st = (uint8_t *)tf->a1;
         struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
-        if (!st || !f) {
+        if (!tf->a1 || !f) {
             tf->a0 = (uint64_t)-1;
         } else if (f->is_pipe) {
             /* Pipes: return FIFO mode */
-            memset(st, 0, 128);
+            uint8_t kstat[128];
+            memset(kstat, 0, 128);
             uint32_t mode = 0x1000 | 0600; /* S_IFIFO | 0600 */
             uint32_t nlink = 1;
             uint64_t ino = (uint64_t)(f->pipe_id + 1);
             int32_t blksz = 4096;
-            memcpy(st + 8, &ino, 8);
-            memcpy(st + 16, &mode, 4);
-            memcpy(st + 20, &nlink, 4);
-            memcpy(st + 56, &blksz, 4);
+            memcpy(kstat + 8, &ino, 8);
+            memcpy(kstat + 16, &mode, 4);
+            memcpy(kstat + 20, &nlink, 4);
+            memcpy(kstat + 56, &blksz, 4);
+            if (copyout(current_proc->pagetable, tf->a1, kstat, 128) < 0) {
+                tf->a0 = (uint64_t)-14;
+                goto syscall_done;
+            }
             tf->a0 = 0;
         } else if (f->ops && f->ops->fstat) {
             /* Per-fd stat via VFS ops (handles devfs char devices, etc.) */
-            int ret = f->ops->fstat(f->private, st);
+            uint8_t kstat[128];
+            int ret = f->ops->fstat(f->private, kstat);
+            if (ret == 0) {
+                if (copyout(current_proc->pagetable, tf->a1, kstat, 128) < 0) {
+                    tf->a0 = (uint64_t)-14;
+                    goto syscall_done;
+                }
+            }
             tf->a0 = (uint64_t)(int64_t)ret;
         } else {
             /* Generic regular file fallback */
-            memset(st, 0, 128);
+            uint8_t kstat[128];
+            memset(kstat, 0, 128);
             uint64_t dev = 1;
             uint64_t ino = (uint64_t)(fd + 1);
             uint32_t mode = 0x81A4; /* S_IFREG | 0644 */
@@ -1495,36 +1560,50 @@ pipe_eof:
             int32_t blksz = 4096;
             int64_t sec, nsec;
             get_wall_time(&sec, &nsec);
-            memcpy(st + 0, &dev, 8);
-            memcpy(st + 8, &ino, 8);
-            memcpy(st + 16, &mode, 4);
-            memcpy(st + 20, &nlink, 4);
-            memcpy(st + 56, &blksz, 4);
-            memcpy(st + 72, &sec, 8);   /* st_atime_sec */
-            memcpy(st + 80, &nsec, 8);  /* st_atime_nsec */
-            memcpy(st + 88, &sec, 8);   /* st_mtime_sec */
-            memcpy(st + 96, &nsec, 8);  /* st_mtime_nsec */
-            memcpy(st + 104, &sec, 8);  /* st_ctime_sec */
-            memcpy(st + 112, &nsec, 8); /* st_ctime_nsec */
+            memcpy(kstat + 0, &dev, 8);
+            memcpy(kstat + 8, &ino, 8);
+            memcpy(kstat + 16, &mode, 4);
+            memcpy(kstat + 20, &nlink, 4);
+            memcpy(kstat + 56, &blksz, 4);
+            memcpy(kstat + 72, &sec, 8);   /* st_atime_sec */
+            memcpy(kstat + 80, &nsec, 8);  /* st_atime_nsec */
+            memcpy(kstat + 88, &sec, 8);   /* st_mtime_sec */
+            memcpy(kstat + 96, &nsec, 8);  /* st_mtime_nsec */
+            memcpy(kstat + 104, &sec, 8);  /* st_ctime_sec */
+            memcpy(kstat + 112, &nsec, 8); /* st_ctime_nsec */
+            if (copyout(current_proc->pagetable, tf->a1, kstat, 128) < 0) {
+                tf->a0 = (uint64_t)-14;
+                goto syscall_done;
+            }
             tf->a0 = 0;
         }
 
     } else if (sysnum == SYS_newfstatat) {
         /* newfstatat(AT_FDCWD, path, struct stat *, flags) */
-        const char *path = (const char *)tf->a1;
-        uint8_t *st = (uint8_t *)tf->a2;
-        if (!path || !st) {
+        if (!tf->a1 || !tf->a2) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
+        char kpath[256];
+        if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
+            tf->a0 = (uint64_t)-14; /* -EFAULT */
+            goto syscall_done;
+        }
         char resolved[256];
-        resolve_path(current_proc->cwd, path, resolved);
+        resolve_path(current_proc->cwd, kpath, resolved);
 
         /* Dispatch through VFS */
         const char *relpath;
         struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
         if (ops && ops->stat) {
-            int ret = ops->stat(relpath, st);
+            uint8_t kstat[128];
+            int ret = ops->stat(relpath, kstat);
+            if (ret == 0) {
+                if (copyout(current_proc->pagetable, tf->a2, kstat, 128) < 0) {
+                    tf->a0 = (uint64_t)-14;
+                    goto syscall_done;
+                }
+            }
             tf->a0 = (uint64_t)(int64_t)ret;
         } else {
             tf->a0 = (uint64_t)-1;
@@ -1588,16 +1667,13 @@ pipe_eof:
                         f->offset = (int64_t)(-(1024 + mi + 1));
                     }
                 }
-                /* Copy kernel buffer to user space page-by-page via walk() */
-                uint64_t done = 0;
-                while (done < written) {
-                    pte_t *pte = walk(current_proc->pagetable, ubuf_va + done, 0);
-                    if (!pte || !(*pte & PTE_V)) break;
-                    uint64_t pa = PTE2PA(*pte) + ((ubuf_va + done) & 0xFFF);
-                    uint64_t chunk = 4096 - ((ubuf_va + done) & 0xFFF);
-                    if (chunk > written - done) chunk = written - done;
-                    memcpy((char *)pa, kbuf + done, chunk);
-                    done += chunk;
+                /* Copy kernel buffer to user space */
+                if (written > 0) {
+                    if (copyout(current_proc->pagetable, ubuf_va, kbuf, written) < 0) {
+                        kfree(kbuf);
+                        tf->a0 = (uint64_t)-14;
+                        goto syscall_done;
+                    }
                 }
                 kfree(kbuf);
                 tf->a0 = (uint64_t)written;
@@ -1613,11 +1689,9 @@ pipe_eof:
          * One timer tick = 1 second (TIMER_FREQ = 10 MHz). */
         uint64_t req_uaddr = tf->a0;
         if (req_uaddr && current_proc) {
-            pte_t *pte = walk(current_proc->pagetable, req_uaddr, 0);
-            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-                uint64_t pa = PTE2PA(*pte) + (req_uaddr & 0xFFF);
-                uint64_t *req = (uint64_t *)pa;
-                uint64_t secs = req[0]; /* tv_sec */
+            uint64_t kreq[2];
+            if (copyin(current_proc->pagetable, kreq, req_uaddr, 16) == 0) {
+                uint64_t secs = kreq[0]; /* tv_sec */
                 current_proc->sleep_until     = ticks + secs;
                 current_proc->waiting_for_uart = 2;
                 current_proc->state           = SLEEPING;
@@ -1730,10 +1804,11 @@ pipe_eof:
         /* ps(struct ps_entry *buf, int maxentries) -> number of entries written
          * struct ps_entry { int32_t pid; int32_t ppid; char state; char name[15]; }
          * = 20 bytes, padded to 24 for alignment. */
-        uint8_t *buf      = (uint8_t *)tf->a0;
         int      maxn     = (int)tf->a1;
         int      written  = 0;
-        if (buf && maxn > 0) {
+        if (tf->a0 && maxn > 0) {
+            /* Build entries in a kernel buffer, then copyout */
+            uint8_t kps[64 * 24]; /* max 64 procs * 24 bytes each */
             for (struct proc *p = proc; p < &proc[64]; p++) {
                 if (p->state == UNUSED) continue;
                 if (written >= maxn) break;
@@ -1746,7 +1821,7 @@ pipe_eof:
                     case ZOMBIE:    st = 'Z'; break;
                     default:        st = '?'; break;
                 }
-                uint8_t *e = buf + written * 24;
+                uint8_t *e = kps + written * 24;
                 int32_t pid_  = (int32_t)p->pid;
                 int32_t ppid_ = (int32_t)(p->parent ? p->parent->pid : 0);
                 memset(e, 0, 24);
@@ -1758,6 +1833,12 @@ pipe_eof:
                 if (nl > 15) nl = 15;
                 memcpy(e + 9, p->name, nl);
                 written++;
+            }
+            if (written > 0) {
+                if (copyout(current_proc->pagetable, tf->a0, kps, (uint64_t)written * 24) < 0) {
+                    tf->a0 = (uint64_t)-14;
+                    goto syscall_done;
+                }
             }
         }
         tf->a0 = (uint64_t)written;
@@ -1776,10 +1857,9 @@ pipe_eof:
                 if (argp) {
                     /* Write a default 80x24 winsize struct to user memory */
                     struct { uint16_t row, col, xpix, ypix; } ws = {24, 80, 0, 0};
-                    pte_t *pte = walk(current_proc->pagetable, argp, 0);
-                    if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-                        uint64_t pa = PTE2PA(*pte) + (argp & 0xFFF);
-                        memcpy((void *)pa, &ws, sizeof(ws));
+                    if (copyout(current_proc->pagetable, argp, &ws, sizeof(ws)) < 0) {
+                        tf->a0 = (uint64_t)-14;
+                        goto syscall_done;
                     }
                 }
                 tf->a0 = 0; /* success - it IS a terminal */
@@ -1793,12 +1873,23 @@ pipe_eof:
         } else if (request >= TCGETS && request <= TCSETSF) {
             /* termios get/set -- only valid for terminal fds */
             if (fd >= 0 && fd <= 2) {
-                pte_t *pte = walk(current_proc->pagetable, argp, 0);
-                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-                    uint64_t pa = PTE2PA(*pte) + (argp & 0xFFF);
-                    tf->a0 = (uint64_t)tty_ioctl(request, (void *)pa);
-                } else {
-                    tf->a0 = (uint64_t)-14; /* -EFAULT */
+                /* For TCGETS (read), read into kbuf, call tty_ioctl, copyout.
+                 * For TCSETS* (write), copyin, call tty_ioctl. */
+                char ktermios[128]; /* termios struct ~60 bytes, generous buffer */
+                memset(ktermios, 0, sizeof(ktermios));
+                if (request != TCGETS && argp) {
+                    /* Write operation: copy user data in first */
+                    if (copyin(current_proc->pagetable, ktermios, argp, 60) < 0) {
+                        tf->a0 = (uint64_t)-14;
+                        goto syscall_done;
+                    }
+                }
+                tf->a0 = (uint64_t)tty_ioctl(request, (void *)ktermios);
+                if (request == TCGETS && argp) {
+                    if (copyout(current_proc->pagetable, argp, ktermios, 60) < 0) {
+                        tf->a0 = (uint64_t)-14;
+                        goto syscall_done;
+                    }
                 }
             } else {
                 tf->a0 = (uint64_t)-25; /* -ENOTTY */
@@ -1828,10 +1919,9 @@ pipe_eof:
                 old.flags = sig_sa[signum].flags;
                 old.pad = 0;
                 old.restorer = sig_sa[signum].restorer;
-                pte_t *pte = walk(current_proc->pagetable, oldact_uaddr, 0);
-                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-                    uint64_t pa = PTE2PA(*pte) + (oldact_uaddr & 0xFFF);
-                    memcpy((void *)pa, &old, sizeof(old));
+                if (copyout(current_proc->pagetable, oldact_uaddr, &old, sizeof(old)) < 0) {
+                    tf->a0 = (uint64_t)-14;
+                    goto syscall_done;
                 }
             }
             /* Install new action if provided */
@@ -1840,15 +1930,14 @@ pipe_eof:
                     uint64_t handler; uint64_t mask;
                     int flags; int pad; uint64_t restorer;
                 } act;
-                pte_t *pte = walk(current_proc->pagetable, act_uaddr, 0);
-                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-                    uint64_t pa = PTE2PA(*pte) + (act_uaddr & 0xFFF);
-                    memcpy(&act, (void *)pa, sizeof(act));
-                    sig_sa[signum].handler = act.handler;
-                    sig_sa[signum].mask = act.mask;
-                    sig_sa[signum].flags = act.flags;
-                    sig_sa[signum].restorer = act.restorer;
+                if (copyin(current_proc->pagetable, &act, act_uaddr, sizeof(act)) < 0) {
+                    tf->a0 = (uint64_t)-14;
+                    goto syscall_done;
                 }
+                sig_sa[signum].handler = act.handler;
+                sig_sa[signum].mask = act.mask;
+                sig_sa[signum].flags = act.flags;
+                sig_sa[signum].restorer = act.restorer;
             }
             tf->a0 = 0;
         }
@@ -1862,19 +1951,17 @@ pipe_eof:
         /* Return old mask if requested */
         if (oldset_uaddr) {
             uint64_t oldmask = current_proc->sigmask;
-            pte_t *pte = walk(current_proc->pagetable, oldset_uaddr, 0);
-            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-                uint64_t pa = PTE2PA(*pte) + (oldset_uaddr & 0xFFF);
-                memcpy((void *)pa, &oldmask, sizeof(oldmask));
+            if (copyout(current_proc->pagetable, oldset_uaddr, &oldmask, sizeof(oldmask)) < 0) {
+                tf->a0 = (uint64_t)-14;
+                goto syscall_done;
             }
         }
         /* Apply new mask if provided */
         if (set_uaddr) {
             uint64_t newset = 0;
-            pte_t *pte = walk(current_proc->pagetable, set_uaddr, 0);
-            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-                uint64_t pa = PTE2PA(*pte) + (set_uaddr & 0xFFF);
-                memcpy(&newset, (void *)pa, sizeof(newset));
+            if (copyin(current_proc->pagetable, &newset, set_uaddr, sizeof(newset)) < 0) {
+                tf->a0 = (uint64_t)-14;
+                goto syscall_done;
             }
             if (how == 0) /* SIG_BLOCK */
                 current_proc->sigmask |= newset;
@@ -1893,12 +1980,10 @@ pipe_eof:
         /* Read saved trapframe from user stack */
         struct trapframe saved;
         memset(&saved, 0, sizeof(saved));
-        for (uint64_t off = 0; off < sizeof(struct trapframe); off += 8) {
-            pte_t *pte = walk(current_proc->pagetable, usp + off, 0);
-            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-                uint64_t pa = PTE2PA(*pte) + ((usp + off) & 0xFFF);
-                *(uint64_t *)((char *)&saved + off) = *(uint64_t *)pa;
-            }
+        if (copyin(current_proc->pagetable, &saved, usp, sizeof(saved)) < 0) {
+            /* Can't restore -- kill the process */
+            tf->a0 = (uint64_t)-14;
+            goto syscall_done;
         }
 
         /* Restore the original trapframe */
@@ -1913,13 +1998,12 @@ pipe_eof:
         if (tv_uaddr) {
             int64_t sec, nsec;
             get_wall_time(&sec, &nsec);
-            struct { int64_t sec; int64_t usec; } tv;
-            tv.sec = sec;
-            tv.usec = nsec / 1000; /* ns -> us */
-            pte_t *pte = walk(current_proc->pagetable, tv_uaddr, 0);
-            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-                uint64_t pa = PTE2PA(*pte) + (tv_uaddr & 0xFFF);
-                memcpy((void *)pa, &tv, sizeof(tv));
+            struct { int64_t sec; int64_t usec; } ktv;
+            ktv.sec = sec;
+            ktv.usec = nsec / 1000; /* ns -> us */
+            if (copyout(current_proc->pagetable, tv_uaddr, &ktv, sizeof(ktv)) < 0) {
+                tf->a0 = (uint64_t)-14;
+                goto syscall_done;
             }
         }
         tf->a0 = 0;
@@ -1944,15 +2028,15 @@ pipe_eof:
 
     } else if (sysnum == SYS_faccessat) {
         /* faccessat(dirfd, pathname, mode, flags) */
-        const char *path = (const char *)tf->a1;
-        if (!path) {
-            tf->a0 = (uint64_t)-2; /* -ENOENT */
+        char kpath[256];
+        if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
+            tf->a0 = (uint64_t)-14; /* -EFAULT */
             goto syscall_done;
         }
 
         /* Resolve path against cwd */
         char resolved[256];
-        resolve_path(current_proc->cwd, path, resolved);
+        resolve_path(current_proc->cwd, kpath, resolved);
 
         /* Check via VFS stat */
         const char *relpath;
@@ -1967,13 +2051,15 @@ pipe_eof:
 
     } else if (sysnum == SYS_unlinkat) {
         /* unlinkat(AT_FDCWD, path, flags) */
-        const char *upath = (const char *)tf->a1;
         int flags = (int)tf->a2;
-        if (!upath) {
-            tf->a0 = (uint64_t)-1;
-        } else {
+        char kpath[256];
+        if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
+            tf->a0 = (uint64_t)-14; /* -EFAULT */
+            goto syscall_done;
+        }
+        {
             char resolved[256];
-            resolve_path(current_proc->cwd, upath, resolved);
+            resolve_path(current_proc->cwd, kpath, resolved);
             const char *relpath;
             struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
             if (flags & 0x200) { /* AT_REMOVEDIR */
@@ -2001,13 +2087,15 @@ pipe_eof:
 
     } else if (sysnum == SYS_mkdirat) {
         /* mkdirat(AT_FDCWD, path, mode) */
-        const char *upath = (const char *)tf->a1;
         int mode = (int)tf->a2;
-        if (!upath) {
-            tf->a0 = (uint64_t)-1;
-        } else {
+        char kpath[256];
+        if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
+            tf->a0 = (uint64_t)-14; /* -EFAULT */
+            goto syscall_done;
+        }
+        {
             char resolved[256];
-            resolve_path(current_proc->cwd, upath, resolved);
+            resolve_path(current_proc->cwd, kpath, resolved);
             const char *relpath;
             struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
             if (ops && ops->mkdir) {
@@ -2020,14 +2108,16 @@ pipe_eof:
 
     } else if (sysnum == SYS_mknodat) {
         /* mknodat(AT_FDCWD, path, mode, dev) */
-        const char *upath = (const char *)tf->a1;
         uint32_t mode = (uint32_t)tf->a2;
         uint32_t rdev = (uint32_t)tf->a3;
-        if (!upath) {
-            tf->a0 = (uint64_t)-1;
-        } else {
+        char kpath[256];
+        if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
+            tf->a0 = (uint64_t)-14; /* -EFAULT */
+            goto syscall_done;
+        }
+        {
             char resolved[256];
-            resolve_path(current_proc->cwd, upath, resolved);
+            resolve_path(current_proc->cwd, kpath, resolved);
             const char *relpath;
             struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
             if (ops == &ext2_ops) {
@@ -2062,48 +2152,69 @@ pipe_eof:
         if (!f || iovcnt < 0) {
             tf->a0 = (uint64_t)-9; /* -EBADF */
         } else {
-            /* Translate iovec array pointer */
-            pte_t *iov_pte = walk(current_proc->pagetable, iov_uaddr, 0);
-            if (!iov_pte || !(*iov_pte & PTE_V)) { tf->a0 = (uint64_t)-14; goto syscall_done; }
-            struct { uint64_t base; uint64_t len; } *iov = (void *)(PTE2PA(*iov_pte) + (iov_uaddr & 0xFFF));
+            if (iovcnt > 16) iovcnt = 16;
+            /* Copy iovec array from user space */
+            struct { uint64_t base; uint64_t len; } kiov[16];
+            if (copyin(current_proc->pagetable, kiov, iov_uaddr, iovcnt * 16) < 0) {
+                tf->a0 = (uint64_t)-14;
+                goto syscall_done;
+            }
             int64_t total = 0;
             for (int i = 0; i < iovcnt; i++) {
-                uint64_t buf_uaddr = iov[i].base;
-                uint64_t len = iov[i].len;
+                uint64_t buf_uaddr = kiov[i].base;
+                uint64_t len = kiov[i].len;
                 if (len == 0) continue;
-                /* Translate buffer pointer */
-                char *base;
-                if (buf_uaddr) {
-                    pte_t *bpte = walk(current_proc->pagetable, buf_uaddr, 0);
-                    if (!bpte || !(*bpte & PTE_V)) { if (total == 0) total = -14; break; }
-                    base = (char *)(PTE2PA(*bpte) + (buf_uaddr & 0xFFF));
-                } else {
+                if (!buf_uaddr) {
                     if (total == 0) total = -14;
                     break;
                 }
                 if (f->is_pipe) {
                     int pid = f->pipe_id;
                     if (pid < 0 || !f->pipe_write) { total = -9; break; }
-                    for (uint64_t j = 0; j < len; j++) {
-                        while (pipe_avail(pid) >= PIPE_BUF) {
-                            if (!pipes[pid].read_open) break;
-                            current_proc->state = SLEEPING;
-                            swtch(&current_proc->context, &scheduler_context);
+                    char kchunk[512];
+                    uint64_t done = 0;
+                    while (done < len) {
+                        uint64_t clen = len - done;
+                        if (clen > sizeof(kchunk)) clen = sizeof(kchunk);
+                        if (copyin(current_proc->pagetable, kchunk, buf_uaddr + done, clen) < 0) {
+                            if (total == 0) total = -14;
+                            goto writev_out;
                         }
-                        if (!pipes[pid].read_open) break;
-                        pipes[pid].buf[pipes[pid].wpos % PIPE_BUF] = base[j];
-                        pipes[pid].wpos++;
+                        for (uint64_t j = 0; j < clen; j++) {
+                            while (pipe_avail(pid) >= PIPE_BUF) {
+                                if (!pipes[pid].read_open) break;
+                                current_proc->state = SLEEPING;
+                                swtch(&current_proc->context, &scheduler_context);
+                            }
+                            if (!pipes[pid].read_open) break;
+                            pipes[pid].buf[pipes[pid].wpos % PIPE_BUF] = kchunk[j];
+                            pipes[pid].wpos++;
+                        }
+                        done += clen;
                     }
                     total += (int64_t)len;
                 } else if (f->ops && f->ops->write) {
-                    int64_t n = f->ops->write(f->private, base, len, &f->offset);
-                    if (n < 0) { if (total == 0) total = n; break; }
-                    total += n;
+                    char kchunk[512];
+                    uint64_t done = 0;
+                    while (done < len) {
+                        uint64_t clen = len - done;
+                        if (clen > sizeof(kchunk)) clen = sizeof(kchunk);
+                        if (copyin(current_proc->pagetable, kchunk, buf_uaddr + done, clen) < 0) {
+                            if (total == 0) total = -14;
+                            goto writev_out;
+                        }
+                        int64_t n = f->ops->write(f->private, kchunk, clen, &f->offset);
+                        if (n < 0) { if (total == 0) total = n; goto writev_out; }
+                        total += n;
+                        done += n;
+                        if ((uint64_t)n < clen) break;
+                    }
                 } else {
                     if (total == 0) total = -9;
                     break;
                 }
             }
+writev_out:
             tf->a0 = (uint64_t)total;
         }
 
@@ -2116,22 +2227,19 @@ pipe_eof:
         if (!f || iovcnt < 0) {
             tf->a0 = (uint64_t)-9; /* -EBADF */
         } else {
-            /* Translate iovec array pointer */
-            pte_t *iov_pte = walk(current_proc->pagetable, iov_uaddr, 0);
-            if (!iov_pte || !(*iov_pte & PTE_V)) { tf->a0 = (uint64_t)-14; goto syscall_done; }
-            struct { uint64_t base; uint64_t len; } *iov = (void *)(PTE2PA(*iov_pte) + (iov_uaddr & 0xFFF));
+            if (iovcnt > 16) iovcnt = 16;
+            /* Copy iovec array from user space */
+            struct { uint64_t base; uint64_t len; } kiov[16];
+            if (copyin(current_proc->pagetable, kiov, iov_uaddr, iovcnt * 16) < 0) {
+                tf->a0 = (uint64_t)-14;
+                goto syscall_done;
+            }
             int64_t total = 0;
             for (int i = 0; i < iovcnt; i++) {
-                uint64_t buf_uaddr = iov[i].base;
-                uint64_t len = iov[i].len;
+                uint64_t buf_uaddr = kiov[i].base;
+                uint64_t len = kiov[i].len;
                 if (len == 0) continue;
-                /* Translate buffer pointer */
-                char *base;
-                if (buf_uaddr) {
-                    pte_t *bpte = walk(current_proc->pagetable, buf_uaddr, 0);
-                    if (!bpte || !(*bpte & PTE_V)) { if (total == 0) total = -14; break; }
-                    base = (char *)(PTE2PA(*bpte) + (buf_uaddr & 0xFFF));
-                } else {
+                if (!buf_uaddr) {
                     if (total == 0) total = -14;
                     break;
                 }
@@ -2142,22 +2250,46 @@ pipe_eof:
                         current_proc->state = SLEEPING;
                         swtch(&current_proc->context, &scheduler_context);
                     }
-                    uint64_t j;
-                    for (j = 0; j < len && pipe_avail(pid) > 0; j++) {
-                        base[j] = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
-                        pipes[pid].rpos++;
+                    char kchunk[512];
+                    uint64_t j = 0;
+                    while (j < len && pipe_avail(pid) > 0) {
+                        uint64_t clen = len - j;
+                        if (clen > sizeof(kchunk)) clen = sizeof(kchunk);
+                        uint64_t k;
+                        for (k = 0; k < clen && pipe_avail(pid) > 0; k++) {
+                            kchunk[k] = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
+                            pipes[pid].rpos++;
+                        }
+                        if (k > 0 && copyout(current_proc->pagetable, buf_uaddr + j, kchunk, k) < 0) {
+                            if (total == 0) total = -14;
+                            goto readv_out;
+                        }
+                        j += k;
                     }
                     total += (int64_t)j;
                 } else if (f->ops && f->ops->read) {
-                    int64_t n = f->ops->read(f->private, base, len, &f->offset);
-                    if (n < 0) { if (total == 0) total = n; break; }
-                    total += n;
-                    if (n < (int64_t)len) break; /* short read */
+                    char kchunk[512];
+                    uint64_t done = 0;
+                    while (done < len) {
+                        uint64_t clen = len - done;
+                        if (clen > sizeof(kchunk)) clen = sizeof(kchunk);
+                        int64_t n = f->ops->read(f->private, kchunk, clen, &f->offset);
+                        if (n < 0) { if (total == 0) total = n; goto readv_out; }
+                        if (n == 0) break;
+                        if (copyout(current_proc->pagetable, buf_uaddr + done, kchunk, n) < 0) {
+                            if (total == 0) total = -14;
+                            goto readv_out;
+                        }
+                        total += n;
+                        done += n;
+                        if ((uint64_t)n < clen) break; /* short read */
+                    }
                 } else {
                     if (total == 0) total = -9;
                     break;
                 }
             }
+readv_out:
             tf->a0 = (uint64_t)total;
         }
 
@@ -2177,10 +2309,9 @@ pipe_eof:
                 rlim[0] = 0xFFFFFFFFFFFFFFFFULL;
                 rlim[1] = 0xFFFFFFFFFFFFFFFFULL;
             }
-            pte_t *pte = walk(current_proc->pagetable, old_uaddr, 0);
-            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
-                uint64_t pa = PTE2PA(*pte) + (old_uaddr & 0xFFF);
-                memcpy((void *)pa, rlim, 16);
+            if (copyout(current_proc->pagetable, old_uaddr, rlim, 16) < 0) {
+                tf->a0 = (uint64_t)-14;
+                goto syscall_done;
             }
         }
         tf->a0 = 0;
@@ -2194,17 +2325,15 @@ pipe_eof:
             uint64_t state = r_time();
             uint64_t done = 0;
             while (done < buflen) {
-                /* Translate user VA to kernel PA, one page at a time */
-                pte_t *pte = walk(current_proc->pagetable, uaddr + done, 0);
-                if (!pte || !(*pte & PTE_V)) break;
-                uint64_t pa = PTE2PA(*pte) + ((uaddr + done) & 0xFFF);
-                uint64_t chunk = 4096 - ((uaddr + done) & 0xFFF);
-                if (chunk > buflen - done) chunk = buflen - done;
-                char *kbuf = (char *)pa;
+                char krbuf[512];
+                uint64_t chunk = buflen - done;
+                if (chunk > sizeof(krbuf)) chunk = sizeof(krbuf);
                 for (uint64_t i = 0; i < chunk; i++) {
                     state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-                    kbuf[i] = (char)(state >> 33);
+                    krbuf[i] = (char)(state >> 33);
                 }
+                if (copyout(current_proc->pagetable, uaddr + done, krbuf, chunk) < 0)
+                    break;
                 done += chunk;
             }
         }
