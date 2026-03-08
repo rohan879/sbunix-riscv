@@ -285,7 +285,7 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Super pages — Sv39 2MB megapages for kernel identity maps; `walk()` detects level-1 leaf PTEs; COW fork splits to 4KB
 - [x] On-disk read/write file system — ext2-lite over virtio-blk (`kernel/ext2.c`); mounted at `/disk`; open/read/write/mkdir/unlink
 - [x] On-disk swap and paging — clock eviction in `kernel/swap.c`; 1024 swap slots at end of disk; swap-in on page fault
-- [ ] TCP/IP networking via lwIP
+- [ ] TCP/IP networking via lwIP (see detailed plan below)
 - [ ] Multi-core support
 
 ### Remaining Fixes
@@ -316,7 +316,7 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Job Control Shell — sbush with sessions (`setsid`), process groups (`setpgid`/`tcsetpgrp`), fg/bg/jobs builtins
 - [x] Pipes — bidirectional pipe2 syscall; shell pipelines work across processes
 - [x] Limit System — `prlimit64` handles RLIMIT_STACK (8MB) and RLIMIT_NOFILE (16); libc getrlimit/setrlimit wrappers
-- [ ] Networks — no TCP/IP stack; lwIP integration not started
+- [ ] Networks — no TCP/IP stack; lwIP integration not started (see detailed plan below)
 - [x] getrandom — LCG PRNG seeded from RTC via `r_time()`; functional but not cryptographically secure
   - **Note:** Implemented in commit `d72182c` (`kernel/trap.c`, SYS_getrandom handler). Uses a simple linear congruential generator — sufficient for test harnesses and non-security uses, but does not meet POSIX `getentropy()`/`getrandom()` entropy requirements. A hardware RNG or entropy pool would be needed for real crypto.
 
@@ -324,7 +324,49 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 
 - [ ] Add WFI to scheduler idle loop — execute `wfi` instruction when no RUNNABLE process exists to reduce CPU usage
 - [ ] Implement procfs (`/proc`) — virtual filesystem exposing per-PID directories with at least `status`, `cmdline`; mount at `/proc` in `vfs_init()`
-- [ ] TCP/IP networking via lwIP — integrate lwIP stack with virtio-net driver
+- [ ] TCP/IP networking via lwIP (3 layers, detailed below)
+
+### TCP/IP Networking Plan (lwIP + virtio-net)
+
+QEMU already provides `virtio-net-pci-non-transitional` with user-mode networking (`-netdev user`). The device is present on the PCI bus but no kernel driver initializes it.
+
+**Existing infrastructure that lwIP can reuse:**
+- PCI ECAM enumeration — working in `kernel/virtio_blk.c`; virtio-net uses the same pattern (device ID `0x1041` vs `0x1042`)
+- `kmalloc()`/`kalloc()` — lwIP needs malloc/free for packet buffers and control blocks
+- PLIC interrupt routing — already working for UART; virtio-net RX interrupt follows same path
+- Kernel `string.h` — memcpy, memset, strlen already implemented (lwIP requires these)
+- Timer tick counter — `ticks` global incremented by timer interrupt; lwIP needs millisecond time
+
+**Layer 1: virtio-net driver** (`kernel/virtio_net.c`)
+- [ ] Clone virtio-blk PCI discovery; scan for device ID `0x1041` (virtio-net non-transitional)
+- [ ] Set up 2 virtqueues: RX (queue 0) and TX (queue 1), vs 1 for virtio-blk
+- [ ] Negotiate features: `VIRTIO_NET_F_MAC` (bit 5) to read MAC address from device config
+- [ ] Pre-post RX buffers (descriptor chain with virtio-net header + packet data)
+- [ ] TX path: format virtio-net header + ethernet frame, submit to TX virtqueue
+- [ ] RX interrupt handler: claim from PLIC, dequeue completed RX buffers, feed to lwIP `netif->input()`
+- [ ] Expose `virtio_net_send(buf, len)` and `virtio_net_init()` to kernel
+
+**Layer 2: lwIP platform port** (`kernel/lwip/`)
+- [ ] `lwipopts.h` — configure for NO_SYS=1 (no threading), MEM_SIZE, PBUF pool sizes, enable TCP/UDP/DHCP
+- [ ] `cc.h` / `arch.h` — type mappings (`u8_t`=`uint8_t`, etc.), `PACK_STRUCT_*` macros, `LWIP_PLATFORM_DIAG` → `printk`
+- [ ] `sys_arch.c` — `sys_now()` returns milliseconds from tick counter; no mutex/semaphore needed (NO_SYS=1)
+- [ ] Memory hooks: `mem_malloc`/`mem_free` → wrap `kmalloc`/`kmfree`; or use lwIP's internal allocator with a static pool from `kalloc()`
+- [ ] `netif` driver: register with `netif_add()`, set `linkoutput` → `virtio_net_send()`, call `ethernet_input()` from RX interrupt
+- [ ] Call `sys_check_timeouts()` from timer tick to drive lwIP timers (ARP, TCP retransmit, DHCP)
+- [ ] Build lwIP sources with cross-compiler flags (`-ffreestanding -nostdinc -mcmodel=medany`)
+
+**Layer 3: Socket syscalls** (kernel/trap.c + libc)
+- [ ] Kernel side: add syscall handlers for `SYS_socket` (198), `SYS_bind` (200), `SYS_listen` (201), `SYS_accept` (202), `SYS_connect` (203), `SYS_sendto` (206), `SYS_recvfrom` (207), `SYS_setsockopt` (208), `SYS_getsockopt` (209)
+- [ ] Dispatch to lwIP's sequential API: `lwip_socket()`, `lwip_bind()`, `lwip_connect()`, `lwip_send()`, `lwip_recv()`
+- [ ] Map lwIP socket fds into the per-process open file table (new `struct open_file` type)
+- [ ] Libc headers: `sys/socket.h`, `netinet/in.h`, `arpa/inet.h` with socket wrappers
+
+**Validation:**
+- [ ] Milestone 1: `virtio_net_init()` prints MAC address at boot — confirms PCI discovery works
+- [ ] Milestone 2: DHCP acquires IP from QEMU's built-in DHCP server (10.0.2.x)
+- [ ] Milestone 3: `ping 10.0.2.2` (QEMU gateway) from kernel — confirms ICMP round-trip
+- [ ] Milestone 4: Userspace UDP echo client/server
+- [ ] Milestone 5: Userspace TCP connect to host via QEMU port forwarding
 
 ## Grading Targets
 
