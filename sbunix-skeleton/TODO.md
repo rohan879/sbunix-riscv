@@ -190,13 +190,21 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] `SYS_ioctl` (29) — TIOCGWINSZ returns 80x24, TIOCGPGRP/TIOCSPGRP handled, unknown → -ENOTTY
 - [x] `SYS_rt_sigaction` (134) — stores/retrieves sigaction per process, rejects SIGKILL/SIGSTOP
 - [x] `SYS_rt_sigprocmask` (135) — SIG_BLOCK/SIG_UNBLOCK/SIG_SETMASK on `proc->sigmask`
-- [x] `SYS_gettimeofday` (169) — kernel `ticks` → `tv_sec`, `tv_usec=0`
+- [x] `SYS_gettimeofday` (169) — Goldfish RTC epoch time via get_wall_time()
+- [x] `SYS_clock_gettime` (113) — epoch time + VA translation via walk()
 - [x] `SYS_fcntl` (25) — F_GETFD/F_SETFD/F_GETFL/F_SETFL stubs
 - [x] `SYS_faccessat` (48) — resolves path in tarfs, returns 0 or -ENOENT
 - [x] `SYS_unlinkat` (35), `SYS_linkat` (37), `SYS_renameat2` (276), `SYS_mkdirat` (34) — return -EROFS
 - [x] `SYS_umask` (166) — returns 022
 - [x] `execve` envp fix — copies envp strings before destroying old page table
 - [x] `SYS_alarm` (200) — custom syscall; sets `proc->alarm_ticks`, returns remaining seconds from previous alarm
+- [x] `SYS_geteuid` (175), `SYS_getegid` (177) — return 0 (root)
+- [x] `SYS_set_tid_address` (96) — returns current pid
+- [x] `SYS_readlinkat` (78) — returns -ENOENT (no symlinks)
+- [x] `SYS_getrandom` (278) — LCG PRNG seeded from r_time()
+- [x] `SYS_writev` (66), `SYS_readv` (65) — basic iovec iteration (partial, see Remaining Fixes)
+- [x] `SYS_prlimit64` (261) — returns -ENOSYS stub
+- [x] `SYS_setpgid` (154), `SYS_getpgid` (155), `SYS_setsid` (157), `SYS_getsid` (156) — pid-returning stubs
 
 ## Kernel Architecture Features
 
@@ -248,6 +256,16 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] On-disk swap and paging — clock eviction in `kernel/swap.c`; 1024 swap slots at end of disk; swap-in on page fault
 - [ ] TCP/IP networking via lwIP
 - [ ] Multi-core support
+
+### Remaining Fixes
+
+- [ ] writev/readv VA translation — iovec pointers not validated via walk(); pipe wake logic incomplete
+- [ ] getrandom — trivial LCG PRNG, not cryptographically secure
+- [ ] prlimit64 — returns -ENOSYS; needs RLIMIT_STACK/RLIMIT_NOFILE handling
+- [ ] Process groups — setpgid/getpgid/setsid/getsid are stubs returning pid; no actual pgid tracking in struct proc
+- [ ] Libc errno handling — only open() sets errno; read/write/close/stat/etc. return raw negative codes
+- [ ] nanosleep VA translation — reads user timespec pointer directly without walk()
+- [ ] Ext2 timestamps — ext2_stat/ext2_fstat don't populate st_atime/st_mtime/st_ctime; ext2_inode_mem lacks timestamp fields
 
 ## Grading Targets
 
