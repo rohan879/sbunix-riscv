@@ -103,6 +103,8 @@ void vfs_init(void) {
 
   /* Register devfs at /dev first (longer prefix wins) */
   vfs_register_mount("/dev", &devfs_ops);
+  /* Register procfs at /proc */
+  vfs_register_mount("/proc", &procfs_ops);
   /* Register ext2 at /disk (if mounted) */
   extern int ext2_mounted_flag(void);
   if (ext2_mounted_flag())
@@ -110,5 +112,5 @@ void vfs_init(void) {
   /* Register tarfs at / (root) */
   vfs_register_mount("/", &tarfs_ops);
 
-  printk("vfs: initialized (/dev -> devfs, / -> tarfs)\n");
+  printk("vfs: initialized (/dev -> devfs, /proc -> procfs, / -> tarfs)\n");
 }
