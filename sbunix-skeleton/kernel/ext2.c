@@ -233,6 +233,8 @@ static struct ext2_inode_mem *icache_get(uint32_t ino) {
           memcpy(di.direct, icache[i].direct, sizeof(di.direct));
           di.indirect = icache[i].indirect;
           di.mode = icache[i].mode;
+          di.ctime = icache[i].ctime;
+          di.mtime = icache[i].mtime;
           ext2_write_dinode(icache[i].ino, &di);
         }
         slot = i;
@@ -261,6 +263,8 @@ static struct ext2_inode_mem *icache_get(uint32_t ino) {
   memcpy(ip->direct, di.direct, sizeof(ip->direct));
   ip->indirect = di.indirect;
   ip->mode = di.mode;
+  ip->ctime = di.ctime;
+  ip->mtime = di.mtime;
   return ip;
 }
 
@@ -979,6 +983,12 @@ static int ext2_stat(const char *path, uint8_t *st) {
   memcpy(st + 48, &size, 8);
   memcpy(st + 56, &blksz, 4);
   memcpy(st + 64, &blks, 8);
+  /* timestamps */
+  int64_t mtime_sec = (int64_t)ip->mtime;
+  int64_t ctime_sec = (int64_t)ip->ctime;
+  memcpy(st + 72, &mtime_sec, 8);   /* st_atime_sec (use mtime as atime) */
+  memcpy(st + 88, &mtime_sec, 8);   /* st_mtime_sec */
+  memcpy(st + 104, &ctime_sec, 8);  /* st_ctime_sec */
 
   icache_release(ip);
   return 0;
@@ -1012,6 +1022,12 @@ static int ext2_fstat(void *private, uint8_t *st) {
   memcpy(st + 48, &size, 8);
   memcpy(st + 56, &blksz, 4);
   memcpy(st + 64, &blks, 8);
+  /* timestamps */
+  int64_t mtime_sec = (int64_t)ip->mtime;
+  int64_t ctime_sec = (int64_t)ip->ctime;
+  memcpy(st + 72, &mtime_sec, 8);   /* st_atime_sec (use mtime as atime) */
+  memcpy(st + 88, &mtime_sec, 8);   /* st_mtime_sec */
+  memcpy(st + 104, &ctime_sec, 8);  /* st_ctime_sec */
 
   icache_release(ip);
   return 0;

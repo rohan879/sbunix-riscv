@@ -120,6 +120,8 @@ struct ext2_inode_mem {
   uint32_t direct[12];
   uint32_t indirect;
   uint32_t mode;
+  uint64_t ctime;
+  uint64_t mtime;
 };
 
 /* ------------------------------------------------------------------ */
