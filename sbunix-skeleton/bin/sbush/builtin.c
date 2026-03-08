@@ -1,4 +1,162 @@
 #include "sbush.h"
+#include <sys/stat.h>
+
+/* -----------------------------------------------------------------------
+ * test / [ builtin — recursive descent evaluator
+ * ---------------------------------------------------------------------- */
+static char **t_argv;
+static int    t_argc;
+static int    t_pos;
+
+static const char *t_peek(void) {
+    if (t_pos < t_argc)
+        return t_argv[t_pos];
+    return NULL;
+}
+
+static const char *t_advance(void) {
+    if (t_pos < t_argc)
+        return t_argv[t_pos++];
+    return NULL;
+}
+
+static long str_to_long(const char *s) {
+    long val = 0;
+    int neg = 0;
+    if (*s == '-') { neg = 1; s++; }
+    else if (*s == '+') s++;
+    while (*s >= '0' && *s <= '9')
+        val = val * 10 + (*s++ - '0');
+    return neg ? -val : val;
+}
+
+static int eval_or(void);
+
+static int eval_primary(void) {
+    const char *tok = t_peek();
+    if (!tok) return 0; /* false */
+
+    /* parenthesized subexpression */
+    if (strcmp(tok, "(") == 0) {
+        t_advance();
+        int r = eval_or();
+        if (t_peek() && strcmp(t_peek(), ")") == 0)
+            t_advance();
+        return r;
+    }
+
+    /* unary operators */
+    if (strcmp(tok, "!") == 0) {
+        t_advance();
+        return !eval_primary();
+    }
+    if (strcmp(tok, "-n") == 0) {
+        t_advance();
+        const char *s = t_advance();
+        return s && s[0] != '\0';
+    }
+    if (strcmp(tok, "-z") == 0) {
+        t_advance();
+        const char *s = t_advance();
+        return !s || s[0] == '\0';
+    }
+
+    /* file test operators */
+    if (tok[0] == '-' && tok[1] != '\0' && tok[2] == '\0') {
+        char op = tok[1];
+        if (op == 'e' || op == 'f' || op == 'd' ||
+            op == 'r' || op == 'w' || op == 'x') {
+            t_advance();
+            const char *path = t_advance();
+            if (!path) return 0;
+            struct stat st;
+            if (stat(path, &st) < 0) return 0;
+            switch (op) {
+                case 'e': return 1;
+                case 'f': return S_ISREG(st.st_mode);
+                case 'd': return S_ISDIR(st.st_mode);
+                case 'r': return (st.st_mode & S_IRUSR) != 0;
+                case 'w': return (st.st_mode & S_IWUSR) != 0;
+                case 'x': return (st.st_mode & S_IXUSR) != 0;
+            }
+            return 0;
+        }
+    }
+
+    /* consume first operand */
+    t_advance();
+    const char *op = t_peek();
+    if (!op) {
+        /* bare string: true if non-empty */
+        return tok[0] != '\0';
+    }
+
+    /* binary string operators */
+    if (strcmp(op, "=") == 0 || strcmp(op, "==") == 0) {
+        t_advance();
+        const char *rhs = t_advance();
+        return rhs && strcmp(tok, rhs) == 0;
+    }
+    if (strcmp(op, "!=") == 0) {
+        t_advance();
+        const char *rhs = t_advance();
+        return !rhs || strcmp(tok, rhs) != 0;
+    }
+
+    /* binary integer operators */
+    if (strcmp(op, "-eq") == 0) { t_advance(); const char *r = t_advance(); return r && str_to_long(tok) == str_to_long(r); }
+    if (strcmp(op, "-ne") == 0) { t_advance(); const char *r = t_advance(); return r && str_to_long(tok) != str_to_long(r); }
+    if (strcmp(op, "-lt") == 0) { t_advance(); const char *r = t_advance(); return r && str_to_long(tok) < str_to_long(r); }
+    if (strcmp(op, "-le") == 0) { t_advance(); const char *r = t_advance(); return r && str_to_long(tok) <= str_to_long(r); }
+    if (strcmp(op, "-gt") == 0) { t_advance(); const char *r = t_advance(); return r && str_to_long(tok) > str_to_long(r); }
+    if (strcmp(op, "-ge") == 0) { t_advance(); const char *r = t_advance(); return r && str_to_long(tok) >= str_to_long(r); }
+
+    /* bare string (non-empty = true) */
+    return tok[0] != '\0';
+}
+
+static int eval_and(void) {
+    int result = eval_primary();
+    while (t_peek() && strcmp(t_peek(), "-a") == 0) {
+        t_advance();
+        int rhs = eval_primary();
+        result = result && rhs;
+    }
+    return result;
+}
+
+static int eval_or(void) {
+    int result = eval_and();
+    while (t_peek() && strcmp(t_peek(), "-o") == 0) {
+        t_advance();
+        int rhs = eval_and();
+        result = result || rhs;
+    }
+    return result;
+}
+
+static int builtin_test(struct command *cmd) {
+    int is_bracket = (strcmp(cmd->argv[0], "[") == 0);
+
+    t_argv = cmd->argv + 1;
+    t_argc = cmd->argc - 1;
+
+    /* [ requires closing ] */
+    if (is_bracket) {
+        if (t_argc == 0 || strcmp(t_argv[t_argc - 1], "]") != 0) {
+            dprintf(2, "sbush: [: missing ]\n");
+            return 2;
+        }
+        t_argc--; /* exclude ] */
+    }
+
+    if (t_argc == 0)
+        return 1; /* no args = false */
+
+    t_pos = 0;
+    int result = eval_or();
+    return result ? 0 : 1;
+}
 
 int is_builtin(const char *cmd) {
     return (strcmp(cmd, "cd") == 0 ||
@@ -6,6 +164,10 @@ int is_builtin(const char *cmd) {
             strcmp(cmd, "set") == 0 ||
             strcmp(cmd, "unset") == 0 ||
             strcmp(cmd, "shift") == 0 ||
+            strcmp(cmd, "test") == 0 ||
+            strcmp(cmd, "[") == 0 ||
+            strcmp(cmd, "true") == 0 ||
+            strcmp(cmd, "false") == 0 ||
             strcmp(cmd, "exit") == 0 ||
             strcmp(cmd, "jobs") == 0 ||
             strcmp(cmd, "fg") == 0 ||
@@ -68,6 +230,12 @@ int run_builtin(struct command *cmd) {
         positional_shift(n);
         return 0;
     }
+
+    if (strcmp(cmd->argv[0], "true") == 0) return 0;
+    if (strcmp(cmd->argv[0], "false") == 0) return 1;
+
+    if (strcmp(cmd->argv[0], "test") == 0 || strcmp(cmd->argv[0], "[") == 0)
+        return builtin_test(cmd);
 
     if (strcmp(cmd->argv[0], "exit") == 0) {
         int code = 0;
