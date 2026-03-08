@@ -1051,6 +1051,13 @@ pipe_eof:
             f->offset = 0;
             f->flags = flags;
             f->is_pipe = 0;
+            /* Store resolved path for mount-point injection in readdir */
+            {
+              int plen = strlen(resolved);
+              if (plen > 255) plen = 255;
+              memcpy(f->path, resolved, plen);
+              f->path[plen] = '\0';
+            }
             proc_ofile(current_proc)[fd] = f;
             tf->a0 = (uint64_t)fd;
         }
@@ -1530,7 +1537,42 @@ pipe_eof:
 
         if (f->ops && f->ops->readdir) {
             int ret = f->ops->readdir(f->private, ubuf, count, &f->offset);
-            tf->a0 = (uint64_t)(int64_t)ret;
+            if (ret < 0) {
+                tf->a0 = (uint64_t)(int64_t)ret;
+            } else {
+                /* Inject synthetic directory entries for child mount points.
+                 * Use a negative offset range (starting at -1024) to track
+                 * which mount entries we've already emitted. */
+                unsigned int written = (unsigned int)ret;
+                if (ret == 0 && f->offset >= 0) {
+                    /* Filesystem readdir exhausted; switch to mount injection phase */
+                    f->offset = -1024;
+                }
+                if (f->offset <= -1024) {
+                    const char *mnames[8];
+                    int nmounts = vfs_get_child_mounts(f->path, mnames, 8);
+                    int mstart = (int)(-(f->offset + 1024)); /* how many we've already emitted */
+                    for (int mi = mstart; mi < nmounts; mi++) {
+                        int nl = strlen(mnames[mi]);
+                        int rl = (19 + nl + 1 + 7) & ~7;
+                        if (written + (unsigned int)rl > count) break;
+                        char *d = ubuf + written;
+                        memset(d, 0, rl);
+                        uint64_t ino = (uint64_t)(5000 + mi);
+                        int64_t doff = (int64_t)(-(1024 + mi + 1));
+                        uint16_t rlen = (uint16_t)rl;
+                        uint8_t dt = 4; /* DT_DIR */
+                        memcpy(d + 0, &ino, 8);
+                        memcpy(d + 8, &doff, 8);
+                        memcpy(d + 16, &rlen, 2);
+                        memcpy(d + 18, &dt, 1);
+                        memcpy(d + 19, mnames[mi], nl + 1);
+                        written += (unsigned int)rl;
+                        f->offset = (int64_t)(-(1024 + mi + 1));
+                    }
+                }
+                tf->a0 = (uint64_t)written;
+            }
         } else {
             tf->a0 = (uint64_t)-1;
         }

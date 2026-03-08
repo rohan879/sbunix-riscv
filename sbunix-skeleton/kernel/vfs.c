@@ -94,6 +94,48 @@ void vfs_free_file(struct open_file *f) {
 }
 
 /* ------------------------------------------------------------------ */
+/* vfs_get_child_mounts — return basenames of mounts under dir         */
+/* ------------------------------------------------------------------ */
+int vfs_get_child_mounts(const char *dir, const char *names[], int max) {
+  int dlen = strlen(dir);
+  int count = 0;
+
+  for (int i = 0; i < num_mounts && count < max; i++) {
+    struct mount *m = &mount_table[i];
+    /* Skip root mount itself */
+    if (m->path_len <= 1) continue;
+
+    if (dlen == 1 && dir[0] == '/') {
+      /* Listing root: child mounts are those with path "/<name>" (no further /) */
+      if (m->path[0] == '/') {
+        const char *rest = m->path + 1;
+        /* Only direct children — no slash in rest */
+        int has_slash = 0;
+        for (const char *c = rest; *c; c++) {
+          if (*c == '/') { has_slash = 1; break; }
+        }
+        if (!has_slash && *rest != '\0')
+          names[count++] = rest;
+      }
+    } else {
+      /* Listing non-root dir: child mounts start with "dir/" */
+      if (m->path_len > dlen &&
+          memcmp(m->path, dir, dlen) == 0 &&
+          m->path[dlen] == '/') {
+        const char *rest = m->path + dlen + 1;
+        int has_slash = 0;
+        for (const char *c = rest; *c; c++) {
+          if (*c == '/') { has_slash = 1; break; }
+        }
+        if (!has_slash && *rest != '\0')
+          names[count++] = rest;
+      }
+    }
+  }
+  return count;
+}
+
+/* ------------------------------------------------------------------ */
 /* VFS init                                                             */
 /* ------------------------------------------------------------------ */
 void vfs_init(void) {
