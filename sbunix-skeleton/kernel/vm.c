@@ -133,6 +133,9 @@ void kvminit(void) {
     // UART registers: too small for super page, use 4KB
     kvmmap(0x10000000, 0x10000000, PAGE_SIZE, PTE_R | PTE_W);
 
+    // Goldfish RTC at 0x101000 (one 4KB page)
+    kvmmap(0x101000, 0x101000, PAGE_SIZE, PTE_R | PTE_W);
+
     // PCIe ECAM config space (0x30000000, 256 MiB) -- 2MB-aligned
     kvmmap_super(0x30000000, 0x30000000, 0x10000000, PTE_R | PTE_W);
 

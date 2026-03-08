@@ -16,9 +16,31 @@
 
 #define TIMER_FREQ 10000000UL  // 10 MHz timebase
 
+/* Goldfish RTC at 0x101000 (QEMU virt machine) */
+#define GOLDFISH_RTC_BASE 0x101000UL
+#define GOLDFISH_RTC_TIME_LOW  0x00
+#define GOLDFISH_RTC_TIME_HIGH 0x04
+
 static unsigned long boot_time;
 static unsigned long ticks;
+static uint64_t boot_epoch_ns;  /* RTC nanoseconds at boot */
 static unsigned char last_key = 0;
+
+static void rtc_init(void) {
+    volatile uint32_t *rtc = (volatile uint32_t *)GOLDFISH_RTC_BASE;
+    uint32_t lo = rtc[0];  /* TIME_LOW */
+    uint32_t hi = rtc[1];  /* TIME_HIGH */
+    boot_epoch_ns = ((uint64_t)hi << 32) | (uint64_t)lo;
+}
+
+/* Get current wall-clock time as {sec, nsec} */
+static void get_wall_time(int64_t *sec, int64_t *nsec) {
+    uint64_t elapsed_ticks = r_time() - boot_time;
+    uint64_t elapsed_ns = elapsed_ticks * 100; /* 10MHz -> ns */
+    uint64_t now_ns = boot_epoch_ns + elapsed_ns;
+    *sec  = (int64_t)(now_ns / 1000000000ULL);
+    *nsec = (int64_t)(now_ns % 1000000000ULL);
+}
 
 /* ------------------------------------------------------------------ */
 /* Kernel pipe table                                                    */
@@ -141,6 +163,7 @@ static inline void sbi_set_timer(unsigned long stime) {
 void timer_init(void) {
     boot_time = r_time();
     ticks = 0;
+    rtc_init();
     sbi_set_timer(r_time() + TIMER_FREQ);
 }
 
@@ -1375,15 +1398,24 @@ pipe_eof:
 
     } else if (sysnum == SYS_clock_gettime) {
         /* clock_gettime(clockid_t, struct timespec *)
-         * struct timespec: { int64_t tv_sec; int64_t tv_nsec; }
-         * We report ticks as seconds (each tick = 1s). */
-        int64_t *ts = (int64_t *)tf->a1;
-        if (ts) {
-            ts[0] = (int64_t)ticks;   /* tv_sec */
-            ts[1] = 0;                 /* tv_nsec */
-            tf->a0 = 0;
+         * struct timespec: { int64_t tv_sec; int64_t tv_nsec; } */
+        uint64_t ts_uaddr = tf->a1;
+        if (ts_uaddr) {
+            int64_t sec, nsec;
+            get_wall_time(&sec, &nsec);
+            struct { int64_t tv_sec; int64_t tv_nsec; } ts;
+            ts.tv_sec = sec;
+            ts.tv_nsec = nsec;
+            pte_t *pte = walk(current_proc->pagetable, ts_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (ts_uaddr & 0xFFF);
+                memcpy((void *)pa, &ts, sizeof(ts));
+                tf->a0 = 0;
+            } else {
+                tf->a0 = (uint64_t)-14; /* -EFAULT */
+            }
         } else {
-            tf->a0 = (uint64_t)-1;
+            tf->a0 = (uint64_t)-14; /* -EFAULT */
         }
 
     } else if (sysnum == SYS_lseek) {
@@ -1785,9 +1817,11 @@ pipe_eof:
         uint64_t tv_uaddr = tf->a0;
         /* a1 = timezone pointer, ignored */
         if (tv_uaddr) {
+            int64_t sec, nsec;
+            get_wall_time(&sec, &nsec);
             struct { int64_t sec; int64_t usec; } tv;
-            tv.sec = (int64_t)ticks;
-            tv.usec = 0;
+            tv.sec = sec;
+            tv.usec = nsec / 1000; /* ns -> us */
             pte_t *pte = walk(current_proc->pagetable, tv_uaddr, 0);
             if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
                 uint64_t pa = PTE2PA(*pte) + (tv_uaddr & 0xFFF);
