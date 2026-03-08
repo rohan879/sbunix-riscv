@@ -291,12 +291,40 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 ### Remaining Fixes
 
 - [x] writev/readv VA translation — iovec array and buffer pointers translated via walk()
-- [ ] getrandom — trivial LCG PRNG, not cryptographically secure
+- [x] getrandom — LCG PRNG seeded from RTC; functional but not cryptographically secure
 - [x] prlimit64 — RLIMIT_STACK (8MB) and RLIMIT_NOFILE (16) handled; others return RLIM_INFINITY
 - [x] Process groups — setpgid/getpgid/setsid/getsid with pgid/sid fields in struct proc
 - [x] Libc errno handling — `__syscall_ret` applied to all error-returning syscall wrappers in unistd.c and stat.c
 - [x] nanosleep VA translation — user timespec pointer translated via walk()
 - [x] Ext2 timestamps — ext2_stat/ext2_fstat populate st_atime/st_mtime/st_ctime from on-disk inode
+
+## POSIX Compliance Checklist (Required Components)
+
+- [x] Memory Manager — physical page allocator, Sv39 page tables, kmalloc slab allocator, COW fork, demand paging
+- [x] Creation of Virtual Address Space — per-process page tables, VMAs (`struct vm_area`), mmap/munmap/mprotect
+- [x] Kernel — boot via OpenSBI, trap/interrupt dispatch, SBI timer, PLIC external interrupts
+- [x] Scheduler — cooperative + preemptive round-robin; timer-driven yield via `swtch()`
+- [x] Sleeping Process Support — SLEEPING state in `struct proc`; nanosleep, waitpid, tty_read all sleep/wake
+- [ ] WFI/Idle Support — scheduler busy-spins in `kernel/proc.c`; needs idle process or WFI instruction in scheduler loop
+- [x] Threads — `sys_clone` with `CLONE_VM`/`CLONE_FILES`/`CLONE_SIGHAND`; refcounted shared resources
+- [x] File System — VFS layer (`kernel/vfs.c`) with mount table (8 slots), `struct vfs_ops`, `struct open_file` refcounting
+- [x] FS Type 1: Read-Only FS at boot — tarfs mounted at `/` with ls, ps, cat, echo, kill, sleep, sbush
+- [ ] FS Type 2: /proc virtual FS — not implemented; need procfs exposing process list (pid, state, name, ppid)
+- [x] Mount points — VFS mount table supports 8 entries; currently: `/` (tarfs), `/dev` (devfs), `/disk` (ext2)
+- [x] R/W file system — ext2-lite over virtio-blk at `/disk`; open/read/write/mkdir/unlink
+- [x] Terminal Support — `kernel/tty.c` line discipline; cooked mode (echo, backspace, ^C, ^D); raw mode; stdin/stdout/stderr via `/dev/console`
+- [x] Job Control Shell — sbush with sessions (`setsid`), process groups (`setpgid`/`tcsetpgrp`), fg/bg/jobs builtins
+- [x] Pipes — bidirectional pipe2 syscall; shell pipelines work across processes
+- [x] Limit System — `prlimit64` handles RLIMIT_STACK (8MB) and RLIMIT_NOFILE (16); libc getrlimit/setrlimit wrappers
+- [ ] Networks — no TCP/IP stack; lwIP integration not started
+- [x] getrandom — LCG PRNG seeded from RTC via `r_time()`; functional but not cryptographically secure
+  - **Note:** Implemented in commit `d72182c` (`kernel/trap.c`, SYS_getrandom handler). Uses a simple linear congruential generator — sufficient for test harnesses and non-security uses, but does not meet POSIX `getentropy()`/`getrandom()` entropy requirements. A hardware RNG or entropy pool would be needed for real crypto.
+
+### Remaining Work for Full POSIX Compliance
+
+- [ ] Add WFI to scheduler idle loop — execute `wfi` instruction when no RUNNABLE process exists to reduce CPU usage
+- [ ] Implement procfs (`/proc`) — virtual filesystem exposing per-PID directories with at least `status`, `cmdline`; mount at `/proc` in `vfs_init()`
+- [ ] TCP/IP networking via lwIP — integrate lwIP stack with virtio-net driver
 
 ## Grading Targets
 
