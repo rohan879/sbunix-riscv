@@ -5,6 +5,7 @@
 #include <string.h>
 #include <vm.h>
 #include <proc.h>
+#include <swap.h>
 
 pagetable_t kernel_pagetable;
 
@@ -202,20 +203,30 @@ void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len) {
     while (a < end) {
         int level;
         pte_t *pte = walk_super(pagetable, a, &level);
-        if (!pte || !(*pte & PTE_V)) {
-            a += PAGE_SIZE;     /* skip unmapped 4KB region */
+        if (!pte) {
+            a += PAGE_SIZE;
             continue;
         }
-        uint64_t pa = PTE2PA(*pte);
-        if (level == 1) {
-            /* Super page: free the 2MB block */
-            kfree_super((void *)pa);
+        if (*pte & PTE_V) {
+            uint64_t pa = PTE2PA(*pte);
+            if (level == 1) {
+                /* Super page: free the 2MB block */
+                kfree_super((void *)pa);
+                *pte = 0;
+                a += SUPERPAGE_SIZE;
+            } else {
+                /* Regular 4KB page */
+                kfree((void *)pa);
+                *pte = 0;
+                a += PAGE_SIZE;
+            }
+        } else if (PTE_IS_SWAPPED(*pte)) {
+            /* Swapped-out page: free the swap slot */
+            swap_free(PTE_SWAP_SLOT(*pte));
             *pte = 0;
-            a += SUPERPAGE_SIZE;
+            a += PAGE_SIZE;
         } else {
-            /* Regular 4KB page */
-            kfree((void *)pa);
-            *pte = 0;
+            /* Completely unmapped */
             a += PAGE_SIZE;
         }
     }

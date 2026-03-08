@@ -2,6 +2,7 @@
 #include <printk.h>
 #include <riscv.h>
 #include <string.h>
+#include <swap.h>
 
 extern char _kernel_end[]; // Symbol from linker script
 
@@ -12,6 +13,8 @@ struct run {
 struct {
     struct run *freelist;
 } kmem;
+
+static int free_page_count;
 
 /* Reference counts for physical pages */
 #define MAX_PAGES ((128 * 1024 * 1024) / PAGE_SIZE) /* 128MB / 4KB = 32768 */
@@ -63,6 +66,7 @@ void kfree(void *pa) {
     r = (struct run*)pa;
     r->next = kmem.freelist;
     kmem.freelist = r;
+    free_page_count++;
 }
 
 // Initializes the page allocator.
@@ -90,12 +94,20 @@ void kinit(void) {
 void *kalloc(void) {
     struct run *r;
 
+    if (free_page_count < SWAP_LOW_WATERMARK && swap_enabled())
+        swap_evict_pages(SWAP_EVICT_BATCH);
+
     r = kmem.freelist;
     if(r) {
         kmem.freelist = r->next;
+        free_page_count--;
         page_refcount[pa_to_index((uint64_t)r)] = 1;
     }
     return r;
+}
+
+int get_free_page_count(void) {
+    return free_page_count;
 }
 
 // Allocate 512 contiguous 4KB pages (2MB) at a 2MB-aligned physical address.
@@ -150,6 +162,7 @@ void *kalloc_super(void) {
                 pp = &(*pp)->next;
             }
         }
+        free_page_count -= removed;
 
         /* Set base page refcount to 1 */
         page_refcount[base] = 1;
@@ -185,5 +198,6 @@ void kfree_super(void *pa) {
         struct run *r = (struct run *)sub_pa;
         r->next = kmem.freelist;
         kmem.freelist = r;
+        free_page_count++;
     }
 }

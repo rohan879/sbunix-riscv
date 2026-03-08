@@ -12,6 +12,7 @@
 #include <vm.h>
 #include <exec.h>
 #include <tty.h>
+#include <swap.h>
 
 #define TIMER_FREQ 10000000UL  // 10 MHz timebase
 
@@ -252,7 +253,36 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
     /* Walk through user virtual address space and COW-share PTE_U pages */
     for (uint64_t va = 0; va < sz; va += PAGE_SIZE) {
         pte_t *pte = walk(src, va, 0);
-        if (!pte || !(*pte & PTE_V))
+        if (!pte)
+            continue;
+
+        /* Handle swapped-out pages: duplicate the swap slot */
+        if (PTE_IS_SWAPPED(*pte)) {
+            int old_slot = PTE_SWAP_SLOT(*pte);
+            int new_slot = swap_alloc();
+            if (new_slot < 0) return -1; /* swap full */
+
+            char *tmp = kalloc();
+            if (!tmp) {
+                swap_free(new_slot);
+                return -1;
+            }
+            swap_read(old_slot, tmp);
+            swap_write(new_slot, tmp);
+            kfree(tmp);
+
+            /* Child gets new slot with same flags */
+            pte_t child_pte = PTE_SWAP_ENCODE(new_slot, PTE_SWAP_FLAGS(*pte));
+            pte_t *cpte = walk(dst, va, 1);
+            if (!cpte) {
+                swap_free(new_slot);
+                return -1;
+            }
+            *cpte = child_pte;
+            continue;
+        }
+
+        if (!(*pte & PTE_V))
             continue;
         /* Only share user-accessible pages */
         if (!(*pte & PTE_U))
@@ -753,6 +783,28 @@ void trap_handler(struct trapframe *tf) {
                     /* Flush TLB for this VA */
                     asm volatile("sfence.vma %0, zero" : : "r"(va));
                     return; /* resume execution */
+                }
+            }
+
+            /* --- Swap-in: PTE_V=0 with PTE_SWAP marker --- */
+            if (current_proc) {
+                uint64_t sva = PGROUNDDOWN(stval);
+                pte_t *spte = walk(current_proc->pagetable, sva, 0);
+                if (spte && PTE_IS_SWAPPED(*spte)) {
+                    int slot = PTE_SWAP_SLOT(*spte);
+                    int sflags = PTE_SWAP_FLAGS(*spte);
+
+                    char *newpage = kalloc();
+                    if (!newpage)
+                        goto pagefault_kill;
+
+                    swap_read(slot, newpage);
+                    swap_free(slot);
+
+                    /* Restore PTE with original permissions + PTE_V */
+                    *spte = PA2PTE((uint64_t)newpage) | sflags | PTE_V;
+                    asm volatile("sfence.vma %0, zero" : : "r"(sva));
+                    return; /* resume faulting instruction */
                 }
             }
 
