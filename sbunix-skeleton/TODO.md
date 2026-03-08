@@ -153,7 +153,7 @@ Originally scored 13/49 tests (20/100 points). All missing headers, declarations
 
 ### `libc/include/sys/` Directory — Complete
 
-All 7 sys/ headers exist with full content.
+All 10 sys/ headers exist with full content.
 
 - [x] `mkdir -p libc/include/sys` — already exists
 - [x] `sys/time.h` — `struct timeval`, `gettimeofday()`, `timersub`/`timeradd`/`timercmp` macros
@@ -161,18 +161,34 @@ All 7 sys/ headers exist with full content.
 - [x] `sys/types.h` — `pid_t`, `uid_t`, `gid_t`, `off_t`, `ssize_t`, `size_t`, `mode_t`
 - [x] `sys/stat.h` — `struct stat`, `S_ISREG`/`S_ISDIR` macros, `fstat()`/`stat()` declarations
 - [x] `sys/wait.h` — `waitpid()`, `WIFEXITED`/`WEXITSTATUS`/`WIFSIGNALED`/`WTERMSIG` macros
-- [x] `sys/mman.h` — `mmap()`/`munmap()` declarations, `PROT_*`/`MAP_*` constants
+- [x] `sys/mman.h` — `mmap()`/`munmap()`/`madvise()` declarations, `PROT_*`/`MAP_*`/`MADV_*` constants
 - [x] `sys/ioctl.h` — `ioctl()`, `struct winsize`, `TIOCGWINSZ`/`TIOCSWINSZ`/`TIOCGPGRP`/`TIOCSPGRP`
+- [x] `sys/resource.h` — `struct rlimit`, `struct rusage`, `RLIMIT_*` constants, `getrlimit()`/`setrlimit()`/`getrusage()`
+- [x] `sys/utsname.h` — `struct utsname`, `uname()`
+- [x] `sys/uio.h` — `struct iovec`, `readv()`/`writev()`
+
+### Additional Headers — Complete
+
+- [x] `ctype.h` — 14 `static inline` character classification functions (`isalpha`, `isdigit`, `toupper`, etc.)
+- [x] `assert.h` — `assert()` macro using `dprintf(2, ...)` + `abort()`
+- [x] `termios.h` — `struct termios` (matches kernel `tty.h`), `tcgetattr()`/`tcsetattr()`/`cfmakeraw()`, all flag constants
+- [x] `libgen.h` — `basename()`/`dirname()`
+- [x] `poll.h` — `struct pollfd`, `nfds_t`, `POLLIN`/`POLLOUT`/`POLLERR`/`POLLHUP`/`POLLNVAL`, `poll()`
+- [x] `setjmp.h` — `jmp_buf` (14 callee-saved regs), `setjmp()`/`longjmp()`
+- [x] `pwd.h` — `struct passwd`, `getpwuid()`/`getpwnam()`
+- [x] `grp.h` — `struct group`, `getgrgid()`/`getgrnam()`
 
 ### Missing Declarations in Existing Headers
 
 - [x] `string.h` — added: `memmove`, `memchr`, `strdup`, `strndup`, `strncat`, `strspn`, `strcspn`, `strpbrk`, `strtok`, `strerror`
-- [x] `unistd.h` — added: `isatty`, `setsid`, `getpgrp`, `setpgid`, `tcgetpgrp`, `tcsetpgrp`, `alarm`
+- [x] `unistd.h` — added: `isatty`, `setsid`, `getpgrp`, `setpgid`, `tcgetpgrp`, `tcsetpgrp`, `alarm`, `getpgid`, `getsid`, `ftruncate`, `geteuid`, `getegid`, `wait`
 - [x] `signal.h` — added: `sighandler_t` typedef, `sig_atomic_t` typedef
 - [x] `stdlib.h` — added: `setenv`, `unsetenv`, `putenv`
 - [x] `errno.h` — complete (45 error codes, extern errno)
 - [x] `fcntl.h` — complete (`O_*` flags, `AT_FDCWD`, fcntl commands)
 - [x] `dirent.h` — complete (`struct dirent`, `DIR`, opendir/readdir/closedir)
+- [x] `stdio.h` — added: `FILE` typedef, `stdin`/`stdout`/`stderr`, `fprintf`/`vfprintf`/`perror`/`fputs`/`fputc`/`fgets`/`fgetc`/`fwrite`/`fread`/`fopen`/`fclose`/`fflush`/`fileno`/`feof`/`ferror`/`clearerr`/`fseek`/`ftell`/`sscanf`
+- [x] `syscall.h` — added: `SYS_ftruncate`, `SYS_tgkill`, `SYS_rt_sigreturn`, `SYS_madvise`
 
 ### Corresponding Libc Implementations
 
@@ -182,6 +198,18 @@ All 7 sys/ headers exist with full content.
 - [x] `stat()`/`fstat()` syscall wrappers in libc
 - [x] `waitpid()` wrapper with `W*` macros
 - [x] `ioctl` syscall handling in `kernel/trap.c` — SYS_ioctl(29), TIOCGWINSZ returns 80x24
+- [x] FILE* streams in `libc/fileio.c` — static pool of 16 FILEs, unbuffered fprintf/fread/fwrite/fopen/fclose/perror
+- [x] Terminal I/O in `libc/termios.c` — tcgetattr/tcsetattr wrapping ioctl TCGETS/TCSETS, cfmakeraw
+- [x] Resource limits in `libc/resource.c` — getrlimit/setrlimit via prlimit64, getrusage stub
+- [x] System identification in `libc/utsname.c` — uname() returns "SBUnix"/"riscv64"
+- [x] Scatter/gather I/O in `libc/uio.c` — readv/writev syscall wrappers
+- [x] Path decomposition in `libc/libgen.c` — basename/dirname pure string manipulation
+- [x] I/O multiplexing in `libc/poll.c` — poll() stub (assumes all events ready)
+- [x] Non-local jumps in `libc/setjmp.S` — RISC-V setjmp/longjmp saving 14 callee-saved registers
+- [x] User/group database in `libc/pwd.c` — getpwuid/getpwnam/getgrgid/getgrnam returning static root entries
+- [x] Fixed libc wrappers to use real syscalls — setsid, getpgrp, setpgid, tcgetpgrp, tcsetpgrp now call kernel
+- [x] Added missing wrappers — getpgid, getsid, ftruncate, geteuid, getegid, wait, madvise
+- [x] Fixed `abort()` to raise SIGABRT before _exit(134)
 
 ## Kernel Syscall Stubs (Feedback-Driven)
 
@@ -205,6 +233,9 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] `SYS_writev` (66), `SYS_readv` (65) — basic iovec iteration (partial, see Remaining Fixes)
 - [x] `SYS_prlimit64` (261) — returns -ENOSYS stub
 - [x] `SYS_setpgid` (154), `SYS_getpgid` (155), `SYS_setsid` (157), `SYS_getsid` (156) — pid-returning stubs
+- [x] `SYS_madvise` (233) — no-op success (no real VM advice needed)
+- [x] `SYS_ftruncate` (46) — returns -EROFS (tarfs is read-only)
+- [x] `SYS_tgkill` (131) — routes to same signal delivery logic as SYS_kill
 
 ## Kernel Architecture Features
 
