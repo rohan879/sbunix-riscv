@@ -4,6 +4,8 @@ int is_builtin(const char *cmd) {
     return (strcmp(cmd, "cd") == 0 ||
             strcmp(cmd, "export") == 0 ||
             strcmp(cmd, "set") == 0 ||
+            strcmp(cmd, "unset") == 0 ||
+            strcmp(cmd, "shift") == 0 ||
             strcmp(cmd, "exit") == 0 ||
             strcmp(cmd, "jobs") == 0 ||
             strcmp(cmd, "fg") == 0 ||
@@ -44,6 +46,26 @@ int run_builtin(struct command *cmd) {
         if (cmd->argc == 3) {
             var_set(cmd->argv[1], cmd->argv[2]);
         }
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "unset") == 0) {
+        for (int i = 1; i < cmd->argc; i++)
+            var_unset(cmd->argv[i]);
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "shift") == 0) {
+        int n = 1;
+        if (cmd->argc > 1) {
+            n = atoi(cmd->argv[1]);
+            if (n < 0) n = 0;
+        }
+        if (n > positional_count) {
+            dprintf(2, "sbush: shift: count exceeds positional parameters\n");
+            return 1;
+        }
+        positional_shift(n);
         return 0;
     }
 

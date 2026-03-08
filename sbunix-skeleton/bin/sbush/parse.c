@@ -38,6 +38,31 @@ static void expand_vars(char *line) {
                 itoa((int)getpid(), tmp, 10);
                 for (char *v = tmp; *v && dst < end; )
                     *dst++ = *v++;
+            } else if (*src == '#') {
+                /* $# -- positional parameter count */
+                src++;
+                char tmp[16];
+                itoa(positional_count, tmp, 10);
+                for (char *v = tmp; *v && dst < end; )
+                    *dst++ = *v++;
+            } else if (*src == '@' || *src == '*') {
+                /* $@ / $* -- all positional parameters */
+                src++;
+                for (int pi = 1; pi <= positional_count; pi++) {
+                    char *pv = positional_get(pi);
+                    if (pv) {
+                        if (pi > 1 && dst < end) *dst++ = ' ';
+                        while (*pv && dst < end) *dst++ = *pv++;
+                    }
+                }
+            } else if (*src >= '0' && *src <= '9') {
+                /* $0-$9 -- positional parameter */
+                int idx = *src - '0';
+                src++;
+                char *pv = positional_get(idx);
+                if (pv) {
+                    while (*pv && dst < end) *dst++ = *pv++;
+                }
             } else {
                 /* $NAME -- regular variable */
                 char name[64];
@@ -147,7 +172,7 @@ static int tokenize(char *str, struct command *cmd) {
 /* -----------------------------------------------------------------------
  * Glob pattern matching
  * ---------------------------------------------------------------------- */
-static int glob_match(const char *pat, const char *name) {
+int glob_match(const char *pat, const char *name) {
     while (*pat) {
         if (*pat == '*') {
             while (*pat == '*') pat++;
@@ -343,9 +368,23 @@ static int parse_pipeline(char *seg, struct pipeline *pl) {
 int parse_line(char *line, struct cmdlist *cl) {
     cl->npl = 0;
 
-    /* strip comment */
-    char *hash = strchr(line, '#');
-    if (hash) *hash = '\0';
+    /* strip comment: # at start of line or preceded by whitespace, but not $# */
+    {
+        char *p = line;
+        int in_dq = 0, in_sq = 0;
+        while (*p) {
+            if (*p == '\'' && !in_dq) { in_sq = !in_sq; p++; continue; }
+            if (*p == '"'  && !in_sq) { in_dq = !in_dq; p++; continue; }
+            if (!in_sq && !in_dq && *p == '#' && (p == line || *(p-1) != '$')) {
+                /* Only treat as comment if preceded by whitespace or at start */
+                if (p == line || *(p-1) == ' ' || *(p-1) == '\t') {
+                    *p = '\0';
+                    break;
+                }
+            }
+            p++;
+        }
+    }
 
     /* strip trailing whitespace / newline */
     int len = strlen(line);

@@ -7,12 +7,18 @@ volatile sig_atomic_t fg_pid = 0;
 /* Flag set by SIGCHLD handler; main loop checks and prints notifications */
 volatile sig_atomic_t g_sigchld_flag = 0;
 
+static int exec_depth = 0;
+static struct cmdlist cl_stack[MAX_EXEC_DEPTH];
+
 void execute_line(char *line) {
-    /* static: struct cmdlist is ~130 KB; placing it on the stack overflows
-     * the 32 KB user stack.  The shell is single-threaded so static is safe. */
-    static struct cmdlist cl;
-    if (parse_line(line, &cl) > 0)
-        execute_cmdlist(&cl);
+    if (exec_depth >= MAX_EXEC_DEPTH) {
+        dprintf(2, "sbush: execution recursion limit reached\n");
+        return;
+    }
+    struct cmdlist *cl = &cl_stack[exec_depth++];
+    if (parse_line(line, cl) > 0)
+        execute_cmdlist(cl);
+    exec_depth--;
 }
 
 /* -----------------------------------------------------------------------
@@ -128,6 +134,7 @@ static void reap_zombies(void) {
 
 int main(int argc, char *argv[], char *envp[]) {
     env_init(envp);
+    positional_set_zero(argv[0]);
 
     /* Install signal handlers before entering REPL */
     install_signal_handlers();
