@@ -541,9 +541,19 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
             return;
         /* Default: terminate process */
         p->exit_status = 128 + signum;
+        /* Clean up resources (mirrors SYS_exit path) */
+        vma_free_all(p);
+        for (int i = 0; i < NOFILE; i++) {
+            if (p->ofile[i])
+                close_ofile(p, i);
+        }
         p->state = ZOMBIE;
-        if (p->parent && p->parent->state == SLEEPING)
-            p->parent->state = RUNNABLE;
+        /* Notify parent via SIGCHLD and wake it */
+        if (p->parent) {
+            p->parent->sigpending |= (1UL << SIGCHLD);
+            if (p->parent->state == SLEEPING)
+                p->parent->state = RUNNABLE;
+        }
         swtch(&p->context, &scheduler_context);
         return;
     }
