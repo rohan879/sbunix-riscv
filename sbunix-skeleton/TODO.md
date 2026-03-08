@@ -259,13 +259,13 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 
 ### Remaining Fixes
 
-- [ ] writev/readv VA translation — iovec pointers not validated via walk(); pipe wake logic incomplete
+- [x] writev/readv VA translation — iovec array and buffer pointers translated via walk()
 - [ ] getrandom — trivial LCG PRNG, not cryptographically secure
-- [ ] prlimit64 — returns -ENOSYS; needs RLIMIT_STACK/RLIMIT_NOFILE handling
-- [ ] Process groups — setpgid/getpgid/setsid/getsid are stubs returning pid; no actual pgid tracking in struct proc
-- [ ] Libc errno handling — only open() sets errno; read/write/close/stat/etc. return raw negative codes
-- [ ] nanosleep VA translation — reads user timespec pointer directly without walk()
-- [ ] Ext2 timestamps — ext2_stat/ext2_fstat don't populate st_atime/st_mtime/st_ctime; ext2_inode_mem lacks timestamp fields
+- [x] prlimit64 — RLIMIT_STACK (8MB) and RLIMIT_NOFILE (16) handled; others return RLIM_INFINITY
+- [x] Process groups — setpgid/getpgid/setsid/getsid with pgid/sid fields in struct proc
+- [x] Libc errno handling — `__syscall_ret` applied to all error-returning syscall wrappers in unistd.c and stat.c
+- [x] nanosleep VA translation — user timespec pointer translated via walk()
+- [x] Ext2 timestamps — ext2_stat/ext2_fstat populate st_atime/st_mtime/st_ctime from on-disk inode
 
 ## Grading Targets
 
