@@ -13,6 +13,7 @@ struct vfs_ops {
   int64_t (*write)(void *private, const char *buf, uint64_t count, int64_t *offset);
   int (*close)(void *private);
   int (*stat)(const char *path, uint8_t *st);
+  int (*fstat)(void *private, uint8_t *st);  /* per-fd stat */
   int (*readdir)(void *private, char *buf, unsigned int count, int64_t *offset);
   int (*mkdir)(const char *path, int mode);
   int (*unlink)(const char *path);
@@ -52,5 +53,8 @@ void vfs_init(void);
 /* Filesystem ops (defined in their respective .c files) */
 extern struct vfs_ops tarfs_ops;
 extern struct vfs_ops devfs_ops;
+
+/* devfs helpers */
+int devfs_is_tty(void *private);
 
 #endif

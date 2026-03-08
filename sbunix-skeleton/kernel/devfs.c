@@ -3,6 +3,7 @@
 #include <printk.h>
 #include <uart.h>
 #include <kmalloc.h>
+#include <proc.h>
 
 /* ------------------------------------------------------------------ */
 /* Device table                                                         */
@@ -13,6 +14,7 @@ struct device {
   const char *name;
   int64_t (*read_fn)(char *buf, uint64_t count);
   int64_t (*write_fn)(const char *buf, uint64_t count);
+  int is_tty;     /* 1 if this device is a terminal */
 };
 
 /* /dev/null */
@@ -37,20 +39,42 @@ static int64_t devzero_write(const char *buf, uint64_t count) {
 
 /* /dev/console */
 static int64_t devconsole_read(char *buf, uint64_t count) {
-  (void)buf; (void)count;
-  /* Console read is handled specially via UART in trap.c */
-  return 0;
+  /* UART raw byte delivery.  Returns one character at a time.
+   * Sleeps via swtch() when no input is available -- this creates
+   * a dependency on the process layer, acceptable in a teaching OS. */
+  uint64_t i = 0;
+  while (i < count) {
+    char c;
+    /* Wait until a character is available */
+    while (uart_dequeue(&c) != 0) {
+      /* Poll hardware UART directly in case interrupt missed a char */
+      int hw_c = uart_getc();
+      if (hw_c != -1) {
+        uart_enqueue((char)hw_c);
+        continue;
+      }
+      /* Sleep until UART interrupt wakes us */
+      current_proc->waiting_for_uart = 1;
+      current_proc->state = SLEEPING;
+      swtch(&current_proc->context, &scheduler_context);
+    }
+    if (c == '\r') c = '\n';
+    buf[i++] = c;
+    /* Return after each character so the caller can process it */
+    break;
+  }
+  return (int64_t)i;
 }
 static int64_t devconsole_write(const char *buf, uint64_t count) {
   for (uint64_t i = 0; i < count; i++)
-    printk("%c", buf[i]);
+    uart_write(buf[i]);
   return (int64_t)count;
 }
 
 static struct device devices[MAX_DEVICES] = {
-  { "null",    devnull_read,    devnull_write },
-  { "zero",    devzero_read,    devzero_write },
-  { "console", devconsole_read, devconsole_write },
+  { "null",    devnull_read,    devnull_write,    0 },
+  { "zero",    devzero_read,    devzero_write,    0 },
+  { "console", devconsole_read, devconsole_write, 1 },
 };
 static int num_devices = 3;
 
@@ -123,6 +147,35 @@ static int devfs_close(void *private) {
   if (private)
     kmfree(private, sizeof(struct devfs_private));
   return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* devfs_fstat -- per-fd stat for open device files                     */
+/* ------------------------------------------------------------------ */
+static int devfs_fstat(void *private, uint8_t *st) {
+  struct devfs_private *priv = (struct devfs_private *)private;
+  memset(st, 0, 128);
+  if (priv && priv->dev) {
+    uint32_t mode = (uint32_t)(0x2000 | 0666); /* S_IFCHR | 0666 */
+    uint32_t nlink = 1;
+    memcpy(st + 16, &mode, 4);
+    memcpy(st + 20, &nlink, 4);
+  } else {
+    /* /dev directory itself */
+    uint32_t mode = (uint32_t)(0x4000 | 0755); /* S_IFDIR | 0755 */
+    uint32_t nlink = 1;
+    memcpy(st + 16, &mode, 4);
+    memcpy(st + 20, &nlink, 4);
+  }
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* devfs_is_tty -- query whether an open devfs file is a terminal      */
+/* ------------------------------------------------------------------ */
+int devfs_is_tty(void *private) {
+  struct devfs_private *priv = (struct devfs_private *)private;
+  return (priv && priv->dev && priv->dev->is_tty) ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -258,6 +311,7 @@ struct vfs_ops devfs_ops = {
   .write   = devfs_write,
   .close   = devfs_close,
   .stat    = devfs_stat,
+  .fstat   = devfs_fstat,
   .readdir = devfs_readdir,
   .mkdir   = devfs_mkdir,
   .unlink  = devfs_unlink,

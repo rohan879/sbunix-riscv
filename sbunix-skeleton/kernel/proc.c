@@ -40,6 +40,38 @@ void forkret(void) {
   trap_restore(current_proc->trapframe);
 }
 
+/* Open /dev/console via VFS and assign to the next free ofile slot.
+ * Returns the fd number or -1 on failure. */
+static int kern_open_console(void) {
+  const char *relpath;
+  struct vfs_ops *ops = vfs_lookup_mount("/dev/console", &relpath);
+  if (!ops || !ops->open) return -1;
+  void *priv = NULL;
+  int ret = ops->open(relpath, 2 /* O_RDWR */, &priv);
+  if (ret < 0) return ret;
+  struct open_file *f = vfs_alloc_file();
+  if (!f) {
+    if (ops->close) ops->close(priv);
+    return -12; /* -ENOMEM */
+  }
+  f->ops = ops;
+  f->private = priv;
+  f->offset = 0;
+  f->flags = 2; /* O_RDWR */
+  f->is_pipe = 0;
+  /* Find lowest free fd slot */
+  for (int i = 0; i < NOFILE; i++) {
+    if (current_proc->ofile[i] == NULL) {
+      current_proc->ofile[i] = f;
+      return i;
+    }
+  }
+  /* No free slot */
+  if (ops->close) ops->close(priv);
+  vfs_free_file(f);
+  return -1;
+}
+
 // Helper to start the first process
 void init_starter(void) {
     int ret = exec("./bin/init");
@@ -50,19 +82,12 @@ void init_starter(void) {
     if (ret < 0)
         printk("init_starter: exec failed\n");
 
-    /* Pre-populate stdin(0), stdout(1), stderr(2) as open_file pointers
-     * so that alloc_fd() never hands them out to pipes or other files.
-     * These fds point to the UART (no VFS ops, handled specially). */
+    /* Open /dev/console three times for stdin(0), stdout(1), stderr(2).
+     * Each gets its own open_file with independent refcount. */
     for (int i = 0; i < 3; i++) {
-        struct open_file *f = vfs_alloc_file();
-        if (f) {
-            f->ops = NULL; /* UART console, not VFS-backed */
-            f->private = NULL;
-            f->is_pipe = 0;
-            f->offset = 0;
-            f->flags = 0;
-        }
-        current_proc->ofile[i] = f;
+        int fd = kern_open_console();
+        if (fd < 0)
+            printk("init_starter: failed to open /dev/console for fd %d\n", i);
     }
 
     // Now we must jump to user mode!
@@ -120,6 +145,12 @@ found:
   p->sigmask = 0;
   p->sigpending = 0;
   p->alarm_ticks = 0;
+
+  // Initialize clone/thread sharing fields
+  p->clone_flags = 0;
+  p->shared_pt = NULL;
+  p->shared_ft = NULL;
+  p->shared_sa = NULL;
 
   return p;
 }

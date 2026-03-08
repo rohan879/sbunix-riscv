@@ -59,8 +59,9 @@ static int pipe_avail(int pid) {
 
 /* Allocate a free fd slot in current_proc; returns fd or -1 */
 static int alloc_fd(void) {
+  struct open_file **ftable = proc_ofile(current_proc);
   for (int i = 0; i < NOFILE; i++) {
-    if (current_proc->ofile[i] == NULL)
+    if (ftable[i] == NULL)
       return i;
   }
   return -1;
@@ -68,16 +69,17 @@ static int alloc_fd(void) {
 
 /* Shallow copy fd table from src to dst (for clone), incrementing refcounts */
 static void copy_ofile(struct proc *dst, struct proc *src) {
+  struct open_file **srctab = proc_ofile(src);
   for (int i = 0; i < NOFILE; i++) {
-    dst->ofile[i] = src->ofile[i];
-    if (src->ofile[i]) {
-      src->ofile[i]->refcount++;
+    dst->ofile[i] = srctab[i];
+    if (srctab[i]) {
+      srctab[i]->refcount++;
       /* bump pipe refcounts too */
-      if (src->ofile[i]->is_pipe) {
-        int pid = src->ofile[i]->pipe_id;
-        if (src->ofile[i]->pipe_read && pid >= 0)
+      if (srctab[i]->is_pipe) {
+        int pid = srctab[i]->pipe_id;
+        if (srctab[i]->pipe_read && pid >= 0)
           pipes[pid].read_open++;
-        if (src->ofile[i]->pipe_write && pid >= 0)
+        if (srctab[i]->pipe_write && pid >= 0)
           pipes[pid].write_open++;
       }
     }
@@ -85,11 +87,12 @@ static void copy_ofile(struct proc *dst, struct proc *src) {
 }
 
 /* Close an open_file: decrement refcount, handle pipe cleanup, free when zero.
- * Also clears the slot in the given proc's ofile[fd]. */
+ * Also clears the slot in the given proc's ofile[fd] (or shared_ft). */
 static void close_ofile(struct proc *p, int fd) {
-  struct open_file *f = p->ofile[fd];
+  struct open_file **ftable = proc_ofile(p);
+  struct open_file *f = ftable[fd];
   if (!f) return;
-  p->ofile[fd] = NULL;
+  ftable[fd] = NULL;
 
   if (f->is_pipe) {
     int pid = f->pipe_id;
@@ -303,59 +306,186 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
 }
 
 /* ------------------------------------------------------------------ */
-/* sys_clone: fork the current process                                  */
+/* cleanup_proc_resources: free or release shared resources on exit      */
+/* Called from SYS_exit, signal default-kill, and SYS_kill SIGKILL.     */
+/* ------------------------------------------------------------------ */
+static void cleanup_proc_resources(struct proc *p) {
+    /* ---- Pagetable / VMAs ---- */
+    if (p->shared_pt) {
+        p->shared_pt->refcount--;
+        if (p->shared_pt->refcount == 0) {
+            /* Last user: free VMAs (pagetable pages leak is pre-existing) */
+            vma_free_all(p);
+            kmfree(p->shared_pt, sizeof(struct shared_pagetable));
+        } else {
+            /* Other threads still using the pagetable; just free our VMAs */
+            vma_free_all(p);
+        }
+        p->shared_pt = NULL;
+        /* Point to kernel pagetable so scheduler doesn't use freed pt */
+        p->pagetable = kernel_pagetable;
+    } else {
+        /* Traditional fork: free VMAs as before */
+        vma_free_all(p);
+    }
+
+    /* ---- File descriptors ---- */
+    if (p->shared_ft) {
+        p->shared_ft->refcount--;
+        if (p->shared_ft->refcount == 0) {
+            /* Last user: close all fds in the shared table.
+             * close_ofile uses proc_ofile() which returns shared_ft->ofile. */
+            for (int i = 0; i < NOFILE; i++) {
+                if (p->shared_ft->ofile[i])
+                    close_ofile(p, i);
+            }
+            kmfree(p->shared_ft, sizeof(struct shared_ftable));
+        }
+        p->shared_ft = NULL;
+    } else {
+        /* Traditional: close fds in proc's own ofile[] */
+        for (int i = 0; i < NOFILE; i++) {
+            if (p->ofile[i])
+                close_ofile(p, i);
+        }
+    }
+
+    /* ---- Signal actions ---- */
+    if (p->shared_sa) {
+        p->shared_sa->refcount--;
+        if (p->shared_sa->refcount == 0)
+            kmfree(p->shared_sa, sizeof(struct shared_sigactions));
+        p->shared_sa = NULL;
+    }
+    /* Inline sigactions need no freeing */
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_clone: fork or create a thread in the current process            */
+/* a0 = flags (CLONE_VM | CLONE_FILES | CLONE_SIGHAND | SIGCHLD etc.)  */
+/* a1 = child stack pointer (0 means inherit parent sp)                 */
 /* ------------------------------------------------------------------ */
 static pid_t sys_clone(void) {
+    uint64_t flags    = current_proc->trapframe->a0;
+    uint64_t child_sp = current_proc->trapframe->a1;
+    int clone_flags   = (int)(flags & ~0xFFUL); /* mask out low-byte signal */
+
+    /* CLONE_SIGHAND requires CLONE_VM (Linux semantics) */
+    if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
+        return -22; /* -EINVAL */
+
     struct proc *p = allocproc();
     if (!p) return -1;
 
-    /* Copy cwd */
+    /* ---- Common path (all modes) ---- */
     memcpy(p->cwd, current_proc->cwd, sizeof(p->cwd));
-
-    /* Copy name */
     memcpy(p->name, current_proc->name, sizeof(p->name));
 
-    /* Copy file descriptors */
-    copy_ofile(p, current_proc);
-
-    /* Copy trapframe — child starts after the ecall just like parent */
+    /* Copy trapframe -- child starts after the ecall just like parent */
     memcpy(p->trapframe, current_proc->trapframe, sizeof(struct trapframe));
+    p->trapframe->a0 = 0; /* child returns 0 */
 
-    /* Child returns 0 from clone/fork */
-    p->trapframe->a0 = 0;
+    /* Set child stack pointer if caller provided one */
+    if (child_sp != 0)
+        p->trapframe->sp = child_sp;
 
-    /* Build child page table: copy kernel/device identity maps first */
-    pagetable_t new_pt = uvmcreate();
-    if (!new_pt) goto bad;
-
-    /* Identity map kernel RAM and I/O (same as exec) */
-    if (mappages(new_pt, 0x80000000, PHYSTOP - 0x80000000, 0x80000000,
-                 PTE_R | PTE_W | PTE_X) < 0) goto bad;
-    if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000, PTE_R | PTE_W) < 0) goto bad;
-    if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000, PTE_R | PTE_W) < 0) goto bad;
-    if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) goto bad;
-
-    /* COW-share user pages (code + data segments + stack) */
-    if (copy_pagetable_cow(new_pt, current_proc->pagetable, MAXVA) < 0) goto bad;
-
-    /* Map signal trampoline into child */
-    uvmmap_sigtrampoline(new_pt);
-
-    p->pagetable = new_pt;
-    p->sz = current_proc->sz;
     p->parent = current_proc;
+    p->clone_flags = clone_flags;
 
-    /* Copy stack bounds */
+    /* Copy stack bounds and mmap_base from parent */
     p->stack_top = current_proc->stack_top;
     p->stack_bottom = current_proc->stack_bottom;
-
-    /* Copy mmap_base */
     p->mmap_base = current_proc->mmap_base;
+    p->sz = current_proc->sz;
 
-    /* Deep copy VMA list from parent to child */
-    vma_dup(current_proc, p);
+    /* ---- CLONE_VM: share address space ---- */
+    if (clone_flags & CLONE_VM) {
+        /* Promote parent's pagetable to shared if not already */
+        if (!current_proc->shared_pt) {
+            struct shared_pagetable *spt =
+                (struct shared_pagetable *)kmalloc(sizeof(struct shared_pagetable));
+            if (!spt) goto bad;
+            spt->pt = current_proc->pagetable;
+            spt->refcount = 1;
+            current_proc->shared_pt = spt;
+            current_proc->clone_flags |= CLONE_VM;
+        }
+        current_proc->shared_pt->refcount++;
+        p->shared_pt = current_proc->shared_pt;
+        p->pagetable = p->shared_pt->pt;
 
-    /* Child's kernel context: resume at forkret which will sret back to user */
+        /* Deep copy VMA list (Option A from design doc) */
+        vma_dup(current_proc, p);
+    } else {
+        /* Traditional COW fork: build independent child page table */
+        pagetable_t new_pt = uvmcreate();
+        if (!new_pt) goto bad;
+
+        /* Identity map kernel RAM and I/O (same as exec) */
+        if (mappages(new_pt, 0x80000000, PHYSTOP - 0x80000000, 0x80000000,
+                     PTE_R | PTE_W | PTE_X) < 0) goto bad;
+        if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000,
+                     PTE_R | PTE_W) < 0) goto bad;
+        if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000,
+                     PTE_R | PTE_W) < 0) goto bad;
+        if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000,
+                     PTE_R | PTE_W) < 0) goto bad;
+
+        /* COW-share user pages */
+        if (copy_pagetable_cow(new_pt, current_proc->pagetable, MAXVA) < 0)
+            goto bad;
+
+        /* Map signal trampoline into child */
+        uvmmap_sigtrampoline(new_pt);
+
+        p->pagetable = new_pt;
+
+        /* Deep copy VMA list */
+        vma_dup(current_proc, p);
+    }
+
+    /* ---- CLONE_FILES: share file descriptor table ---- */
+    if (clone_flags & CLONE_FILES) {
+        /* Promote parent's ofile[] to shared if not already */
+        if (!current_proc->shared_ft) {
+            struct shared_ftable *sft =
+                (struct shared_ftable *)kmalloc(sizeof(struct shared_ftable));
+            if (!sft) goto bad;
+            for (int i = 0; i < NOFILE; i++)
+                sft->ofile[i] = current_proc->ofile[i];
+            sft->refcount = 1;
+            current_proc->shared_ft = sft;
+            current_proc->clone_flags |= CLONE_FILES;
+        }
+        current_proc->shared_ft->refcount++;
+        p->shared_ft = current_proc->shared_ft;
+    } else {
+        /* Traditional: copy file descriptors independently */
+        copy_ofile(p, current_proc);
+    }
+
+    /* ---- CLONE_SIGHAND: share signal handlers ---- */
+    if (clone_flags & CLONE_SIGHAND) {
+        /* Promote parent's sigactions to shared if not already */
+        if (!current_proc->shared_sa) {
+            struct shared_sigactions *ssa =
+                (struct shared_sigactions *)kmalloc(sizeof(struct shared_sigactions));
+            if (!ssa) goto bad;
+            memcpy(ssa->actions, current_proc->sigactions,
+                   sizeof(ssa->actions));
+            ssa->refcount = 1;
+            current_proc->shared_sa = ssa;
+            current_proc->clone_flags |= CLONE_SIGHAND;
+        }
+        current_proc->shared_sa->refcount++;
+        p->shared_sa = current_proc->shared_sa;
+    } else {
+        /* Traditional: copy signal actions by value */
+        memcpy(p->sigactions, current_proc->sigactions,
+               sizeof(p->sigactions));
+    }
+
+    /* Child's kernel context: resume at forkret */
     p->context.ra = (uint64_t)forkret;
     p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
 
@@ -545,7 +675,8 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* Clear from pending */
     p->sigpending &= ~(1UL << signum);
 
-    uint64_t handler = p->sigactions[signum].handler;
+    struct kern_sigaction *sa = proc_sigactions(p);
+    uint64_t handler = sa[signum].handler;
 
     /* SIG_DFL (0) -- default action */
     if (handler == 0) {
@@ -554,12 +685,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
             return;
         /* Default: terminate process */
         p->exit_status = 128 + signum;
-        /* Clean up resources (mirrors SYS_exit path) */
-        vma_free_all(p);
-        for (int i = 0; i < NOFILE; i++) {
-            if (p->ofile[i])
-                close_ofile(p, i);
-        }
+        cleanup_proc_resources(p);
         p->state = ZOMBIE;
         /* Notify parent via SIGCHLD and wake it */
         if (p->parent) {
@@ -598,8 +724,8 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     tf->ra = SIG_TRAMPOLINE_VA;          /* return address -> trampoline -> sigreturn */
 
     /* Block this signal during handler execution */
-    p->sigmask |= p->sigactions[signum].mask;
-    if (!(p->sigactions[signum].flags & 0x40000000)) /* SA_NODEFER */
+    p->sigmask |= sa[signum].mask;
+    if (!(sa[signum].flags & 0x40000000)) /* SA_NODEFER */
         p->sigmask |= (1UL << signum);
 }
 
@@ -758,15 +884,9 @@ pagefault_kill:
         int fd = (int)tf->a0;
         char *buf = (char *)tf->a1;
         size_t len = (size_t)tf->a2;
-        struct open_file *f = (fd >= 0 && fd < NOFILE) ? current_proc->ofile[fd] : NULL;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
-        if ((fd == 1 || fd == 2) && (!f || !f->is_pipe)) {
-            /* stdout / stderr (only when not redirected to a pipe) */
-            size_t i;
-            for (i = 0; i < len; i++)
-                printk("%c", buf[i]);
-            tf->a0 = (uint64_t)i;
-        } else if (f && f->is_pipe && f->pipe_write) {
+        if (f && f->is_pipe && f->pipe_write) {
             int pid = f->pipe_id;
             size_t written = 0;
             while (written < len) {
@@ -804,37 +924,9 @@ pagefault_kill:
         int fd = (int)tf->a0;
         char *buf = (char *)tf->a1;
         size_t len = (size_t)tf->a2;
-        struct open_file *f = (fd >= 0 && fd < NOFILE) ? current_proc->ofile[fd] : NULL;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
-        if (fd == 0 && (!f || !f->is_pipe)) {
-            /* stdin: UART raw byte delivery.
-             * The kernel returns characters as-is; line editing (echo,
-             * backspace, Ctrl-C handling) is done by the caller (sbush). */
-            size_t i = 0;
-            while (i < len) {
-                char c;
-                /* Wait until a character is available */
-                while (uart_dequeue(&c) != 0) {
-                    /* Poll hardware UART directly in case interrupt missed a char */
-                    int hw_c = uart_getc();
-                    if (hw_c != -1) {
-                        uart_enqueue((char)hw_c);
-                        continue;
-                    }
-                    /* Sleep until UART interrupt wakes us */
-                    if (current_proc) {
-                        current_proc->waiting_for_uart = 1;
-                        current_proc->state = SLEEPING;
-                        swtch(&current_proc->context, &scheduler_context);
-                    }
-                }
-                if (c == '\r') c = '\n';
-                buf[i++] = c;
-                /* Return after each character so the caller can process it */
-                break;
-            }
-            tf->a0 = (uint64_t)i;
-        } else if (f && f->is_pipe && f->pipe_read) {
+        if (f && f->is_pipe && f->pipe_read) {
             int pid = f->pipe_id;
             size_t read_bytes = 0;
             while (read_bytes < len) {
@@ -912,13 +1004,13 @@ pipe_eof:
             f->offset = 0;
             f->flags = flags;
             f->is_pipe = 0;
-            current_proc->ofile[fd] = f;
+            proc_ofile(current_proc)[fd] = f;
             tf->a0 = (uint64_t)fd;
         }
 
     } else if (sysnum == SYS_close) {
         int fd = (int)tf->a0;
-        if (fd >= 0 && fd < NOFILE && current_proc->ofile[fd]) {
+        if (fd >= 0 && fd < NOFILE && proc_ofile(current_proc)[fd]) {
             close_ofile(current_proc, fd);
             tf->a0 = 0;
         } else {
@@ -928,7 +1020,8 @@ pipe_eof:
     } else if (sysnum == SYS_dup3) {
         int oldfd = (int)tf->a0;
         int newfd = (int)tf->a1;
-        if (oldfd < 0 || oldfd >= NOFILE || !current_proc->ofile[oldfd] ||
+        struct open_file **ftab = proc_ofile(current_proc);
+        if (oldfd < 0 || oldfd >= NOFILE || !ftab[oldfd] ||
             newfd < 0 || newfd >= NOFILE) {
             tf->a0 = (uint64_t)-1;
         } else if (oldfd == newfd) {
@@ -936,17 +1029,17 @@ pipe_eof:
             tf->a0 = (uint64_t)newfd;
         } else {
             /* Close newfd if open */
-            if (current_proc->ofile[newfd])
+            if (ftab[newfd])
                 close_ofile(current_proc, newfd);
             /* Share the same open_file, bump refcount */
-            current_proc->ofile[newfd] = current_proc->ofile[oldfd];
-            current_proc->ofile[oldfd]->refcount++;
+            ftab[newfd] = ftab[oldfd];
+            ftab[oldfd]->refcount++;
             /* bump pipe refcount for the new reference */
-            if (current_proc->ofile[oldfd]->is_pipe) {
-                int pid = current_proc->ofile[oldfd]->pipe_id;
+            if (ftab[oldfd]->is_pipe) {
+                int pid = ftab[oldfd]->pipe_id;
                 if (pid >= 0) {
-                    if (current_proc->ofile[oldfd]->pipe_read)  pipes[pid].read_open++;
-                    if (current_proc->ofile[oldfd]->pipe_write) pipes[pid].write_open++;
+                    if (ftab[oldfd]->pipe_read)  pipes[pid].read_open++;
+                    if (ftab[oldfd]->pipe_write) pipes[pid].write_open++;
                 }
             }
             tf->a0 = (uint64_t)newfd;
@@ -958,6 +1051,7 @@ pipe_eof:
         if (pipeid < 0) {
             tf->a0 = (uint64_t)-1;
         } else {
+            struct open_file **ftab = proc_ofile(current_proc);
             struct open_file *rf = vfs_alloc_file();
             struct open_file *wf = vfs_alloc_file();
             int rfd = -1, wfd = -1;
@@ -968,12 +1062,12 @@ pipe_eof:
                 rf->pipe_write = 0;
                 rf->pipe_id = pipeid;
                 rf->ops = NULL;
-                current_proc->ofile[rfd] = rf;
+                ftab[rfd] = rf;
                 if (wf) wfd = alloc_fd();
             }
             if (wfd < 0 || !wf) {
                 if (rfd >= 0) {
-                    current_proc->ofile[rfd] = NULL;
+                    ftab[rfd] = NULL;
                     vfs_free_file(rf);
                 } else if (rf) {
                     vfs_free_file(rf);
@@ -987,7 +1081,7 @@ pipe_eof:
                 wf->pipe_write = 1;
                 wf->pipe_id = pipeid;
                 wf->ops = NULL;
-                current_proc->ofile[wfd] = wf;
+                ftab[wfd] = wf;
                 fds[0] = rfd;
                 fds[1] = wfd;
                 tf->a0 = 0;
@@ -1239,6 +1333,7 @@ pipe_eof:
         } else {
             if (sig == 9) { /* SIGKILL -- always kill immediately */
                 target->exit_status = 128 + 9;
+                cleanup_proc_resources(target);
                 target->state = ZOMBIE;
                 if (target->parent) {
                     target->parent->sigpending |= (1UL << SIGCHLD);
@@ -1271,7 +1366,7 @@ pipe_eof:
         int fd      = (int)tf->a0;
         long offset = (long)tf->a1;
         int whence  = (int)tf->a2;
-        struct open_file *f = (fd >= 0 && fd < NOFILE) ? current_proc->ofile[fd] : NULL;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
         if (!f || f->is_pipe) {
             tf->a0 = (uint64_t)-1;
         } else {
@@ -1301,7 +1396,7 @@ pipe_eof:
         /* fstat(int fd, struct stat *st) */
         int fd = (int)tf->a0;
         uint8_t *st = (uint8_t *)tf->a1;
-        struct open_file *f = (fd >= 0 && fd < NOFILE) ? current_proc->ofile[fd] : NULL;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
         if (!st || !f) {
             tf->a0 = (uint64_t)-1;
         } else if (f->is_pipe) {
@@ -1310,15 +1405,12 @@ pipe_eof:
             uint32_t mode = 0x1000 | 0600; /* S_IFIFO | 0600 */
             memcpy(st + 16, &mode, 4);
             tf->a0 = 0;
-        } else if (fd <= 2 && (!f || !f->ops)) {
-            /* stdin/stdout/stderr without VFS backing (UART) */
-            memset(st, 0, 128);
-            uint32_t mode = 0x2000 | 0600; /* S_IFCHR | 0600 */
-            memcpy(st + 16, &mode, 4);
-            tf->a0 = 0;
+        } else if (f->ops && f->ops->fstat) {
+            /* Per-fd stat via VFS ops (handles devfs char devices, etc.) */
+            int ret = f->ops->fstat(f->private, st);
+            tf->a0 = (uint64_t)(int64_t)ret;
         } else {
-            /* For VFS files we don't easily have the path for stat.
-             * Fill in a generic regular file stat from the open_file info. */
+            /* Generic regular file fallback */
             memset(st, 0, 128);
             uint32_t mode = 0x81A4; /* S_IFREG | 0644 */
             uint32_t nlink = 1;
@@ -1355,7 +1447,7 @@ pipe_eof:
         int fd             = (int)tf->a0;
         char *ubuf         = (char *)tf->a1;
         unsigned int count = (unsigned int)tf->a2;
-        struct open_file *f = (fd >= 0 && fd < NOFILE) ? current_proc->ofile[fd] : NULL;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
         if (!f || f->is_pipe) {
             tf->a0 = (uint64_t)-1;
@@ -1388,13 +1480,8 @@ pipe_eof:
         int status = (int)tf->a0;
         if (current_proc) {
             current_proc->exit_status = status;
-            /* Free VMA list */
-            vma_free_all(current_proc);
-            /* Close all open fds */
-            for (int i = 0; i < NOFILE; i++) {
-                if (current_proc->ofile[i])
-                    close_ofile(current_proc, i);
-            }
+            /* Clean up shared/owned resources */
+            cleanup_proc_resources(current_proc);
             /* If init (pid 1) exits, the system has nothing left to run */
             if (current_proc->pid == 1) {
                 printk("\nSystem halted (init exited with status %d).\n", status);
@@ -1531,8 +1618,11 @@ pipe_eof:
         uint64_t argp = tf->a2;
 
         if (request == 0x5413) { /* TIOCGWINSZ */
-            if (fd >= 0 && fd <= 2) {
-                /* stdin/stdout/stderr are the UART terminal */
+            struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+            int is_tty = 0;
+            if (f && f->ops == &devfs_ops && f->private)
+              is_tty = devfs_is_tty(f->private);
+            if (is_tty) {
                 if (argp) {
                     /* Write a default 80x24 winsize struct to user memory */
                     struct { uint16_t row, col, xpix, ypix; } ws = {24, 80, 0, 0};
@@ -1563,17 +1653,18 @@ pipe_eof:
         if (signum < 1 || signum >= 32 || signum == 9 || signum == 19) {
             tf->a0 = (uint64_t)-22; /* -EINVAL */
         } else {
+            struct kern_sigaction *sig_sa = proc_sigactions(current_proc);
             /* Return old action if requested */
             if (oldact_uaddr) {
                 struct {
                     uint64_t handler; uint64_t mask;
                     int flags; int pad; uint64_t restorer;
                 } old;
-                old.handler = current_proc->sigactions[signum].handler;
-                old.mask = current_proc->sigactions[signum].mask;
-                old.flags = current_proc->sigactions[signum].flags;
+                old.handler = sig_sa[signum].handler;
+                old.mask = sig_sa[signum].mask;
+                old.flags = sig_sa[signum].flags;
                 old.pad = 0;
-                old.restorer = current_proc->sigactions[signum].restorer;
+                old.restorer = sig_sa[signum].restorer;
                 pte_t *pte = walk(current_proc->pagetable, oldact_uaddr, 0);
                 if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
                     uint64_t pa = PTE2PA(*pte) + (oldact_uaddr & 0xFFF);
@@ -1590,10 +1681,10 @@ pipe_eof:
                 if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
                     uint64_t pa = PTE2PA(*pte) + (act_uaddr & 0xFFF);
                     memcpy(&act, (void *)pa, sizeof(act));
-                    current_proc->sigactions[signum].handler = act.handler;
-                    current_proc->sigactions[signum].mask = act.mask;
-                    current_proc->sigactions[signum].flags = act.flags;
-                    current_proc->sigactions[signum].restorer = act.restorer;
+                    sig_sa[signum].handler = act.handler;
+                    sig_sa[signum].mask = act.mask;
+                    sig_sa[signum].flags = act.flags;
+                    sig_sa[signum].restorer = act.restorer;
                 }
             }
             tf->a0 = 0;
@@ -1672,7 +1763,7 @@ pipe_eof:
         int fd = (int)tf->a0;
         int cmd = (int)tf->a1;
 
-        if (fd < 0 || fd >= NOFILE || !current_proc->ofile[fd]) {
+        if (fd < 0 || fd >= NOFILE || !proc_ofile(current_proc)[fd]) {
             tf->a0 = (uint64_t)-9; /* -EBADF */
         } else if (cmd == 1) { /* F_GETFD */
             tf->a0 = 0;

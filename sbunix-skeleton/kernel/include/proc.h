@@ -69,6 +69,29 @@ enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 struct vm_area;
 struct open_file;
 
+/* Signal action descriptor (defined here so shared_sigactions can use it) */
+struct kern_sigaction {
+  uint64_t handler;   /* sa_handler function pointer */
+  uint64_t mask;      /* sa_mask */
+  int      flags;     /* sa_flags */
+  uint64_t restorer;  /* sa_restorer */
+};
+
+/* Shared-resource wrappers for CLONE_VM / CLONE_FILES / CLONE_SIGHAND */
+struct shared_pagetable {
+  pagetable_t pt;         /* the Sv39 page table root */
+  int         refcount;   /* number of procs sharing this pagetable */
+};
+
+struct shared_ftable {
+  struct open_file *ofile[NOFILE]; /* the fd array */
+  int               refcount;     /* number of procs sharing this table */
+};
+
+struct shared_sigactions {
+  struct kern_sigaction actions[32]; /* one per signal */
+  int                  refcount;    /* number of procs sharing */
+};
 
 /* Signal trampoline is mapped at this user VA in every process */
 #define SIG_TRAMPOLINE_VA  0x3FFFFFF000UL  /* just below top of Sv39 user space */
@@ -100,18 +123,28 @@ struct proc {
   struct vm_area *vma_list;    // sorted linked list of virtual memory areas
   uint64_t mmap_base;          // next VA to use for non-MAP_FIXED mmap
   /* signal handling */
-  struct kern_sigaction {
-    uint64_t handler;   /* sa_handler function pointer */
-    uint64_t mask;      /* sa_mask */
-    int      flags;     /* sa_flags */
-    uint64_t restorer;  /* sa_restorer */
-  } sigactions[32];             /* one per signal (indices 0-31) */
+  struct kern_sigaction sigactions[32]; /* one per signal (indices 0-31) */
   uint64_t sigmask;             /* blocked signal mask */
   uint64_t sigpending;          /* pending signal bitmask */
   /* stack bounds for auto-grow */
   uint64_t stack_top;            /* top of user stack (highest VA) */
   uint64_t stack_bottom;         /* lowest allocated stack page */
+  /* Clone/thread sharing state */
+  int clone_flags;                          /* flags this proc was created with */
+  struct shared_pagetable  *shared_pt;      /* non-NULL if CLONE_VM */
+  struct shared_ftable     *shared_ft;      /* non-NULL if CLONE_FILES */
+  struct shared_sigactions *shared_sa;      /* non-NULL if CLONE_SIGHAND */
 };
+
+/* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,
+ * indirecting through shared wrappers when present. */
+static inline struct open_file **proc_ofile(struct proc *p) {
+  return p->shared_ft ? p->shared_ft->ofile : p->ofile;
+}
+
+static inline struct kern_sigaction *proc_sigactions(struct proc *p) {
+  return p->shared_sa ? p->shared_sa->actions : p->sigactions;
+}
 
 void            procinit(void);
 struct proc*    allocproc(void);

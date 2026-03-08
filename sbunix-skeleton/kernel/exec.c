@@ -4,9 +4,11 @@
 #include <tar.h>
 #include <elf.h>
 #include <kalloc.h>
+#include <kmalloc.h>
 #include <riscv.h>
 #include <vm.h>
 #include <proc.h>
+#include <syscall.h>
 
 extern char _tarfs_start[];
 extern char _tarfs_end[];
@@ -32,6 +34,30 @@ int exec(char *path) {
     // 2. Validate
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
         ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3) return -1;
+
+    /* Detach from shared pagetable if this is a CLONE_VM thread */
+    if (current_proc->shared_pt) {
+        current_proc->shared_pt->refcount--;
+        if (current_proc->shared_pt->refcount == 0) {
+            /* We were the last user -- free old shared pagetable wrapper.
+             * The actual pagetable pages leak (pre-existing issue). */
+            kmfree(current_proc->shared_pt, sizeof(struct shared_pagetable));
+        }
+        current_proc->shared_pt = NULL;
+        current_proc->clone_flags &= ~CLONE_VM;
+        /* exec will create a brand new pagetable below */
+    }
+
+    /* Detach from shared signal handlers (exec resets all to SIG_DFL) */
+    if (current_proc->shared_sa) {
+        current_proc->shared_sa->refcount--;
+        if (current_proc->shared_sa->refcount == 0)
+            kmfree(current_proc->shared_sa, sizeof(struct shared_sigactions));
+        current_proc->shared_sa = NULL;
+        current_proc->clone_flags &= ~CLONE_SIGHAND;
+    }
+    /* Reset all sigactions to default */
+    memset(current_proc->sigactions, 0, sizeof(current_proc->sigactions));
 
     /* Clear old VMAs before loading new binary */
     vma_free_all(current_proc);
@@ -78,11 +104,11 @@ int exec(char *path) {
     // 5. Identity map kernel and ALL RAM (No PTE_U)
     // This ensures kernel code, data, AND dynamically allocated pages (like kstack)
     // are accessible after switching satp.
-    if(mappages(pagetable, 0x80000000, PHYSTOP - 0x80000000, 0x80000000, PTE_R | PTE_W | PTE_X) < 0) return -1;
+    if(mappages_super(pagetable, 0x80000000, PHYSTOP - 0x80000000, 0x80000000, PTE_R | PTE_W | PTE_X) < 0) return -1;
     // Map I/O registers needed for interrupt handling
     if(mappages(pagetable, 0x10000000, PAGE_SIZE, 0x10000000, PTE_R | PTE_W) < 0) return -1;  // UART
     if(mappages(pagetable, 0x2000000, 0x10000, 0x2000000, PTE_R | PTE_W) < 0) return -1;      // CLINT
-    if(mappages(pagetable, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) return -1; // PLIC
+    if(mappages_super(pagetable, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) return -1; // PLIC
 
     // Map signal trampoline page
     uvmmap_sigtrampoline(pagetable);

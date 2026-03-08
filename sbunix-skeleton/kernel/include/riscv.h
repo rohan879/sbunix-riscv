@@ -24,6 +24,17 @@ typedef int            pid_t;
 #define PGROUNDUP(sz)  (((sz)+PAGE_SIZE-1) & ~(PAGE_SIZE-1))
 #define PGROUNDDOWN(a) (((a)) & ~(PAGE_SIZE-1))
 
+/* 2MB super page (megapage) support for Sv39 level-1 leaf PTEs */
+#define SUPERPAGE_SIZE   (512 * PAGE_SIZE)           /* 2 MB = 0x200000 */
+#define SUPERPAGE_SHIFT  21
+#define SUPERPAGE_MASK   (SUPERPAGE_SIZE - 1)        /* 0x1FFFFF */
+#define SPGROUNDDOWN(a)  ((a) & ~(uint64_t)SUPERPAGE_MASK)
+#define SPGROUNDUP(a)    (((a) + SUPERPAGE_MASK) & ~(uint64_t)SUPERPAGE_MASK)
+#define IS_SUPERPAGE_ALIGNED(a)  (((uint64_t)(a) & SUPERPAGE_MASK) == 0)
+
+/* A PTE is a leaf if any of R, W, X is set (Sv39 spec) */
+#define PTE_IS_LEAF(pte)  ((pte) & (PTE_R | PTE_W | PTE_X))
+
 // PTE flags
 #define PTE_V (1L << 0) // valid
 #define PTE_R (1L << 1)
