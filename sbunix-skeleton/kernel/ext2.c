@@ -233,6 +233,7 @@ static struct ext2_inode_mem *icache_get(uint32_t ino) {
           memcpy(di.direct, icache[i].direct, sizeof(di.direct));
           di.indirect = icache[i].indirect;
           di.mode = icache[i].mode;
+          di.rdev = icache[i].rdev;
           di.ctime = icache[i].ctime;
           di.mtime = icache[i].mtime;
           ext2_write_dinode(icache[i].ino, &di);
@@ -263,6 +264,7 @@ static struct ext2_inode_mem *icache_get(uint32_t ino) {
   memcpy(ip->direct, di.direct, sizeof(ip->direct));
   ip->indirect = di.indirect;
   ip->mode = di.mode;
+  ip->rdev = di.rdev;
   ip->ctime = di.ctime;
   ip->mtime = di.mtime;
   return ip;
@@ -284,6 +286,7 @@ static void icache_writeback(struct ext2_inode_mem *ip) {
   memcpy(di.direct, ip->direct, sizeof(di.direct));
   di.indirect = ip->indirect;
   di.mode = ip->mode;
+  di.rdev = ip->rdev;
   ext2_write_dinode(ip->ino, &di);
   ip->dirty = 0;
 }
@@ -312,7 +315,12 @@ static int ext2_alloc_inode(uint16_t type) {
       memset(&di, 0, sizeof(di));
       di.type = type;
       di.link_count = 1;
-      di.mode = (type == EXT2_TYPE_DIR) ? 0755 : 0644;
+      if (type == EXT2_TYPE_DIR)
+        di.mode = 0755;
+      else if (type == EXT2_TYPE_CHRDEV || type == EXT2_TYPE_BLKDEV)
+        di.mode = 0666;
+      else
+        di.mode = 0644;
       ext2_write_dinode(ino, &di);
       sb.free_inodes--;
       sb.dirty = 1;
@@ -968,18 +976,24 @@ static int ext2_stat(const char *path, uint8_t *st) {
   uint32_t mode;
   if (ip->type == EXT2_TYPE_DIR)
     mode = (uint32_t)(0x4000 | (ip->mode & 0xfff));
+  else if (ip->type == EXT2_TYPE_CHRDEV)
+    mode = (uint32_t)(0x2000 | (ip->mode & 0xfff));
+  else if (ip->type == EXT2_TYPE_BLKDEV)
+    mode = (uint32_t)(0x6000 | (ip->mode & 0xfff));
   else
     mode = (uint32_t)(0x8000 | (ip->mode & 0xfff));
   uint32_t nlink = ip->link_count;
   int64_t size = (int64_t)ip->size;
   int32_t blksz = 4096;
   int64_t blks = ((int64_t)ip->size + 511) / 512;
+  uint64_t rdev = (uint64_t)ip->rdev;
 
   memcpy(st + 0, &dev, 8);
   memcpy(st + 8, &ino, 8);
   memcpy(st + 16, &mode, 4);
   memcpy(st + 20, &nlink, 4);
   /* uid=0, gid=0 already zeroed */
+  memcpy(st + 32, &rdev, 8);  /* st_rdev */
   memcpy(st + 48, &size, 8);
   memcpy(st + 56, &blksz, 4);
   memcpy(st + 64, &blks, 8);
@@ -1007,18 +1021,24 @@ static int ext2_fstat(void *private, uint8_t *st) {
   uint32_t mode;
   if (ip->type == EXT2_TYPE_DIR)
     mode = (uint32_t)(0x4000 | (ip->mode & 0xfff));
+  else if (ip->type == EXT2_TYPE_CHRDEV)
+    mode = (uint32_t)(0x2000 | (ip->mode & 0xfff));
+  else if (ip->type == EXT2_TYPE_BLKDEV)
+    mode = (uint32_t)(0x6000 | (ip->mode & 0xfff));
   else
     mode = (uint32_t)(0x8000 | (ip->mode & 0xfff));
   uint32_t nlink = ip->link_count;
   int64_t size = (int64_t)ip->size;
   int32_t blksz = 4096;
   int64_t blks = ((int64_t)ip->size + 511) / 512;
+  uint64_t rdev = (uint64_t)ip->rdev;
 
   memcpy(st + 0, &dev, 8);
   memcpy(st + 8, &ino, 8);
   memcpy(st + 16, &mode, 4);
   memcpy(st + 20, &nlink, 4);
   /* uid=0, gid=0 already zeroed */
+  memcpy(st + 32, &rdev, 8);  /* st_rdev */
   memcpy(st + 48, &size, 8);
   memcpy(st + 56, &blksz, 4);
   memcpy(st + 64, &blks, 8);
@@ -1280,6 +1300,77 @@ static int ext2_unlink(const char *path) {
 
   bcache_sync();
   sb_flush_if_dirty();
+  return 0;
+}
+
+int ext2_mknod(const char *path, uint32_t mode, uint32_t rdev) {
+  if (!ext2_mounted)
+    return -1;
+
+  while (*path == '/') path++;
+
+  /* Determine inode type from mode */
+  uint16_t itype;
+  uint8_t ftype;
+  if ((mode & 0xF000) == 0x2000) {      /* S_IFCHR */
+    itype = EXT2_TYPE_CHRDEV;
+    ftype = EXT2_FT_CHRDEV;
+  } else if ((mode & 0xF000) == 0x6000) { /* S_IFBLK */
+    itype = EXT2_TYPE_BLKDEV;
+    ftype = EXT2_FT_BLKDEV;
+  } else {
+    return -22; /* -EINVAL */
+  }
+
+  char parent_path[256];
+  const char *basename = path_parent(path, parent_path, sizeof(parent_path));
+  if (basename[0] == '\0')
+    return -1;
+
+  struct ext2_inode_mem *parent = ext2_namei(parent_path);
+  if (!parent)
+    return -2; /* -ENOENT */
+  if (parent->type != EXT2_TYPE_DIR) {
+    icache_release(parent);
+    return -20; /* -ENOTDIR */
+  }
+
+  /* Check name doesn't exist */
+  uint32_t existing;
+  if (ext2_dir_lookup(parent, basename, &existing) == 0) {
+    icache_release(parent);
+    return -17; /* -EEXIST */
+  }
+
+  int new_ino = ext2_alloc_inode(itype);
+  if (new_ino < 0) {
+    icache_release(parent);
+    return -28; /* -ENOSPC */
+  }
+
+  struct ext2_inode_mem *ip = icache_get((uint32_t)new_ino);
+  if (!ip) {
+    ext2_free_inode((uint32_t)new_ino);
+    icache_release(parent);
+    return -1;
+  }
+
+  ip->mode = mode & 0xfff;
+  ip->rdev = rdev;
+  ip->dirty = 1;
+  icache_writeback(ip);
+  icache_release(ip);
+
+  int ret = ext2_dir_add(parent, basename, (uint32_t)new_ino, ftype);
+  icache_writeback(parent);
+  icache_release(parent);
+
+  if (ret < 0) {
+    ext2_free_inode((uint32_t)new_ino);
+    return ret;
+  }
+
+  bcache_sync();
   return 0;
 }
 

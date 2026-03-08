@@ -3,6 +3,7 @@
 #include <riscv.h>
 #include <proc.h>
 #include <vfs.h>
+#include <ext2.h>
 #include <syscall.h>
 #include <uart.h>
 #include <plic.h>
@@ -2011,6 +2012,26 @@ pipe_eof:
             struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
             if (ops && ops->mkdir) {
                 int ret = ops->mkdir(relpath, mode);
+                tf->a0 = (uint64_t)(int64_t)ret;
+            } else {
+                tf->a0 = (uint64_t)-30; /* -EROFS */
+            }
+        }
+
+    } else if (sysnum == SYS_mknodat) {
+        /* mknodat(AT_FDCWD, path, mode, dev) */
+        const char *upath = (const char *)tf->a1;
+        uint32_t mode = (uint32_t)tf->a2;
+        uint32_t rdev = (uint32_t)tf->a3;
+        if (!upath) {
+            tf->a0 = (uint64_t)-1;
+        } else {
+            char resolved[256];
+            resolve_path(current_proc->cwd, upath, resolved);
+            const char *relpath;
+            struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+            if (ops == &ext2_ops) {
+                int ret = ext2_mknod(relpath, mode, rdev);
                 tf->a0 = (uint64_t)(int64_t)ret;
             } else {
                 tf->a0 = (uint64_t)-30; /* -EROFS */

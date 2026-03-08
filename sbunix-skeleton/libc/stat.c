@@ -34,6 +34,11 @@ int mkdir(const char *path, mode_t mode) {
     return (int)__syscall_ret(syscall(34, AT_FDCWD, path, mode));
 }
 
+int mknod(const char *path, mode_t mode, dev_t dev) {
+    /* SYS_mknodat = 33 */
+    return (int)__syscall_ret(syscall(33, AT_FDCWD, path, mode, dev));
+}
+
 mode_t umask(mode_t mask) {
     /* SYS_umask = 166 */
     return (mode_t)syscall(166, mask);
