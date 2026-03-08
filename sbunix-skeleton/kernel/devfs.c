@@ -4,6 +4,7 @@
 #include <uart.h>
 #include <kmalloc.h>
 #include <proc.h>
+#include <tty.h>
 
 /* ------------------------------------------------------------------ */
 /* Device table                                                         */
@@ -39,31 +40,7 @@ static int64_t devzero_write(const char *buf, uint64_t count) {
 
 /* /dev/console */
 static int64_t devconsole_read(char *buf, uint64_t count) {
-  /* UART raw byte delivery.  Returns one character at a time.
-   * Sleeps via swtch() when no input is available -- this creates
-   * a dependency on the process layer, acceptable in a teaching OS. */
-  uint64_t i = 0;
-  while (i < count) {
-    char c;
-    /* Wait until a character is available */
-    while (uart_dequeue(&c) != 0) {
-      /* Poll hardware UART directly in case interrupt missed a char */
-      int hw_c = uart_getc();
-      if (hw_c != -1) {
-        uart_enqueue((char)hw_c);
-        continue;
-      }
-      /* Sleep until UART interrupt wakes us */
-      current_proc->waiting_for_uart = 1;
-      current_proc->state = SLEEPING;
-      swtch(&current_proc->context, &scheduler_context);
-    }
-    if (c == '\r') c = '\n';
-    buf[i++] = c;
-    /* Return after each character so the caller can process it */
-    break;
-  }
-  return (int64_t)i;
+  return (int64_t)tty_read(buf, (int)count);
 }
 static int64_t devconsole_write(const char *buf, uint64_t count) {
   for (uint64_t i = 0; i < count; i++)

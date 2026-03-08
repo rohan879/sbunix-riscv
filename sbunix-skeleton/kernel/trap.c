@@ -11,6 +11,7 @@
 #include <string.h>
 #include <vm.h>
 #include <exec.h>
+#include <tty.h>
 
 #define TIMER_FREQ 10000000UL  // 10 MHz timebase
 
@@ -192,39 +193,10 @@ static void handle_external_interrupt(void) {
     if (irq == UART_IRQ) {
         int c;
         while ((c = uart_getc()) != -1) {
-            if (c == 0x03) {
-                /* Ctrl-C: deliver SIGINT through the signal machinery
-                 * instead of force-killing processes.  This lets each
-                 * process's sigaction (SIG_DFL terminates, user handler
-                 * runs, SIG_IGN ignores) decide the outcome, and ensures
-                 * proper cleanup (fd close, VMA free) via the normal
-                 * exit path.  Also delivers SIGINT to the shell so its
-                 * sigint_handler can forward to fg_pid. */
-                int signalled_any = 0;
-                for (struct proc *p = proc; p < &proc[64]; p++) {
-                    if (p->state != UNUSED && p->state != ZOMBIE &&
-                        p->pid > 1) {
-                        p->sigpending |= (1UL << 2); /* SIGINT */
-                        if (p->state == SLEEPING)
-                            p->state = RUNNABLE;
-                        /* Track whether any shell children were signalled */
-                        if (p->parent && p->parent->pid > 1)
-                            signalled_any = 1;
-                    }
-                }
-                /* Only enqueue 0x03 when the shell is idle at the prompt
-                 * (no foreground children).  When children exist, the
-                 * shell's SIGINT handler + SIGCHLD from dying children
-                 * handle everything; a stale 0x03 would cause read_line
-                 * to spuriously restart the prompt after reaping. */
-                if (!signalled_any)
-                    uart_enqueue(0x03);
-            } else {
-                uart_enqueue(c);
-            }
+            tty_input((char)c);
             last_key = (unsigned char)c;
         }
-        uart_wakeup();
+        /* tty_input() calls uart_wakeup() internally when data is ready */
         /* Also wake any process sleeping in wait4 so it can reap zombies.
          * Only wake waitpid sleepers (waiting_for_uart==0); do NOT wake
          * timed sleeps (waiting_for_uart==2) or UART-input sleeps (==1,
@@ -1640,6 +1612,19 @@ pipe_eof:
             tf->a0 = (uint64_t)current_proc->pid;
         } else if (request == 0x5410) { /* TIOCSPGRP */
             tf->a0 = 0;
+        } else if (request >= TCGETS && request <= TCSETSF) {
+            /* termios get/set -- only valid for terminal fds */
+            if (fd >= 0 && fd <= 2) {
+                pte_t *pte = walk(current_proc->pagetable, argp, 0);
+                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                    uint64_t pa = PTE2PA(*pte) + (argp & 0xFFF);
+                    tf->a0 = (uint64_t)tty_ioctl(request, (void *)pa);
+                } else {
+                    tf->a0 = (uint64_t)-14; /* -EFAULT */
+                }
+            } else {
+                tf->a0 = (uint64_t)-25; /* -ENOTTY */
+            }
         } else {
             tf->a0 = (uint64_t)-25; /* -ENOTTY for unknown ioctls */
         }
@@ -1801,7 +1786,22 @@ pipe_eof:
         }
 
     } else if (sysnum == SYS_unlinkat) {
-        tf->a0 = (uint64_t)-30; /* -EROFS */
+        /* unlinkat(AT_FDCWD, path, flags) */
+        const char *upath = (const char *)tf->a1;
+        if (!upath) {
+            tf->a0 = (uint64_t)-1;
+        } else {
+            char resolved[256];
+            resolve_path(current_proc->cwd, upath, resolved);
+            const char *relpath;
+            struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+            if (ops && ops->unlink) {
+                int ret = ops->unlink(relpath);
+                tf->a0 = (uint64_t)(int64_t)ret;
+            } else {
+                tf->a0 = (uint64_t)-30; /* -EROFS */
+            }
+        }
 
     } else if (sysnum == SYS_linkat) {
         tf->a0 = (uint64_t)-30; /* -EROFS */
@@ -1810,7 +1810,23 @@ pipe_eof:
         tf->a0 = (uint64_t)-30; /* -EROFS */
 
     } else if (sysnum == SYS_mkdirat) {
-        tf->a0 = (uint64_t)-30; /* -EROFS */
+        /* mkdirat(AT_FDCWD, path, mode) */
+        const char *upath = (const char *)tf->a1;
+        int mode = (int)tf->a2;
+        if (!upath) {
+            tf->a0 = (uint64_t)-1;
+        } else {
+            char resolved[256];
+            resolve_path(current_proc->cwd, upath, resolved);
+            const char *relpath;
+            struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+            if (ops && ops->mkdir) {
+                int ret = ops->mkdir(relpath, mode);
+                tf->a0 = (uint64_t)(int64_t)ret;
+            } else {
+                tf->a0 = (uint64_t)-30; /* -EROFS */
+            }
+        }
 
     } else if (sysnum == SYS_umask) {
         tf->a0 = 0022; /* return old umask, always 022 */

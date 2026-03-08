@@ -78,51 +78,25 @@ static void install_signal_handlers(void) {
     sigaction(SIGCHLD, &sa, NULL);
 }
 
-/* Read a line from stdin with echo and line editing.
- * Prints the prompt (ps1) before reading.  Handles Ctrl-C by printing a
- * fresh prompt and restarting the line, so callers never see a -2 return.
+/* Read a line from stdin.  The kernel tty layer (cooked mode) handles echo,
+ * backspace, ^C (SIGINT), ^Z (SIGTSTP), and ^D (EOF).  We just read the
+ * completed line.
  * Returns the number of characters in buf (excluding NUL), or -1 on EOF. */
 static int read_line(char *buf, int max, const char *ps1) {
 restart:
     write(STDOUT_FILENO, ps1, strlen(ps1));
-    int i = 0;
-    while (i < max - 1) {
-        char c;
-        ssize_t n = read(STDIN_FILENO, &c, 1);
-        if (n <= 0)
-            return -1;
-
-        if (c == '\x03') {
-            /* Ctrl-C: print "^C\n" here (kernel may not have, e.g. when input
-             * arrives via the direct UART poll path rather than the interrupt
-             * handler).  Move to a fresh line then restart the prompt. */
-            write(STDOUT_FILENO, "^C\n", 3);
-            i = 0;
-            goto restart;
-        }
-
-        if (c == '\x7f' || c == '\x08') {
-            /* Backspace: erase last typed character; i > 0 prevents
-             * erasing past the start of input (i.e. into the prompt). */
-            if (i > 0) {
-                i--;
-                write(STDOUT_FILENO, "\x08 \x08", 3);
-            }
-            continue;
-        }
-
-        if (c == '\n') {
-            write(STDOUT_FILENO, "\n", 1);
-            buf[i] = '\0';
-            return i;
-        }
-
-        /* Echo and store printable characters */
-        write(STDOUT_FILENO, &c, 1);
-        buf[i++] = c;
+    ssize_t n = read(STDIN_FILENO, buf, max - 1);
+    if (n == 0)
+        return -1;   /* EOF (^D on empty line) */
+    if (n < 0) {
+        /* EINTR from ^C — tty already echoed ^C\n, reprint prompt */
+        goto restart;
     }
-    buf[i] = '\0';
-    return i;
+    /* Strip trailing newline */
+    if (n > 0 && buf[n - 1] == '\n')
+        n--;
+    buf[n] = '\0';
+    return (int)n;
 }
 
 /* Print notifications for completed/stopped background jobs */

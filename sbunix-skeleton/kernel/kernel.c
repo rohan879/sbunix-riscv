@@ -11,6 +11,8 @@
 #include <plic.h>
 #include <dtb.h>
 #include <virtio_blk.h>
+#include <ext2.h>
+#include <tty.h>
 
 // Declare symbols for the embedded tarfs
 extern char _tarfs_start[];
@@ -30,10 +32,12 @@ void boot(uint64_t hartid, void *dtb) {
   timer_init();
   plic_init();
   uart_intr_init();
+  tty_init();
   w_sie(r_sie() | SIE_STIE | SIE_SEIE);
   w_sstatus(r_sstatus() | SSTATUS_SIE);
 
-  virtio_blk_test();
+  if (virtio_blk_init() == 0)
+    ext2_init();
 
   procinit();
   vfs_init();
