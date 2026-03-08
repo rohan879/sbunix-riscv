@@ -68,4 +68,13 @@ extern int errno;
 #define ECONNREFUSED 111 /* connection refused */
 #define ETIMEDOUT  110  /* connection timed out */
 
+/* Convert raw negative kernel return to -1 + errno */
+static inline long __syscall_ret(long r) {
+    if (r < 0 && r >= -4095) {
+        errno = (int)(-r);
+        return -1;
+    }
+    return r;
+}
+
 #endif /* _ERRNO_H */

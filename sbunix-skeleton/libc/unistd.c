@@ -6,14 +6,6 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 
-static inline long __syscall_ret(long r) {
-    if (r < 0 && r >= -4095) {
-        errno = (int)(-r);
-        return -1;
-    }
-    return r;
-}
-
 ssize_t read(int fd, void *buf, size_t count) {
     return __syscall_ret(syscall(SYS_read, fd, buf, count));
 }

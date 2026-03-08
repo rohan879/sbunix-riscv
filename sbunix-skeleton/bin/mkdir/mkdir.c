@@ -17,8 +17,12 @@ static int mkpath(const char *path, mode_t mode) {
       char saved = buf[i];
       buf[i] = '\0';
       if (mkdir(buf, mode) < 0 && errno != EEXIST) {
-        dprintf(2, "mkdir: cannot create '%s': %s\n", buf, strerror(errno));
-        return -1;
+        /* Check if it already exists as a directory */
+        struct stat st;
+        if (stat(buf, &st) < 0 || !S_ISDIR(st.st_mode)) {
+          dprintf(2, "mkdir: cannot create '%s': %s\n", buf, strerror(errno));
+          return -1;
+        }
       }
       buf[i] = saved;
     }

@@ -7,14 +7,6 @@
 #include <fcntl.h>
 #include <errno.h>
 
-static inline long __syscall_ret(long r) {
-    if (r < 0 && r >= -4095) {
-        errno = (int)(-r);
-        return -1;
-    }
-    return r;
-}
-
 int fstat(int fd, struct stat *buf) {
     return (int)__syscall_ret(syscall(SYS_fstat, fd, buf));
 }

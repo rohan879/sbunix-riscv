@@ -10,13 +10,14 @@
 #include <signal.h>
 #include <unistd.h>
 #include <syscall.h>
+#include <errno.h>
 
 /*
  * kill() — send signal `sig` to process `pid`.
  * Uses SYS_kill (129) which matches the Linux RISC-V ABI.
  */
 int kill(pid_t pid, int sig) {
-    return (int)syscall(SYS_kill, pid, sig);
+    return (int)__syscall_ret(syscall(SYS_kill, pid, sig));
 }
 
 /*

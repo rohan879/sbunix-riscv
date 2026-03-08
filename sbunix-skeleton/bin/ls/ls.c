@@ -5,6 +5,7 @@
 #include <syscall.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <errno.h>
 
 /* -----------------------------------------------------------------------
  * Flags parsed from argv
@@ -38,6 +39,10 @@ static void fmt_mode(unsigned int mode, char *out) {
     /* type */
     if      ((mode & 0xF000) == 0x4000) out[0] = 'd';
     else if ((mode & 0xF000) == 0xA000) out[0] = 'l';
+    else if ((mode & 0xF000) == 0x2000) out[0] = 'c';
+    else if ((mode & 0xF000) == 0x6000) out[0] = 'b';
+    else if ((mode & 0xF000) == 0x1000) out[0] = 'p';
+    else if ((mode & 0xF000) == 0xC000) out[0] = 's';
     else                                 out[0] = '-';
     /* owner */
     out[1] = (mode & 0400) ? 'r' : '-';
@@ -115,7 +120,7 @@ static int ls_dir(const char *path) {
                 return 0;
             }
         }
-        printf("ls: cannot access '%s'\n", path);
+        dprintf(2, "ls: cannot access '%s': %s\n", path, strerror(errno));
         return 1;
     }
 
