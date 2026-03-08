@@ -779,7 +779,7 @@ static long sys_brk_handler(struct trapframe *tf) {
         uint64_t heap_start = (cur_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
         uint64_t rounded    = (new_brk + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
         if (heap_start < rounded) {
-            if (uvmalloc(current_proc->pagetable, heap_start, rounded, PTE_W) == 0) {
+            if (uvmalloc(current_proc->pagetable, heap_start, rounded, PTE_R|PTE_W) == 0) {
                 return (long)cur_sz;
             }
         }
@@ -1551,7 +1551,13 @@ static long sys_mmap_handler(struct trapframe *tf) {
         current_proc->mmap_base += len;
     }
 
-    if (uvmalloc(current_proc->pagetable, va, va + len, PTE_W) == 0) {
+    int pte_flags = 0;
+    if (prot & PROT_READ)  pte_flags |= PTE_R;
+    if (prot & PROT_WRITE) pte_flags |= PTE_W;
+    if (prot & PROT_EXEC)  pte_flags |= PTE_X;
+    if (pte_flags == 0) pte_flags = PTE_R; /* minimum readable */
+
+    if (uvmalloc(current_proc->pagetable, va, va + len, pte_flags) == 0) {
         return (long)-1;
     }
 
@@ -1564,25 +1570,69 @@ static long sys_mmap_handler(struct trapframe *tf) {
 }
 
 static long sys_munmap_handler(struct trapframe *tf) {
-    uint64_t addr = tf->a0;
+    uint64_t addr = tf->a0 & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t len  = tf->a1;
-
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 
-    struct vm_area *v = vma_find(current_proc, addr);
-    if (v) {
-        uvmunmap(current_proc->pagetable, addr, len);
-        sfence_vma();
-        vma_remove(current_proc, addr, addr + len);
-        return (long)0;
-    } else {
-        return (long)-1;
-    }
+    if (addr >= MAXVA || addr + len > MAXVA)
+        return -22; /* -EINVAL */
+
+    /* Unmap pages -- uvmunmap handles unmapped gaps gracefully */
+    uvmunmap(current_proc->pagetable, addr, len);
+    sfence_vma();
+
+    /* Remove VMA tracking (handles splits automatically) */
+    vma_remove(current_proc, addr, addr + len);
+
+    return 0;
 }
 
 static long sys_mprotect_handler(struct trapframe *tf) {
-    (void)tf;
-    return (long)0;
+    uint64_t addr = tf->a0;
+    uint64_t len  = tf->a1;
+    int prot      = (int)tf->a2;
+
+    /* Validate alignment */
+    if (addr & (PAGE_SIZE - 1))
+        return -22; /* -EINVAL */
+    len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    if (len == 0)
+        return 0;
+    if (addr + len > MAXVA)
+        return -22;
+
+    /* Build new PTE permission bits */
+    int new_flags = 0;
+    if (prot & PROT_READ)  new_flags |= PTE_R;
+    if (prot & PROT_WRITE) new_flags |= PTE_W;
+    if (prot & PROT_EXEC)  new_flags |= PTE_X;
+
+    /* Walk each page and update PTE flags */
+    for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
+        int level;
+        pte_t *pte = walk_super(current_proc->pagetable, va, &level);
+
+        /* Split super page if needed */
+        if (pte && (*pte & PTE_V) && level == 1) {
+            superpage_split(current_proc->pagetable, va & ~(uint64_t)SUPERPAGE_MASK);
+            pte = walk(current_proc->pagetable, va, 0);
+        }
+
+        if (!pte || !(*pte & PTE_V))
+            continue;
+
+        /* Clear old R/W/X, set new ones, keep U and other flags */
+        *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | new_flags;
+    }
+
+    /* Update VMA tracking: remove old region, re-add with new prot */
+    struct vm_area *v = vma_find(current_proc, addr);
+    int old_flags = v ? v->flags : 0;
+    vma_remove(current_proc, addr, addr + len);
+    vma_add(current_proc, addr, addr + len, prot, old_flags);
+
+    sfence_vma();
+    return 0;
 }
 
 static long sys_ps_handler(struct trapframe *tf) {

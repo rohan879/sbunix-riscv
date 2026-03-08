@@ -169,7 +169,7 @@ pagetable_t uvmcreate() {
 
 // Allocate PTEs and physical memory for a virtual address range [start_va, end_va).
 // Returns end_va or 0 on error.
-uint64_t uvmalloc(pagetable_t pagetable, uint64_t start_va, uint64_t end_va, int xperm) {
+uint64_t uvmalloc(pagetable_t pagetable, uint64_t start_va, uint64_t end_va, int perm) {
   char *mem;
   uint64_t a;
 
@@ -183,7 +183,7 @@ uint64_t uvmalloc(pagetable_t pagetable, uint64_t start_va, uint64_t end_va, int
       return 0;
     }
     memset(mem, 0, PAGE_SIZE);
-    if(mappages(pagetable, a, PAGE_SIZE, (uint64_t)mem, PTE_R|PTE_U|xperm) != 0){
+    if(mappages(pagetable, a, PAGE_SIZE, (uint64_t)mem, perm|PTE_U|PTE_V) != 0){
       kfree(mem);
       return 0;
     }
