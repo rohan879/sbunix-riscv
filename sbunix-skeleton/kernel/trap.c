@@ -190,34 +190,32 @@ static void handle_external_interrupt(void) {
         int c;
         while ((c = uart_getc()) != -1) {
             if (c == 0x03) {
-                /* Ctrl-C: kill all non-init foreground processes */
-                int killed_any = 0;
+                /* Ctrl-C: deliver SIGINT through the signal machinery
+                 * instead of force-killing processes.  This lets each
+                 * process's sigaction (SIG_DFL terminates, user handler
+                 * runs, SIG_IGN ignores) decide the outcome, and ensures
+                 * proper cleanup (fd close, VMA free) via the normal
+                 * exit path.  Also delivers SIGINT to the shell so its
+                 * sigint_handler can forward to fg_pid. */
+                int signalled_any = 0;
                 for (struct proc *p = proc; p < &proc[64]; p++) {
-                    if (p->state != UNUSED && p->pid > 1) {
-                        p->exit_status = 130; /* 128 + SIGINT */
-                        p->state = ZOMBIE;
-                        killed_any = 1;
-                        /* Close all fds to release pipe references */
-                        for (int i = 0; i < NOFILE; i++) {
-                            if (p->ofile[i])
-                                close_ofile(p, i);
-                        }
+                    if (p->state != UNUSED && p->state != ZOMBIE &&
+                        p->pid > 1) {
+                        p->sigpending |= (1UL << 2); /* SIGINT */
+                        if (p->state == SLEEPING)
+                            p->state = RUNNABLE;
+                        /* Track whether any shell children were signalled */
+                        if (p->parent && p->parent->pid > 1)
+                            signalled_any = 1;
                     }
                 }
-                /* When children were killed the shell is blocked in waitpid.
-                 * Print "^C\n" here for visual feedback, then wake all sleeping
-                 * processes so waitpid returns.  Do NOT enqueue 0x03 — the shell
-                 * will call read_line fresh after waitpid.
-                 *
-                 * When no children existed the shell is blocked in read() inside
-                 * read_line.  Deliver 0x03 to read_line; read_line itself will
-                 * print "^C\n" and restart the prompt (avoids a double-print). */
-                if (killed_any) {
-                    printk("^C\n");
-                } else {
-                    /* Shell was idle at prompt; deliver ^C to read_line */
+                /* Only enqueue 0x03 when the shell is idle at the prompt
+                 * (no foreground children).  When children exist, the
+                 * shell's SIGINT handler + SIGCHLD from dying children
+                 * handle everything; a stale 0x03 would cause read_line
+                 * to spuriously restart the prompt after reaping. */
+                if (!signalled_any)
                     uart_enqueue(0x03);
-                }
             } else {
                 uart_enqueue(c);
             }
