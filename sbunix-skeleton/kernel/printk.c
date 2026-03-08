@@ -1,11 +1,57 @@
 #include <printk.h>
 #include <uart.h>
 #include <stdarg.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------ */
+/* Kernel ring buffer for dmesg                                        */
+/* ------------------------------------------------------------------ */
+#define DMESG_BUFSZ 16384
+static char dmesg_buf[DMESG_BUFSZ];
+static int dmesg_head;   /* next write position */
+static int dmesg_count;  /* total bytes written (may exceed DMESG_BUFSZ) */
+
+int dmesg_total(void) {
+  return dmesg_count;
+}
+
+int dmesg_read(char *buf, int bufsz, int offset) {
+  int avail = dmesg_count < DMESG_BUFSZ ? dmesg_count : DMESG_BUFSZ;
+  int start_offset = dmesg_count - avail; /* logical offset of oldest byte */
+
+  if (offset < start_offset)
+    offset = start_offset;
+  if (offset >= dmesg_count)
+    return 0;
+
+  int to_copy = dmesg_count - offset;
+  if (to_copy > bufsz)
+    to_copy = bufsz;
+
+  /* Compute ring buffer position for 'offset' */
+  int ring_pos = (dmesg_head - avail + (offset - start_offset)) % DMESG_BUFSZ;
+  if (ring_pos < 0) ring_pos += DMESG_BUFSZ;
+
+  int copied = 0;
+  while (copied < to_copy) {
+    int chunk = DMESG_BUFSZ - ring_pos;
+    if (chunk > to_copy - copied)
+      chunk = to_copy - copied;
+    memcpy(buf + copied, dmesg_buf + ring_pos, chunk);
+    copied += chunk;
+    ring_pos = (ring_pos + chunk) % DMESG_BUFSZ;
+  }
+  return copied;
+}
 
 // similar to write userspace call but does not use fd number
 static void writek(char *buf, int count) {
     for (int i = 0; i < count; i++) {
         uart_write(buf[i]);
+        /* Also write to ring buffer */
+        dmesg_buf[dmesg_head] = buf[i];
+        dmesg_head = (dmesg_head + 1) % DMESG_BUFSZ;
+        dmesg_count++;
     }
 }
 

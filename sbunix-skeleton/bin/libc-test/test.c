@@ -550,6 +550,58 @@ static void test_stdint(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 17. stdin/stdout/stderr — FILE streams and file descriptors
+ * ---------------------------------------------------------------------- */
+
+static void test_stdio_streams(void) {
+    section("stdio streams");
+
+    /* FILE* pointers are non-NULL */
+    CHECK("stdin != NULL",       stdin != NULL);
+    CHECK("stdout != NULL",      stdout != NULL);
+    CHECK("stderr != NULL",      stderr != NULL);
+
+    /* fileno returns correct fd numbers */
+    CHECK("fileno(stdin) == 0",  fileno(stdin) == 0);
+    CHECK("fileno(stdout) == 1", fileno(stdout) == 1);
+    CHECK("fileno(stderr) == 2", fileno(stderr) == 2);
+
+    /* stdout write works (if we got this far, it does, but test explicitly) */
+    int n = write(1, "", 0);
+    CHECK("write(1) ok",        n == 0);
+
+    /* stderr write works */
+    n = write(2, "", 0);
+    CHECK("write(2) ok",        n == 0);
+
+    /* fprintf to stdout returns positive count */
+    /* (use a known string so we can check return value) */
+    int r = fprintf(stdout, "");
+    CHECK("fprintf(stdout) ok", r >= 0);
+
+    /* fputc to stdout */
+    /* We can't easily verify output, but it shouldn't return EOF */
+
+    /* fd 0,1,2 are valid (fstat should succeed) */
+    struct stat st;
+    CHECK("fstat(0) ok",        fstat(0, &st) == 0);
+    CHECK("fstat(1) ok",        fstat(1, &st) == 0);
+    CHECK("fstat(2) ok",        fstat(2, &st) == 0);
+
+    /* isatty should return 1 for console fds */
+    CHECK("isatty(0)",          isatty(0) == 1);
+    CHECK("isatty(1)",          isatty(1) == 1);
+    CHECK("isatty(2)",          isatty(2) == 1);
+
+    /* fputs/fwrite to stdout should not error */
+    int wr = fputs("", stdout);
+    CHECK("fputs(stdout) ok",   wr >= 0);
+
+    /* stderr is unbuffered and distinct from stdout */
+    CHECK("stderr != stdout",   stderr != stdout);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -572,6 +624,7 @@ int main(void) {
     test_wait_macros();
     test_mman();
     test_stdint();
+    test_stdio_streams();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

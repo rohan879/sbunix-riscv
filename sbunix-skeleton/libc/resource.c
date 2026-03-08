@@ -7,14 +7,6 @@
 #include <errno.h>
 #include <string.h>
 
-static inline long __syscall_ret(long r) {
-    if (r < 0 && r >= -4095) {
-        errno = (int)(-r);
-        return -1;
-    }
-    return r;
-}
-
 int getrlimit(int resource, struct rlimit *rlim) {
     return (int)__syscall_ret(syscall(SYS_prlimit64, 0, resource, 0, rlim));
 }

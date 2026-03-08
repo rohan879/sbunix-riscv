@@ -1,8 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <signal.h>
-#include <syscall.h>
 
 int main(int argc, char *argv[]) {
     int sig = 15; /* SIGTERM default — kernel treats any signal as kill */
@@ -32,8 +33,8 @@ int main(int argc, char *argv[]) {
             ret = 1;
             continue;
         }
-        if (syscall(SYS_kill, pid, sig) < 0) {
-            dprintf(2, "kill: %d: no such process\n", (int)pid);
+        if (kill(pid, sig) < 0) {
+            dprintf(2, "kill: %d: %s\n", (int)pid, strerror(errno));
             ret = 1;
         }
     }

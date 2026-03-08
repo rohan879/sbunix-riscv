@@ -387,4 +387,5 @@ struct vfs_ops tarfs_ops = {
   .readdir = tarfs_readdir,
   .mkdir   = tarfs_mkdir,
   .unlink  = tarfs_unlink,
+  .rmdir   = NULL,
 };

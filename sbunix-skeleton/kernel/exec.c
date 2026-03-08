@@ -105,11 +105,13 @@ int exec(char *path) {
     // This ensures kernel code, data, AND dynamically allocated pages (like kstack)
     // are accessible after switching satp.
     if(mappages_super(pagetable, 0x80000000, PHYSTOP - 0x80000000, 0x80000000, PTE_R | PTE_W | PTE_X) < 0) return -1;
-    // Map I/O registers needed for interrupt handling
+    // Map I/O registers needed for interrupt handling and device I/O
     if(mappages(pagetable, 0x10000000, PAGE_SIZE, 0x10000000, PTE_R | PTE_W) < 0) return -1;  // UART
     if(mappages(pagetable, 0x101000, PAGE_SIZE, 0x101000, PTE_R | PTE_W) < 0) return -1;    // RTC
     if(mappages(pagetable, 0x2000000, 0x10000, 0x2000000, PTE_R | PTE_W) < 0) return -1;      // CLINT
     if(mappages_super(pagetable, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) return -1; // PLIC
+    if(mappages_super(pagetable, 0x30000000, 0x200000, 0x30000000, PTE_R | PTE_W) < 0) return -1; // PCIe ECAM (first 2MB)
+    if(mappages_super(pagetable, 0x40000000, 0x40000000, 0x40000000, PTE_R | PTE_W) < 0) return -1; // PCIe MMIO BAR
 
     // Map signal trampoline page
     uvmmap_sigtrampoline(pagetable);

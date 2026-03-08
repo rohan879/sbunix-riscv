@@ -7,14 +7,6 @@
 #include <fcntl.h>
 #include <errno.h>
 
-static inline long __syscall_ret(long r) {
-    if (r < 0 && r >= -4095) {
-        errno = (int)(-r);
-        return -1;
-    }
-    return r;
-}
-
 int fstat(int fd, struct stat *buf) {
     return (int)__syscall_ret(syscall(SYS_fstat, fd, buf));
 }
@@ -31,7 +23,12 @@ int lstat(const char *path, struct stat *buf) {
 
 int mkdir(const char *path, mode_t mode) {
     /* SYS_mkdirat = 34 */
-    return (int)syscall(34, AT_FDCWD, path, mode);
+    return (int)__syscall_ret(syscall(34, AT_FDCWD, path, mode));
+}
+
+int mknod(const char *path, mode_t mode, dev_t dev) {
+    /* SYS_mknodat = 33 */
+    return (int)__syscall_ret(syscall(33, AT_FDCWD, path, mode, dev));
 }
 
 mode_t umask(mode_t mask) {

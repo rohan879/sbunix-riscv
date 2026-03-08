@@ -75,10 +75,16 @@ struct stat {
 #define S_IWUGO  (S_IWUSR | S_IWGRP | S_IWOTH)
 #define S_IXUGO  (S_IXUSR | S_IXGRP | S_IXOTH)
 
+/* Device number macros */
+#define makedev(maj, min) (((unsigned long)(maj) << 8) | ((unsigned long)(min) & 0xff))
+#define major(dev)        (((unsigned long)(dev) >> 8) & 0xff)
+#define minor(dev)        ((unsigned long)(dev) & 0xff)
+
 int stat(const char *path, struct stat *buf);
 int fstat(int fd, struct stat *buf);
 int lstat(const char *path, struct stat *buf);
 int mkdir(const char *path, mode_t mode);
+int mknod(const char *path, mode_t mode, dev_t dev);
 mode_t umask(mode_t mask);
 
 #endif /* _SYS_STAT_H */

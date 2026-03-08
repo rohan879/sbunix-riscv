@@ -3,6 +3,7 @@
 #include <riscv.h>
 #include <proc.h>
 #include <vfs.h>
+#include <ext2.h>
 #include <syscall.h>
 #include <uart.h>
 #include <plic.h>
@@ -451,9 +452,15 @@ static pid_t sys_clone(void) {
                      PTE_R | PTE_W | PTE_X) < 0) goto bad;
         if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000,
                      PTE_R | PTE_W) < 0) goto bad;
+        if (mappages(new_pt, 0x101000, PAGE_SIZE, 0x101000,
+                     PTE_R | PTE_W) < 0) goto bad;
         if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000,
                      PTE_R | PTE_W) < 0) goto bad;
         if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000,
+                     PTE_R | PTE_W) < 0) goto bad;
+        if (mappages_super(new_pt, 0x30000000, 0x200000, 0x30000000,
+                     PTE_R | PTE_W) < 0) goto bad;
+        if (mappages_super(new_pt, 0x40000000, 0x40000000, 0x40000000,
                      PTE_R | PTE_W) < 0) goto bad;
 
         /* COW-share user pages */
@@ -1051,6 +1058,13 @@ pipe_eof:
             f->offset = 0;
             f->flags = flags;
             f->is_pipe = 0;
+            /* Store resolved path for mount-point injection in readdir */
+            {
+              int plen = strlen(resolved);
+              if (plen > 255) plen = 255;
+              memcpy(f->path, resolved, plen);
+              f->path[plen] = '\0';
+            }
             proc_ofile(current_proc)[fd] = f;
             tf->a0 = (uint64_t)fd;
         }
@@ -1519,7 +1533,7 @@ pipe_eof:
     } else if (sysnum == SYS_getdents64) {
         /* getdents64(int fd, struct linux_dirent64 *buf, unsigned int count) */
         int fd             = (int)tf->a0;
-        char *ubuf         = (char *)tf->a1;
+        uint64_t ubuf_va   = tf->a1;
         unsigned int count = (unsigned int)tf->a2;
         struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
@@ -1529,8 +1543,65 @@ pipe_eof:
         }
 
         if (f->ops && f->ops->readdir) {
-            int ret = f->ops->readdir(f->private, ubuf, count, &f->offset);
-            tf->a0 = (uint64_t)(int64_t)ret;
+            /* Use a kernel buffer so readdir never touches user VA directly */
+            if (count > 4096) count = 4096;
+            char *kbuf = kalloc();
+            if (!kbuf) {
+                tf->a0 = (uint64_t)-12; /* -ENOMEM */
+                goto syscall_done;
+            }
+            memset(kbuf, 0, 4096);
+
+            int ret = f->ops->readdir(f->private, kbuf, count, &f->offset);
+            if (ret < 0) {
+                kfree(kbuf);
+                tf->a0 = (uint64_t)(int64_t)ret;
+            } else {
+                /* Inject synthetic directory entries for child mount points.
+                 * Use a negative offset range (starting at -1024) to track
+                 * which mount entries we've already emitted. */
+                unsigned int written = (unsigned int)ret;
+                if (ret == 0 && f->offset >= 0) {
+                    /* Filesystem readdir exhausted; switch to mount injection phase */
+                    f->offset = -1024;
+                }
+                if (f->offset <= -1024) {
+                    const char *mnames[8];
+                    int nmounts = vfs_get_child_mounts(f->path, mnames, 8);
+                    int mstart = (int)(-(f->offset + 1024)); /* how many we've already emitted */
+                    for (int mi = mstart; mi < nmounts; mi++) {
+                        int nl = strlen(mnames[mi]);
+                        int rl = (19 + nl + 1 + 7) & ~7;
+                        if (written + (unsigned int)rl > count) break;
+                        char *d = kbuf + written;
+                        memset(d, 0, rl);
+                        uint64_t ino = (uint64_t)(5000 + mi);
+                        int64_t doff = (int64_t)(-(1024 + mi + 1));
+                        uint16_t rlen = (uint16_t)rl;
+                        uint8_t dt = 4; /* DT_DIR */
+                        memcpy(d + 0, &ino, 8);
+                        memcpy(d + 8, &doff, 8);
+                        memcpy(d + 16, &rlen, 2);
+                        memcpy(d + 18, &dt, 1);
+                        memcpy(d + 19, mnames[mi], nl + 1);
+                        written += (unsigned int)rl;
+                        f->offset = (int64_t)(-(1024 + mi + 1));
+                    }
+                }
+                /* Copy kernel buffer to user space page-by-page via walk() */
+                uint64_t done = 0;
+                while (done < written) {
+                    pte_t *pte = walk(current_proc->pagetable, ubuf_va + done, 0);
+                    if (!pte || !(*pte & PTE_V)) break;
+                    uint64_t pa = PTE2PA(*pte) + ((ubuf_va + done) & 0xFFF);
+                    uint64_t chunk = 4096 - ((ubuf_va + done) & 0xFFF);
+                    if (chunk > written - done) chunk = written - done;
+                    memcpy((char *)pa, kbuf + done, chunk);
+                    done += chunk;
+                }
+                kfree(kbuf);
+                tf->a0 = (uint64_t)written;
+            }
         } else {
             tf->a0 = (uint64_t)-1;
         }
@@ -1897,6 +1968,7 @@ pipe_eof:
     } else if (sysnum == SYS_unlinkat) {
         /* unlinkat(AT_FDCWD, path, flags) */
         const char *upath = (const char *)tf->a1;
+        int flags = (int)tf->a2;
         if (!upath) {
             tf->a0 = (uint64_t)-1;
         } else {
@@ -1904,11 +1976,20 @@ pipe_eof:
             resolve_path(current_proc->cwd, upath, resolved);
             const char *relpath;
             struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
-            if (ops && ops->unlink) {
-                int ret = ops->unlink(relpath);
-                tf->a0 = (uint64_t)(int64_t)ret;
+            if (flags & 0x200) { /* AT_REMOVEDIR */
+                if (ops && ops->rmdir) {
+                    int ret = ops->rmdir(relpath);
+                    tf->a0 = (uint64_t)(int64_t)ret;
+                } else {
+                    tf->a0 = (uint64_t)-30; /* -EROFS */
+                }
             } else {
-                tf->a0 = (uint64_t)-30; /* -EROFS */
+                if (ops && ops->unlink) {
+                    int ret = ops->unlink(relpath);
+                    tf->a0 = (uint64_t)(int64_t)ret;
+                } else {
+                    tf->a0 = (uint64_t)-30; /* -EROFS */
+                }
             }
         }
 
@@ -1931,6 +2012,26 @@ pipe_eof:
             struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
             if (ops && ops->mkdir) {
                 int ret = ops->mkdir(relpath, mode);
+                tf->a0 = (uint64_t)(int64_t)ret;
+            } else {
+                tf->a0 = (uint64_t)-30; /* -EROFS */
+            }
+        }
+
+    } else if (sysnum == SYS_mknodat) {
+        /* mknodat(AT_FDCWD, path, mode, dev) */
+        const char *upath = (const char *)tf->a1;
+        uint32_t mode = (uint32_t)tf->a2;
+        uint32_t rdev = (uint32_t)tf->a3;
+        if (!upath) {
+            tf->a0 = (uint64_t)-1;
+        } else {
+            char resolved[256];
+            resolve_path(current_proc->cwd, upath, resolved);
+            const char *relpath;
+            struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+            if (ops == &ext2_ops) {
+                int ret = ext2_mknod(relpath, mode, rdev);
                 tf->a0 = (uint64_t)(int64_t)ret;
             } else {
                 tf->a0 = (uint64_t)-30; /* -EROFS */
@@ -2086,14 +2187,25 @@ pipe_eof:
 
     } else if (sysnum == SYS_getrandom) {
         /* getrandom(void *buf, size_t buflen, unsigned int flags) */
-        char *buf = (char *)tf->a0;
+        uint64_t uaddr = tf->a0;
         uint64_t buflen = tf->a1;
-        if (buf && buflen > 0) {
+        if (uaddr && buflen > 0) {
             /* Simple PRNG seeded from RISC-V cycle counter */
             uint64_t state = r_time();
-            for (uint64_t i = 0; i < buflen; i++) {
-                state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-                buf[i] = (char)(state >> 33);
+            uint64_t done = 0;
+            while (done < buflen) {
+                /* Translate user VA to kernel PA, one page at a time */
+                pte_t *pte = walk(current_proc->pagetable, uaddr + done, 0);
+                if (!pte || !(*pte & PTE_V)) break;
+                uint64_t pa = PTE2PA(*pte) + ((uaddr + done) & 0xFFF);
+                uint64_t chunk = 4096 - ((uaddr + done) & 0xFFF);
+                if (chunk > buflen - done) chunk = buflen - done;
+                char *kbuf = (char *)pa;
+                for (uint64_t i = 0; i < chunk; i++) {
+                    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                    kbuf[i] = (char)(state >> 33);
+                }
+                done += chunk;
             }
         }
         tf->a0 = (uint64_t)buflen;

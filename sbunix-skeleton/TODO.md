@@ -297,6 +297,9 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Libc errno handling — `__syscall_ret` applied to all error-returning syscall wrappers in unistd.c and stat.c
 - [x] nanosleep VA translation — user timespec pointer translated via walk()
 - [x] Ext2 timestamps — ext2_stat/ext2_fstat populate st_atime/st_mtime/st_ctime from on-disk inode
+- [x] getdents64 VA translation — uses kernel buffer for readdir, copies to user space page-by-page via walk()
+- [x] PCIe MMIO mappings in process page tables — exec and fork map PCIe ECAM (2MB) and MMIO BAR (1GB) so virtio-blk I/O works during syscalls
+- [x] Mount point injection in readdir — getdents64 appends synthetic DT_DIR entries for child mount points (dev, proc, disk) after filesystem readdir exhausts
 
 ## POSIX Compliance Checklist (Required Components)
 
@@ -305,11 +308,11 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Kernel — boot via OpenSBI, trap/interrupt dispatch, SBI timer, PLIC external interrupts
 - [x] Scheduler — cooperative + preemptive round-robin; timer-driven yield via `swtch()`
 - [x] Sleeping Process Support — SLEEPING state in `struct proc`; nanosleep, waitpid, tty_read all sleep/wake
-- [ ] WFI/Idle Support — scheduler busy-spins in `kernel/proc.c`; needs idle process or WFI instruction in scheduler loop
+- [x] WFI/Idle Support — `wfi` instruction in scheduler loop when no RUNNABLE process found (`kernel/proc.c`)
 - [x] Threads — `sys_clone` with `CLONE_VM`/`CLONE_FILES`/`CLONE_SIGHAND`; refcounted shared resources
 - [x] File System — VFS layer (`kernel/vfs.c`) with mount table (8 slots), `struct vfs_ops`, `struct open_file` refcounting
 - [x] FS Type 1: Read-Only FS at boot — tarfs mounted at `/` with ls, ps, cat, echo, kill, sleep, sbush
-- [ ] FS Type 2: /proc virtual FS — not implemented; need procfs exposing process list (pid, state, name, ppid)
+- [x] FS Type 2: /proc virtual FS — `kernel/procfs.c` exposes per-PID directories with `status` and `cmdline`; mounted at `/proc` in `vfs_init()`
 - [x] Mount points — VFS mount table supports 8 entries; currently: `/` (tarfs), `/dev` (devfs), `/disk` (ext2)
 - [x] R/W file system — ext2-lite over virtio-blk at `/disk`; open/read/write/mkdir/unlink
 - [x] Terminal Support — `kernel/tty.c` line discipline; cooked mode (echo, backspace, ^C, ^D); raw mode; stdin/stdout/stderr via `/dev/console`
@@ -322,8 +325,8 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 
 ### Remaining Work for Full POSIX Compliance
 
-- [ ] Add WFI to scheduler idle loop — execute `wfi` instruction when no RUNNABLE process exists to reduce CPU usage
-- [ ] Implement procfs (`/proc`) — virtual filesystem exposing per-PID directories with at least `status`, `cmdline`; mount at `/proc` in `vfs_init()`
+- [x] Add WFI to scheduler idle loop — `wfi` halts hart until next interrupt when no RUNNABLE process exists
+- [x] Implement procfs (`/proc`) — `kernel/procfs.c` with `status`, `cmdline` per-PID; mounted at `/proc`
 - [ ] TCP/IP networking via lwIP (3 layers, detailed below)
 
 ### TCP/IP Networking Plan (lwIP + virtio-net)

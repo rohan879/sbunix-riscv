@@ -17,6 +17,7 @@ struct vfs_ops {
   int (*readdir)(void *private, char *buf, unsigned int count, int64_t *offset);
   int (*mkdir)(const char *path, int mode);
   int (*unlink)(const char *path);
+  int (*rmdir)(const char *path);
 };
 
 /* Open file description -- stored in proc->ofile[] */
@@ -31,6 +32,8 @@ struct open_file {
   int pipe_read;
   int pipe_write;
   int pipe_id;
+  /* resolved path for mount-point injection in readdir */
+  char path[256];
 };
 
 /* Filesystem mount point */
@@ -49,11 +52,15 @@ void vfs_free_file(struct open_file *f);
 struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath);
 void vfs_register_mount(const char *path, struct vfs_ops *ops);
 void vfs_init(void);
+int vfs_get_child_mounts(const char *dir, const char *names[], int max);
+int vfs_get_mount_info(int index, const char **path, const char **fstype);
 
 /* Filesystem ops (defined in their respective .c files) */
 extern struct vfs_ops tarfs_ops;
 extern struct vfs_ops devfs_ops;
 extern struct vfs_ops ext2_ops;
+extern struct vfs_ops procfs_ops;
+extern struct vfs_ops sysfs_ops;
 
 /* devfs helpers */
 int devfs_is_tty(void *private);

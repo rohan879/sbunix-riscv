@@ -20,10 +20,14 @@
 #define EXT2_TYPE_FREE    0
 #define EXT2_TYPE_FILE    1
 #define EXT2_TYPE_DIR     2
+#define EXT2_TYPE_CHRDEV  3
+#define EXT2_TYPE_BLKDEV  4
 
 /* Directory entry file types (mirrors inode type) */
 #define EXT2_FT_FILE      1
 #define EXT2_FT_DIR       2
+#define EXT2_FT_CHRDEV    3
+#define EXT2_FT_BLKDEV    4
 
 /* Max filename length */
 #define EXT2_NAME_MAX     255
@@ -79,7 +83,8 @@ struct ext2_dinode {
   uint32_t uid;
   uint32_t gid;
   uint32_t mode;
-  uint8_t  _reserved[36];
+  uint32_t rdev;           /* device major/minor (for char/block devs) */
+  uint8_t  _reserved[32];
 };
 
 /* ------------------------------------------------------------------ */
@@ -120,6 +125,7 @@ struct ext2_inode_mem {
   uint32_t direct[12];
   uint32_t indirect;
   uint32_t mode;
+  uint32_t rdev;
   uint64_t ctime;
   uint64_t mtime;
 };
@@ -137,5 +143,6 @@ struct ext2_open_private {
 /* ------------------------------------------------------------------ */
 int  ext2_init(void);
 void ext2_sync(void);
+int  ext2_mknod(const char *path, uint32_t mode, uint32_t rdev);
 
 #endif
