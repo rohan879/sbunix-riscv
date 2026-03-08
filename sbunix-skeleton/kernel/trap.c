@@ -691,15 +691,11 @@ void trap_handler(struct trapframe *tf) {
 pagefault_kill:
             printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
                    current_proc ? current_proc->pid : -1, tf->epc, stval, cause);
-            /* Kill the process */
             if (current_proc) {
-                current_proc->exit_status = 139;  /* SIGSEGV */
-                current_proc->state = ZOMBIE;
-                /* Wake parent if waiting */
-                if (current_proc->parent &&
-                    current_proc->parent->state == SLEEPING)
-                    current_proc->parent->state = RUNNABLE;
-                swtch(&current_proc->context, &scheduler_context);
+                current_proc->sigpending |= (1UL << SIGSEGV);
+                deliver_signal(tf, current_proc);
+                /* If deliver_signal returned (handler caught it), resume */
+                return;
             }
             while(1) {}
         }

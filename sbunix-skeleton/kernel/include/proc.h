@@ -74,6 +74,7 @@ struct open_file;
 #define SIG_TRAMPOLINE_VA  0x3FFFFFF000UL  /* just below top of Sv39 user space */
 
 /* Signal constants */
+#define SIGSEGV   11
 #define SIGCHLD   17
 #define SIGURG    23
 #define SIGWINCH  28
