@@ -18,6 +18,9 @@ struct vfs_ops {
   int (*mkdir)(const char *path, int mode);
   int (*unlink)(const char *path);
   int (*rmdir)(const char *path);
+  int (*symlink)(const char *target, const char *linkpath);
+  int (*readlink)(const char *path, char *buf, int bufsiz);
+  int (*rename)(const char *oldpath, const char *newpath);
 };
 
 /* Open file description -- stored in proc->ofile[] */

@@ -319,6 +319,8 @@ static int ext2_alloc_inode(uint16_t type) {
         di.mode = 0755;
       else if (type == EXT2_TYPE_CHRDEV || type == EXT2_TYPE_BLKDEV)
         di.mode = 0666;
+      else if (type == EXT2_TYPE_SYMLINK)
+        di.mode = 0777;
       else
         di.mode = 0644;
       ext2_write_dinode(ino, &di);
@@ -980,6 +982,8 @@ static int ext2_stat(const char *path, uint8_t *st) {
     mode = (uint32_t)(0x2000 | (ip->mode & 0xfff));
   else if (ip->type == EXT2_TYPE_BLKDEV)
     mode = (uint32_t)(0x6000 | (ip->mode & 0xfff));
+  else if (ip->type == EXT2_TYPE_SYMLINK)
+    mode = (uint32_t)(0xA000 | (ip->mode & 0xfff));
   else
     mode = (uint32_t)(0x8000 | (ip->mode & 0xfff));
   uint32_t nlink = ip->link_count;
@@ -1025,6 +1029,8 @@ static int ext2_fstat(void *private, uint8_t *st) {
     mode = (uint32_t)(0x2000 | (ip->mode & 0xfff));
   else if (ip->type == EXT2_TYPE_BLKDEV)
     mode = (uint32_t)(0x6000 | (ip->mode & 0xfff));
+  else if (ip->type == EXT2_TYPE_SYMLINK)
+    mode = (uint32_t)(0xA000 | (ip->mode & 0xfff));
   else
     mode = (uint32_t)(0x8000 | (ip->mode & 0xfff));
   uint32_t nlink = ip->link_count;
@@ -1374,6 +1380,114 @@ int ext2_mknod(const char *path, uint32_t mode, uint32_t rdev) {
   return 0;
 }
 
+static int ext2_symlink(const char *target, const char *linkpath) {
+    if (!ext2_mounted)
+        return -1;
+
+    while (*linkpath == '/') linkpath++;
+    if (linkpath[0] == '\0')
+        return -1;
+
+    int targetlen = strlen(target);
+    if (targetlen == 0 || targetlen >= EXT2_BLOCK_SIZE)
+        return -22; /* EINVAL */
+
+    char parent_path[256];
+    const char *basename = path_parent(linkpath, parent_path, sizeof(parent_path));
+    if (basename[0] == '\0')
+        return -1;
+
+    struct ext2_inode_mem *parent = ext2_namei(parent_path);
+    if (!parent)
+        return -2; /* ENOENT */
+
+    /* Check name doesn't already exist */
+    uint32_t existing_ino;
+    if (ext2_dir_lookup(parent, basename, &existing_ino) == 0) {
+        icache_release(parent);
+        return -17; /* EEXIST */
+    }
+
+    /* Allocate inode */
+    int ino = ext2_alloc_inode(EXT2_TYPE_SYMLINK);
+    if (ino < 0) {
+        icache_release(parent);
+        return -28; /* ENOSPC */
+    }
+
+    struct ext2_inode_mem *ip = icache_get((uint32_t)ino);
+    if (!ip) {
+        icache_release(parent);
+        return -1;
+    }
+
+    ip->mode = 0777;
+    ip->size = (uint32_t)targetlen;
+
+    /* Allocate data block and write target */
+    uint32_t blk = ext2_bmap_alloc(ip, 0);
+    if (blk == 0) {
+        icache_release(ip);
+        icache_release(parent);
+        return -28; /* ENOSPC */
+    }
+
+    struct bcache_entry *be = bcache_get(blk);
+    memset(be->data, 0, EXT2_BLOCK_SIZE);
+    memcpy(be->data, target, (uint32_t)targetlen);
+    bcache_mark_dirty(be);
+    bcache_release(be);
+
+    ip->dirty = 1;
+    icache_writeback(ip);
+    icache_release(ip);
+
+    /* Add directory entry */
+    int ret = ext2_dir_add(parent, basename, (uint32_t)ino, EXT2_FT_SYMLINK);
+    icache_writeback(parent);
+    icache_release(parent);
+
+    if (ret < 0) {
+        ext2_free_inode((uint32_t)ino);
+        return ret;
+    }
+
+    bcache_sync();
+    return 0;
+}
+
+static int ext2_readlink(const char *path, char *buf, int bufsiz) {
+    if (!ext2_mounted)
+        return -1;
+
+    while (*path == '/') path++;
+
+    struct ext2_inode_mem *ip = ext2_namei(path);
+    if (!ip)
+        return -2; /* ENOENT */
+
+    if (ip->type != EXT2_TYPE_SYMLINK) {
+        icache_release(ip);
+        return -22; /* EINVAL */
+    }
+
+    int copylen = (int)ip->size;
+    if (copylen > bufsiz)
+        copylen = bufsiz;
+
+    uint32_t blk = ext2_bmap(ip, 0);
+    if (blk == 0) {
+        icache_release(ip);
+        return -1;
+    }
+
+    struct bcache_entry *be = bcache_get(blk);
+    memcpy(buf, be->data, (uint32_t)copylen);
+    bcache_release(be);
+    icache_release(ip);
+    return copylen;
+}
+
 static int ext2_rmdir(const char *path) {
   if (!ext2_mounted)
     return -1;
@@ -1468,16 +1582,19 @@ static int ext2_rmdir(const char *path) {
 /* ================================================================== */
 
 struct vfs_ops ext2_ops = {
-  .open    = ext2_open,
-  .read    = ext2_read,
-  .write   = ext2_write,
-  .close   = ext2_close,
-  .stat    = ext2_stat,
-  .fstat   = ext2_fstat,
-  .readdir = ext2_readdir,
-  .mkdir   = ext2_mkdir,
-  .unlink  = ext2_unlink,
-  .rmdir   = ext2_rmdir,
+  .open     = ext2_open,
+  .read     = ext2_read,
+  .write    = ext2_write,
+  .close    = ext2_close,
+  .stat     = ext2_stat,
+  .fstat    = ext2_fstat,
+  .readdir  = ext2_readdir,
+  .mkdir    = ext2_mkdir,
+  .unlink   = ext2_unlink,
+  .rmdir    = ext2_rmdir,
+  .symlink  = ext2_symlink,
+  .readlink = ext2_readlink,
+  .rename   = 0,
 };
 
 /* ================================================================== */

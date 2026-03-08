@@ -211,3 +211,11 @@ pid_t wait(int *status) {
 unsigned int alarm(unsigned int seconds) {
     return (unsigned int)syscall(SYS_alarm, seconds);
 }
+
+int symlink(const char *target, const char *linkpath) {
+    return (int)__syscall_ret(syscall(SYS_symlinkat, target, AT_FDCWD, linkpath));
+}
+
+ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+    return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, AT_FDCWD, path, buf, bufsiz));
+}

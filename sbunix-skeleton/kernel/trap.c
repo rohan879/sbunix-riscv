@@ -1978,8 +1978,48 @@ static long sys_set_tid_address_handler(struct trapframe *tf) {
 }
 
 static long sys_readlinkat_handler(struct trapframe *tf) {
-    (void)tf;
-    return (long)-2;
+    char kpath[256];
+    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
+        return (long)-14;
+
+    int bufsiz = (int)tf->a3;
+    if (bufsiz <= 0)
+        return (long)-22;
+
+    char resolved[256];
+    resolve_path(current_proc->cwd, kpath, resolved);
+
+    const char *relpath;
+    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    if (!ops || !ops->readlink)
+        return (long)-22; /* EINVAL */
+
+    char kbuf[256];
+    int maxread = bufsiz > 256 ? 256 : bufsiz;
+    int ret = ops->readlink(relpath, kbuf, maxread);
+    if (ret < 0)
+        return (long)(int64_t)ret;
+
+    if (copyout(current_proc->pagetable, tf->a2, kbuf, (uint64_t)ret) < 0)
+        return (long)-14;
+    return (long)ret;
+}
+
+static long sys_symlinkat_handler(struct trapframe *tf) {
+    char ktarget[256], klinkpath[256];
+    if (copyinstr(current_proc->pagetable, ktarget, tf->a0, sizeof(ktarget)) < 0)
+        return (long)-14;
+    if (copyinstr(current_proc->pagetable, klinkpath, tf->a2, sizeof(klinkpath)) < 0)
+        return (long)-14;
+
+    char resolved[256];
+    resolve_path(current_proc->cwd, klinkpath, resolved);
+
+    const char *relpath;
+    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    if (ops && ops->symlink)
+        return (long)(int64_t)ops->symlink(ktarget, relpath);
+    return (long)-30; /* EROFS */
 }
 
 static long sys_writev_handler(struct trapframe *tf) {
@@ -2339,6 +2379,7 @@ void syscall_init(void) {
     syscall_table[SYS_getegid]         = sys_getegid_handler;
     syscall_table[SYS_set_tid_address] = sys_set_tid_address_handler;
     syscall_table[SYS_readlinkat]      = sys_readlinkat_handler;
+    syscall_table[SYS_symlinkat]       = sys_symlinkat_handler;
     syscall_table[SYS_writev]          = sys_writev_handler;
     syscall_table[SYS_readv]           = sys_readv_handler;
     syscall_table[SYS_prlimit64]       = sys_prlimit64_handler;

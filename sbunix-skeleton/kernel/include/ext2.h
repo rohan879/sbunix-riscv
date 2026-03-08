@@ -22,12 +22,14 @@
 #define EXT2_TYPE_DIR     2
 #define EXT2_TYPE_CHRDEV  3
 #define EXT2_TYPE_BLKDEV  4
+#define EXT2_TYPE_SYMLINK 5
 
 /* Directory entry file types (mirrors inode type) */
 #define EXT2_FT_FILE      1
 #define EXT2_FT_DIR       2
 #define EXT2_FT_CHRDEV    3
 #define EXT2_FT_BLKDEV    4
+#define EXT2_FT_SYMLINK   7
 
 /* Max filename length */
 #define EXT2_NAME_MAX     255
