@@ -1818,19 +1818,42 @@ static long sys_gettimeofday_handler(struct trapframe *tf) {
 static long sys_fcntl_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     int cmd = (int)tf->a1;
+    struct open_file **ftab = proc_ofile(current_proc);
 
-    if (fd < 0 || fd >= NOFILE || !proc_ofile(current_proc)[fd]) {
-        return (long)-9;
-    } else if (cmd == 1) {
+    if (fd < 0 || fd >= NOFILE || !ftab[fd])
+        return (long)-9; /* EBADF */
+
+    if (cmd == 0 || cmd == 1030) {
+        /* F_DUPFD (0) or F_DUPFD_CLOEXEC (1030) — dup to lowest fd >= arg */
+        int minfd = (int)tf->a2;
+        if (minfd < 0 || minfd >= NOFILE)
+            return (long)-22; /* EINVAL */
+        for (int i = minfd; i < NOFILE; i++) {
+            if (ftab[i] == 0) {
+                ftab[i] = ftab[fd];
+                ftab[fd]->refcount++;
+                if (ftab[fd]->is_pipe) {
+                    int pid = ftab[fd]->pipe_id;
+                    if (pid >= 0) {
+                        if (ftab[fd]->pipe_read)  pipes[pid].read_open++;
+                        if (ftab[fd]->pipe_write) pipes[pid].write_open++;
+                    }
+                }
+                return (long)i;
+            }
+        }
+        return (long)-24; /* EMFILE */
+    } else if (cmd == 1) { /* F_GETFD */
         return (long)0;
-    } else if (cmd == 2) {
+    } else if (cmd == 2) { /* F_SETFD */
         return (long)0;
-    } else if (cmd == 3) {
-        return (long)2;
-    } else if (cmd == 4) {
+    } else if (cmd == 3) { /* F_GETFL */
+        return (long)ftab[fd]->flags;
+    } else if (cmd == 4) { /* F_SETFL */
+        ftab[fd]->flags = (int)tf->a2;
         return (long)0;
     } else {
-        return (long)-22;
+        return (long)-22; /* EINVAL */
     }
 }
 
