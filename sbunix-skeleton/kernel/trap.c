@@ -2158,6 +2158,33 @@ pipe_eof:
             current_proc->alarm_ticks = ticks + seconds;
         tf->a0 = remaining;
 
+    } else if (sysnum == SYS_madvise) {
+        /* madvise — no-op success (no real VM advice needed) */
+        tf->a0 = 0;
+
+    } else if (sysnum == SYS_ftruncate) {
+        /* ftruncate — tarfs is read-only; return -EROFS */
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_tgkill) {
+        /* tgkill(tgid, tid, sig) — route to same logic as kill */
+        pid_t tid = (pid_t)tf->a1;
+        int sig = (int)tf->a2;
+        if (sig == 0) {
+            tf->a0 = 0;
+        } else {
+            tf->a0 = (uint64_t)-3; /* -ESRCH */
+            for (struct proc *p = proc; p < &proc[64]; p++) {
+                if (p->pid == tid && p->state != UNUSED) {
+                    p->sigpending |= (1UL << sig);
+                    if (p->state == SLEEPING)
+                        p->state = RUNNABLE;
+                    tf->a0 = 0;
+                    break;
+                }
+            }
+        }
+
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);
         tf->a0 = (uint64_t)-1;
