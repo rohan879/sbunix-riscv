@@ -18,6 +18,7 @@ enum procfs_type {
   PROCFS_STATUS,    /* /proc/<pid>/status */
   PROCFS_CMDLINE,   /* /proc/<pid>/cmdline */
   PROCFS_DMESG,     /* /proc/dmesg */
+  PROCFS_MOUNTS,    /* /proc/mounts */
 };
 
 struct procfs_private {
@@ -145,6 +146,35 @@ static int procfs_open(const char *path, int flags, void **private) {
     return 0;
   }
 
+  /* /proc/mounts */
+  if (strcmp(p, "mounts") == 0) {
+    priv->type = PROCFS_MOUNTS;
+    int pos = 0;
+    const char *mpath, *fstype;
+    for (int i = 0; vfs_get_mount_info(i, &mpath, &fstype) == 0; i++) {
+      const char *rw = "ro";
+      /* ext2 is read-write */
+      if (strcmp(fstype, "ext2") == 0)
+        rw = "rw";
+      /* Render: "<fstype> on <path> (<rw>)\n" */
+      int fl = strlen(fstype);
+      int pl = strlen(mpath);
+      int rl = strlen(rw);
+      int need = fl + 4 + pl + 2 + rl + 2; /* "fs on path (rw)\n" */
+      if (pos + need >= (int)sizeof(priv->buf))
+        break;
+      memcpy(priv->buf + pos, fstype, fl); pos += fl;
+      memcpy(priv->buf + pos, " on ", 4); pos += 4;
+      memcpy(priv->buf + pos, mpath, pl); pos += pl;
+      memcpy(priv->buf + pos, " (", 2); pos += 2;
+      memcpy(priv->buf + pos, rw, rl); pos += rl;
+      memcpy(priv->buf + pos, ")\n", 2); pos += 2;
+    }
+    priv->len = pos;
+    *private = priv;
+    return 0;
+  }
+
   /* Extract PID component */
   char pidstr[16];
   int i = 0;
@@ -206,7 +236,8 @@ static int64_t procfs_read(void *private, char *buf, uint64_t count, int64_t *of
     return (int64_t)n;
   }
 
-  if (priv->type != PROCFS_STATUS && priv->type != PROCFS_CMDLINE)
+  if (priv->type != PROCFS_STATUS && priv->type != PROCFS_CMDLINE &&
+      priv->type != PROCFS_MOUNTS)
     return 0;
 
   int64_t off = *offset;
@@ -270,6 +301,14 @@ static int procfs_stat(const char *path, uint8_t *st) {
     return 0;
   }
 
+  if (strcmp(p, "mounts") == 0) {
+    uint32_t mode = (uint32_t)(0x8000 | 0444); /* S_IFREG | r--r--r-- */
+    uint64_t ino = 202;
+    memcpy(st + 8, &ino, 8);
+    memcpy(st + 16, &mode, 4);
+    return 0;
+  }
+
   /* Extract PID */
   char pidstr[16];
   int i = 0;
@@ -323,6 +362,15 @@ static int procfs_fstat(void *private, uint8_t *st) {
     uint64_t ino = 201;
     memcpy(st + 8, &ino, 8);
     memcpy(st + 16, &mode, 4);
+    return 0;
+  }
+  if (priv->type == PROCFS_MOUNTS) {
+    uint32_t mode = (uint32_t)(0x8000 | 0444);
+    uint64_t ino = 202;
+    uint64_t size = (uint64_t)priv->len;
+    memcpy(st + 8, &ino, 8);
+    memcpy(st + 16, &mode, 4);
+    memcpy(st + 48, &size, 8);
     return 0;
   }
   if (priv->type == PROCFS_ROOT || priv->type == PROCFS_PIDDIR) {
@@ -380,6 +428,7 @@ static int procfs_readdir(void *private, char *ubuf, unsigned int count, int64_t
     EMIT_DIRENT(".", 200, 4);   /* DT_DIR */
     EMIT_DIRENT("..", 1, 4);    /* DT_DIR */
     EMIT_DIRENT("dmesg", 201, 8); /* DT_REG */
+    EMIT_DIRENT("mounts", 202, 8); /* DT_REG */
 
     for (struct proc *p = proc; p < &proc[64]; p++) {
       if (p->state != UNUSED) {

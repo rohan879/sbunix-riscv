@@ -53,6 +53,7 @@ struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath);
 void vfs_register_mount(const char *path, struct vfs_ops *ops);
 void vfs_init(void);
 int vfs_get_child_mounts(const char *dir, const char *names[], int max);
+int vfs_get_mount_info(int index, const char **path, const char **fstype);
 
 /* Filesystem ops (defined in their respective .c files) */
 extern struct vfs_ops tarfs_ops;

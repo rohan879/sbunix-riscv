@@ -136,6 +136,24 @@ int vfs_get_child_mounts(const char *dir, const char *names[], int max) {
 }
 
 /* ------------------------------------------------------------------ */
+/* vfs_get_mount_info — return mount path and fs type by index          */
+/* ------------------------------------------------------------------ */
+int vfs_get_mount_info(int index, const char **path, const char **fstype) {
+  if (index < 0 || index >= num_mounts)
+    return -1;
+  struct mount *m = &mount_table[index];
+  if (path) *path = m->path;
+  if (fstype) {
+    if (m->ops == &tarfs_ops)       *fstype = "tarfs";
+    else if (m->ops == &devfs_ops)  *fstype = "devfs";
+    else if (m->ops == &procfs_ops) *fstype = "procfs";
+    else if (m->ops == &ext2_ops)   *fstype = "ext2";
+    else                            *fstype = "unknown";
+  }
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* VFS init                                                             */
 /* ------------------------------------------------------------------ */
 void vfs_init(void) {
