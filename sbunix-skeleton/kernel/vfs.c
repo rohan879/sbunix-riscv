@@ -148,6 +148,7 @@ int vfs_get_mount_info(int index, const char **path, const char **fstype) {
     else if (m->ops == &devfs_ops)  *fstype = "devfs";
     else if (m->ops == &procfs_ops) *fstype = "procfs";
     else if (m->ops == &ext2_ops)   *fstype = "ext2";
+    else if (m->ops == &sysfs_ops)  *fstype = "sysfs";
     else                            *fstype = "unknown";
   }
   return 0;
@@ -165,6 +166,8 @@ void vfs_init(void) {
   vfs_register_mount("/dev", &devfs_ops);
   /* Register procfs at /proc */
   vfs_register_mount("/proc", &procfs_ops);
+  /* Register sysfs at /sys */
+  vfs_register_mount("/sys", &sysfs_ops);
   /* Register ext2 at /mnt (if mounted) */
   extern int ext2_mounted_flag(void);
   if (ext2_mounted_flag())
@@ -172,5 +175,5 @@ void vfs_init(void) {
   /* Register tarfs at / (root) */
   vfs_register_mount("/", &tarfs_ops);
 
-  printk("vfs: initialized (/dev -> devfs, /proc -> procfs, / -> tarfs)\n");
+  printk("vfs: initialized (/dev -> devfs, /proc -> procfs, /sys -> sysfs, / -> tarfs)\n");
 }

@@ -60,6 +60,7 @@ extern struct vfs_ops tarfs_ops;
 extern struct vfs_ops devfs_ops;
 extern struct vfs_ops ext2_ops;
 extern struct vfs_ops procfs_ops;
+extern struct vfs_ops sysfs_ops;
 
 /* devfs helpers */
 int devfs_is_tty(void *private);
