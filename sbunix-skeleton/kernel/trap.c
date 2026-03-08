@@ -1955,17 +1955,31 @@ pipe_eof:
     } else if (sysnum == SYS_writev) {
         /* writev(int fd, const struct iovec *iov, int iovcnt) */
         int fd = (int)tf->a0;
-        struct { uint64_t base; uint64_t len; } *iov = (void *)tf->a1;
+        uint64_t iov_uaddr = tf->a1;
         int iovcnt = (int)tf->a2;
         struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
         if (!f || iovcnt < 0) {
             tf->a0 = (uint64_t)-9; /* -EBADF */
         } else {
+            /* Translate iovec array pointer */
+            pte_t *iov_pte = walk(current_proc->pagetable, iov_uaddr, 0);
+            if (!iov_pte || !(*iov_pte & PTE_V)) { tf->a0 = (uint64_t)-14; goto syscall_done; }
+            struct { uint64_t base; uint64_t len; } *iov = (void *)(PTE2PA(*iov_pte) + (iov_uaddr & 0xFFF));
             int64_t total = 0;
             for (int i = 0; i < iovcnt; i++) {
-                char *base = (char *)iov[i].base;
+                uint64_t buf_uaddr = iov[i].base;
                 uint64_t len = iov[i].len;
                 if (len == 0) continue;
+                /* Translate buffer pointer */
+                char *base;
+                if (buf_uaddr) {
+                    pte_t *bpte = walk(current_proc->pagetable, buf_uaddr, 0);
+                    if (!bpte || !(*bpte & PTE_V)) { if (total == 0) total = -14; break; }
+                    base = (char *)(PTE2PA(*bpte) + (buf_uaddr & 0xFFF));
+                } else {
+                    if (total == 0) total = -14;
+                    break;
+                }
                 if (f->is_pipe) {
                     int pid = f->pipe_id;
                     if (pid < 0 || !f->pipe_write) { total = -9; break; }
@@ -1995,17 +2009,31 @@ pipe_eof:
     } else if (sysnum == SYS_readv) {
         /* readv(int fd, const struct iovec *iov, int iovcnt) */
         int fd = (int)tf->a0;
-        struct { uint64_t base; uint64_t len; } *iov = (void *)tf->a1;
+        uint64_t iov_uaddr = tf->a1;
         int iovcnt = (int)tf->a2;
         struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
         if (!f || iovcnt < 0) {
             tf->a0 = (uint64_t)-9; /* -EBADF */
         } else {
+            /* Translate iovec array pointer */
+            pte_t *iov_pte = walk(current_proc->pagetable, iov_uaddr, 0);
+            if (!iov_pte || !(*iov_pte & PTE_V)) { tf->a0 = (uint64_t)-14; goto syscall_done; }
+            struct { uint64_t base; uint64_t len; } *iov = (void *)(PTE2PA(*iov_pte) + (iov_uaddr & 0xFFF));
             int64_t total = 0;
             for (int i = 0; i < iovcnt; i++) {
-                char *base = (char *)iov[i].base;
+                uint64_t buf_uaddr = iov[i].base;
                 uint64_t len = iov[i].len;
                 if (len == 0) continue;
+                /* Translate buffer pointer */
+                char *base;
+                if (buf_uaddr) {
+                    pte_t *bpte = walk(current_proc->pagetable, buf_uaddr, 0);
+                    if (!bpte || !(*bpte & PTE_V)) { if (total == 0) total = -14; break; }
+                    base = (char *)(PTE2PA(*bpte) + (buf_uaddr & 0xFFF));
+                } else {
+                    if (total == 0) total = -14;
+                    break;
+                }
                 if (f->is_pipe) {
                     int pid = f->pipe_id;
                     if (pid < 0 || !f->pipe_read) { total = -9; break; }
