@@ -451,9 +451,15 @@ static pid_t sys_clone(void) {
                      PTE_R | PTE_W | PTE_X) < 0) goto bad;
         if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000,
                      PTE_R | PTE_W) < 0) goto bad;
+        if (mappages(new_pt, 0x101000, PAGE_SIZE, 0x101000,
+                     PTE_R | PTE_W) < 0) goto bad;
         if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000,
                      PTE_R | PTE_W) < 0) goto bad;
         if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000,
+                     PTE_R | PTE_W) < 0) goto bad;
+        if (mappages_super(new_pt, 0x30000000, 0x200000, 0x30000000,
+                     PTE_R | PTE_W) < 0) goto bad;
+        if (mappages_super(new_pt, 0x40000000, 0x40000000, 0x40000000,
                      PTE_R | PTE_W) < 0) goto bad;
 
         /* COW-share user pages */
@@ -1526,7 +1532,7 @@ pipe_eof:
     } else if (sysnum == SYS_getdents64) {
         /* getdents64(int fd, struct linux_dirent64 *buf, unsigned int count) */
         int fd             = (int)tf->a0;
-        char *ubuf         = (char *)tf->a1;
+        uint64_t ubuf_va   = tf->a1;
         unsigned int count = (unsigned int)tf->a2;
         struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
@@ -1536,8 +1542,18 @@ pipe_eof:
         }
 
         if (f->ops && f->ops->readdir) {
-            int ret = f->ops->readdir(f->private, ubuf, count, &f->offset);
+            /* Use a kernel buffer so readdir never touches user VA directly */
+            if (count > 4096) count = 4096;
+            char *kbuf = kalloc();
+            if (!kbuf) {
+                tf->a0 = (uint64_t)-12; /* -ENOMEM */
+                goto syscall_done;
+            }
+            memset(kbuf, 0, 4096);
+
+            int ret = f->ops->readdir(f->private, kbuf, count, &f->offset);
             if (ret < 0) {
+                kfree(kbuf);
                 tf->a0 = (uint64_t)(int64_t)ret;
             } else {
                 /* Inject synthetic directory entries for child mount points.
@@ -1556,7 +1572,7 @@ pipe_eof:
                         int nl = strlen(mnames[mi]);
                         int rl = (19 + nl + 1 + 7) & ~7;
                         if (written + (unsigned int)rl > count) break;
-                        char *d = ubuf + written;
+                        char *d = kbuf + written;
                         memset(d, 0, rl);
                         uint64_t ino = (uint64_t)(5000 + mi);
                         int64_t doff = (int64_t)(-(1024 + mi + 1));
@@ -1571,6 +1587,18 @@ pipe_eof:
                         f->offset = (int64_t)(-(1024 + mi + 1));
                     }
                 }
+                /* Copy kernel buffer to user space page-by-page via walk() */
+                uint64_t done = 0;
+                while (done < written) {
+                    pte_t *pte = walk(current_proc->pagetable, ubuf_va + done, 0);
+                    if (!pte || !(*pte & PTE_V)) break;
+                    uint64_t pa = PTE2PA(*pte) + ((ubuf_va + done) & 0xFFF);
+                    uint64_t chunk = 4096 - ((ubuf_va + done) & 0xFFF);
+                    if (chunk > written - done) chunk = written - done;
+                    memcpy((char *)pa, kbuf + done, chunk);
+                    done += chunk;
+                }
+                kfree(kbuf);
                 tf->a0 = (uint64_t)written;
             }
         } else {
