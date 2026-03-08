@@ -47,6 +47,7 @@
 /* Time */
 #define SYS_nanosleep   101
 #define SYS_clock_gettime 113
+#define SYS_clock_nanosleep 115
 #define SYS_gettimeofday  169
 
 /* Memory */
@@ -66,6 +67,10 @@
 /* I/O vectors */
 #define SYS_readv       65
 #define SYS_writev      66
+
+/* I/O multiplexing */
+#define SYS_pselect6        72
+#define SYS_ppoll           73
 
 /* Symlinks */
 #define SYS_readlinkat  78

@@ -2338,6 +2338,280 @@ static long sys_tgkill_handler(struct trapframe *tf) {
     }
 }
 
+/* Poll event constants (must match libc/include/poll.h) */
+#define KPOLLIN   0x0001
+#define KPOLLOUT  0x0004
+#define KPOLLERR  0x0008
+#define KPOLLHUP  0x0010
+#define KPOLLNVAL 0x0020
+
+static short check_fd_ready(struct open_file *f, short events) {
+    if (!f)
+        return KPOLLNVAL;
+
+    short revents = 0;
+
+    if (f->is_pipe) {
+        int pid = f->pipe_id;
+        if (pid < 0 || !pipes[pid].used)
+            return KPOLLNVAL;
+
+        if (f->pipe_read) {
+            if (events & KPOLLIN) {
+                if (pipe_avail(pid) > 0)
+                    revents |= KPOLLIN;
+            }
+            /* POLLHUP: write end closed and no data left */
+            if (pipes[pid].write_open <= 0 && pipe_avail(pid) == 0)
+                revents |= KPOLLHUP;
+        }
+        if (f->pipe_write) {
+            if (events & KPOLLOUT) {
+                if (pipe_avail(pid) < PIPE_BUF)
+                    revents |= KPOLLOUT;
+            }
+            /* POLLERR: read end closed */
+            if (pipes[pid].read_open <= 0)
+                revents |= KPOLLERR;
+        }
+    } else {
+        /* Regular file or device: always ready */
+        revents = events & (KPOLLIN | KPOLLOUT);
+    }
+
+    return revents;
+}
+
+static long sys_clock_nanosleep_handler(struct trapframe *tf) {
+    /* a0=clockid (ignored), a1=flags, a2=request, a3=remain */
+    int flags = (int)tf->a1;
+    uint64_t kreq[2]; /* {tv_sec, tv_nsec} */
+    if (copyin(current_proc->pagetable, kreq, tf->a2, 16) < 0)
+        return (long)-14;
+
+    uint64_t sleep_ticks = kreq[0] * (TIMER_FREQ / 10) + kreq[1] / 100;
+
+    if (flags & 1) {
+        /* TIMER_ABSTIME: kreq is absolute wall time */
+        int64_t now_sec, now_nsec;
+        get_wall_time(&now_sec, &now_nsec);
+        uint64_t now_total = (uint64_t)now_sec * 1000000000UL + (uint64_t)now_nsec;
+        uint64_t target = kreq[0] * 1000000000UL + kreq[1];
+        if (target <= now_total)
+            return 0; /* already past */
+        uint64_t diff_ns = target - now_total;
+        sleep_ticks = diff_ns / 100; /* 100ns per tick */
+    }
+
+    current_proc->sleep_until = ticks + sleep_ticks;
+    current_proc->waiting_for_uart = 2;
+    current_proc->state = SLEEPING;
+    swtch(&current_proc->context, &scheduler_context);
+
+    /* If remain ptr and relative mode, report remaining */
+    if (tf->a3 != 0 && !(flags & 1)) {
+        uint64_t krem[2] = {0, 0};
+        copyout(current_proc->pagetable, tf->a3, krem, 16);
+    }
+    return 0;
+}
+
+static long sys_ppoll_handler(struct trapframe *tf) {
+    uint64_t fds_uaddr = tf->a0;
+    int nfds = (int)tf->a1;
+    uint64_t timeout_uaddr = tf->a2;
+    uint64_t sigmask_uaddr = tf->a3;
+
+    if (nfds < 0 || nfds > NOFILE)
+        return (long)-22;
+
+    /* Copyin pollfd array: each entry is {int fd; short events; short revents} = 8 bytes */
+    uint8_t kfds[NOFILE * 8];
+    int fds_size = nfds * 8;
+    if (fds_size > 0 && copyin(current_proc->pagetable, kfds, fds_uaddr, (uint64_t)fds_size) < 0)
+        return (long)-14;
+
+    /* Handle sigmask swap */
+    uint64_t old_mask = current_proc->sigmask;
+    if (sigmask_uaddr != 0) {
+        uint64_t new_mask;
+        if (copyin(current_proc->pagetable, &new_mask, sigmask_uaddr, 8) < 0)
+            return (long)-14;
+        current_proc->sigmask = new_mask;
+    }
+
+    /* Parse timeout */
+    int has_timeout = (timeout_uaddr != 0);
+    uint64_t sleep_until_val = 0;
+    if (has_timeout) {
+        uint64_t kts[2];
+        if (copyin(current_proc->pagetable, kts, timeout_uaddr, 16) < 0) {
+            current_proc->sigmask = old_mask;
+            return (long)-14;
+        }
+        if (kts[0] == 0 && kts[1] == 0) {
+            /* Non-blocking poll */
+        } else {
+            uint64_t ns = kts[0] * 1000000000UL + kts[1];
+            sleep_until_val = ticks + ns / 100;
+        }
+    }
+
+    struct open_file **ftab = proc_ofile(current_proc);
+
+    /* Check readiness */
+    int ready = 0;
+    for (int i = 0; i < nfds; i++) {
+        int fd = *(int *)(kfds + i * 8);
+        short events = *(short *)(kfds + i * 8 + 4);
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? ftab[fd] : 0;
+        short rev = check_fd_ready(f, events);
+        *(short *)(kfds + i * 8 + 6) = rev;
+        if (rev)
+            ready++;
+    }
+
+    /* If none ready and timeout allows blocking */
+    if (ready == 0 && (!has_timeout || sleep_until_val > ticks)) {
+        if (sleep_until_val > 0) {
+            current_proc->sleep_until = sleep_until_val;
+            current_proc->waiting_for_uart = 2;
+            current_proc->state = SLEEPING;
+            swtch(&current_proc->context, &scheduler_context);
+        }
+
+        /* Re-check after wakeup */
+        ready = 0;
+        for (int i = 0; i < nfds; i++) {
+            int fd = *(int *)(kfds + i * 8);
+            short events = *(short *)(kfds + i * 8 + 4);
+            struct open_file *f = (fd >= 0 && fd < NOFILE) ? ftab[fd] : 0;
+            short rev = check_fd_ready(f, events);
+            *(short *)(kfds + i * 8 + 6) = rev;
+            if (rev)
+                ready++;
+        }
+    }
+
+    /* Restore sigmask */
+    if (sigmask_uaddr != 0)
+        current_proc->sigmask = old_mask;
+
+    /* Copyout results */
+    if (fds_size > 0 && copyout(current_proc->pagetable, fds_uaddr, kfds, (uint64_t)fds_size) < 0)
+        return (long)-14;
+
+    return (long)ready;
+}
+
+static long sys_pselect6_handler(struct trapframe *tf) {
+    int nfds = (int)tf->a0;
+    uint64_t readfds_uaddr = tf->a1;
+    uint64_t writefds_uaddr = tf->a2;
+    uint64_t exceptfds_uaddr = tf->a3;
+    uint64_t timeout_uaddr = tf->a4;
+
+    if (nfds < 0 || nfds > NOFILE)
+        nfds = NOFILE;
+
+    /* fd_set is 128 bytes but we only need first 8 bytes (64 fds) */
+    uint64_t rfds = 0, wfds = 0, efds = 0;
+    if (readfds_uaddr && copyin(current_proc->pagetable, &rfds, readfds_uaddr, 8) < 0)
+        return (long)-14;
+    if (writefds_uaddr && copyin(current_proc->pagetable, &wfds, writefds_uaddr, 8) < 0)
+        return (long)-14;
+    if (exceptfds_uaddr && copyin(current_proc->pagetable, &efds, exceptfds_uaddr, 8) < 0)
+        return (long)-14;
+
+    /* Parse timeout */
+    int has_timeout = (timeout_uaddr != 0);
+    uint64_t sleep_until_val = 0;
+    if (has_timeout) {
+        uint64_t kts[2];
+        if (copyin(current_proc->pagetable, kts, timeout_uaddr, 16) < 0)
+            return (long)-14;
+        if (kts[0] == 0 && kts[1] == 0) {
+            /* Non-blocking */
+        } else {
+            uint64_t ns = kts[0] * 1000000000UL + kts[1];
+            sleep_until_val = ticks + ns / 100;
+        }
+    }
+
+    struct open_file **ftab = proc_ofile(current_proc);
+
+    /* Check readiness */
+    uint64_t out_rfds = 0, out_wfds = 0, out_efds = 0;
+    int ready = 0;
+
+    for (int fd = 0; fd < nfds; fd++) {
+        uint64_t bit = 1UL << fd;
+        struct open_file *f = (fd < NOFILE) ? ftab[fd] : 0;
+
+        if (rfds & bit) {
+            short rev = check_fd_ready(f, KPOLLIN);
+            if (rev & (KPOLLIN | KPOLLHUP | KPOLLERR)) {
+                out_rfds |= bit;
+                ready++;
+            }
+        }
+        if (wfds & bit) {
+            short rev = check_fd_ready(f, KPOLLOUT);
+            if (rev & KPOLLOUT) {
+                out_wfds |= bit;
+                ready++;
+            }
+        }
+        if (efds & bit) {
+            short rev = check_fd_ready(f, 0);
+            if (rev & (KPOLLERR | KPOLLNVAL)) {
+                out_efds |= bit;
+                ready++;
+            }
+        }
+    }
+
+    /* Block if none ready and timeout allows */
+    if (ready == 0 && (!has_timeout || sleep_until_val > ticks)) {
+        if (sleep_until_val > 0) {
+            current_proc->sleep_until = sleep_until_val;
+            current_proc->waiting_for_uart = 2;
+            current_proc->state = SLEEPING;
+            swtch(&current_proc->context, &scheduler_context);
+        }
+
+        /* Re-check */
+        out_rfds = out_wfds = out_efds = 0;
+        ready = 0;
+        for (int fd = 0; fd < nfds; fd++) {
+            uint64_t bit = 1UL << fd;
+            struct open_file *f = (fd < NOFILE) ? ftab[fd] : 0;
+            if (rfds & bit) {
+                short rev = check_fd_ready(f, KPOLLIN);
+                if (rev & (KPOLLIN | KPOLLHUP | KPOLLERR)) { out_rfds |= bit; ready++; }
+            }
+            if (wfds & bit) {
+                short rev = check_fd_ready(f, KPOLLOUT);
+                if (rev & KPOLLOUT) { out_wfds |= bit; ready++; }
+            }
+            if (efds & bit) {
+                short rev = check_fd_ready(f, 0);
+                if (rev & (KPOLLERR | KPOLLNVAL)) { out_efds |= bit; ready++; }
+            }
+        }
+    }
+
+    /* Copyout modified fd_sets */
+    if (readfds_uaddr && copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8) < 0)
+        return (long)-14;
+    if (writefds_uaddr && copyout(current_proc->pagetable, writefds_uaddr, &out_wfds, 8) < 0)
+        return (long)-14;
+    if (exceptfds_uaddr && copyout(current_proc->pagetable, exceptfds_uaddr, &out_efds, 8) < 0)
+        return (long)-14;
+
+    return (long)ready;
+}
+
 static long sys_sigaltstack_handler(struct trapframe *tf) {
     uint64_t new_addr = tf->a0;
     uint64_t old_addr = tf->a1;
@@ -2496,6 +2770,9 @@ void syscall_init(void) {
     syscall_table[SYS_tgkill]          = sys_tgkill_handler;
     syscall_table[SYS_uname]           = sys_uname_handler;
     syscall_table[SYS_sigaltstack]     = sys_sigaltstack_handler;
+    syscall_table[SYS_clock_nanosleep] = sys_clock_nanosleep_handler;
+    syscall_table[SYS_ppoll]           = sys_ppoll_handler;
+    syscall_table[SYS_pselect6]        = sys_pselect6_handler;
     syscall_table[SYS_mount]           = sys_mount_handler;
     syscall_table[SYS_umount2]         = sys_umount2_handler;
 }

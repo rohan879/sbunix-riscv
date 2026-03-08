@@ -4,6 +4,7 @@
 
 #include <time.h>
 #include <syscall.h>
+#include <errno.h>
 
 /*
  * nanosleep() — sleep for at least the duration specified by *req.
@@ -50,5 +51,12 @@ int gettimeofday(struct timeval *tv, void *tz) {
         return -1;
     tv->tv_sec = ts.tv_sec;
     tv->tv_usec = ts.tv_nsec / 1000;
+    return 0;
+}
+
+int clock_nanosleep(int clockid, int flags,
+                    const struct timespec *req, struct timespec *rem) {
+    long ret = syscall(SYS_clock_nanosleep, clockid, flags, req, rem);
+    if (ret < 0) { errno = (int)(-ret); return (int)(-ret); }
     return 0;
 }

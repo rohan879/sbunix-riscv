@@ -36,4 +36,10 @@ int    clock_gettime(int clk_id, struct timespec *tp);
 int    nanosleep(const struct timespec *req, struct timespec *rem);
 int    gettimeofday(struct timeval *tv, void *tz);
 
+/* Timer flags */
+#define TIMER_ABSTIME 1
+
+int clock_nanosleep(int clockid, int flags,
+                    const struct timespec *req, struct timespec *rem);
+
 #endif /* _TIME_H */
