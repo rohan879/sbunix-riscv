@@ -32,6 +32,7 @@
 /* Time */
 #define SYS_nanosleep   101
 #define SYS_clock_gettime 113
+#define SYS_clock_nanosleep 115
 
 /* File control / access */
 #define SYS_fcntl       25
@@ -39,7 +40,10 @@
 #define SYS_mknodat     33
 #define SYS_mkdirat     34
 #define SYS_unlinkat    35
+#define SYS_symlinkat   36
 #define SYS_linkat      37
+#define SYS_umount2     39
+#define SYS_mount       40
 #define SYS_faccessat   48
 #define SYS_umask       166
 #define SYS_renameat2   276
@@ -47,6 +51,10 @@
 /* I/O vectors */
 #define SYS_readv       65
 #define SYS_writev      66
+
+/* I/O multiplexing */
+#define SYS_pselect6        72
+#define SYS_ppoll           73
 
 /* Symlinks */
 #define SYS_readlinkat  78
@@ -61,6 +69,7 @@
 /* Signal */
 #define SYS_rt_sigaction   134
 #define SYS_rt_sigprocmask 135
+#define SYS_sigaltstack 132
 #define SYS_rt_sigreturn   139
 
 /* Time */
@@ -85,6 +94,7 @@
 #define SYS_ftruncate   46
 #define SYS_tgkill      131
 #define SYS_madvise     233
+#define SYS_uname       160
 
 /* Custom / teaching-OS extensions */
 #define SYS_alarm       200   /* alarm(seconds) — one-shot SIGALRM */

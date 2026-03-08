@@ -43,10 +43,12 @@ pte_t *walk_super(pagetable_t pagetable, uint64_t va, int *level_out);
 void  superpage_split(pagetable_t pagetable, uint64_t va);
 void  kvmmap_super(uint64_t va, uint64_t pa, uint64_t sz, int perm);
 pagetable_t uvmcreate(void);
-uint64_t uvmalloc(pagetable_t pagetable, uint64_t start_va, uint64_t end_va, int xperm);
+uint64_t uvmalloc(pagetable_t pagetable, uint64_t start_va, uint64_t end_va, int perm);
 int uvmmap(pagetable_t pagetable, uint64_t va, uint64_t pa, uint64_t sz, int perm);
 void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len);
 void uvmmap_sigtrampoline(pagetable_t pagetable);
-int uvmcopyin(pagetable_t pagetable, uint64_t dstva, char *src, uint64_t len);
+int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len);
+int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len);
+int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max);
 
 #endif

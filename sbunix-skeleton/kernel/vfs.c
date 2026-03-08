@@ -20,6 +20,18 @@ void vfs_register_mount(const char *path, struct vfs_ops *ops) {
   num_mounts++;
 }
 
+int vfs_unregister_mount(const char *path) {
+  for (int i = 0; i < num_mounts; i++) {
+    if (strcmp(mount_table[i].path, path) == 0) {
+      for (int j = i; j < num_mounts - 1; j++)
+        mount_table[j] = mount_table[j + 1];
+      num_mounts--;
+      return 0;
+    }
+  }
+  return -1;
+}
+
 /* Longest-prefix match on path.  Sets *relpath to the remainder. */
 struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath) {
   struct mount *best = NULL;

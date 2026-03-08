@@ -44,6 +44,7 @@ void boot(uint64_t hartid, void *dtb) {
 
   procinit();
   vfs_init();
+  syscall_init();
   userinit();
 
   printk("Starting scheduler...\n");

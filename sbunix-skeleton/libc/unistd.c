@@ -32,6 +32,13 @@ int close(int fd) {
 }
 
 int dup2(int oldfd, int newfd) {
+    if (oldfd == newfd) {
+        /* POSIX: no-op if oldfd is valid */
+        long r = syscall(SYS_fcntl, oldfd, 1 /* F_GETFD */);
+        if (r < 0)
+            return (int)__syscall_ret(r);
+        return newfd;
+    }
     return (int)__syscall_ret(syscall(SYS_dup3, oldfd, newfd, 0));
 }
 
@@ -79,16 +86,7 @@ unsigned int sleep(unsigned int seconds) {
 }
 
 int dup(int oldfd) {
-    /* Find the lowest available fd >= 0 by trying dup3 into increasing slots.
-     * We try slots 0..15; skip if they'd be the same as oldfd. */
-    for (int newfd = 0; newfd < 16; newfd++) {
-        if (newfd == oldfd) continue;
-        /* Probe: try dup3(oldfd, newfd). If newfd is already open the kernel
-         * closes it and reuses it — that's correct dup semantics. */
-        long r = syscall(SYS_dup3, oldfd, newfd, 0);
-        if (r == newfd) return newfd;
-    }
-    return -1;
+    return (int)__syscall_ret(syscall(SYS_fcntl, oldfd, 0 /* F_DUPFD */, 0));
 }
 
 off_t lseek(int fd, off_t offset, int whence) {
@@ -212,4 +210,12 @@ pid_t wait(int *status) {
 
 unsigned int alarm(unsigned int seconds) {
     return (unsigned int)syscall(SYS_alarm, seconds);
+}
+
+int symlink(const char *target, const char *linkpath) {
+    return (int)__syscall_ret(syscall(SYS_symlinkat, target, AT_FDCWD, linkpath));
+}
+
+ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+    return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, AT_FDCWD, path, buf, bufsiz));
 }

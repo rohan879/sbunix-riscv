@@ -18,6 +18,9 @@ struct vfs_ops {
   int (*mkdir)(const char *path, int mode);
   int (*unlink)(const char *path);
   int (*rmdir)(const char *path);
+  int (*symlink)(const char *target, const char *linkpath);
+  int (*readlink)(const char *path, char *buf, int bufsiz);
+  int (*rename)(const char *oldpath, const char *newpath);
 };
 
 /* Open file description -- stored in proc->ofile[] */
@@ -51,6 +54,7 @@ struct open_file *vfs_alloc_file(void);
 void vfs_free_file(struct open_file *f);
 struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath);
 void vfs_register_mount(const char *path, struct vfs_ops *ops);
+int vfs_unregister_mount(const char *path);
 void vfs_init(void);
 int vfs_get_child_mounts(const char *dir, const char *names[], int max);
 int vfs_get_mount_info(int index, const char **path, const char **fstype);

@@ -128,6 +128,9 @@ struct proc {
   struct kern_sigaction sigactions[32]; /* one per signal (indices 0-31) */
   uint64_t sigmask;             /* blocked signal mask */
   uint64_t sigpending;          /* pending signal bitmask */
+  uint64_t ss_sp;               /* alternate signal stack base */
+  uint64_t ss_size;             /* alternate signal stack size */
+  int      ss_flags;            /* SS_DISABLE=2, SS_ONSTACK=1, 0=inactive */
   /* stack bounds for auto-grow */
   uint64_t stack_top;            /* top of user stack (highest VA) */
   uint64_t stack_bottom;         /* lowest allocated stack page */
