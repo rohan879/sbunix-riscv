@@ -275,6 +275,7 @@ static pid_t sys_clone(void) {
     if (mappages(new_pt, 0x80000000, PHYSTOP - 0x80000000, 0x80000000,
                  PTE_R | PTE_W | PTE_X) < 0) goto bad;
     if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000, PTE_R | PTE_W) < 0) goto bad;
+    if (mappages(new_pt, 0x101000, PAGE_SIZE, 0x101000, PTE_R | PTE_W) < 0) goto bad;
     if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000, PTE_R | PTE_W) < 0) goto bad;
     if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) goto bad;
 
@@ -1001,11 +1002,14 @@ pipe_eof:
     } else if (sysnum == SYS_clock_gettime) {
         /* clock_gettime(clockid_t, struct timespec *)
          * struct timespec: { int64_t tv_sec; int64_t tv_nsec; }
-         * We report ticks as seconds (each tick = 1s). */
+         * We report the time from the QEMU Goldfish RTC. */
         int64_t *ts = (int64_t *)tf->a1;
         if (ts) {
-            ts[0] = (int64_t)ticks;   /* tv_sec */
-            ts[1] = 0;                 /* tv_nsec */
+            uint32_t low = *(volatile uint32_t *)0x101000;
+            uint32_t high = *(volatile uint32_t *)0x101004;
+            uint64_t nsec = ((uint64_t)high << 32) | low;
+            ts[0] = (int64_t)(nsec / 1000000000ULL);   /* tv_sec */
+            ts[1] = (int64_t)(nsec % 1000000000ULL);   /* tv_nsec */
             tf->a0 = 0;
         } else {
             tf->a0 = (uint64_t)-1;

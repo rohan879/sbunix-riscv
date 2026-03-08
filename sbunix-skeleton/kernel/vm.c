@@ -64,6 +64,9 @@ void kvminit(void) {
     // uart registers
     kvmmap(0x10000000, 0x10000000, PAGE_SIZE, PTE_R | PTE_W);
 
+    // Goldfish RTC
+    kvmmap(0x101000, 0x101000, PAGE_SIZE, PTE_R | PTE_W);
+
     // PCIe ECAM config space (0x30000000, 256 MiB)
     kvmmap(0x30000000, 0x30000000, 0x10000000, PTE_R | PTE_W);
 
