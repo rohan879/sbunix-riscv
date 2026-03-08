@@ -132,17 +132,29 @@ static int devfs_close(void *private) {
 static int devfs_fstat(void *private, uint8_t *st) {
   struct devfs_private *priv = (struct devfs_private *)private;
   memset(st, 0, 128);
+  uint64_t dev = 3; /* devfs device */
+  uint32_t nlink = 1;
+  int32_t blksz = 4096;
+  memcpy(st + 0, &dev, 8);
+  memcpy(st + 20, &nlink, 4);
+  memcpy(st + 56, &blksz, 4);
   if (priv && priv->dev) {
     uint32_t mode = (uint32_t)(0x2000 | 0666); /* S_IFCHR | 0666 */
-    uint32_t nlink = 1;
+    /* Find device index for rdev/ino */
+    uint64_t idx = 1;
+    for (int i = 0; i < num_devices; i++) {
+      if (&devices[i] == priv->dev) { idx = (uint64_t)(i + 1); break; }
+    }
+    uint64_t rdev = idx;
+    memcpy(st + 8, &idx, 8);   /* st_ino */
     memcpy(st + 16, &mode, 4);
-    memcpy(st + 20, &nlink, 4);
+    memcpy(st + 32, &rdev, 8); /* st_rdev */
   } else {
     /* /dev directory itself */
     uint32_t mode = (uint32_t)(0x4000 | 0755); /* S_IFDIR | 0755 */
-    uint32_t nlink = 1;
+    uint64_t ino = 100;
+    memcpy(st + 8, &ino, 8);
     memcpy(st + 16, &mode, 4);
-    memcpy(st + 20, &nlink, 4);
   }
   return 0;
 }
@@ -162,13 +174,20 @@ static int devfs_stat(const char *path, uint8_t *st) {
   const char *name = path;
   while (*name == '/') name++;
 
+  uint64_t dev = 3; /* devfs device */
+  uint32_t nlink = 1;
+  int32_t blksz = 4096;
+
   /* /dev directory itself */
   if (*name == '\0') {
     memset(st, 0, 128);
     uint32_t mode = (uint32_t)(0x4000 | 0755); /* S_IFDIR */
-    uint32_t nlink = 1;
+    uint64_t ino = 100;
+    memcpy(st + 0, &dev, 8);
+    memcpy(st + 8, &ino, 8);
     memcpy(st + 16, &mode, 4);
     memcpy(st + 20, &nlink, 4);
+    memcpy(st + 56, &blksz, 4);
     return 0;
   }
 
@@ -176,9 +195,14 @@ static int devfs_stat(const char *path, uint8_t *st) {
     if (strcmp(devices[i].name, name) == 0) {
       memset(st, 0, 128);
       uint32_t mode = (uint32_t)(0x2000 | 0666); /* S_IFCHR | 0666 */
-      uint32_t nlink = 1;
+      uint64_t ino = (uint64_t)(i + 1);
+      uint64_t rdev = (uint64_t)(i + 1);
+      memcpy(st + 0, &dev, 8);
+      memcpy(st + 8, &ino, 8);
       memcpy(st + 16, &mode, 4);
       memcpy(st + 20, &nlink, 4);
+      memcpy(st + 32, &rdev, 8);
+      memcpy(st + 56, &blksz, 4);
       return 0;
     }
   }

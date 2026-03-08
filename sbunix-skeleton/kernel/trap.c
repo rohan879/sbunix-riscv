@@ -1459,7 +1459,13 @@ pipe_eof:
             /* Pipes: return FIFO mode */
             memset(st, 0, 128);
             uint32_t mode = 0x1000 | 0600; /* S_IFIFO | 0600 */
+            uint32_t nlink = 1;
+            uint64_t ino = (uint64_t)(f->pipe_id + 1);
+            int32_t blksz = 4096;
+            memcpy(st + 8, &ino, 8);
             memcpy(st + 16, &mode, 4);
+            memcpy(st + 20, &nlink, 4);
+            memcpy(st + 56, &blksz, 4);
             tf->a0 = 0;
         } else if (f->ops && f->ops->fstat) {
             /* Per-fd stat via VFS ops (handles devfs char devices, etc.) */
@@ -1468,12 +1474,24 @@ pipe_eof:
         } else {
             /* Generic regular file fallback */
             memset(st, 0, 128);
+            uint64_t dev = 1;
+            uint64_t ino = (uint64_t)(fd + 1);
             uint32_t mode = 0x81A4; /* S_IFREG | 0644 */
             uint32_t nlink = 1;
-            int32_t blksz = 512;
+            int32_t blksz = 4096;
+            int64_t sec, nsec;
+            get_wall_time(&sec, &nsec);
+            memcpy(st + 0, &dev, 8);
+            memcpy(st + 8, &ino, 8);
             memcpy(st + 16, &mode, 4);
             memcpy(st + 20, &nlink, 4);
             memcpy(st + 56, &blksz, 4);
+            memcpy(st + 72, &sec, 8);   /* st_atime_sec */
+            memcpy(st + 80, &nsec, 8);  /* st_atime_nsec */
+            memcpy(st + 88, &sec, 8);   /* st_mtime_sec */
+            memcpy(st + 96, &nsec, 8);  /* st_mtime_nsec */
+            memcpy(st + 104, &sec, 8);  /* st_ctime_sec */
+            memcpy(st + 112, &nsec, 8); /* st_ctime_nsec */
             tf->a0 = 0;
         }
 

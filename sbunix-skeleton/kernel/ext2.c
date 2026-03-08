@@ -959,6 +959,8 @@ static int ext2_stat(const char *path, uint8_t *st) {
   if (!ip) return -2; /* -ENOENT */
 
   memset(st, 0, 128);
+  uint64_t dev = 2; /* ext2 device */
+  uint64_t ino = (uint64_t)ip->ino;
   uint32_t mode;
   if (ip->type == EXT2_TYPE_DIR)
     mode = (uint32_t)(0x4000 | (ip->mode & 0xfff));
@@ -969,8 +971,11 @@ static int ext2_stat(const char *path, uint8_t *st) {
   int32_t blksz = 4096;
   int64_t blks = ((int64_t)ip->size + 511) / 512;
 
+  memcpy(st + 0, &dev, 8);
+  memcpy(st + 8, &ino, 8);
   memcpy(st + 16, &mode, 4);
   memcpy(st + 20, &nlink, 4);
+  /* uid=0, gid=0 already zeroed */
   memcpy(st + 48, &size, 8);
   memcpy(st + 56, &blksz, 4);
   memcpy(st + 64, &blks, 8);
@@ -987,6 +992,8 @@ static int ext2_fstat(void *private, uint8_t *st) {
   if (!ip) return -1;
 
   memset(st, 0, 128);
+  uint64_t dev = 2; /* ext2 device */
+  uint64_t ino = (uint64_t)ip->ino;
   uint32_t mode;
   if (ip->type == EXT2_TYPE_DIR)
     mode = (uint32_t)(0x4000 | (ip->mode & 0xfff));
@@ -997,8 +1004,11 @@ static int ext2_fstat(void *private, uint8_t *st) {
   int32_t blksz = 4096;
   int64_t blks = ((int64_t)ip->size + 511) / 512;
 
+  memcpy(st + 0, &dev, 8);
+  memcpy(st + 8, &ino, 8);
   memcpy(st + 16, &mode, 4);
   memcpy(st + 20, &nlink, 4);
+  /* uid=0, gid=0 already zeroed */
   memcpy(st + 48, &size, 8);
   memcpy(st + 56, &blksz, 4);
   memcpy(st + 64, &blks, 8);

@@ -156,6 +156,35 @@ static int tarfs_close(void *private) {
 }
 
 /* ------------------------------------------------------------------ */
+/* tarfs_fstat                                                          */
+/* ------------------------------------------------------------------ */
+static int tarfs_fstat(void *private, uint8_t *st) {
+  struct tarfs_private *priv = (struct tarfs_private *)private;
+  if (!priv) return -1;
+
+  memset(st, 0, 128);
+  uint64_t dev = 1;
+  uint64_t ino = priv->hdr
+    ? (uint64_t)((unsigned long)priv->hdr / 512) + 2
+    : 1;
+  uint32_t mode = priv->is_dir ? (uint32_t)(0x4000 | 0755)
+                                : (uint32_t)(0x8000 | 0644);
+  uint32_t nlink = 1;
+  int64_t size = (int64_t)priv->size;
+  int32_t blksz = 512;
+  int64_t blks = ((int64_t)priv->size + 511) / 512;
+
+  memcpy(st + 0, &dev, 8);
+  memcpy(st + 8, &ino, 8);
+  memcpy(st + 16, &mode, 4);
+  memcpy(st + 20, &nlink, 4);
+  memcpy(st + 48, &size, 8);
+  memcpy(st + 56, &blksz, 4);
+  memcpy(st + 64, &blks, 8);
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* tarfs_stat                                                           */
 /* ------------------------------------------------------------------ */
 static int tarfs_stat(const char *path, uint8_t *st) {
@@ -178,9 +207,13 @@ static int tarfs_stat(const char *path, uint8_t *st) {
     if ((path[0] == '/' && path[1] == '\0') || (path[0] == '.' && path[1] == '\0')) {
       /* Synthesize stat for root directory */
       memset(st, 0, 128);
+      uint64_t rdev = 1; /* tarfs device */
+      uint64_t rino = 1;
       uint32_t mode = (uint32_t)(0x4000 | 0755); /* S_IFDIR | 0755 */
       uint32_t nlink = 1;
       int32_t blksz = 512;
+      memcpy(st + 0, &rdev, 8);
+      memcpy(st + 8, &rino, 8);
       memcpy(st + 16, &mode, 4);
       memcpy(st + 20, &nlink, 4);
       memcpy(st + 56, &blksz, 4);
@@ -190,6 +223,9 @@ static int tarfs_stat(const char *path, uint8_t *st) {
   }
 
   memset(st, 0, 128);
+  uint64_t tdev = 1; /* tarfs device */
+  /* Use header address as a unique inode number */
+  uint64_t tino = (uint64_t)((unsigned long)hdr / 512) + 2;
   uint64_t fsz = tar_get_file_size(hdr);
   uint32_t mode = (hdr->typeflag == '5') ? (uint32_t)(0x4000 | 0755)
                                           : (uint32_t)(0x8000 | 0644);
@@ -197,6 +233,8 @@ static int tarfs_stat(const char *path, uint8_t *st) {
   int64_t size = (int64_t)fsz;
   int32_t blksz = 512;
   int64_t blks = ((int64_t)fsz + 511) / 512;
+  memcpy(st + 0, &tdev, 8);
+  memcpy(st + 8, &tino, 8);
   memcpy(st + 16, &mode, 4);
   memcpy(st + 20, &nlink, 4);
   memcpy(st + 48, &size, 8);
@@ -345,6 +383,7 @@ struct vfs_ops tarfs_ops = {
   .write   = tarfs_write,
   .close   = tarfs_close,
   .stat    = tarfs_stat,
+  .fstat   = tarfs_fstat,
   .readdir = tarfs_readdir,
   .mkdir   = tarfs_mkdir,
   .unlink  = tarfs_unlink,
