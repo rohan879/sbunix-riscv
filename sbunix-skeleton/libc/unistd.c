@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <errno.h>
 
 ssize_t read(int fd, void *buf, size_t count) {
     return syscall(SYS_read, fd, buf, count);
@@ -18,7 +19,12 @@ int open(const char *path, int flags, ...) {
     va_start(ap, flags);
     int mode = va_arg(ap, int);
     va_end(ap);
-    return syscall(SYS_openat, AT_FDCWD, path, flags, mode);
+    long ret = syscall(SYS_openat, AT_FDCWD, path, flags, mode);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return (int)ret;
 }
 
 int close(int fd) {
