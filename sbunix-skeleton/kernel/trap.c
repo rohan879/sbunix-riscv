@@ -2086,14 +2086,25 @@ pipe_eof:
 
     } else if (sysnum == SYS_getrandom) {
         /* getrandom(void *buf, size_t buflen, unsigned int flags) */
-        char *buf = (char *)tf->a0;
+        uint64_t uaddr = tf->a0;
         uint64_t buflen = tf->a1;
-        if (buf && buflen > 0) {
+        if (uaddr && buflen > 0) {
             /* Simple PRNG seeded from RISC-V cycle counter */
             uint64_t state = r_time();
-            for (uint64_t i = 0; i < buflen; i++) {
-                state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-                buf[i] = (char)(state >> 33);
+            uint64_t done = 0;
+            while (done < buflen) {
+                /* Translate user VA to kernel PA, one page at a time */
+                pte_t *pte = walk(current_proc->pagetable, uaddr + done, 0);
+                if (!pte || !(*pte & PTE_V)) break;
+                uint64_t pa = PTE2PA(*pte) + ((uaddr + done) & 0xFFF);
+                uint64_t chunk = 4096 - ((uaddr + done) & 0xFFF);
+                if (chunk > buflen - done) chunk = buflen - done;
+                char *kbuf = (char *)pa;
+                for (uint64_t i = 0; i < chunk; i++) {
+                    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                    kbuf[i] = (char)(state >> 33);
+                }
+                done += chunk;
             }
         }
         tf->a0 = (uint64_t)buflen;
