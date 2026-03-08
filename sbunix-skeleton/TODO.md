@@ -92,23 +92,32 @@
 
 - [x] Syscall dispatch (`ecall` → `scause` environment-call-from-U-mode)
 - [x] `read(stdin)`, `write(stdout)`, `write(stderr)` via UART terminal
-- [x] VFS layer — `kernel/vfs.c` with mount table, `struct vfs_ops`, `struct open_file` refcounting; tarfs adapter (`kernel/tarfs_vfs.c`), devfs (`kernel/devfs.c`)
+- [x] VFS layer — `kernel/vfs.c` with mount table (5 mounts), `struct vfs_ops`, `struct open_file` refcounting; tarfs (`/`), devfs (`/dev`), procfs (`/proc`), sysfs (`/sys`), ext2 (`/mnt`)
 - [x] tarfs: `open`, `read`, `close`, `opendir`, `readdir`, `closedir`
   - Embedded in `.tarfs` section (`_tarfs_start` / `_tarfs_end`)
 
 ### 7. Userspace Binaries
 
 - [x] `bin/echo`, `bin/sleep`, `bin/cat`, `bin/ls`
-- [x] `bin/kill` (`kill -9`), `bin/ps`
+- [x] `bin/kill` (`kill -9`), `bin/ps`, `bin/pwd`
 - [x] `bin/sbush` (full shell)
 - [x] `bin/spin` — preemptive scheduling test (two CPU-bound fork'd loops)
 - [x] `bin/alarmtest` — SIGALRM test (`alarm(2)` + sigaction handler)
 - [x] `bin/segvtest` — SIGSEGV test (NULL deref caught by user signal handler)
+- [x] `bin/mkdir` — create directories with `-p` recursive flag support
+- [x] `bin/cp` — copy files (4KB buffered read/write loop)
+- [x] `bin/rm` — remove files/directories with `-r` recursive and `-f` force flags
+- [x] `bin/dmesg` — display kernel ring buffer (reads `/proc/dmesg`)
+- [x] `bin/mount` — display mount table (reads `/proc/mounts`)
+- [x] `bin/mknod` — create device nodes via `SYS_mknodat` (char/block with major:minor)
 
 ### 8. /bin/init
 
 - [x] fork(clone) + exec + wait on `/etc/rc` — `bin/init/init.c` forks+execs `/bin/sbush /etc/rc`
 - [x] Then exec sbush — `init` respawns interactive shell after rc completes; `userinit()` now boots `/bin/init`
+- [x] SIGCHLD handler for zombie reaping — reaps orphaned children with `waitpid(-1, NULL, WNOHANG)`
+- [x] Environment setup — exports PATH, HOME, TERM, HOSTNAME, PS1 before running rc
+- [x] Session management — calls `setsid()` for each respawned shell
 
 ## POSIX Shell Completeness (sbush)
 
@@ -222,7 +231,8 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] `SYS_clock_gettime` (113) — epoch time + VA translation via walk()
 - [x] `SYS_fcntl` (25) — F_GETFD/F_SETFD/F_GETFL/F_SETFL stubs
 - [x] `SYS_faccessat` (48) — resolves path in tarfs, returns 0 or -ENOENT
-- [x] `SYS_unlinkat` (35), `SYS_linkat` (37), `SYS_renameat2` (276), `SYS_mkdirat` (34) — return -EROFS
+- [x] `SYS_unlinkat` (35), `SYS_linkat` (37), `SYS_renameat2` (276), `SYS_mkdirat` (34) — return -EROFS for tarfs; ext2 supports unlink/mkdir/rmdir
+- [x] `SYS_mknodat` (33) — creates device nodes on ext2 with encoded major:minor
 - [x] `SYS_umask` (166) — returns 022
 - [x] `execve` envp fix — copies envp strings before destroying old page table
 - [x] `SYS_alarm` (200) — custom syscall; sets `proc->alarm_ticks`, returns remaining seconds from previous alarm
@@ -273,8 +283,10 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 
 - [x] Shell-side signal handlers (SIGINT, SIGTSTP, SIGCHLD) — installed in `sbush.c` via `sigaction`
 - [x] Process groups for pipelines — `setpgid`/`tcsetpgrp` used in `exec.c` for pipeline job control
-- [x] VFS layer — `kernel/vfs.c` + `tarfs_vfs.c` + `devfs.c` with mount table and `open_file` refcounting
+- [x] VFS layer — `kernel/vfs.c` + `tarfs_vfs.c` + `devfs.c` + `procfs.c` + `sysfs.c` with mount table and `open_file` refcounting
 - [x] `/bin/init` runs `/etc/rc` before exec'ing sbush — `bin/init/init.c`
+- [x] Kernel ring buffer — `printk` output stored in circular buffer; exposed via `/proc/dmesg`
+- [x] `SYS_mknodat` (34) — creates device nodes on ext2 with major:minor encoding
 
 ### Still Open
 
@@ -283,7 +295,7 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Input discipline (termios) — `kernel/tty.c` line discipline; cooked mode with echo/backspace/^C/^D; raw mode; ioctl TCGETS/TCSETS
 - [x] User-level threads — `sys_clone` extended with CLONE_VM/CLONE_FILES/CLONE_SIGHAND; refcounted shared resources
 - [x] Super pages — Sv39 2MB megapages for kernel identity maps; `walk()` detects level-1 leaf PTEs; COW fork splits to 4KB
-- [x] On-disk read/write file system — ext2-lite over virtio-blk (`kernel/ext2.c`); mounted at `/disk`; open/read/write/mkdir/unlink
+- [x] On-disk read/write file system — ext2-lite over virtio-blk (`kernel/ext2.c`); mounted at `/mnt`; open/read/write/mkdir/unlink/rmdir
 - [x] On-disk swap and paging — clock eviction in `kernel/swap.c`; 1024 swap slots at end of disk; swap-in on page fault
 - [ ] TCP/IP networking via lwIP (see detailed plan below)
 - [ ] Multi-core support
@@ -299,7 +311,9 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Ext2 timestamps — ext2_stat/ext2_fstat populate st_atime/st_mtime/st_ctime from on-disk inode
 - [x] getdents64 VA translation — uses kernel buffer for readdir, copies to user space page-by-page via walk()
 - [x] PCIe MMIO mappings in process page tables — exec and fork map PCIe ECAM (2MB) and MMIO BAR (1GB) so virtio-blk I/O works during syscalls
-- [x] Mount point injection in readdir — getdents64 appends synthetic DT_DIR entries for child mount points (dev, proc, disk) after filesystem readdir exhausts
+- [x] Mount point injection in readdir — getdents64 appends synthetic DT_DIR entries for child mount points (dev, proc, sys, mnt) after filesystem readdir exhausts
+- [x] Ext2 rmdir support — `SYS_unlinkat` with `AT_REMOVEDIR` flag dispatches to `ext2_ops.rmdir`
+- [x] Strerror messages — libc `strerror()` returns correct POSIX error strings for all errno values
 
 ## POSIX Compliance Checklist (Required Components)
 
@@ -312,9 +326,10 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Threads — `sys_clone` with `CLONE_VM`/`CLONE_FILES`/`CLONE_SIGHAND`; refcounted shared resources
 - [x] File System — VFS layer (`kernel/vfs.c`) with mount table (8 slots), `struct vfs_ops`, `struct open_file` refcounting
 - [x] FS Type 1: Read-Only FS at boot — tarfs mounted at `/` with ls, ps, cat, echo, kill, sleep, sbush
-- [x] FS Type 2: /proc virtual FS — `kernel/procfs.c` exposes per-PID directories with `status` and `cmdline`; mounted at `/proc` in `vfs_init()`
-- [x] Mount points — VFS mount table supports 8 entries; currently: `/` (tarfs), `/dev` (devfs), `/disk` (ext2)
-- [x] R/W file system — ext2-lite over virtio-blk at `/disk`; open/read/write/mkdir/unlink
+- [x] FS Type 2: /proc virtual FS — `kernel/procfs.c` exposes per-PID dirs with `status`, `cmdline`, plus `dmesg` and `mounts`; mounted at `/proc`
+- [x] FS Type 3: /sys virtual FS — `kernel/sysfs.c` exposes `kernel/{version,hostname}` and `devices/<name>/{address,size,irq,compatible,capacity}`; mounted at `/sys`
+- [x] Mount points — VFS mount table supports 8 entries; currently: `/` (tarfs), `/dev` (devfs), `/proc` (procfs), `/sys` (sysfs), `/mnt` (ext2)
+- [x] R/W file system — ext2-lite over virtio-blk at `/mnt`; open/read/write/mkdir/unlink/rmdir/mknod
 - [x] Terminal Support — `kernel/tty.c` line discipline; cooked mode (echo, backspace, ^C, ^D); raw mode; stdin/stdout/stderr via `/dev/console`
 - [x] Job Control Shell — sbush with sessions (`setsid`), process groups (`setpgid`/`tcsetpgrp`), fg/bg/jobs builtins
 - [x] Pipes — bidirectional pipe2 syscall; shell pipelines work across processes
@@ -326,7 +341,8 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 ### Remaining Work for Full POSIX Compliance
 
 - [x] Add WFI to scheduler idle loop — `wfi` halts hart until next interrupt when no RUNNABLE process exists
-- [x] Implement procfs (`/proc`) — `kernel/procfs.c` with `status`, `cmdline` per-PID; mounted at `/proc`
+- [x] Implement procfs (`/proc`) — `kernel/procfs.c` with per-PID `status`/`cmdline`, plus `dmesg` and `mounts`
+- [x] Implement sysfs (`/sys`) — `kernel/sysfs.c` with `kernel/{version,hostname}` and DTB device attributes
 - [ ] TCP/IP networking via lwIP (3 layers, detailed below)
 
 ### TCP/IP Networking Plan (lwIP + virtio-net)
