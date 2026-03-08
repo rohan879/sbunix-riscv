@@ -1283,6 +1283,95 @@ static int ext2_unlink(const char *path) {
   return 0;
 }
 
+static int ext2_rmdir(const char *path) {
+  if (!ext2_mounted)
+    return -1;
+
+  while (*path == '/') path++;
+
+  char parent_path[256];
+  const char *basename = path_parent(path, parent_path, sizeof(parent_path));
+  if (basename[0] == '\0')
+    return -1;
+
+  struct ext2_inode_mem *parent = ext2_namei(parent_path);
+  if (!parent)
+    return -2; /* -ENOENT */
+  if (parent->type != EXT2_TYPE_DIR) {
+    icache_release(parent);
+    return -20; /* -ENOTDIR */
+  }
+
+  uint32_t target_ino;
+  if (ext2_dir_lookup(parent, basename, &target_ino) < 0) {
+    icache_release(parent);
+    return -2; /* -ENOENT */
+  }
+
+  if (target_ino == EXT2_ROOT_INO) {
+    icache_release(parent);
+    return -1;
+  }
+
+  struct ext2_inode_mem *ip = icache_get(target_ino);
+  if (!ip) {
+    icache_release(parent);
+    return -1;
+  }
+
+  if (ip->type != EXT2_TYPE_DIR) {
+    icache_release(ip);
+    icache_release(parent);
+    return -20; /* -ENOTDIR */
+  }
+
+  /* Check directory is empty (only . and ..) */
+  uint32_t nblocks = (ip->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
+  for (uint32_t b = 0; b < nblocks; b++) {
+    uint32_t disk_blk = ext2_bmap(ip, b);
+    if (disk_blk == 0) continue;
+    struct bcache_entry *e = bcache_get(disk_blk);
+    if (!e) continue;
+    uint32_t off = 0;
+    while (off < EXT2_BLOCK_SIZE) {
+      struct ext2_dirent *de = (struct ext2_dirent *)(e->data + off);
+      if (de->rec_len == 0) break;
+      if (de->inode_number != 0) {
+        int is_dot = (de->name_len == 1 && de->name[0] == '.');
+        int is_dotdot = (de->name_len == 2 && de->name[0] == '.' && de->name[1] == '.');
+        if (!is_dot && !is_dotdot) {
+          bcache_release(e);
+          icache_release(ip);
+          icache_release(parent);
+          return -39; /* -ENOTEMPTY */
+        }
+      }
+      off += de->rec_len;
+    }
+    bcache_release(e);
+  }
+
+  /* Remove directory entry from parent */
+  int ret = ext2_dir_remove(parent, basename);
+  icache_writeback(parent);
+  icache_release(parent);
+
+  if (ret < 0) {
+    icache_release(ip);
+    return ret;
+  }
+
+  /* Free the directory inode */
+  ip->link_count = 0;
+  ip->dirty = 1;
+  icache_release(ip);
+  ext2_free_inode(target_ino);
+
+  bcache_sync();
+  sb_flush_if_dirty();
+  return 0;
+}
+
 /* ================================================================== */
 /* VFS ops struct                                                      */
 /* ================================================================== */
@@ -1297,6 +1386,7 @@ struct vfs_ops ext2_ops = {
   .readdir = ext2_readdir,
   .mkdir   = ext2_mkdir,
   .unlink  = ext2_unlink,
+  .rmdir   = ext2_rmdir,
 };
 
 /* ================================================================== */

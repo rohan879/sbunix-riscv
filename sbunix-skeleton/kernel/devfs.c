@@ -316,4 +316,5 @@ struct vfs_ops devfs_ops = {
   .readdir = devfs_readdir,
   .mkdir   = devfs_mkdir,
   .unlink  = devfs_unlink,
+  .rmdir   = NULL,
 };

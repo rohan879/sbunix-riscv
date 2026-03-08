@@ -1967,6 +1967,7 @@ pipe_eof:
     } else if (sysnum == SYS_unlinkat) {
         /* unlinkat(AT_FDCWD, path, flags) */
         const char *upath = (const char *)tf->a1;
+        int flags = (int)tf->a2;
         if (!upath) {
             tf->a0 = (uint64_t)-1;
         } else {
@@ -1974,11 +1975,20 @@ pipe_eof:
             resolve_path(current_proc->cwd, upath, resolved);
             const char *relpath;
             struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
-            if (ops && ops->unlink) {
-                int ret = ops->unlink(relpath);
-                tf->a0 = (uint64_t)(int64_t)ret;
+            if (flags & 0x200) { /* AT_REMOVEDIR */
+                if (ops && ops->rmdir) {
+                    int ret = ops->rmdir(relpath);
+                    tf->a0 = (uint64_t)(int64_t)ret;
+                } else {
+                    tf->a0 = (uint64_t)-30; /* -EROFS */
+                }
             } else {
-                tf->a0 = (uint64_t)-30; /* -EROFS */
+                if (ops && ops->unlink) {
+                    int ret = ops->unlink(relpath);
+                    tf->a0 = (uint64_t)(int64_t)ret;
+                } else {
+                    tf->a0 = (uint64_t)-30; /* -EROFS */
+                }
             }
         }
 

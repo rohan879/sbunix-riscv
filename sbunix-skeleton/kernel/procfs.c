@@ -401,4 +401,5 @@ struct vfs_ops procfs_ops = {
   .readdir = procfs_readdir,
   .mkdir   = procfs_mkdir,
   .unlink  = procfs_unlink,
+  .rmdir   = NULL,
 };

@@ -17,6 +17,7 @@ struct vfs_ops {
   int (*readdir)(void *private, char *buf, unsigned int count, int64_t *offset);
   int (*mkdir)(const char *path, int mode);
   int (*unlink)(const char *path);
+  int (*rmdir)(const char *path);
 };
 
 /* Open file description -- stored in proc->ofile[] */
