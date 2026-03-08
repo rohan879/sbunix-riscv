@@ -55,7 +55,7 @@
 
 ## Final Project — Plan of Attack
 
-### 1. Boot + Early Console (partially done)
+### 1. Boot + Early Console — DONE
 
 - [x] OpenSBI handoff, UART printing
 - [x] Parse DTB pointer from `a1`
@@ -66,53 +66,245 @@
 - [x] Exception entry/exit (`sepc`/`scause`/`stval` dispatch)
 - [x] Timer interrupts (SBI)
 - [x] External interrupts via PLIC
-- [ ] Minimal scheduler tick for preemption
+- [x] Minimal scheduler tick for preemption — `handle_timer_interrupt()` yields RUNNING process via `swtch()` for round-robin
 
 ### 3. Memory Subsystem
 
-- [ ] Physical page allocator (page descriptors, free list)
-- [ ] Sv39 page tables (3-level, managed via `satp` CSR)
-- [ ] Enable/disable virtual memory
-- [ ] `kmalloc`
+- [x] Physical page allocator (page descriptors, free list)
+- [x] Sv39 page tables (3-level, managed via `satp` CSR)
+- [x] Enable/disable virtual memory
+- [x] `kmalloc` — power-of-two slab allocator in `kernel/kmalloc.c` (16–2048 byte buckets)
 
 ### 4. Process Subsystem
 
-- [ ] Kernel threads
-- [ ] Context switch (RISC-V register save/restore)
-- [ ] User-mode entry (U-mode), per-process page tables
+- [x] Kernel threads
+- [x] Context switch (RISC-V register save/restore)
+- [x] User-mode entry (U-mode), per-process page tables
 
 ### 5. User-level Subsystem
 
-- [ ] VMAs / vm_map_entry tracking
-- [ ] COW fork (via `clone`), auto-growing stack, graceful SEGV
-- [ ] Page fault handler (`scause` exception codes)
+- [x] VMAs / vm_map_entry tracking — `struct vm_area` linked list in `kernel/vm.c`, integrated with exec/mmap/munmap/fork/exit
+- [x] COW fork (via `clone`) — PTE_COW (RSW bit 8), page refcounting in kalloc
+- [x] Auto-growing stack — page fault handler extends stack down by up to 16 pages
+- [x] Page fault handler (`scause` 13/15) — COW faults, stack auto-grow, mmap demand paging
 
 ### 6. I/O Subsystem
 
-- [ ] Syscall dispatch (`ecall` → `scause` environment-call-from-U-mode)
-- [ ] `read(stdin)`, `write(stdout)`, `write(stderr)` via UART terminal
-- [ ] VFS layer
-- [ ] tarfs: `open`, `read`, `close`, `opendir`, `readdir`, `closedir`
+- [x] Syscall dispatch (`ecall` → `scause` environment-call-from-U-mode)
+- [x] `read(stdin)`, `write(stdout)`, `write(stderr)` via UART terminal
+- [x] VFS layer — `kernel/vfs.c` with mount table, `struct vfs_ops`, `struct open_file` refcounting; tarfs adapter (`kernel/tarfs_vfs.c`), devfs (`kernel/devfs.c`)
+- [x] tarfs: `open`, `read`, `close`, `opendir`, `readdir`, `closedir`
   - Embedded in `.tarfs` section (`_tarfs_start` / `_tarfs_end`)
 
 ### 7. Userspace Binaries
 
-- [ ] `bin/echo`, `bin/sleep`, `bin/cat`, `bin/ls`
-- [ ] `bin/kill` (`kill -9`), `bin/ps`
-- [ ] `bin/sbush` (full shell)
+- [x] `bin/echo`, `bin/sleep`, `bin/cat`, `bin/ls`
+- [x] `bin/kill` (`kill -9`), `bin/ps`
+- [x] `bin/sbush` (full shell)
+- [x] `bin/spin` — preemptive scheduling test (two CPU-bound fork'd loops)
+- [x] `bin/alarmtest` — SIGALRM test (`alarm(2)` + sigaction handler)
+- [x] `bin/segvtest` — SIGSEGV test (NULL deref caught by user signal handler)
 
 ### 8. /bin/init
 
-- [ ] fork(clone) + exec + wait on `/etc/rc`
-- [ ] Then exec sbush
+- [x] fork(clone) + exec + wait on `/etc/rc` — `bin/init/init.c` forks+execs `/bin/sbush /etc/rc`
+- [x] Then exec sbush — `init` respawns interactive shell after rc completes; `userinit()` now boots `/bin/init`
+
+## POSIX Shell Completeness (sbush)
+
+Shell basics (cd, PATH, pipes, background, scripts) are done. These remain for POSIX compliance:
+
+### Signal Handling
+
+- [x] Install `SIGINT` handler — forwards to `fg_pid` via `sigaction(SA_RESTART)` in `sbush.c`
+- [x] Install `SIGTSTP` (^Z) handler — forwards to `fg_pid`, shell itself never stops
+- [x] Handle `SIGCHLD` — `sigchld_handler` reaps via `waitpid(WNOHANG|WUNTRACED)`, updates job table
+
+### Job Control
+
+- [x] `jobs` builtin — list background/stopped jobs (`bin/sbush/jobs.c`)
+- [x] `fg` builtin — resume stopped job in foreground
+- [x] `bg` builtin — resume stopped job in background
+- [x] Set process groups for pipelines (`setpgid`) and terminal control (`tcsetpgrp`) — first child calls `setpgid(0,0)`, others join; parent uses `tcsetpgrp` for foreground
+
+### Redirections
+
+- [x] Output redirect: `cmd > file`, `cmd >> file`
+- [x] Input redirect: `cmd < file`
+- [x] Stderr redirect: `cmd 2> file`, `cmd 2>&1`
+
+### Variable / Expansion
+
+- [x] `$?` — exit status of last command (deferred expansion per-pipeline)
+- [x] `$!` — PID of last background process
+- [x] `$$` — PID of shell itself
+- [x] Double-quote variable expansion (`"$VAR"` preserves spaces)
+- [x] Single-quote literal strings (`'no $expansion'`)
+- [x] Backslash escapes (`\"`, `\\`, `\n`, `\t`, `\$`)
+
+### Globbing
+
+- [x] `*` wildcard expansion (match any string) — implemented in `parse.c:72-209`
+- [x] `?` wildcard expansion (match single character) — implemented in `parse.c:72-209`
+
+## Libc Header Completeness (Feedback-Driven) — DONE
+
+Originally scored 13/49 tests (20/100 points). All missing headers, declarations, and implementations have been added.
+
+### `libc/include/sys/` Directory — Complete
+
+All 10 sys/ headers exist with full content.
+
+- [x] `mkdir -p libc/include/sys` — already exists
+- [x] `sys/time.h` — `struct timeval`, `gettimeofday()`, `timersub`/`timeradd`/`timercmp` macros
+- [x] `sys/syscall.h` — re-exports all `SYS_*`, adds `__NR_*` POSIX aliases
+- [x] `sys/types.h` — `pid_t`, `uid_t`, `gid_t`, `off_t`, `ssize_t`, `size_t`, `mode_t`
+- [x] `sys/stat.h` — `struct stat`, `S_ISREG`/`S_ISDIR` macros, `fstat()`/`stat()` declarations
+- [x] `sys/wait.h` — `waitpid()`, `WIFEXITED`/`WEXITSTATUS`/`WIFSIGNALED`/`WTERMSIG` macros
+- [x] `sys/mman.h` — `mmap()`/`munmap()`/`madvise()` declarations, `PROT_*`/`MAP_*`/`MADV_*` constants
+- [x] `sys/ioctl.h` — `ioctl()`, `struct winsize`, `TIOCGWINSZ`/`TIOCSWINSZ`/`TIOCGPGRP`/`TIOCSPGRP`
+- [x] `sys/resource.h` — `struct rlimit`, `struct rusage`, `RLIMIT_*` constants, `getrlimit()`/`setrlimit()`/`getrusage()`
+- [x] `sys/utsname.h` — `struct utsname`, `uname()`
+- [x] `sys/uio.h` — `struct iovec`, `readv()`/`writev()`
+
+### Additional Headers — Complete
+
+- [x] `ctype.h` — 14 `static inline` character classification functions (`isalpha`, `isdigit`, `toupper`, etc.)
+- [x] `assert.h` — `assert()` macro using `dprintf(2, ...)` + `abort()`
+- [x] `termios.h` — `struct termios` (matches kernel `tty.h`), `tcgetattr()`/`tcsetattr()`/`cfmakeraw()`, all flag constants
+- [x] `libgen.h` — `basename()`/`dirname()`
+- [x] `poll.h` — `struct pollfd`, `nfds_t`, `POLLIN`/`POLLOUT`/`POLLERR`/`POLLHUP`/`POLLNVAL`, `poll()`
+- [x] `setjmp.h` — `jmp_buf` (14 callee-saved regs), `setjmp()`/`longjmp()`
+- [x] `pwd.h` — `struct passwd`, `getpwuid()`/`getpwnam()`
+- [x] `grp.h` — `struct group`, `getgrgid()`/`getgrnam()`
+
+### Missing Declarations in Existing Headers
+
+- [x] `string.h` — added: `memmove`, `memchr`, `strdup`, `strndup`, `strncat`, `strspn`, `strcspn`, `strpbrk`, `strtok`, `strerror`
+- [x] `unistd.h` — added: `isatty`, `setsid`, `getpgrp`, `setpgid`, `tcgetpgrp`, `tcsetpgrp`, `alarm`, `getpgid`, `getsid`, `ftruncate`, `geteuid`, `getegid`, `wait`
+- [x] `signal.h` — added: `sighandler_t` typedef, `sig_atomic_t` typedef
+- [x] `stdlib.h` — added: `setenv`, `unsetenv`, `putenv`
+- [x] `errno.h` — complete (45 error codes, extern errno)
+- [x] `fcntl.h` — complete (`O_*` flags, `AT_FDCWD`, fcntl commands)
+- [x] `dirent.h` — complete (`struct dirent`, `DIR`, opendir/readdir/closedir)
+- [x] `stdio.h` — added: `FILE` typedef, `stdin`/`stdout`/`stderr`, `fprintf`/`vfprintf`/`perror`/`fputs`/`fputc`/`fgets`/`fgetc`/`fwrite`/`fread`/`fopen`/`fclose`/`fflush`/`fileno`/`feof`/`ferror`/`clearerr`/`fseek`/`ftell`/`sscanf`
+- [x] `syscall.h` — added: `SYS_ftruncate`, `SYS_tgkill`, `SYS_rt_sigreturn`, `SYS_madvise`
+
+### Corresponding Libc Implementations
+
+- [x] Implement missing string functions in `libc/string.c` — all 10 functions
+- [x] Implement `isatty()` in `libc/unistd.c` — ioctl probe + fd 0-2 fallback
+- [x] Implement `setenv()`/`unsetenv()`/`putenv()` in `libc/stdlib.c` — static env storage
+- [x] `stat()`/`fstat()` syscall wrappers in libc
+- [x] `waitpid()` wrapper with `W*` macros
+- [x] `ioctl` syscall handling in `kernel/trap.c` — SYS_ioctl(29), TIOCGWINSZ returns 80x24
+- [x] FILE* streams in `libc/fileio.c` — static pool of 16 FILEs, unbuffered fprintf/fread/fwrite/fopen/fclose/perror
+- [x] Terminal I/O in `libc/termios.c` — tcgetattr/tcsetattr wrapping ioctl TCGETS/TCSETS, cfmakeraw
+- [x] Resource limits in `libc/resource.c` — getrlimit/setrlimit via prlimit64, getrusage stub
+- [x] System identification in `libc/utsname.c` — uname() returns "SBUnix"/"riscv64"
+- [x] Scatter/gather I/O in `libc/uio.c` — readv/writev syscall wrappers
+- [x] Path decomposition in `libc/libgen.c` — basename/dirname pure string manipulation
+- [x] I/O multiplexing in `libc/poll.c` — poll() stub (assumes all events ready)
+- [x] Non-local jumps in `libc/setjmp.S` — RISC-V setjmp/longjmp saving 14 callee-saved registers
+- [x] User/group database in `libc/pwd.c` — getpwuid/getpwnam/getgrgid/getgrnam returning static root entries
+- [x] Fixed libc wrappers to use real syscalls — setsid, getpgrp, setpgid, tcgetpgrp, tcsetpgrp now call kernel
+- [x] Added missing wrappers — getpgid, getsid, ftruncate, geteuid, getegid, wait, madvise
+- [x] Fixed `abort()` to raise SIGABRT before _exit(134)
+
+## Kernel Syscall Stubs (Feedback-Driven)
+
+Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
+
+- [x] `SYS_ioctl` (29) — TIOCGWINSZ returns 80x24, TIOCGPGRP/TIOCSPGRP handled, unknown → -ENOTTY
+- [x] `SYS_rt_sigaction` (134) — stores/retrieves sigaction per process, rejects SIGKILL/SIGSTOP
+- [x] `SYS_rt_sigprocmask` (135) — SIG_BLOCK/SIG_UNBLOCK/SIG_SETMASK on `proc->sigmask`
+- [x] `SYS_gettimeofday` (169) — Goldfish RTC epoch time via get_wall_time()
+- [x] `SYS_clock_gettime` (113) — epoch time + VA translation via walk()
+- [x] `SYS_fcntl` (25) — F_GETFD/F_SETFD/F_GETFL/F_SETFL stubs
+- [x] `SYS_faccessat` (48) — resolves path in tarfs, returns 0 or -ENOENT
+- [x] `SYS_unlinkat` (35), `SYS_linkat` (37), `SYS_renameat2` (276), `SYS_mkdirat` (34) — return -EROFS
+- [x] `SYS_umask` (166) — returns 022
+- [x] `execve` envp fix — copies envp strings before destroying old page table
+- [x] `SYS_alarm` (200) — custom syscall; sets `proc->alarm_ticks`, returns remaining seconds from previous alarm
+- [x] `SYS_geteuid` (175), `SYS_getegid` (177) — return 0 (root)
+- [x] `SYS_set_tid_address` (96) — returns current pid
+- [x] `SYS_readlinkat` (78) — returns -ENOENT (no symlinks)
+- [x] `SYS_getrandom` (278) — LCG PRNG seeded from r_time()
+- [x] `SYS_writev` (66), `SYS_readv` (65) — basic iovec iteration (partial, see Remaining Fixes)
+- [x] `SYS_prlimit64` (261) — returns -ENOSYS stub
+- [x] `SYS_setpgid` (154), `SYS_getpgid` (155), `SYS_setsid` (157), `SYS_getsid` (156) — pid-returning stubs
+- [x] `SYS_madvise` (233) — no-op success (no real VM advice needed)
+- [x] `SYS_ftruncate` (46) — returns -EROFS (tarfs is read-only)
+- [x] `SYS_tgkill` (131) — routes to same signal delivery logic as SYS_kill
+
+## Kernel Architecture Features
+
+### Signal Delivery
+
+- [x] Signal trampoline page at `SIG_TRAMPOLINE_VA` (0x3FFFFFF000) — `kernel/sigtramp.S`
+- [x] `deliver_signal()` — saves trapframe, diverts to handler, sets ra to trampoline
+- [x] `SYS_rt_sigreturn` (139) — restores saved trapframe
+- [x] `SYS_kill` uses `sigpending` bits for non-SIGKILL signals
+- [x] Per-process `sigactions[32]`, `sigmask`, `sigpending` in `struct proc`
+- [x] SIGCHLD delivery on child exit — `SYS_exit`, `SYS_kill` SIGKILL, and `deliver_signal` SIG_DFL paths all set `parent->sigpending |= (1 << SIGCHLD)`
+- [x] SIGSEGV delivery via signal machinery — page fault handler sets `sigpending |= (1 << SIGSEGV)` and calls `deliver_signal()` instead of direct kill; user handlers can catch it
+- [x] `SYS_alarm` (200) — sets per-process `alarm_ticks`; timer handler checks expiry and delivers SIGALRM (signal 14)
+- [x] `deliver_signal()` SIG_DFL cleanup — calls `vma_free_all()` + `close_ofile()` for all fds before marking ZOMBIE (mirrors `SYS_exit` path)
+- [x] Ctrl-C delivers SIGINT via `sigpending` instead of force-killing processes — lets sigaction handlers run properly
+
+### Sub-page Allocator
+
+- [x] `kmalloc(size)` / `kmfree(ptr, size)` — `kernel/kmalloc.c`
+- [x] 8 power-of-two bucket sizes: 16, 32, 64, 128, 256, 512, 1024, 2048 bytes
+- [x] Each bucket backed by freelist carved from kalloc'd pages
+
+### COW Fork + Page Refcounting
+
+- [x] `copy_pagetable_cow()` — marks writable user pages read-only + PTE_COW in both parent/child
+- [x] Page refcount array in `kalloc.c` — `kalloc()` sets refcount=1, `kfree()` frees when refcount=0
+- [x] Page fault handler: COW fault allocates new page + copies if refcount > 1
+
+### Stack Auto-Grow + Demand Paging
+
+- [x] Page fault extends stack down by up to 16 pages when fault is near stack bottom
+- [x] Demand paging for mmap regions — lazily maps pages on first access
+
+### Remaining Kernel Work
+
+- [x] Shell-side signal handlers (SIGINT, SIGTSTP, SIGCHLD) — installed in `sbush.c` via `sigaction`
+- [x] Process groups for pipelines — `setpgid`/`tcsetpgrp` used in `exec.c` for pipeline job control
+- [x] VFS layer — `kernel/vfs.c` + `tarfs_vfs.c` + `devfs.c` with mount table and `open_file` refcounting
+- [x] `/bin/init` runs `/etc/rc` before exec'ing sbush — `bin/init/init.c`
+
+### Still Open
+
+- [x] Kernel SIGCHLD generation — `SYS_exit`, SIGKILL, and `deliver_signal` SIG_DFL all set `parent->sigpending |= (1 << SIGCHLD)` on child death
+- [x] devfs integration for stdin/stdout/stderr — fd 0/1/2 opened via `/dev/console` VFS ops in `init_starter()`; UART special-case removed from trap.c
+- [x] Input discipline (termios) — `kernel/tty.c` line discipline; cooked mode with echo/backspace/^C/^D; raw mode; ioctl TCGETS/TCSETS
+- [x] User-level threads — `sys_clone` extended with CLONE_VM/CLONE_FILES/CLONE_SIGHAND; refcounted shared resources
+- [x] Super pages — Sv39 2MB megapages for kernel identity maps; `walk()` detects level-1 leaf PTEs; COW fork splits to 4KB
+- [x] On-disk read/write file system — ext2-lite over virtio-blk (`kernel/ext2.c`); mounted at `/disk`; open/read/write/mkdir/unlink
+- [x] On-disk swap and paging — clock eviction in `kernel/swap.c`; 1024 swap slots at end of disk; swap-in on page fault
+- [ ] TCP/IP networking via lwIP
+- [ ] Multi-core support
+
+### Remaining Fixes
+
+- [x] writev/readv VA translation — iovec array and buffer pointers translated via walk()
+- [ ] getrandom — trivial LCG PRNG, not cryptographically secure
+- [x] prlimit64 — RLIMIT_STACK (8MB) and RLIMIT_NOFILE (16) handled; others return RLIM_INFINITY
+- [x] Process groups — setpgid/getpgid/setsid/getsid with pgid/sid fields in struct proc
+- [x] Libc errno handling — `__syscall_ret` applied to all error-returning syscall wrappers in unistd.c and stat.c
+- [x] nanosleep VA translation — user timespec pointer translated via walk()
+- [x] Ext2 timestamps — ext2_stat/ext2_fstat populate st_atime/st_mtime/st_ctime from on-disk inode
 
 ## Grading Targets
 
-- [ ] Cooperative multi-tasking + all functional requirements (50 pts)
-- [ ] Preemptive multi-tasking (+10 pts)
-- [ ] Signals (INT on ^C, ALARM, SEGV) and pipes (+10 pts)
-- [ ] On-disk r/w file system (+10 pts)
-- [ ] On-disk swap and paging (+10 pts)
+- [x] Cooperative multi-tasking + all functional requirements (50 pts) — scheduler, fork, exec, wait, pipes, VFS, tarfs, user binaries all working
+- [x] Preemptive multi-tasking (+10 pts) — timer-driven scheduler tick yields RUNNING processes via `swtch()`; tested with `bin/spin` (two CPU-bound fork'd loops both complete)
+- [x] Signals (INT on ^C, ALARM, SEGV) and pipes (+10 pts) — SIGINT via `sigpending`, SIGALRM via `alarm()` syscall, SIGSEGV via `deliver_signal()`, SIGCHLD on exit; pipes work; tested with `spin`, `alarmtest`, `segvtest`
+- [x] On-disk r/w file system (+10 pts) — ext2-lite with block cache, inode cache, directory ops over virtio-blk
+- [x] On-disk swap and paging (+10 pts) — clock eviction, swap bitmap, PTE_SWAP encoding, transparent swap-in on page fault
 - [ ] TCP/IP networking via lwIP (+10 pts)
 - [ ] Multi-core (+20 pts)
 

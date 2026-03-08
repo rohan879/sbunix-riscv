@@ -2,6 +2,7 @@
 #define _PROC_H
 
 #include <riscv.h>
+#include <vfs.h>
 
 // Saved registers for kernel context switches.
 struct context {
@@ -64,31 +65,49 @@ enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 /* Maximum open file descriptors per process */
 #define NOFILE 16
 
-/* Maximum anonymous mmap regions per process */
-#define NMMAP 16
+/* Forward declarations */
+struct vm_area;
+struct open_file;
 
-/* One anonymous mmap region */
-struct mmap_region {
-  uint64_t va;   /* base virtual address (page-aligned); 0 = unused */
-  uint64_t len;  /* length in bytes (page-aligned) */
+/* Signal action descriptor (defined here so shared_sigactions can use it) */
+struct kern_sigaction {
+  uint64_t handler;   /* sa_handler function pointer */
+  uint64_t mask;      /* sa_mask */
+  int      flags;     /* sa_flags */
+  uint64_t restorer;  /* sa_restorer */
 };
 
-/* Simple file descriptor table entry */
-struct file {
-  int used;             // 1 if slot occupied
-  int pipe_read;        // 1 if this is the read end of a pipe
-  int pipe_write;       // 1 if this is the write end of a pipe
-  int pipe_id;          // which pipe (index into kernel pipe table)
-  /* tar file fields (used when pipe_read==0 && pipe_write==0 && used==1) */
-  unsigned long tar_offset; // byte offset within file data
-  unsigned long tar_size;   // total file size
-  char *tar_data;           // pointer into tarfs data (after header)
+/* Shared-resource wrappers for CLONE_VM / CLONE_FILES / CLONE_SIGHAND */
+struct shared_pagetable {
+  pagetable_t pt;         /* the Sv39 page table root */
+  int         refcount;   /* number of procs sharing this pagetable */
 };
+
+struct shared_ftable {
+  struct open_file *ofile[NOFILE]; /* the fd array */
+  int               refcount;     /* number of procs sharing this table */
+};
+
+struct shared_sigactions {
+  struct kern_sigaction actions[32]; /* one per signal */
+  int                  refcount;    /* number of procs sharing */
+};
+
+/* Signal trampoline is mapped at this user VA in every process */
+#define SIG_TRAMPOLINE_VA  0x3FFFFFF000UL  /* just below top of Sv39 user space */
+
+/* Signal constants */
+#define SIGSEGV   11
+#define SIGCHLD   17
+#define SIGURG    23
+#define SIGWINCH  28
 
 // Per-process state
 struct proc {
   enum procstate state;        // Process state
   pid_t pid;                   // Process ID
+  pid_t pgid;                  // Process group ID
+  pid_t sid;                   // Session ID
   struct proc *parent;         // Parent process
   void *kstack;                // Virtual address of kernel stack
   uint64_t sz;                 // Size of process memory (bytes)
@@ -98,13 +117,36 @@ struct proc {
   char name[16];               // Process name (debugging)
   int waiting_for_uart;        // 1 if sleeping for UART input; 2 if timed sleep
   uint64_t sleep_until;        // for timed sleep: wake when ticks >= this value
+  unsigned long alarm_ticks;   // tick count when alarm fires (0 = no alarm)
   int exit_status;             // exit status (for wait4)
   char cwd[256];               // current working directory
-  struct file ofile[NOFILE];   // open file descriptors
-  /* anonymous mmap tracking */
-  struct mmap_region mmap_regions[NMMAP]; // per-process mmap table
+  struct open_file *ofile[NOFILE]; // open file descriptors (VFS)
+  /* VMA list for tracking all user memory regions */
+  struct vm_area *vma_list;    // sorted linked list of virtual memory areas
   uint64_t mmap_base;          // next VA to use for non-MAP_FIXED mmap
+  /* signal handling */
+  struct kern_sigaction sigactions[32]; /* one per signal (indices 0-31) */
+  uint64_t sigmask;             /* blocked signal mask */
+  uint64_t sigpending;          /* pending signal bitmask */
+  /* stack bounds for auto-grow */
+  uint64_t stack_top;            /* top of user stack (highest VA) */
+  uint64_t stack_bottom;         /* lowest allocated stack page */
+  /* Clone/thread sharing state */
+  int clone_flags;                          /* flags this proc was created with */
+  struct shared_pagetable  *shared_pt;      /* non-NULL if CLONE_VM */
+  struct shared_ftable     *shared_ft;      /* non-NULL if CLONE_FILES */
+  struct shared_sigactions *shared_sa;      /* non-NULL if CLONE_SIGHAND */
 };
+
+/* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,
+ * indirecting through shared wrappers when present. */
+static inline struct open_file **proc_ofile(struct proc *p) {
+  return p->shared_ft ? p->shared_ft->ofile : p->ofile;
+}
+
+static inline struct kern_sigaction *proc_sigactions(struct proc *p) {
+  return p->shared_sa ? p->shared_sa->actions : p->sigactions;
+}
 
 void            procinit(void);
 struct proc*    allocproc(void);

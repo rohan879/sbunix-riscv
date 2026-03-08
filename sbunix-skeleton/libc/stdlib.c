@@ -5,6 +5,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <unistd.h>
 
 /* -----------------------------------------------------------------------
  * String-to-number conversions
@@ -263,10 +265,10 @@ void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
 
 /*
  * abort() — terminate the process abnormally.
- * On SBUnix there is no SIGABRT delivery; just exit with status 134.
  */
 void abort(void) {
-    exit(134);
+    raise(SIGABRT);
+    _exit(134);
 }
 
 /*
@@ -284,4 +286,97 @@ char *getenv(const char *name) {
             return environ[i] + len + 1;
     }
     return (void *)0;
+}
+
+/*
+ * Environment manipulation.
+ * These operate on the global environ array.
+ * Simple implementation: maintains a static array of "NAME=VALUE" strings.
+ */
+
+#define MAX_ENV 128
+static char *env_storage[MAX_ENV + 1];
+static int env_initialized = 0;
+
+static void env_ensure_init(void) {
+    if (env_initialized) return;
+    env_initialized = 1;
+    int i = 0;
+    if (environ) {
+        for (; environ[i] && i < MAX_ENV; i++)
+            env_storage[i] = environ[i];
+    }
+    env_storage[i] = (void *)0;
+    environ = env_storage;
+}
+
+int setenv(const char *name, const char *value, int overwrite) {
+    if (!name || !*name || strchr(name, '='))
+        return -1;
+    env_ensure_init();
+    size_t nlen = strlen(name);
+    /* find existing */
+    for (int i = 0; environ[i]; i++) {
+        if (strncmp(environ[i], name, nlen) == 0 && environ[i][nlen] == '=') {
+            if (!overwrite) return 0;
+            /* build new entry */
+            static char buf[320];
+            strcpy(buf, name);
+            strcat(buf, "=");
+            strcat(buf, value);
+            environ[i] = buf;
+            return 0;
+        }
+    }
+    /* add new */
+    int count = 0;
+    while (environ[count]) count++;
+    if (count >= MAX_ENV) return -1;
+    static char newbuf[320];
+    strcpy(newbuf, name);
+    strcat(newbuf, "=");
+    strcat(newbuf, value);
+    environ[count] = newbuf;
+    environ[count + 1] = (void *)0;
+    return 0;
+}
+
+int unsetenv(const char *name) {
+    if (!name || !*name || strchr(name, '='))
+        return -1;
+    env_ensure_init();
+    size_t nlen = strlen(name);
+    int i = 0;
+    while (environ[i]) {
+        if (strncmp(environ[i], name, nlen) == 0 && environ[i][nlen] == '=') {
+            /* shift remaining entries down */
+            int j = i;
+            while (environ[j]) { environ[j] = environ[j + 1]; j++; }
+        } else {
+            i++;
+        }
+    }
+    return 0;
+}
+
+int putenv(char *string) {
+    if (!string) return -1;
+    env_ensure_init();
+    char *eq = strchr(string, '=');
+    if (!eq) return unsetenv(string);
+    size_t nlen = (size_t)(eq - string);
+    /* replace existing */
+    for (int i = 0; environ[i]; i++) {
+        if (strncmp(environ[i], string, nlen) == 0 && environ[i][nlen] == '=') {
+            environ[i] = string;
+            return 0;
+        }
+    }
+    /* add new */
+    int count = 0;
+    while (environ[count]) count++;
+    if (count >= MAX_ENV) return -1;
+    environ[count] = string;
+    environ[count + 1] = (void *)0;
+    return 0;
 }

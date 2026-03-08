@@ -9,23 +9,51 @@ static void expand_vars(char *line) {
     char *src = line;
     char *dst = expand_buf;
     char *end = expand_buf + MAX_LINE - 1;
+    int in_sq = 0;
 
     while (*src && dst < end) {
-        if (*src == '$') {
+        if (*src == '\'' ) {
+            in_sq = !in_sq;
+            *dst++ = *src++;
+        } else if (*src == '$' && !in_sq) {
             src++;
-            char name[64];
-            int i = 0;
-            while (*src && ((*src >= 'a' && *src <= 'z') ||
-                            (*src >= 'A' && *src <= 'Z') ||
-                            (*src >= '0' && *src <= '9') ||
-                            *src == '_') && i < 63) {
-                name[i++] = *src++;
-            }
-            name[i] = '\0';
-            char *val = var_get(name);
-            if (val) {
-                while (*val && dst < end)
-                    *dst++ = *val++;
+            if (*src == '?') {
+                /* $? -- last exit status */
+                src++;
+                char tmp[16];
+                itoa(last_exit_status, tmp, 10);
+                for (char *v = tmp; *v && dst < end; )
+                    *dst++ = *v++;
+            } else if (*src == '!') {
+                /* $! -- last background PID */
+                src++;
+                char tmp[16];
+                itoa((int)last_bg_pid, tmp, 10);
+                for (char *v = tmp; *v && dst < end; )
+                    *dst++ = *v++;
+            } else if (*src == '$') {
+                /* $$ -- shell PID */
+                src++;
+                char tmp[16];
+                itoa((int)getpid(), tmp, 10);
+                for (char *v = tmp; *v && dst < end; )
+                    *dst++ = *v++;
+            } else {
+                /* $NAME -- regular variable */
+                char name[64];
+                int i = 0;
+                while (*src && ((*src >= 'a' && *src <= 'z') ||
+                                (*src >= 'A' && *src <= 'Z') ||
+                                (*src >= '0' && *src <= '9') ||
+                                *src == '_') && i < 63) {
+                    name[i++] = *src++;
+                }
+                name[i] = '\0';
+                char *val = var_get(name);
+                if (val) {
+                    while (*val && dst < end)
+                        *dst++ = *val++;
+                }
             }
         } else {
             *dst++ = *src++;
@@ -49,10 +77,33 @@ static int tokenize(char *str, struct command *cmd) {
 
         if (*p == '"') {
             p++;
+            char *start = p;
+            char *w = p;  /* in-place de-escape */
+            while (*p && *p != '"') {
+                if (*p == '\\' && *(p + 1)) {
+                    p++;
+                    switch (*p) {
+                        case 'n':  *w++ = '\n'; break;
+                        case 't':  *w++ = '\t'; break;
+                        case '\\': *w++ = '\\'; break;
+                        case '"':  *w++ = '"';  break;
+                        case '$':  *w++ = '$';  break;
+                        default:   *w++ = '\\'; *w++ = *p; break;
+                    }
+                    p++;
+                } else {
+                    *w++ = *p++;
+                }
+            }
+            *w = '\0';
+            if (*p == '"') p++;
+            cmd->argv[cmd->argc++] = start;
+        } else if (*p == '\'') {
+            p++;
             cmd->argv[cmd->argc++] = p;
-            while (*p && *p != '"')
+            while (*p && *p != '\'')
                 p++;
-            if (*p == '"')
+            if (*p == '\'')
                 *p++ = '\0';
         } else {
             cmd->argv[cmd->argc++] = p;
@@ -63,6 +114,33 @@ static int tokenize(char *str, struct command *cmd) {
         }
     }
     cmd->argv[cmd->argc] = NULL;
+
+    /* Extract redirections from argv */
+    cmd->redir_in = NULL;
+    cmd->redir_out = NULL;
+    cmd->redir_append = NULL;
+    cmd->redir_err = NULL;
+    cmd->redir_err_to_out = 0;
+
+    int j = 0;
+    for (int i = 0; i < cmd->argc; i++) {
+        if (strcmp(cmd->argv[i], "<") == 0 && i + 1 < cmd->argc) {
+            cmd->redir_in = cmd->argv[++i];
+        } else if (strcmp(cmd->argv[i], ">>") == 0 && i + 1 < cmd->argc) {
+            cmd->redir_append = cmd->argv[++i];
+        } else if (strcmp(cmd->argv[i], ">") == 0 && i + 1 < cmd->argc) {
+            cmd->redir_out = cmd->argv[++i];
+        } else if (strcmp(cmd->argv[i], "2>&1") == 0) {
+            cmd->redir_err_to_out = 1;
+        } else if (strcmp(cmd->argv[i], "2>") == 0 && i + 1 < cmd->argc) {
+            cmd->redir_err = cmd->argv[++i];
+        } else {
+            cmd->argv[j++] = cmd->argv[i];
+        }
+    }
+    cmd->argc = j;
+    cmd->argv[j] = NULL;
+
     return cmd->argc;
 }
 
@@ -236,10 +314,11 @@ static int parse_pipeline(char *seg, struct pipeline *pl) {
         char *pipe_pos = NULL;
         /* find unquoted | (but not ||) */
         char *scan = p;
-        int in_q = 0;
+        int in_dq = 0, in_sq = 0;
         while (*scan) {
-            if (*scan == '"') { in_q = !in_q; scan++; continue; }
-            if (!in_q && *scan == '|' && *(scan+1) != '|') {
+            if (*scan == '"'  && !in_sq) { in_dq = !in_dq; scan++; continue; }
+            if (*scan == '\'' && !in_dq) { in_sq = !in_sq; scan++; continue; }
+            if (!in_dq && !in_sq && *scan == '|' && *(scan+1) != '|') {
                 pipe_pos = scan;
                 break;
             }
@@ -277,23 +356,18 @@ int parse_line(char *line, struct cmdlist *cl) {
     if (len == 0)
         return 0;
 
-    /* expand variables */
-    expand_vars(line);
-    len = strlen(line);
-    if (len == 0)
-        return 0;
-
     /*
      * Scan for unquoted ;, &&, ||.
      * We build a list of (start, connector) pairs.
      */
     char *seg_start = line;
     char *p = line;
-    int   in_q = 0;
+    int   in_dq = 0, in_sq = 0;
 
     while (*p && cl->npl < MAX_CMDLIST) {
-        if (*p == '"') { in_q = !in_q; p++; continue; }
-        if (in_q)       { p++; continue; }
+        if (*p == '"'  && !in_sq) { in_dq = !in_dq; p++; continue; }
+        if (*p == '\'' && !in_dq) { in_sq = !in_sq; p++; continue; }
+        if (in_dq || in_sq) { p++; continue; }
 
         int connector = CONN_NONE;
         int skip = 0;
@@ -309,10 +383,11 @@ int parse_line(char *line, struct cmdlist *cl) {
         if (connector != CONN_NONE) {
             *p = '\0';  /* terminate segment */
             struct pipeline *pl = &cl->pl[cl->npl];
-            if (parse_pipeline(seg_start, pl)) {
-                pl->connector = connector;
-                cl->npl++;
-            }
+            strncpy(pl->raw, seg_start, MAX_LINE - 1);
+            pl->raw[MAX_LINE - 1] = '\0';
+            pl->connector = connector;
+            pl->ncmds = 0;
+            cl->npl++;
             p += skip;
             /* skip leading spaces after separator */
             while (*p == ' ' || *p == '\t') p++;
@@ -325,11 +400,17 @@ int parse_line(char *line, struct cmdlist *cl) {
     /* last (or only) segment */
     if (*seg_start && cl->npl < MAX_CMDLIST) {
         struct pipeline *pl = &cl->pl[cl->npl];
-        if (parse_pipeline(seg_start, pl)) {
-            pl->connector = CONN_NONE;
-            cl->npl++;
-        }
+        strncpy(pl->raw, seg_start, MAX_LINE - 1);
+        pl->raw[MAX_LINE - 1] = '\0';
+        pl->connector = CONN_NONE;
+        pl->ncmds = 0;
+        cl->npl++;
     }
 
     return cl->npl;
+}
+
+int expand_and_parse_pipeline(char *seg, struct pipeline *pl) {
+    expand_vars(seg);
+    return parse_pipeline(seg, pl);
 }

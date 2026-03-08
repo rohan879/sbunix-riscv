@@ -5,11 +5,15 @@
 #include <exec.h>
 #include <vm.h>
 #include <proc.h>
+#include <vfs.h>
 #include <trap.h>
 #include <riscv.h>
 #include <plic.h>
 #include <dtb.h>
 #include <virtio_blk.h>
+#include <ext2.h>
+#include <tty.h>
+#include <swap.h>
 
 // Declare symbols for the embedded tarfs
 extern char _tarfs_start[];
@@ -29,12 +33,17 @@ void boot(uint64_t hartid, void *dtb) {
   timer_init();
   plic_init();
   uart_intr_init();
+  tty_init();
   w_sie(r_sie() | SIE_STIE | SIE_SEIE);
   w_sstatus(r_sstatus() | SSTATUS_SIE);
 
-  virtio_blk_test();
+  if (virtio_blk_init() == 0) {
+    ext2_init();
+    swap_init();
+  }
 
   procinit();
+  vfs_init();
   userinit();
 
   printk("Starting scheduler...\n");

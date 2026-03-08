@@ -5,6 +5,28 @@
 #include <stdarg.h>
 
 #define EOF (-1)
+#define BUFSIZ 1024
+#define FILENAME_MAX 256
+#define FOPEN_MAX 16
+
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+/* FILE stream type */
+typedef struct {
+    int fd;
+    int eof;
+    int error;
+} FILE;
+
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
 
 /* Formatted output to stdout */
 int printf(const char *fmt, ...);
@@ -19,6 +41,33 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 /* Formatted output to a file descriptor */
 int dprintf(int fd, const char *fmt, ...);
 int vdprintf(int fd, const char *fmt, va_list ap);
+
+/* FILE stream I/O */
+int fprintf(FILE *stream, const char *fmt, ...);
+int vfprintf(FILE *stream, const char *fmt, va_list ap);
+int fputs(const char *s, FILE *stream);
+int fputc(int c, FILE *stream);
+char *fgets(char *s, int size, FILE *stream);
+int fgetc(FILE *stream);
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
+FILE *fopen(const char *path, const char *mode);
+int fclose(FILE *stream);
+int fflush(FILE *stream);
+int fileno(FILE *stream);
+int feof(FILE *stream);
+int ferror(FILE *stream);
+void clearerr(FILE *stream);
+int fseek(FILE *stream, long offset, int whence);
+long ftell(FILE *stream);
+void rewind(FILE *stream);
+int sscanf(const char *str, const char *fmt, ...);
+void perror(const char *s);
+int setvbuf(FILE *stream, char *buf, int mode, size_t size);
+void setbuf(FILE *stream, char *buf);
+int ungetc(int c, FILE *stream);
+int getc(FILE *stream);
+int putc(int c, FILE *stream);
 
 /* Basic I/O */
 int puts(const char *s);

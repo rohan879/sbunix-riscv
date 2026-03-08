@@ -2,19 +2,45 @@
 #include <printk.h>
 #include <riscv.h>
 #include <proc.h>
+#include <vfs.h>
 #include <syscall.h>
 #include <uart.h>
 #include <plic.h>
 #include <kalloc.h>
+#include <kmalloc.h>
 #include <string.h>
 #include <vm.h>
 #include <exec.h>
+#include <tty.h>
+#include <swap.h>
 
 #define TIMER_FREQ 10000000UL  // 10 MHz timebase
 
+/* Goldfish RTC at 0x101000 (QEMU virt machine) */
+#define GOLDFISH_RTC_BASE 0x101000UL
+#define GOLDFISH_RTC_TIME_LOW  0x00
+#define GOLDFISH_RTC_TIME_HIGH 0x04
+
 static unsigned long boot_time;
 static unsigned long ticks;
+static uint64_t boot_epoch_ns;  /* RTC nanoseconds at boot */
 static unsigned char last_key = 0;
+
+static void rtc_init(void) {
+    volatile uint32_t *rtc = (volatile uint32_t *)GOLDFISH_RTC_BASE;
+    uint32_t lo = rtc[0];  /* TIME_LOW */
+    uint32_t hi = rtc[1];  /* TIME_HIGH */
+    boot_epoch_ns = ((uint64_t)hi << 32) | (uint64_t)lo;
+}
+
+/* Get current wall-clock time as {sec, nsec} */
+static void get_wall_time(int64_t *sec, int64_t *nsec) {
+    uint64_t elapsed_ticks = r_time() - boot_time;
+    uint64_t elapsed_ns = elapsed_ticks * 100; /* 10MHz -> ns */
+    uint64_t now_ns = boot_epoch_ns + elapsed_ns;
+    *sec  = (int64_t)(now_ns / 1000000000ULL);
+    *nsec = (int64_t)(now_ns % 1000000000ULL);
+}
 
 /* ------------------------------------------------------------------ */
 /* Kernel pipe table                                                    */
@@ -57,25 +83,70 @@ static int pipe_avail(int pid) {
 
 /* Allocate a free fd slot in current_proc; returns fd or -1 */
 static int alloc_fd(void) {
+  struct open_file **ftable = proc_ofile(current_proc);
   for (int i = 0; i < NOFILE; i++) {
-    if (!current_proc->ofile[i].used)
+    if (ftable[i] == NULL)
       return i;
   }
   return -1;
 }
 
-/* Deep copy fd table from src to dst (for clone) */
+/* Shallow copy fd table from src to dst (for clone), incrementing refcounts */
 static void copy_ofile(struct proc *dst, struct proc *src) {
+  struct open_file **srctab = proc_ofile(src);
   for (int i = 0; i < NOFILE; i++) {
-    dst->ofile[i] = src->ofile[i];
-    /* bump refcounts on pipes */
-    if (src->ofile[i].used) {
-      int pid = src->ofile[i].pipe_id;
-      if (src->ofile[i].pipe_read && pid >= 0)
-        pipes[pid].read_open++;
-      if (src->ofile[i].pipe_write && pid >= 0)
-        pipes[pid].write_open++;
+    dst->ofile[i] = srctab[i];
+    if (srctab[i]) {
+      srctab[i]->refcount++;
+      /* bump pipe refcounts too */
+      if (srctab[i]->is_pipe) {
+        int pid = srctab[i]->pipe_id;
+        if (srctab[i]->pipe_read && pid >= 0)
+          pipes[pid].read_open++;
+        if (srctab[i]->pipe_write && pid >= 0)
+          pipes[pid].write_open++;
+      }
     }
+  }
+}
+
+/* Close an open_file: decrement refcount, handle pipe cleanup, free when zero.
+ * Also clears the slot in the given proc's ofile[fd] (or shared_ft). */
+static void close_ofile(struct proc *p, int fd) {
+  struct open_file **ftable = proc_ofile(p);
+  struct open_file *f = ftable[fd];
+  if (!f) return;
+  ftable[fd] = NULL;
+
+  if (f->is_pipe) {
+    int pid = f->pipe_id;
+    if (f->pipe_read && pid >= 0) {
+      pipes[pid].read_open--;
+      if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
+        pipes[pid].used = 0;
+      /* Wake any sleeping pipe readers/writers */
+      for (struct proc *pp = proc; pp < &proc[64]; pp++) {
+        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
+          pp->state = RUNNABLE;
+      }
+    }
+    if (f->pipe_write && pid >= 0) {
+      pipes[pid].write_open--;
+      if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
+        pipes[pid].used = 0;
+      for (struct proc *pp = proc; pp < &proc[64]; pp++) {
+        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
+          pp->state = RUNNABLE;
+      }
+    }
+  }
+
+  f->refcount--;
+  if (f->refcount <= 0) {
+    /* Last reference -- call VFS close if applicable */
+    if (!f->is_pipe && f->ops && f->ops->close)
+      f->ops->close(f->private);
+    vfs_free_file(f);
   }
 }
 
@@ -92,6 +163,7 @@ static inline void sbi_set_timer(unsigned long stime) {
 void timer_init(void) {
     boot_time = r_time();
     ticks = 0;
+    rtc_init();
     sbi_set_timer(r_time() + TIMER_FREQ);
 }
 
@@ -145,47 +217,10 @@ static void handle_external_interrupt(void) {
     if (irq == UART_IRQ) {
         int c;
         while ((c = uart_getc()) != -1) {
-            if (c == 0x03) {
-                /* Ctrl-C: kill all non-init foreground processes */
-                int killed_any = 0;
-                for (struct proc *p = proc; p < &proc[64]; p++) {
-                    if (p->state != UNUSED && p->pid > 1) {
-                        p->exit_status = 130; /* 128 + SIGINT */
-                        p->state = ZOMBIE;
-                        killed_any = 1;
-                        /* Close all fds to release pipe references */
-                        for (int i = 0; i < NOFILE; i++) {
-                            if (p->ofile[i].used) {
-                                int pid = p->ofile[i].pipe_id;
-                                if (p->ofile[i].pipe_read && pid >= 0)
-                                    pipes[pid].read_open--;
-                                if (p->ofile[i].pipe_write && pid >= 0)
-                                    pipes[pid].write_open--;
-                                p->ofile[i].used = 0;
-                            }
-                        }
-                    }
-                }
-                /* When children were killed the shell is blocked in waitpid.
-                 * Print "^C\n" here for visual feedback, then wake all sleeping
-                 * processes so waitpid returns.  Do NOT enqueue 0x03 — the shell
-                 * will call read_line fresh after waitpid.
-                 *
-                 * When no children existed the shell is blocked in read() inside
-                 * read_line.  Deliver 0x03 to read_line; read_line itself will
-                 * print "^C\n" and restart the prompt (avoids a double-print). */
-                if (killed_any) {
-                    printk("^C\n");
-                } else {
-                    /* Shell was idle at prompt; deliver ^C to read_line */
-                    uart_enqueue(0x03);
-                }
-            } else {
-                uart_enqueue(c);
-            }
+            tty_input((char)c);
             last_key = (unsigned char)c;
         }
-        uart_wakeup();
+        /* tty_input() calls uart_wakeup() internally when data is ready */
         /* Also wake any process sleeping in wait4 so it can reap zombies.
          * Only wake waitpid sleepers (waiting_for_uart==0); do NOT wake
          * timed sleeps (waiting_for_uart==2) or UART-input sleeps (==1,
@@ -217,76 +252,265 @@ static void handle_timer_interrupt(void) {
             p->state = RUNNABLE;
         }
     }
+    /* Check for expired alarms and deliver SIGALRM */
+    for (struct proc *p = proc; p < &proc[64]; p++) {
+        if (p->state != UNUSED && p->state != ZOMBIE &&
+            p->alarm_ticks > 0 && ticks >= p->alarm_ticks) {
+            p->alarm_ticks = 0;  /* one-shot */
+            p->sigpending |= (1UL << 14);  /* SIGALRM = 14 */
+            if (p->state == SLEEPING)
+                p->state = RUNNABLE;
+        }
+    }
+    /* Preempt current process on timer tick (round-robin) */
+    if (current_proc && current_proc->state == RUNNING) {
+        current_proc->state = RUNNABLE;
+        swtch(&current_proc->context, &scheduler_context);
+    }
 }
 
 /* ------------------------------------------------------------------ */
-/* copy_pagetable: deep copy user pages from src to dst               */
+/* copy_pagetable_cow: COW-share user pages from src to dst           */
 /* ------------------------------------------------------------------ */
-static int copy_pagetable(pagetable_t dst, pagetable_t src, uint64_t sz) {
-    /* Walk through user virtual address space and copy PTE_U pages only */
+static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
+    /* Walk through user virtual address space and COW-share PTE_U pages */
     for (uint64_t va = 0; va < sz; va += PAGE_SIZE) {
         pte_t *pte = walk(src, va, 0);
-        if (!pte || !(*pte & PTE_V))
+        if (!pte)
             continue;
-        /* Only copy user-accessible pages */
+
+        /* Handle swapped-out pages: duplicate the swap slot */
+        if (PTE_IS_SWAPPED(*pte)) {
+            int old_slot = PTE_SWAP_SLOT(*pte);
+            int new_slot = swap_alloc();
+            if (new_slot < 0) return -1; /* swap full */
+
+            char *tmp = kalloc();
+            if (!tmp) {
+                swap_free(new_slot);
+                return -1;
+            }
+            swap_read(old_slot, tmp);
+            swap_write(new_slot, tmp);
+            kfree(tmp);
+
+            /* Child gets new slot with same flags */
+            pte_t child_pte = PTE_SWAP_ENCODE(new_slot, PTE_SWAP_FLAGS(*pte));
+            pte_t *cpte = walk(dst, va, 1);
+            if (!cpte) {
+                swap_free(new_slot);
+                return -1;
+            }
+            *cpte = child_pte;
+            continue;
+        }
+
+        if (!(*pte & PTE_V))
+            continue;
+        /* Only share user-accessible pages */
         if (!(*pte & PTE_U))
             continue;
+
         uint64_t pa = PTE2PA(*pte);
         int flags = PTE_FLAGS(*pte);
 
-        char *mem = kalloc();
-        if (!mem) return -1;
-        memcpy(mem, (void *)pa, PAGE_SIZE);
-        if (mappages(dst, va, PAGE_SIZE, (uint64_t)mem, flags) < 0) {
-            kfree(mem);
-            return -1;
+        if (flags & PTE_W) {
+            /* Writable page: mark read-only + COW in both parent and child */
+            *pte = PA2PTE(pa) | ((flags & ~PTE_W) | PTE_COW | PTE_V);
+            flags = (flags & ~PTE_W) | PTE_COW;
         }
+
+        /* Share the same physical page */
+        page_ref_inc(pa);
+        if (mappages(dst, va, PAGE_SIZE, pa, flags) < 0)
+            return -1;
     }
+    /* Flush TLB since we modified parent PTEs */
+    sfence_vma();
     return 0;
 }
 
 /* ------------------------------------------------------------------ */
-/* sys_clone: fork the current process                                  */
+/* cleanup_proc_resources: free or release shared resources on exit      */
+/* Called from SYS_exit, signal default-kill, and SYS_kill SIGKILL.     */
+/* ------------------------------------------------------------------ */
+static void cleanup_proc_resources(struct proc *p) {
+    /* ---- Pagetable / VMAs ---- */
+    if (p->shared_pt) {
+        p->shared_pt->refcount--;
+        if (p->shared_pt->refcount == 0) {
+            /* Last user: free VMAs (pagetable pages leak is pre-existing) */
+            vma_free_all(p);
+            kmfree(p->shared_pt, sizeof(struct shared_pagetable));
+        } else {
+            /* Other threads still using the pagetable; just free our VMAs */
+            vma_free_all(p);
+        }
+        p->shared_pt = NULL;
+        /* Point to kernel pagetable so scheduler doesn't use freed pt */
+        p->pagetable = kernel_pagetable;
+    } else {
+        /* Traditional fork: free VMAs as before */
+        vma_free_all(p);
+    }
+
+    /* ---- File descriptors ---- */
+    if (p->shared_ft) {
+        p->shared_ft->refcount--;
+        if (p->shared_ft->refcount == 0) {
+            /* Last user: close all fds in the shared table.
+             * close_ofile uses proc_ofile() which returns shared_ft->ofile. */
+            for (int i = 0; i < NOFILE; i++) {
+                if (p->shared_ft->ofile[i])
+                    close_ofile(p, i);
+            }
+            kmfree(p->shared_ft, sizeof(struct shared_ftable));
+        }
+        p->shared_ft = NULL;
+    } else {
+        /* Traditional: close fds in proc's own ofile[] */
+        for (int i = 0; i < NOFILE; i++) {
+            if (p->ofile[i])
+                close_ofile(p, i);
+        }
+    }
+
+    /* ---- Signal actions ---- */
+    if (p->shared_sa) {
+        p->shared_sa->refcount--;
+        if (p->shared_sa->refcount == 0)
+            kmfree(p->shared_sa, sizeof(struct shared_sigactions));
+        p->shared_sa = NULL;
+    }
+    /* Inline sigactions need no freeing */
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_clone: fork or create a thread in the current process            */
+/* a0 = flags (CLONE_VM | CLONE_FILES | CLONE_SIGHAND | SIGCHLD etc.)  */
+/* a1 = child stack pointer (0 means inherit parent sp)                 */
 /* ------------------------------------------------------------------ */
 static pid_t sys_clone(void) {
+    uint64_t flags    = current_proc->trapframe->a0;
+    uint64_t child_sp = current_proc->trapframe->a1;
+    int clone_flags   = (int)(flags & ~0xFFUL); /* mask out low-byte signal */
+
+    /* CLONE_SIGHAND requires CLONE_VM (Linux semantics) */
+    if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
+        return -22; /* -EINVAL */
+
     struct proc *p = allocproc();
     if (!p) return -1;
 
-    /* Copy cwd */
+    /* ---- Common path (all modes) ---- */
     memcpy(p->cwd, current_proc->cwd, sizeof(p->cwd));
-
-    /* Copy name */
     memcpy(p->name, current_proc->name, sizeof(p->name));
 
-    /* Copy file descriptors */
-    copy_ofile(p, current_proc);
-
-    /* Copy trapframe — child starts after the ecall just like parent */
+    /* Copy trapframe -- child starts after the ecall just like parent */
     memcpy(p->trapframe, current_proc->trapframe, sizeof(struct trapframe));
+    p->trapframe->a0 = 0; /* child returns 0 */
 
-    /* Child returns 0 from clone/fork */
-    p->trapframe->a0 = 0;
+    /* Set child stack pointer if caller provided one */
+    if (child_sp != 0)
+        p->trapframe->sp = child_sp;
 
-    /* Build child page table: copy kernel/device identity maps first */
-    pagetable_t new_pt = uvmcreate();
-    if (!new_pt) goto bad;
-
-    /* Identity map kernel RAM and I/O (same as exec) */
-    if (mappages(new_pt, 0x80000000, PHYSTOP - 0x80000000, 0x80000000,
-                 PTE_R | PTE_W | PTE_X) < 0) goto bad;
-    if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000, PTE_R | PTE_W) < 0) goto bad;
-    if (mappages(new_pt, 0x101000, PAGE_SIZE, 0x101000, PTE_R | PTE_W) < 0) goto bad;
-    if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000, PTE_R | PTE_W) < 0) goto bad;
-    if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) goto bad;
-
-    /* Copy user pages (code + data segments + stack) - PTE_U filtered */
-    if (copy_pagetable(new_pt, current_proc->pagetable, MAXVA) < 0) goto bad;
-
-    p->pagetable = new_pt;
-    p->sz = current_proc->sz;
     p->parent = current_proc;
+    p->clone_flags = clone_flags;
 
-    /* Child's kernel context: resume at forkret which will sret back to user */
+    /* Copy stack bounds and mmap_base from parent */
+    p->stack_top = current_proc->stack_top;
+    p->stack_bottom = current_proc->stack_bottom;
+    p->mmap_base = current_proc->mmap_base;
+    p->sz = current_proc->sz;
+
+    /* ---- CLONE_VM: share address space ---- */
+    if (clone_flags & CLONE_VM) {
+        /* Promote parent's pagetable to shared if not already */
+        if (!current_proc->shared_pt) {
+            struct shared_pagetable *spt =
+                (struct shared_pagetable *)kmalloc(sizeof(struct shared_pagetable));
+            if (!spt) goto bad;
+            spt->pt = current_proc->pagetable;
+            spt->refcount = 1;
+            current_proc->shared_pt = spt;
+            current_proc->clone_flags |= CLONE_VM;
+        }
+        current_proc->shared_pt->refcount++;
+        p->shared_pt = current_proc->shared_pt;
+        p->pagetable = p->shared_pt->pt;
+
+        /* Deep copy VMA list (Option A from design doc) */
+        vma_dup(current_proc, p);
+    } else {
+        /* Traditional COW fork: build independent child page table */
+        pagetable_t new_pt = uvmcreate();
+        if (!new_pt) goto bad;
+
+        /* Identity map kernel RAM and I/O (same as exec) */
+        if (mappages(new_pt, 0x80000000, PHYSTOP - 0x80000000, 0x80000000,
+                     PTE_R | PTE_W | PTE_X) < 0) goto bad;
+        if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000,
+                     PTE_R | PTE_W) < 0) goto bad;
+        if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000,
+                     PTE_R | PTE_W) < 0) goto bad;
+        if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000,
+                     PTE_R | PTE_W) < 0) goto bad;
+
+        /* COW-share user pages */
+        if (copy_pagetable_cow(new_pt, current_proc->pagetable, MAXVA) < 0)
+            goto bad;
+
+        /* Map signal trampoline into child */
+        uvmmap_sigtrampoline(new_pt);
+
+        p->pagetable = new_pt;
+
+        /* Deep copy VMA list */
+        vma_dup(current_proc, p);
+    }
+
+    /* ---- CLONE_FILES: share file descriptor table ---- */
+    if (clone_flags & CLONE_FILES) {
+        /* Promote parent's ofile[] to shared if not already */
+        if (!current_proc->shared_ft) {
+            struct shared_ftable *sft =
+                (struct shared_ftable *)kmalloc(sizeof(struct shared_ftable));
+            if (!sft) goto bad;
+            for (int i = 0; i < NOFILE; i++)
+                sft->ofile[i] = current_proc->ofile[i];
+            sft->refcount = 1;
+            current_proc->shared_ft = sft;
+            current_proc->clone_flags |= CLONE_FILES;
+        }
+        current_proc->shared_ft->refcount++;
+        p->shared_ft = current_proc->shared_ft;
+    } else {
+        /* Traditional: copy file descriptors independently */
+        copy_ofile(p, current_proc);
+    }
+
+    /* ---- CLONE_SIGHAND: share signal handlers ---- */
+    if (clone_flags & CLONE_SIGHAND) {
+        /* Promote parent's sigactions to shared if not already */
+        if (!current_proc->shared_sa) {
+            struct shared_sigactions *ssa =
+                (struct shared_sigactions *)kmalloc(sizeof(struct shared_sigactions));
+            if (!ssa) goto bad;
+            memcpy(ssa->actions, current_proc->sigactions,
+                   sizeof(ssa->actions));
+            ssa->refcount = 1;
+            current_proc->shared_sa = ssa;
+            current_proc->clone_flags |= CLONE_SIGHAND;
+        }
+        current_proc->shared_sa->refcount++;
+        p->shared_sa = current_proc->shared_sa;
+    } else {
+        /* Traditional: copy signal actions by value */
+        memcpy(p->sigactions, current_proc->sigactions,
+               sizeof(p->sigactions));
+    }
+
+    /* Child's kernel context: resume at forkret */
     p->context.ra = (uint64_t)forkret;
     p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
 
@@ -335,14 +559,15 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Simple in-memory "filesystem" using tar entries                      */
+/* Path resolution helpers                                              */
 /* ------------------------------------------------------------------ */
 #include <tar.h>
 extern char _tarfs_start[];
 extern char _tarfs_end[];
 
 /* Convert an absolute/relative path to the tarfs "./..." format.
- * tarfs uses paths like "./bin/echo", "./etc/rc", etc. */
+ * tarfs uses paths like "./bin/echo", "./etc/rc", etc.
+ * Used by execve to look up ELF binaries. */
 static void to_tarfs_path(const char *path, char *out) {
     /* Strip leading slash(es) */
     while (*path == '/') path++;
@@ -439,34 +664,94 @@ static void resolve_path(const char *cwd, const char *path, char *out) {
     normalize_path(raw, out);
 }
 
-/* Check if a path exists as a directory in the tarfs.
-   Returns 1 if "/" or if any tar entry starts with path+"/". */
-static int tar_is_dir(const char *path) {
-    /* Root is always a directory */
-    if (path[0] == '/' && path[1] == '\0') return 1;
-    if (path[0] == '.' && path[1] == '\0') return 1;
-
-    /* Convert to tarfs format for comparison */
-    char tarpath[256];
-    to_tarfs_path(path, tarpath);
-    int tplen = strlen(tarpath);
-
-    struct posix_header *hdr = (struct posix_header *)_tarfs_start;
-    while ((char *)hdr < _tarfs_end) {
-        if (hdr->name[0] == '\0') break;
-        int nlen = strlen(hdr->name);
-        /* Match: entry name == tarpath (exact) or starts with tarpath+"/" */
-        if (nlen >= tplen && memcmp(hdr->name, tarpath, tplen) == 0 &&
-            (hdr->name[tplen] == '/' || hdr->name[tplen] == '\0')) {
-            return 1;
-        }
-        /* advance to next tar entry */
-        unsigned long size = 0;
-        for (int i = 0; i < 11; i++)
-            size = size * 8 + (hdr->size[i] - '0');
-        hdr = (struct posix_header *)((char *)hdr + 512 + ((size + 511) & ~511));
+/* Check if a resolved path exists as a directory by trying to open it */
+static int vfs_is_dir(const char *path) {
+    const char *relpath;
+    struct vfs_ops *ops = vfs_lookup_mount(path, &relpath);
+    if (!ops) return 0;
+    /* Try stat to check if it's a directory */
+    uint8_t st[128];
+    if (ops->stat(relpath, st) == 0) {
+        uint32_t mode;
+        memcpy(&mode, st + 16, 4);
+        return (mode & 0xF000) == 0x4000; /* S_IFDIR */
     }
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Signal delivery                                                      */
+/* ------------------------------------------------------------------ */
+
+static void deliver_signal(struct trapframe *tf, struct proc *p) {
+    /* Find lowest-numbered pending unblocked signal */
+    uint64_t deliverable = p->sigpending & ~p->sigmask;
+    if (deliverable == 0)
+        return;
+
+    int signum = 0;
+    for (int i = 1; i < 32; i++) {
+        if (deliverable & (1UL << i)) {
+            signum = i;
+            break;
+        }
+    }
+
+    /* Clear from pending */
+    p->sigpending &= ~(1UL << signum);
+
+    struct kern_sigaction *sa = proc_sigactions(p);
+    uint64_t handler = sa[signum].handler;
+
+    /* SIG_DFL (0) -- default action */
+    if (handler == 0) {
+        /* Default: ignore for SIGCHLD, SIGURG, SIGWINCH */
+        if (signum == SIGCHLD || signum == SIGURG || signum == SIGWINCH)
+            return;
+        /* Default: terminate process */
+        p->exit_status = 128 + signum;
+        cleanup_proc_resources(p);
+        p->state = ZOMBIE;
+        /* Notify parent via SIGCHLD and wake it */
+        if (p->parent) {
+            p->parent->sigpending |= (1UL << SIGCHLD);
+            if (p->parent->state == SLEEPING)
+                p->parent->state = RUNNABLE;
+        }
+        swtch(&p->context, &scheduler_context);
+        return;
+    }
+
+    /* SIG_IGN (1) -- ignore */
+    if (handler == 1)
+        return;
+
+    /* User handler: save trapframe on user stack, redirect execution */
+    uint64_t sp = tf->sp;
+
+    /* Push original trapframe onto user stack */
+    sp -= sizeof(struct trapframe);
+    sp &= ~15UL; /* 16-byte align */
+
+    /* Copy trapframe to user stack via page walk */
+    for (uint64_t off = 0; off < sizeof(struct trapframe); off += 8) {
+        pte_t *pte = walk(p->pagetable, sp + off, 0);
+        if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+            uint64_t pa = PTE2PA(*pte) + ((sp + off) & 0xFFF);
+            *(uint64_t *)pa = *(uint64_t *)((char *)tf + off);
+        }
+    }
+
+    /* Set up trapframe to call handler(signum) with return to trampoline */
+    tf->epc = handler;                   /* jump to signal handler */
+    tf->a0 = (uint64_t)signum;           /* first arg: signal number */
+    tf->sp = sp;                         /* stack points to saved trapframe */
+    tf->ra = SIG_TRAMPOLINE_VA;          /* return address -> trampoline -> sigreturn */
+
+    /* Block this signal during handler execution */
+    p->sigmask |= sa[signum].mask;
+    if (!(sa[signum].flags & 0x40000000)) /* SA_NODEFER */
+        p->sigmask |= (1UL << signum);
 }
 
 /* ------------------------------------------------------------------ */
@@ -485,6 +770,9 @@ void trap_handler(struct trapframe *tf) {
         } else {
             printk("Unknown interrupt: scause=0x%lx\n", cause);
         }
+        /* Deliver pending signals before returning to user mode */
+        if (current_proc && (current_proc->sigpending & ~current_proc->sigmask))
+            deliver_signal(tf, current_proc);
         return;
     }
 
@@ -493,17 +781,109 @@ void trap_handler(struct trapframe *tf) {
         if (cause == SCAUSE_LOAD_PAGE_FAULT ||
             cause == SCAUSE_STORE_PAGE_FAULT ||
             cause == SCAUSE_INST_PAGE_FAULT) {
+
+            /* --- COW page fault (store fault with COW-marked PTE) --- */
+            if (cause == SCAUSE_STORE_PAGE_FAULT && current_proc) {
+                uint64_t va = PGROUNDDOWN(stval);
+                pte_t *pte = walk(current_proc->pagetable, va, 0);
+
+                if (pte && (*pte & PTE_V) && (*pte & PTE_COW)) {
+                    uint64_t pa = PTE2PA(*pte);
+                    int flags = PTE_FLAGS(*pte);
+
+                    if (page_ref_get(pa) == 1) {
+                        /* Only reference: just make it writable again */
+                        *pte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
+                    } else {
+                        /* Multiple references: allocate new page and copy */
+                        char *newpage = kalloc();
+                        if (!newpage)
+                            goto pagefault_kill;
+                        memcpy(newpage, (void *)pa, PAGE_SIZE);
+                        *pte = PA2PTE((uint64_t)newpage) | ((flags & ~PTE_COW) | PTE_W);
+                        kfree((void *)pa); /* decrement refcount on old page */
+                    }
+                    /* Flush TLB for this VA */
+                    asm volatile("sfence.vma %0, zero" : : "r"(va));
+                    return; /* resume execution */
+                }
+            }
+
+            /* --- Swap-in: PTE_V=0 with PTE_SWAP marker --- */
+            if (current_proc) {
+                uint64_t sva = PGROUNDDOWN(stval);
+                pte_t *spte = walk(current_proc->pagetable, sva, 0);
+                if (spte && PTE_IS_SWAPPED(*spte)) {
+                    int slot = PTE_SWAP_SLOT(*spte);
+                    int sflags = PTE_SWAP_FLAGS(*spte);
+
+                    char *newpage = kalloc();
+                    if (!newpage)
+                        goto pagefault_kill;
+
+                    swap_read(slot, newpage);
+                    swap_free(slot);
+
+                    /* Restore PTE with original permissions + PTE_V */
+                    *spte = PA2PTE((uint64_t)newpage) | sflags | PTE_V;
+                    asm volatile("sfence.vma %0, zero" : : "r"(sva));
+                    return; /* resume faulting instruction */
+                }
+            }
+
+            /* --- Stack auto-grow (any page fault near current stack) --- */
+            if (current_proc && current_proc->stack_top > 0 &&
+                stval >= current_proc->stack_bottom - 16 * PAGE_SIZE &&
+                stval < current_proc->stack_top) {
+                uint64_t va = PGROUNDDOWN(stval);
+                int grew = 0;
+                while (current_proc->stack_bottom > va) {
+                    current_proc->stack_bottom -= PAGE_SIZE;
+                    char *pg = kalloc();
+                    if (!pg) break;
+                    memset(pg, 0, PAGE_SIZE);
+                    mappages(current_proc->pagetable, current_proc->stack_bottom,
+                             PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U);
+                    grew = 1;
+                }
+                if (grew && current_proc->stack_bottom <= va) {
+                    asm volatile("sfence.vma %0, zero" : : "r"(va));
+                    return; /* resume -- page is now mapped */
+                }
+            }
+
+            /* --- Demand paging for VMA regions --- */
+            if (current_proc) {
+                struct vm_area *fvma = vma_find(current_proc, stval);
+                if (fvma) {
+                    uint64_t va = PGROUNDDOWN(stval);
+                    /* Check if page is already mapped */
+                    pte_t *pte = walk(current_proc->pagetable, va, 0);
+                    if (!pte || !(*pte & PTE_V)) {
+                        char *pg = kalloc();
+                        if (pg) {
+                            memset(pg, 0, PAGE_SIZE);
+                            int perm = PTE_U;
+                            if (fvma->prot & PROT_READ)  perm |= PTE_R;
+                            if (fvma->prot & PROT_WRITE) perm |= PTE_W;
+                            if (fvma->prot & PROT_EXEC)  perm |= PTE_X;
+                            mappages(current_proc->pagetable, va, PAGE_SIZE,
+                                     (uint64_t)pg, perm);
+                            asm volatile("sfence.vma %0, zero" : : "r"(va));
+                            return; /* resume */
+                        }
+                    }
+                }
+            }
+
+pagefault_kill:
             printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
                    current_proc ? current_proc->pid : -1, tf->epc, stval, cause);
-            /* Kill the process */
             if (current_proc) {
-                current_proc->exit_status = 139;  /* SIGSEGV */
-                current_proc->state = ZOMBIE;
-                /* Wake parent if waiting */
-                if (current_proc->parent &&
-                    current_proc->parent->state == SLEEPING)
-                    current_proc->parent->state = RUNNABLE;
-                swtch(&current_proc->context, &scheduler_context);
+                current_proc->sigpending |= (1UL << SIGSEGV);
+                deliver_signal(tf, current_proc);
+                /* If deliver_signal returned (handler caught it), resume */
+                return;
             }
             while(1) {}
         }
@@ -551,16 +931,10 @@ void trap_handler(struct trapframe *tf) {
         int fd = (int)tf->a0;
         char *buf = (char *)tf->a1;
         size_t len = (size_t)tf->a2;
-        if ((fd == 1 || fd == 2) &&
-            !(current_proc->ofile[fd].used && current_proc->ofile[fd].pipe_write)) {
-            /* stdout / stderr (only when not redirected to a pipe) */
-            size_t i;
-            for (i = 0; i < len; i++)
-                printk("%c", buf[i]);
-            tf->a0 = (uint64_t)i;
-        } else if (fd >= 0 && fd < NOFILE && current_proc->ofile[fd].used &&
-                   current_proc->ofile[fd].pipe_write) {
-            int pid = current_proc->ofile[fd].pipe_id;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+
+        if (f && f->is_pipe && f->pipe_write) {
+            int pid = f->pipe_id;
             size_t written = 0;
             while (written < len) {
                 int avail = PIPE_BUF - pipe_avail(pid);
@@ -585,6 +959,10 @@ void trap_handler(struct trapframe *tf) {
                 }
             }
             tf->a0 = written;
+        } else if (f && f->ops && f->ops->write) {
+            /* VFS write dispatch */
+            int64_t ret = f->ops->write(f->private, buf, len, &f->offset);
+            tf->a0 = (uint64_t)ret;
         } else {
             tf->a0 = (uint64_t)-1;
         }
@@ -593,37 +971,10 @@ void trap_handler(struct trapframe *tf) {
         int fd = (int)tf->a0;
         char *buf = (char *)tf->a1;
         size_t len = (size_t)tf->a2;
-        if (fd == 0 && !(current_proc->ofile[0].used && current_proc->ofile[0].pipe_read)) {
-            /* stdin: UART raw byte delivery.
-             * The kernel returns characters as-is; line editing (echo,
-             * backspace, Ctrl-C handling) is done by the caller (sbush). */
-            size_t i = 0;
-            while (i < len) {
-                char c;
-                /* Wait until a character is available */
-                while (uart_dequeue(&c) != 0) {
-                    /* Poll hardware UART directly in case interrupt missed a char */
-                    int hw_c = uart_getc();
-                    if (hw_c != -1) {
-                        uart_enqueue((char)hw_c);
-                        continue;
-                    }
-                    /* Sleep until UART interrupt wakes us */
-                    if (current_proc) {
-                        current_proc->waiting_for_uart = 1;
-                        current_proc->state = SLEEPING;
-                        swtch(&current_proc->context, &scheduler_context);
-                    }
-                }
-                if (c == '\r') c = '\n';
-                buf[i++] = c;
-                /* Return after each character so the caller can process it */
-                break;
-            }
-            tf->a0 = (uint64_t)i;
-        } else if (fd >= 0 && fd < NOFILE && current_proc->ofile[fd].used &&
-                   current_proc->ofile[fd].pipe_read) {
-            int pid = current_proc->ofile[fd].pipe_id;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+
+        if (f && f->is_pipe && f->pipe_read) {
+            int pid = f->pipe_id;
             size_t read_bytes = 0;
             while (read_bytes < len) {
                 while (pipe_avail(pid) == 0) {
@@ -645,100 +996,69 @@ void trap_handler(struct trapframe *tf) {
             }
 pipe_eof:
             tf->a0 = (uint64_t)read_bytes;
+        } else if (f && f->ops && f->ops->read) {
+            /* VFS read dispatch */
+            int64_t ret = f->ops->read(f->private, buf, len, &f->offset);
+            tf->a0 = (uint64_t)ret;
         } else {
-            /* Try reading from a tar file if the fd is a plain file */
-            if (fd >= 0 && fd < NOFILE && current_proc->ofile[fd].used &&
-                !current_proc->ofile[fd].pipe_read &&
-                !current_proc->ofile[fd].pipe_write &&
-                current_proc->ofile[fd].tar_data) {
-                unsigned long off  = current_proc->ofile[fd].tar_offset;
-                unsigned long fsz  = current_proc->ofile[fd].tar_size;
-                unsigned long avail = (off < fsz) ? (fsz - off) : 0;
-                unsigned long n    = (len < avail) ? len : avail;
-                if (n > 0) {
-                    memcpy(buf, current_proc->ofile[fd].tar_data + off, n);
-                    current_proc->ofile[fd].tar_offset += n;
-                }
-                tf->a0 = (uint64_t)n;
-            } else {
-                tf->a0 = (uint64_t)0; /* EOF for unknown fds */
-            }
+            tf->a0 = (uint64_t)0; /* EOF for unknown fds */
         }
 
     } else if (sysnum == SYS_openat) {
         /* openat(AT_FDCWD, path, flags, mode) */
         const char *path = (const char *)tf->a1;
-        /* int flags = (int)tf->a2; -- we only support O_RDONLY for now */
+        int flags = (int)tf->a2;
 
         if (!path) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
 
-        /* Resolve path against cwd, then convert to tarfs format */
+        /* Resolve path against cwd */
         char resolved[256];
-        char tarpath[256];
         resolve_path(current_proc->cwd, path, resolved);
-        to_tarfs_path(resolved, tarpath);
 
-        /* Look up in tarfs — try exact match first, then with trailing '/'
-         * (tar directories are stored with a trailing slash) */
-        struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
-        if (!hdr && tarpath[0] != '\0') {
-            /* Append trailing slash and retry */
-            int tplen = strlen(tarpath);
-            if (tplen < 254) {
-                tarpath[tplen]   = '/';
-                tarpath[tplen+1] = '\0';
-                hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
-            }
-        }
-        if (!hdr) {
+        /* Look up mount point via VFS */
+        const char *relpath;
+        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+        if (!ops) {
             tf->a0 = (uint64_t)-1;
+            goto syscall_done;
+        }
+
+        /* Call filesystem open */
+        void *priv = NULL;
+        int ret = ops->open(relpath, flags, &priv);
+        if (ret < 0) {
+            tf->a0 = (uint64_t)ret;
         } else {
+            /* Allocate open_file and fd slot */
+            struct open_file *f = vfs_alloc_file();
+            if (!f) {
+                if (ops->close) ops->close(priv);
+                tf->a0 = (uint64_t)-12; /* -ENOMEM */
+                goto syscall_done;
+            }
             int fd = alloc_fd();
             if (fd < 0) {
+                if (ops->close) ops->close(priv);
+                vfs_free_file(f);
                 tf->a0 = (uint64_t)-1;
-            } else {
-                current_proc->ofile[fd].used       = 1;
-                current_proc->ofile[fd].pipe_read  = 0;
-                current_proc->ofile[fd].pipe_write = 0;
-                current_proc->ofile[fd].pipe_id    = -1;
-                current_proc->ofile[fd].tar_offset = 0;
-                current_proc->ofile[fd].tar_size   = tar_get_file_size(hdr);
-                current_proc->ofile[fd].tar_data   = (char *)hdr + sizeof(struct posix_header);
-                tf->a0 = (uint64_t)fd;
+                goto syscall_done;
             }
+            f->ops = ops;
+            f->private = priv;
+            f->offset = 0;
+            f->flags = flags;
+            f->is_pipe = 0;
+            proc_ofile(current_proc)[fd] = f;
+            tf->a0 = (uint64_t)fd;
         }
 
     } else if (sysnum == SYS_close) {
         int fd = (int)tf->a0;
-        if (fd >= 0 && fd < NOFILE && current_proc->ofile[fd].used) {
-            int pid = current_proc->ofile[fd].pipe_id;
-            if (current_proc->ofile[fd].pipe_read && pid >= 0) {
-                pipes[pid].read_open--;
-                if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
-                    pipes[pid].used = 0;
-                /* Wake any sleeping pipe readers/writers (not timed sleeps) */
-                for (struct proc *p = proc; p < &proc[64]; p++) {
-                    if (p->state == SLEEPING && p->waiting_for_uart != 2)
-                        p->state = RUNNABLE;
-                }
-            }
-            if (current_proc->ofile[fd].pipe_write && pid >= 0) {
-                pipes[pid].write_open--;
-                if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
-                    pipes[pid].used = 0;
-                /* Wake any sleeping pipe readers/writers (not timed sleeps) */
-                for (struct proc *p = proc; p < &proc[64]; p++) {
-                    if (p->state == SLEEPING && p->waiting_for_uart != 2)
-                        p->state = RUNNABLE;
-                }
-            }
-            current_proc->ofile[fd].used = 0;
-            current_proc->ofile[fd].pipe_id = -1;
-            current_proc->ofile[fd].pipe_read = 0;
-            current_proc->ofile[fd].pipe_write = 0;
+        if (fd >= 0 && fd < NOFILE && proc_ofile(current_proc)[fd]) {
+            close_ofile(current_proc, fd);
             tf->a0 = 0;
         } else {
             tf->a0 = (uint64_t)-1;
@@ -747,51 +1067,68 @@ pipe_eof:
     } else if (sysnum == SYS_dup3) {
         int oldfd = (int)tf->a0;
         int newfd = (int)tf->a1;
-        if (oldfd < 0 || oldfd >= NOFILE || !current_proc->ofile[oldfd].used ||
+        struct open_file **ftab = proc_ofile(current_proc);
+        if (oldfd < 0 || oldfd >= NOFILE || !ftab[oldfd] ||
             newfd < 0 || newfd >= NOFILE) {
             tf->a0 = (uint64_t)-1;
         } else if (oldfd == newfd) {
             /* dup2(x, x) is a no-op that returns newfd */
             tf->a0 = (uint64_t)newfd;
         } else {
-            /* Close newfd if open (simplified, no pipe refcount decrement) */
-            if (current_proc->ofile[newfd].used) {
-                current_proc->ofile[newfd].used = 0;
-            }
-            current_proc->ofile[newfd] = current_proc->ofile[oldfd];
+            /* Close newfd if open */
+            if (ftab[newfd])
+                close_ofile(current_proc, newfd);
+            /* Share the same open_file, bump refcount */
+            ftab[newfd] = ftab[oldfd];
+            ftab[oldfd]->refcount++;
             /* bump pipe refcount for the new reference */
-            int pid = current_proc->ofile[oldfd].pipe_id;
-            if (pid >= 0) {
-                if (current_proc->ofile[oldfd].pipe_read)  pipes[pid].read_open++;
-                if (current_proc->ofile[oldfd].pipe_write) pipes[pid].write_open++;
+            if (ftab[oldfd]->is_pipe) {
+                int pid = ftab[oldfd]->pipe_id;
+                if (pid >= 0) {
+                    if (ftab[oldfd]->pipe_read)  pipes[pid].read_open++;
+                    if (ftab[oldfd]->pipe_write) pipes[pid].write_open++;
+                }
             }
             tf->a0 = (uint64_t)newfd;
         }
 
     } else if (sysnum == SYS_pipe2) {
         int *fds = (int *)tf->a0;
-        int pid = alloc_pipe();
-        if (pid < 0) {
+        int pipeid = alloc_pipe();
+        if (pipeid < 0) {
             tf->a0 = (uint64_t)-1;
         } else {
-            int rfd = alloc_fd();
-            int wfd = -1;
-            if (rfd >= 0) {
-                current_proc->ofile[rfd].used = 1;
-                current_proc->ofile[rfd].pipe_read = 1;
-                current_proc->ofile[rfd].pipe_write = 0;
-                current_proc->ofile[rfd].pipe_id = pid;
-                wfd = alloc_fd();
+            struct open_file **ftab = proc_ofile(current_proc);
+            struct open_file *rf = vfs_alloc_file();
+            struct open_file *wf = vfs_alloc_file();
+            int rfd = -1, wfd = -1;
+            if (rf) rfd = alloc_fd();
+            if (rfd >= 0 && rf) {
+                rf->is_pipe = 1;
+                rf->pipe_read = 1;
+                rf->pipe_write = 0;
+                rf->pipe_id = pipeid;
+                rf->ops = NULL;
+                ftab[rfd] = rf;
+                if (wf) wfd = alloc_fd();
             }
-            if (wfd < 0) {
-                if (rfd >= 0) current_proc->ofile[rfd].used = 0;
-                pipes[pid].used = 0;
+            if (wfd < 0 || !wf) {
+                if (rfd >= 0) {
+                    ftab[rfd] = NULL;
+                    vfs_free_file(rf);
+                } else if (rf) {
+                    vfs_free_file(rf);
+                }
+                if (wf) vfs_free_file(wf);
+                pipes[pipeid].used = 0;
                 tf->a0 = (uint64_t)-1;
             } else {
-                current_proc->ofile[wfd].used = 1;
-                current_proc->ofile[wfd].pipe_read = 0;
-                current_proc->ofile[wfd].pipe_write = 1;
-                current_proc->ofile[wfd].pipe_id = pid;
+                wf->is_pipe = 1;
+                wf->pipe_read = 0;
+                wf->pipe_write = 1;
+                wf->pipe_id = pipeid;
+                wf->ops = NULL;
+                ftab[wfd] = wf;
                 fds[0] = rfd;
                 fds[1] = wfd;
                 tf->a0 = 0;
@@ -819,7 +1156,7 @@ pipe_eof:
         }
         char resolved[256];
         resolve_path(current_proc->cwd, path, resolved);
-        if (tar_is_dir(resolved)) {
+        if (vfs_is_dir(resolved)) {
             memcpy(current_proc->cwd, resolved, sizeof(current_proc->cwd));
             tf->a0 = 0;
         } else {
@@ -834,18 +1171,19 @@ pipe_eof:
     } else if (sysnum == SYS_execve) {
         const char *path = (const char *)tf->a0;
         char **argv = (char **)tf->a1;
-        /* char **envp = (char **)tf->a2; -- ignored for now */
+        char **envp = (char **)tf->a2;
 
         if (!path) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
 
-        /* ---- Copy argv strings into kernel-heap buffers BEFORE exec() ----
-         * argv pointers live in the old user address space.  After exec()
-         * replaces the page table those VA→PA mappings no longer exist.
-         * We allocate a 4K page for string data to avoid kernel stack overflow. */
+        /* ---- Copy argv and envp strings into kernel-heap buffers BEFORE exec()
+         * argv/envp pointers live in the old user address space.  After exec()
+         * replaces the page table those VA->PA mappings no longer exist.
+         * We allocate 4K pages for string data to avoid kernel stack overflow. */
         #define EXECVE_MAXARGS  32
+        #define EXECVE_MAXENVS  32
 
         /* Use kalloc() for the large string buffer to avoid stack overflow */
         char *kstrbuf = (char *)kalloc();
@@ -867,6 +1205,24 @@ pipe_eof:
                 memcpy(kstrbuf + kstroff, s, slen);
                 kstroff += slen;
                 kargc++;
+            }
+        }
+
+        /* Copy envp strings from user space (before exec destroys old page table) */
+        char *kenvbuf = (char *)kalloc();
+        int kenvc = 0;
+        int kenvoff = 0;
+        int kenvoff_arr[EXECVE_MAXENVS];
+
+        if (kenvbuf && envp) {
+            while (kenvc < EXECVE_MAXENVS && envp[kenvc]) {
+                const char *s = envp[kenvc];
+                int slen = strlen(s) + 1;
+                if (kenvoff + slen > (int)PAGE_SIZE) break;
+                kenvoff_arr[kenvc] = kenvoff;
+                memcpy(kenvbuf + kenvoff, s, slen);
+                kenvoff += slen;
+                kenvc++;
             }
         }
 
@@ -895,27 +1251,33 @@ pipe_eof:
         }
         if (ret < 0) {
             kfree(kstrbuf);
+            if (kenvbuf) kfree(kenvbuf);
             tf->a0 = (uint64_t)-1;
             return;
         }
 
-        /* ---- Set up the new user stack with argc/argv ---- */
+        /* ---- Set up the new user stack with argc/argv/envp ---- */
         /* Stack layout at sp (growing down from MAXVA-32):
-         *   sp+0:              argc (8 bytes)
-         *   sp+8:              argv[0..argc-1] pointers ((argc+1)*8 bytes)
-         *   sp+8+(argc+1)*8:   string data (kstroff bytes)
+         *   sp+0:                              argc (8 bytes)
+         *   sp+8:                              argv[0..argc-1] + NULL ((argc+1)*8)
+         *   sp+8+(argc+1)*8:                   envp[0..envc-1] + NULL ((envc+1)*8)
+         *   sp+8+(argc+1)*8+(envc+1)*8:        argv string data (kstroff bytes)
+         *   sp+8+(argc+1)*8+(envc+1)*8+kstroff: envp string data (kenvoff bytes)
          */
         {
             struct trapframe *newtf = current_proc->trapframe;
 
-            int ptr_area = (kargc + 1) * 8;
-            int header   = 8;
-            int total    = header + ptr_area + kstroff;
+            int argv_ptrs_sz = (kargc + 1) * 8;
+            int envp_ptrs_sz = (kenvc + 1) * 8;
+            int header       = 8;
+            int total        = header + argv_ptrs_sz + envp_ptrs_sz + kstroff + kenvoff;
             total = (total + 15) & ~15;
 
-            uint64_t sp       = MAXVA - 32 - total;
-            uint64_t str_base = sp + header + ptr_area;
-            uint64_t ptr_base = sp + header;
+            uint64_t sp            = MAXVA - 32 - total;
+            uint64_t argv_ptr_base = sp + header;
+            uint64_t envp_ptr_base = sp + header + argv_ptrs_sz;
+            uint64_t argv_str_base = sp + header + argv_ptrs_sz + envp_ptrs_sz;
+            uint64_t envp_str_base = argv_str_base + kstroff;
 
             /* Use kalloc for kbuf too to avoid stack overflow */
             char *kbuf = (char *)kalloc();
@@ -926,21 +1288,39 @@ pipe_eof:
                 memcpy(kbuf + off, &u_argc, 8); off += 8;
 
                 /* argv pointers */
-                uint64_t argv_ptrs[EXECVE_MAXARGS + 1];
+                uint64_t ptrs[EXECVE_MAXARGS > EXECVE_MAXENVS ?
+                              EXECVE_MAXARGS + 1 : EXECVE_MAXENVS + 1];
                 int str_off2 = 0;
                 for (int i = 0; i < kargc; i++) {
-                    argv_ptrs[i] = str_base + str_off2;
+                    ptrs[i] = argv_str_base + str_off2;
                     int slen = strlen(kstrbuf + kstroff_arr[i]) + 1;
                     str_off2 += slen;
                 }
-                argv_ptrs[kargc] = 0;
-                memcpy(kbuf + off, argv_ptrs, (kargc + 1) * 8);
-                off += (kargc + 1) * 8;
+                ptrs[kargc] = 0;
+                memcpy(kbuf + off, ptrs, argv_ptrs_sz);
+                off += argv_ptrs_sz;
 
-                /* string data */
+                /* envp pointers */
+                str_off2 = 0;
+                for (int i = 0; i < kenvc; i++) {
+                    ptrs[i] = envp_str_base + str_off2;
+                    int slen = strlen(kenvbuf + kenvoff_arr[i]) + 1;
+                    str_off2 += slen;
+                }
+                ptrs[kenvc] = 0;
+                memcpy(kbuf + off, ptrs, envp_ptrs_sz);
+                off += envp_ptrs_sz;
+
+                /* argv string data */
                 if (kstroff > 0) {
                     memcpy(kbuf + off, kstrbuf, kstroff);
                     off += kstroff;
+                }
+
+                /* envp string data */
+                if (kenvoff > 0) {
+                    memcpy(kbuf + off, kenvbuf, kenvoff);
+                    off += kenvoff;
                 }
 
                 uvmcopyin(current_proc->pagetable, sp, kbuf, off);
@@ -949,10 +1329,12 @@ pipe_eof:
 
             newtf->sp = sp;
             newtf->a0 = (uint64_t)kargc;
-            newtf->a1 = ptr_base;
+            newtf->a1 = argv_ptr_base;
+            newtf->a2 = envp_ptr_base;
         }
 
         kfree(kstrbuf);
+        if (kenvbuf) kfree(kenvbuf);
 
         /* exec updated the trapframe; trap_restore will sret into new process */
         trap_restore(current_proc->trapframe);
@@ -980,96 +1362,136 @@ pipe_eof:
         tf->a0 = 0; /* always root */
 
     } else if (sysnum == SYS_kill) {
-        pid_t target = (pid_t)(int)tf->a0;
-        /* int sig = (int)tf->a1; -- only SIGKILL is meaningful here */
-        if (target <= 0) {
+        pid_t target_pid = (pid_t)(int)tf->a0;
+        int sig = (int)tf->a1;
+        if (target_pid <= 0) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
-        int found = 0;
-        for (struct proc *p = proc; p < &proc[64]; p++) {
-            if (p->state != UNUSED && p->pid == target) {
-                p->exit_status = 128 + 9; /* killed by SIGKILL */
-                p->state = ZOMBIE;
-                if (p->parent && p->parent->state == SLEEPING)
-                    p->parent->state = RUNNABLE;
-                found = 1;
+        struct proc *target = NULL;
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
+                target = &proc[i];
                 break;
             }
         }
-        tf->a0 = found ? 0 : (uint64_t)-1;
+        if (!target) {
+            tf->a0 = (uint64_t)-3; /* -ESRCH */
+        } else {
+            if (sig == 9) { /* SIGKILL -- always kill immediately */
+                target->exit_status = 128 + 9;
+                cleanup_proc_resources(target);
+                target->state = ZOMBIE;
+                if (target->parent) {
+                    target->parent->sigpending |= (1UL << SIGCHLD);
+                    if (target->parent->state == SLEEPING)
+                        target->parent->state = RUNNABLE;
+                }
+            } else if (sig > 0 && sig < 32) {
+                target->sigpending |= (1UL << sig);
+                /* Wake target if sleeping so it can handle the signal */
+                if (target->state == SLEEPING)
+                    target->state = RUNNABLE;
+            }
+            tf->a0 = 0;
+        }
 
     } else if (sysnum == SYS_clock_gettime) {
         /* clock_gettime(clockid_t, struct timespec *)
-         * struct timespec: { int64_t tv_sec; int64_t tv_nsec; }
-         * We report the time from the QEMU Goldfish RTC. */
-        int64_t *ts = (int64_t *)tf->a1;
-        if (ts) {
-            uint32_t low = *(volatile uint32_t *)0x101000;
-            uint32_t high = *(volatile uint32_t *)0x101004;
-            uint64_t nsec = ((uint64_t)high << 32) | low;
-            ts[0] = (int64_t)(nsec / 1000000000ULL);   /* tv_sec */
-            ts[1] = (int64_t)(nsec % 1000000000ULL);   /* tv_nsec */
-            tf->a0 = 0;
+         * struct timespec: { int64_t tv_sec; int64_t tv_nsec; } */
+        uint64_t ts_uaddr = tf->a1;
+        if (ts_uaddr) {
+            int64_t sec, nsec;
+            get_wall_time(&sec, &nsec);
+            struct { int64_t tv_sec; int64_t tv_nsec; } ts;
+            ts.tv_sec = sec;
+            ts.tv_nsec = nsec;
+            pte_t *pte = walk(current_proc->pagetable, ts_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (ts_uaddr & 0xFFF);
+                memcpy((void *)pa, &ts, sizeof(ts));
+                tf->a0 = 0;
+            } else {
+                tf->a0 = (uint64_t)-14; /* -EFAULT */
+            }
         } else {
-            tf->a0 = (uint64_t)-1;
+            tf->a0 = (uint64_t)-14; /* -EFAULT */
         }
 
     } else if (sysnum == SYS_lseek) {
         int fd      = (int)tf->a0;
         long offset = (long)tf->a1;
         int whence  = (int)tf->a2;
-        if (fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used ||
-            current_proc->ofile[fd].pipe_read || current_proc->ofile[fd].pipe_write) {
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+        if (!f || f->is_pipe) {
             tf->a0 = (uint64_t)-1;
         } else {
-            unsigned long fsz = current_proc->ofile[fd].tar_size;
-            unsigned long cur = current_proc->ofile[fd].tar_offset;
-            long new_off;
-            if (whence == 0)       /* SEEK_SET */ new_off = offset;
-            else if (whence == 1)  /* SEEK_CUR */ new_off = (long)cur + offset;
-            else if (whence == 2)  /* SEEK_END */ new_off = (long)fsz + offset;
+            /* For VFS files, use the offset field directly.
+             * We don't know the total file size here, so just update offset. */
+            int64_t cur = f->offset;
+            int64_t new_off;
+            if (whence == 0)       /* SEEK_SET */ new_off = (int64_t)offset;
+            else if (whence == 1)  /* SEEK_CUR */ new_off = cur + (int64_t)offset;
+            else if (whence == 2)  /* SEEK_END */ {
+                /* Get file size via fstat */
+                int64_t file_size = 0;
+                if (f->ops && f->ops->fstat) {
+                    uint8_t stbuf[128];
+                    if (f->ops->fstat(f->private, stbuf) == 0)
+                        memcpy(&file_size, stbuf + 48, 8); /* st_size */
+                }
+                new_off = file_size + (int64_t)offset;
+            }
             else { tf->a0 = (uint64_t)-1; goto syscall_done; }
             if (new_off < 0) new_off = 0;
-            if ((unsigned long)new_off > fsz) new_off = (long)fsz;
-            current_proc->ofile[fd].tar_offset = (unsigned long)new_off;
+            f->offset = new_off;
             tf->a0 = (uint64_t)new_off;
         }
 
     } else if (sysnum == SYS_fstat) {
-        /* fstat(int fd, struct stat *st)
-         * Minimal struct stat layout (RISC-V Linux ABI, first fields):
-         *   0:  uint64_t st_dev
-         *   8:  uint64_t st_ino
-         *  16:  uint32_t st_mode
-         *  20:  uint32_t st_nlink
-         *  24:  uint32_t st_uid
-         *  28:  uint32_t st_gid
-         *  32:  uint64_t st_rdev
-         *  40:  int64_t  pad0
-         *  48:  int64_t  st_size
-         *  56:  int32_t  st_blksize
-         *  60:  int32_t  pad1
-         *  64:  int64_t  st_blocks
-         */
+        /* fstat(int fd, struct stat *st) */
         int fd = (int)tf->a0;
         uint8_t *st = (uint8_t *)tf->a1;
-        if (!st || fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used) {
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+        if (!st || !f) {
             tf->a0 = (uint64_t)-1;
-        } else {
-            memset(st, 0, 128); /* zero the whole stat struct */
-            unsigned long fsz = current_proc->ofile[fd].tar_size;
-            /* st_mode: S_IFREG | 0644 = 0x81A4 */
-            uint32_t mode = 0x81A4;
+        } else if (f->is_pipe) {
+            /* Pipes: return FIFO mode */
+            memset(st, 0, 128);
+            uint32_t mode = 0x1000 | 0600; /* S_IFIFO | 0600 */
             uint32_t nlink = 1;
-            int64_t  size  = (int64_t)fsz;
-            int32_t  blksz = 512;
-            int64_t  blks  = ((int64_t)fsz + 511) / 512;
-            memcpy(st + 16, &mode,  4);
+            uint64_t ino = (uint64_t)(f->pipe_id + 1);
+            int32_t blksz = 4096;
+            memcpy(st + 8, &ino, 8);
+            memcpy(st + 16, &mode, 4);
             memcpy(st + 20, &nlink, 4);
-            memcpy(st + 48, &size,  8);
             memcpy(st + 56, &blksz, 4);
-            memcpy(st + 64, &blks,  8);
+            tf->a0 = 0;
+        } else if (f->ops && f->ops->fstat) {
+            /* Per-fd stat via VFS ops (handles devfs char devices, etc.) */
+            int ret = f->ops->fstat(f->private, st);
+            tf->a0 = (uint64_t)(int64_t)ret;
+        } else {
+            /* Generic regular file fallback */
+            memset(st, 0, 128);
+            uint64_t dev = 1;
+            uint64_t ino = (uint64_t)(fd + 1);
+            uint32_t mode = 0x81A4; /* S_IFREG | 0644 */
+            uint32_t nlink = 1;
+            int32_t blksz = 4096;
+            int64_t sec, nsec;
+            get_wall_time(&sec, &nsec);
+            memcpy(st + 0, &dev, 8);
+            memcpy(st + 8, &ino, 8);
+            memcpy(st + 16, &mode, 4);
+            memcpy(st + 20, &nlink, 4);
+            memcpy(st + 56, &blksz, 4);
+            memcpy(st + 72, &sec, 8);   /* st_atime_sec */
+            memcpy(st + 80, &nsec, 8);  /* st_atime_nsec */
+            memcpy(st + 88, &sec, 8);   /* st_mtime_sec */
+            memcpy(st + 96, &nsec, 8);  /* st_mtime_nsec */
+            memcpy(st + 104, &sec, 8);  /* st_ctime_sec */
+            memcpy(st + 112, &nsec, 8); /* st_ctime_nsec */
             tf->a0 = 0;
         }
 
@@ -1081,234 +1503,55 @@ pipe_eof:
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
-        char resolved[256], tarpath[256];
+        char resolved[256];
         resolve_path(current_proc->cwd, path, resolved);
-        to_tarfs_path(resolved, tarpath);
-        struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
-        if (!hdr) {
-            /* retry with trailing '/' for directories stored as "path/" in tarfs */
-            int tplen = strlen(tarpath);
-            if (tplen > 0 && tplen < 254 && tarpath[tplen - 1] != '/') {
-                tarpath[tplen]     = '/';
-                tarpath[tplen + 1] = '\0';
-                hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
-            }
-        }
-        if (!hdr) {
-            tf->a0 = (uint64_t)-1;
+
+        /* Dispatch through VFS */
+        const char *relpath;
+        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+        if (ops && ops->stat) {
+            int ret = ops->stat(relpath, st);
+            tf->a0 = (uint64_t)(int64_t)ret;
         } else {
-            memset(st, 0, 128);
-            unsigned long fsz = tar_get_file_size(hdr);
-            uint32_t mode = (hdr->typeflag == '5') ? (uint32_t)(0x4000 | 0755)
-                                                    : (uint32_t)(0x8000 | 0644);
-            uint32_t nlink = 1;
-            int64_t  size  = (int64_t)fsz;
-            int32_t  blksz = 512;
-            int64_t  blks  = ((int64_t)fsz + 511) / 512;
-            memcpy(st + 16, &mode,  4);
-            memcpy(st + 20, &nlink, 4);
-            memcpy(st + 48, &size,  8);
-            memcpy(st + 56, &blksz, 4);
-            memcpy(st + 64, &blks,  8);
-            tf->a0 = 0;
+            tf->a0 = (uint64_t)-1;
         }
 
     } else if (sysnum == SYS_getdents64) {
-        /* getdents64(int fd, struct linux_dirent64 *buf, unsigned int count)
-         * struct linux_dirent64:
-         *   uint64_t d_ino
-         *   int64_t  d_off
-         *   uint16_t d_reclen
-         *   uint8_t  d_type
-         *   char     d_name[]  (NUL-terminated, padded to 8-byte boundary)
-         */
-        int fd            = (int)tf->a0;
-        char *ubuf        = (char *)tf->a1;
+        /* getdents64(int fd, struct linux_dirent64 *buf, unsigned int count) */
+        int fd             = (int)tf->a0;
+        char *ubuf         = (char *)tf->a1;
         unsigned int count = (unsigned int)tf->a2;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
-        /* fd must be an open "directory" — we accept any tarfs-backed fd
-         * whose tar_data points at a directory header, OR we treat the
-         * fd itself as a directory cursor by storing a scan position.
-         * Simplest approach: we repurpose tar_offset as "bytes of dirents
-         * already returned" and scan the tarfs from scratch each time,
-         * skipping entries we already emitted. */
-
-        if (fd < 0 || fd >= NOFILE || !current_proc->ofile[fd].used ||
-            current_proc->ofile[fd].pipe_read || current_proc->ofile[fd].pipe_write) {
+        if (!f || f->is_pipe) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
 
-        /* We need to know which directory path this fd refers to.
-         * We stored tar_data pointing to the header; for a directory entry
-         * the header name IS the directory path. For now, walk the tarfs
-         * and find entries whose parent directory matches. */
-
-        /* Recover the directory path from the stored tar header */
-        struct posix_header *dir_hdr = (struct posix_header *)
-            (current_proc->ofile[fd].tar_data - sizeof(struct posix_header));
-        /* Compute the canonical dir path from the tar name (strip "./", ensure trailing /) */
-        char dirpath[256];
-        {
-            const char *n = dir_hdr->name;
-            if (n[0] == '.' && n[1] == '/') n += 2;
-            /* strip trailing slash */
-            int nl = strlen(n);
-            if (nl > 0 && n[nl-1] == '/') nl--;
-            memcpy(dirpath, n, nl);
-            dirpath[nl] = '\0';
+        if (f->ops && f->ops->readdir) {
+            int ret = f->ops->readdir(f->private, ubuf, count, &f->offset);
+            tf->a0 = (uint64_t)(int64_t)ret;
+        } else {
+            tf->a0 = (uint64_t)-1;
         }
-        int dirpath_len = strlen(dirpath);
-
-        unsigned long skip = current_proc->ofile[fd].tar_offset;
-        unsigned int  written = 0;
-        unsigned long seen    = 0;
-
-        /* Helper: emit one dirent into ubuf.  Returns 1 on success, 0 if no room. */
-#define EMIT_DIRENT(name_, ino_, dtype_) do { \
-    int _nl = strlen(name_); \
-    int _rl = (19 + _nl + 1 + 7) & ~7; \
-    if (written + _rl > count) goto getdents_done; \
-    char *_d = ubuf + written; \
-    memset(_d, 0, _rl); \
-    uint64_t _ino = (uint64_t)(ino_); \
-    int64_t  _off = (int64_t)(seen + 1); \
-    uint16_t _rlen = (uint16_t)_rl; \
-    uint8_t  _dt   = (uint8_t)(dtype_); \
-    memcpy(_d +  0, &_ino,  8); \
-    memcpy(_d +  8, &_off,  8); \
-    memcpy(_d + 16, &_rlen, 2); \
-    memcpy(_d + 18, &_dt,   1); \
-    memcpy(_d + 19, (name_), _nl + 1); \
-    written += _rl; \
-    current_proc->ofile[fd].tar_offset = seen + 1; \
-} while (0)
-
-        /* Synthetic "." entry (seen index 0) */
-        if (seen >= skip) {
-            uint64_t dot_ino = (uint64_t)((char *)dir_hdr - _tarfs_start) / 512 + 1;
-            EMIT_DIRENT(".", dot_ino, 4 /* DT_DIR */);
-        }
-        seen++;
-
-        /* Synthetic ".." entry (seen index 1) */
-        if (seen >= skip) {
-            /* Find parent directory header for inode number */
-            uint64_t dotdot_ino = 1; /* default: root */
-            if (dirpath_len > 0) {
-                /* Strip last component from dirpath to get parent path */
-                char parentpath[256];
-                int pl = dirpath_len - 1;
-                while (pl > 0 && dirpath[pl] != '/') pl--;
-                if (pl == 0) {
-                    /* Parent is root — its tar entry is "./" */
-                    parentpath[0] = '\0';
-                } else {
-                    memcpy(parentpath, dirpath, pl);
-                    parentpath[pl] = '\0';
-                }
-                /* Search tarfs for the parent header */
-                struct posix_header *ph = (struct posix_header *)_tarfs_start;
-                while ((char *)ph < _tarfs_end) {
-                    if (ph->name[0] == '\0') break;
-                    if (strncmp(ph->magic, "ustar", 5) == 0) {
-                        const char *pn = ph->name;
-                        if (pn[0] == '.' && pn[1] == '/') pn += 2;
-                        int pnl = strlen(pn);
-                        if (pnl > 0 && pn[pnl-1] == '/') pnl--;
-                        if (pnl == (int)strlen(parentpath) &&
-                            memcmp(pn, parentpath, pnl) == 0) {
-                            dotdot_ino = (uint64_t)((char *)ph - _tarfs_start) / 512 + 1;
-                            break;
-                        }
-                    }
-                    unsigned long fsz3 = tar_get_file_size(ph);
-                    ph = (struct posix_header *)((char *)ph + 512 + ((fsz3 + 511) & ~511UL));
-                }
-            }
-            EMIT_DIRENT("..", dotdot_ino, 4 /* DT_DIR */);
-        }
-        seen++;
-
-        struct posix_header *hdr = (struct posix_header *)_tarfs_start;
-        while ((char *)hdr < _tarfs_end && written + 32 <= count) {
-            if (hdr->name[0] == '\0') break;
-            if (strncmp(hdr->magic, "ustar", 5) != 0) {
-                hdr = (struct posix_header *)((char *)hdr + 512);
-                continue;
-            }
-
-            /* Strip "./" prefix from tar name */
-            const char *ename = hdr->name;
-            if (ename[0] == '.' && ename[1] == '/') ename += 2;
-
-            /* Remove trailing slash for comparison */
-            char clean[100];
-            int elen = strlen(ename);
-            if (elen > 0 && ename[elen-1] == '/') elen--;
-            memcpy(clean, ename, elen);
-            clean[elen] = '\0';
-
-            /* Check if this entry's parent is dirpath */
-            int is_child = 0;
-            if (dirpath_len == 0) {
-                /* Root directory: direct children have no '/' in clean */
-                is_child = (elen > 0 && strchr(clean, '/') == (void *)0);
-            } else {
-                /* Child if clean starts with "dirpath/" and has no further '/' */
-                if (elen > dirpath_len + 1 &&
-                    memcmp(clean, dirpath, dirpath_len) == 0 &&
-                    clean[dirpath_len] == '/') {
-                    const char *rest = clean + dirpath_len + 1;
-                    is_child = (strchr(rest, '/') == (void *)0 && rest[0] != '\0');
-                }
-            }
-
-            if (is_child) {
-                if (seen >= skip) {
-                    /* Emit this dirent */
-                    const char *basename = clean + (dirpath_len > 0 ? dirpath_len + 1 : 0);
-                    int namelen = strlen(basename);
-                    /* reclen = 8+8+2+1+1 + namelen + 1, rounded to 8 */
-                    int reclen = (19 + namelen + 1 + 7) & ~7;
-                    if (written + reclen > count) break;
-
-                    char *d = ubuf + written;
-                    memset(d, 0, reclen);
-                    uint64_t ino  = (uint64_t)((char *)hdr - _tarfs_start) / 512 + 1;
-                    int64_t  doff = (int64_t)(seen + 1);
-                    uint16_t rlen = (uint16_t)reclen;
-                    uint8_t  dtype = (hdr->typeflag == '5') ? 4 : 8; /* DT_DIR=4, DT_REG=8 */
-                    memcpy(d +  0, &ino,   8);
-                    memcpy(d +  8, &doff,  8);
-                    memcpy(d + 16, &rlen,  2);
-                    memcpy(d + 18, &dtype, 1);
-                    memcpy(d + 19, basename, namelen + 1);
-                    written += reclen;
-                    current_proc->ofile[fd].tar_offset = seen + 1;
-                }
-                seen++;
-            }
-
-            /* Advance to next tar entry */
-            unsigned long fsz2 = tar_get_file_size(hdr);
-            hdr = (struct posix_header *)((char *)hdr + 512 + ((fsz2 + 511) & ~511UL));
-        }
-getdents_done:
-        tf->a0 = (uint64_t)written;
 
     } else if (sysnum == SYS_nanosleep) {
         /* nanosleep(const struct timespec *req, struct timespec *rem)
          * struct timespec: { uint64_t tv_sec; uint64_t tv_nsec; }
          * We sleep for tv_sec seconds (ignoring tv_nsec for simplicity).
          * One timer tick = 1 second (TIMER_FREQ = 10 MHz). */
-        uint64_t *req = (uint64_t *)tf->a0;
-        if (req && current_proc) {
-            uint64_t secs = req[0]; /* tv_sec */
-            current_proc->sleep_until     = ticks + secs;
-            current_proc->waiting_for_uart = 2;
-            current_proc->state           = SLEEPING;
-            swtch(&current_proc->context, &scheduler_context);
+        uint64_t req_uaddr = tf->a0;
+        if (req_uaddr && current_proc) {
+            pte_t *pte = walk(current_proc->pagetable, req_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (req_uaddr & 0xFFF);
+                uint64_t *req = (uint64_t *)pa;
+                uint64_t secs = req[0]; /* tv_sec */
+                current_proc->sleep_until     = ticks + secs;
+                current_proc->waiting_for_uart = 2;
+                current_proc->state           = SLEEPING;
+                swtch(&current_proc->context, &scheduler_context);
+            }
         }
         tf->a0 = 0;
 
@@ -1316,23 +1559,8 @@ getdents_done:
         int status = (int)tf->a0;
         if (current_proc) {
             current_proc->exit_status = status;
-            /* Close all open fds */
-            for (int i = 0; i < NOFILE; i++) {
-                if (current_proc->ofile[i].used) {
-                    int pid = current_proc->ofile[i].pipe_id;
-                    if (current_proc->ofile[i].pipe_read && pid >= 0) {
-                        pipes[pid].read_open--;
-                        if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
-                            pipes[pid].used = 0;
-                    }
-                    if (current_proc->ofile[i].pipe_write && pid >= 0) {
-                        pipes[pid].write_open--;
-                        if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
-                            pipes[pid].used = 0;
-                    }
-                    current_proc->ofile[i].used = 0;
-                }
-            }
+            /* Clean up shared/owned resources */
+            cleanup_proc_resources(current_proc);
             /* If init (pid 1) exits, the system has nothing left to run */
             if (current_proc->pid == 1) {
                 printk("\nSystem halted (init exited with status %d).\n", status);
@@ -1344,10 +1572,11 @@ getdents_done:
                 while (1) {}
             }
             current_proc->state = ZOMBIE;
-            /* Wake parent if it's waiting */
-            if (current_proc->parent &&
-                current_proc->parent->state == SLEEPING) {
-                current_proc->parent->state = RUNNABLE;
+            /* Notify parent via SIGCHLD and wake it */
+            if (current_proc->parent) {
+                current_proc->parent->sigpending |= (1UL << SIGCHLD);
+                if (current_proc->parent->state == SLEEPING)
+                    current_proc->parent->state = RUNNABLE;
             }
             /* Also wake any process waiting in wait4 (waiting_for_uart==0).
              * Do NOT wake timed-sleep processes (waiting_for_uart==2). */
@@ -1365,7 +1594,7 @@ getdents_done:
          * Only MAP_ANONYMOUS supported.  Returns VA on success, (uint64_t)-1 on failure. */
         uint64_t addr  = tf->a0;
         uint64_t len   = tf->a1;
-        /* int prot  = (int)tf->a2; -- ignored beyond PROT_READ|PROT_WRITE */
+        int      prot  = (int)tf->a2;
         int      flags = (int)tf->a3;
         /* int fd = (int)tf->a4;  -- must be -1 for MAP_ANONYMOUS */
         /* off_t off = tf->a5;    -- must be 0 for MAP_ANONYMOUS */
@@ -1389,27 +1618,19 @@ getdents_done:
             current_proc->mmap_base += len;
         }
 
-        /* Allocate a free slot in mmap_regions[] */
-        int slot = -1;
-        for (int i = 0; i < NMMAP; i++) {
-            if (current_proc->mmap_regions[i].va == 0) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot < 0) {
-            tf->a0 = (uint64_t)-1;
-            goto syscall_done;
-        }
-
         /* Map zeroed pages */
         if (uvmalloc(current_proc->pagetable, va, va + len, PTE_W) == 0) {
             tf->a0 = (uint64_t)-1;
             goto syscall_done;
         }
 
-        current_proc->mmap_regions[slot].va  = va;
-        current_proc->mmap_regions[slot].len = len;
+        /* Track with VMA */
+        if (vma_add(current_proc, va, va + len, prot, flags) < 0) {
+            uvmunmap(current_proc->pagetable, va, len);
+            tf->a0 = (uint64_t)-1;
+            goto syscall_done;
+        }
+
         tf->a0 = va;
 
     } else if (sysnum == SYS_munmap) {
@@ -1419,19 +1640,16 @@ getdents_done:
 
         len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 
-        /* Find matching region */
-        int found = 0;
-        for (int i = 0; i < NMMAP; i++) {
-            if (current_proc->mmap_regions[i].va == addr) {
-                uvmunmap(current_proc->pagetable, addr, current_proc->mmap_regions[i].len);
-                sfence_vma();
-                current_proc->mmap_regions[i].va  = 0;
-                current_proc->mmap_regions[i].len = 0;
-                found = 1;
-                break;
-            }
+        /* Check VMA covers this region */
+        struct vm_area *v = vma_find(current_proc, addr);
+        if (v) {
+            uvmunmap(current_proc->pagetable, addr, len);
+            sfence_vma();
+            vma_remove(current_proc, addr, addr + len);
+            tf->a0 = 0;
+        } else {
+            tf->a0 = (uint64_t)-1;
         }
-        tf->a0 = found ? 0 : (uint64_t)-1;
 
     } else if (sysnum == SYS_mprotect) {
         /* mprotect stub — always succeed */
@@ -1473,10 +1691,507 @@ getdents_done:
         }
         tf->a0 = (uint64_t)written;
 
+    } else if (sysnum == SYS_ioctl) {
+        int fd = (int)tf->a0;
+        unsigned long request = tf->a1;
+        uint64_t argp = tf->a2;
+
+        if (request == 0x5413) { /* TIOCGWINSZ */
+            struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+            int is_tty = 0;
+            if (f && f->ops == &devfs_ops && f->private)
+              is_tty = devfs_is_tty(f->private);
+            if (is_tty) {
+                if (argp) {
+                    /* Write a default 80x24 winsize struct to user memory */
+                    struct { uint16_t row, col, xpix, ypix; } ws = {24, 80, 0, 0};
+                    pte_t *pte = walk(current_proc->pagetable, argp, 0);
+                    if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                        uint64_t pa = PTE2PA(*pte) + (argp & 0xFFF);
+                        memcpy((void *)pa, &ws, sizeof(ws));
+                    }
+                }
+                tf->a0 = 0; /* success - it IS a terminal */
+            } else {
+                tf->a0 = (uint64_t)-25; /* -ENOTTY */
+            }
+        } else if (request == 0x540F) { /* TIOCGPGRP */
+            tf->a0 = (uint64_t)current_proc->pid;
+        } else if (request == 0x5410) { /* TIOCSPGRP */
+            tf->a0 = 0;
+        } else if (request >= TCGETS && request <= TCSETSF) {
+            /* termios get/set -- only valid for terminal fds */
+            if (fd >= 0 && fd <= 2) {
+                pte_t *pte = walk(current_proc->pagetable, argp, 0);
+                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                    uint64_t pa = PTE2PA(*pte) + (argp & 0xFFF);
+                    tf->a0 = (uint64_t)tty_ioctl(request, (void *)pa);
+                } else {
+                    tf->a0 = (uint64_t)-14; /* -EFAULT */
+                }
+            } else {
+                tf->a0 = (uint64_t)-25; /* -ENOTTY */
+            }
+        } else {
+            tf->a0 = (uint64_t)-25; /* -ENOTTY for unknown ioctls */
+        }
+
+    } else if (sysnum == SYS_rt_sigaction) {
+        int signum = (int)tf->a0;
+        uint64_t act_uaddr = tf->a1;    /* const struct sigaction *act */
+        uint64_t oldact_uaddr = tf->a2; /* struct sigaction *oldact */
+        /* a3 = sigsetsize, ignored */
+
+        if (signum < 1 || signum >= 32 || signum == 9 || signum == 19) {
+            tf->a0 = (uint64_t)-22; /* -EINVAL */
+        } else {
+            struct kern_sigaction *sig_sa = proc_sigactions(current_proc);
+            /* Return old action if requested */
+            if (oldact_uaddr) {
+                struct {
+                    uint64_t handler; uint64_t mask;
+                    int flags; int pad; uint64_t restorer;
+                } old;
+                old.handler = sig_sa[signum].handler;
+                old.mask = sig_sa[signum].mask;
+                old.flags = sig_sa[signum].flags;
+                old.pad = 0;
+                old.restorer = sig_sa[signum].restorer;
+                pte_t *pte = walk(current_proc->pagetable, oldact_uaddr, 0);
+                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                    uint64_t pa = PTE2PA(*pte) + (oldact_uaddr & 0xFFF);
+                    memcpy((void *)pa, &old, sizeof(old));
+                }
+            }
+            /* Install new action if provided */
+            if (act_uaddr) {
+                struct {
+                    uint64_t handler; uint64_t mask;
+                    int flags; int pad; uint64_t restorer;
+                } act;
+                pte_t *pte = walk(current_proc->pagetable, act_uaddr, 0);
+                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                    uint64_t pa = PTE2PA(*pte) + (act_uaddr & 0xFFF);
+                    memcpy(&act, (void *)pa, sizeof(act));
+                    sig_sa[signum].handler = act.handler;
+                    sig_sa[signum].mask = act.mask;
+                    sig_sa[signum].flags = act.flags;
+                    sig_sa[signum].restorer = act.restorer;
+                }
+            }
+            tf->a0 = 0;
+        }
+
+    } else if (sysnum == SYS_rt_sigprocmask) {
+        int how = (int)tf->a0;
+        uint64_t set_uaddr = tf->a1;
+        uint64_t oldset_uaddr = tf->a2;
+        /* a3 = sigsetsize, ignored */
+
+        /* Return old mask if requested */
+        if (oldset_uaddr) {
+            uint64_t oldmask = current_proc->sigmask;
+            pte_t *pte = walk(current_proc->pagetable, oldset_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (oldset_uaddr & 0xFFF);
+                memcpy((void *)pa, &oldmask, sizeof(oldmask));
+            }
+        }
+        /* Apply new mask if provided */
+        if (set_uaddr) {
+            uint64_t newset = 0;
+            pte_t *pte = walk(current_proc->pagetable, set_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (set_uaddr & 0xFFF);
+                memcpy(&newset, (void *)pa, sizeof(newset));
+            }
+            if (how == 0) /* SIG_BLOCK */
+                current_proc->sigmask |= newset;
+            else if (how == 1) /* SIG_UNBLOCK */
+                current_proc->sigmask &= ~newset;
+            else if (how == 2) /* SIG_SETMASK */
+                current_proc->sigmask = newset;
+        }
+        tf->a0 = 0;
+
+    } else if (sysnum == SYS_rt_sigreturn) {
+        /* Restore the original trapframe saved on the user stack during
+         * signal delivery.  sp points to the saved trapframe. */
+        uint64_t usp = tf->sp;
+
+        /* Read saved trapframe from user stack */
+        struct trapframe saved;
+        memset(&saved, 0, sizeof(saved));
+        for (uint64_t off = 0; off < sizeof(struct trapframe); off += 8) {
+            pte_t *pte = walk(current_proc->pagetable, usp + off, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + ((usp + off) & 0xFFF);
+                *(uint64_t *)((char *)&saved + off) = *(uint64_t *)pa;
+            }
+        }
+
+        /* Restore the original trapframe */
+        memcpy(tf, &saved, sizeof(struct trapframe));
+        /* Don't modify tf->a0 -- it was already set in the saved frame.
+         * Skip the normal syscall_done return path. */
+        return;
+
+    } else if (sysnum == SYS_gettimeofday) {
+        uint64_t tv_uaddr = tf->a0;
+        /* a1 = timezone pointer, ignored */
+        if (tv_uaddr) {
+            int64_t sec, nsec;
+            get_wall_time(&sec, &nsec);
+            struct { int64_t sec; int64_t usec; } tv;
+            tv.sec = sec;
+            tv.usec = nsec / 1000; /* ns -> us */
+            pte_t *pte = walk(current_proc->pagetable, tv_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (tv_uaddr & 0xFFF);
+                memcpy((void *)pa, &tv, sizeof(tv));
+            }
+        }
+        tf->a0 = 0;
+
+    } else if (sysnum == SYS_fcntl) {
+        int fd = (int)tf->a0;
+        int cmd = (int)tf->a1;
+
+        if (fd < 0 || fd >= NOFILE || !proc_ofile(current_proc)[fd]) {
+            tf->a0 = (uint64_t)-9; /* -EBADF */
+        } else if (cmd == 1) { /* F_GETFD */
+            tf->a0 = 0;
+        } else if (cmd == 2) { /* F_SETFD */
+            tf->a0 = 0;
+        } else if (cmd == 3) { /* F_GETFL */
+            tf->a0 = 2; /* O_RDWR */
+        } else if (cmd == 4) { /* F_SETFL */
+            tf->a0 = 0;
+        } else {
+            tf->a0 = (uint64_t)-22; /* -EINVAL */
+        }
+
+    } else if (sysnum == SYS_faccessat) {
+        /* faccessat(dirfd, pathname, mode, flags) */
+        const char *path = (const char *)tf->a1;
+        if (!path) {
+            tf->a0 = (uint64_t)-2; /* -ENOENT */
+            goto syscall_done;
+        }
+
+        /* Resolve path against cwd */
+        char resolved[256];
+        resolve_path(current_proc->cwd, path, resolved);
+
+        /* Check via VFS stat */
+        const char *relpath;
+        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+        if (ops && ops->stat) {
+            uint8_t st[128];
+            int ret = ops->stat(relpath, st);
+            tf->a0 = (ret == 0) ? 0 : (uint64_t)-2;
+        } else {
+            tf->a0 = (uint64_t)-2; /* -ENOENT */
+        }
+
+    } else if (sysnum == SYS_unlinkat) {
+        /* unlinkat(AT_FDCWD, path, flags) */
+        const char *upath = (const char *)tf->a1;
+        if (!upath) {
+            tf->a0 = (uint64_t)-1;
+        } else {
+            char resolved[256];
+            resolve_path(current_proc->cwd, upath, resolved);
+            const char *relpath;
+            struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+            if (ops && ops->unlink) {
+                int ret = ops->unlink(relpath);
+                tf->a0 = (uint64_t)(int64_t)ret;
+            } else {
+                tf->a0 = (uint64_t)-30; /* -EROFS */
+            }
+        }
+
+    } else if (sysnum == SYS_linkat) {
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_renameat2) {
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_mkdirat) {
+        /* mkdirat(AT_FDCWD, path, mode) */
+        const char *upath = (const char *)tf->a1;
+        int mode = (int)tf->a2;
+        if (!upath) {
+            tf->a0 = (uint64_t)-1;
+        } else {
+            char resolved[256];
+            resolve_path(current_proc->cwd, upath, resolved);
+            const char *relpath;
+            struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+            if (ops && ops->mkdir) {
+                int ret = ops->mkdir(relpath, mode);
+                tf->a0 = (uint64_t)(int64_t)ret;
+            } else {
+                tf->a0 = (uint64_t)-30; /* -EROFS */
+            }
+        }
+
+    } else if (sysnum == SYS_umask) {
+        tf->a0 = 0022; /* return old umask, always 022 */
+
+    } else if (sysnum == SYS_geteuid) {
+        tf->a0 = 0; /* root */
+
+    } else if (sysnum == SYS_getegid) {
+        tf->a0 = 0; /* root */
+
+    } else if (sysnum == SYS_set_tid_address) {
+        tf->a0 = (uint64_t)current_proc->pid;
+
+    } else if (sysnum == SYS_readlinkat) {
+        tf->a0 = (uint64_t)-2; /* -ENOENT: no symlinks */
+
+    } else if (sysnum == SYS_writev) {
+        /* writev(int fd, const struct iovec *iov, int iovcnt) */
+        int fd = (int)tf->a0;
+        uint64_t iov_uaddr = tf->a1;
+        int iovcnt = (int)tf->a2;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+        if (!f || iovcnt < 0) {
+            tf->a0 = (uint64_t)-9; /* -EBADF */
+        } else {
+            /* Translate iovec array pointer */
+            pte_t *iov_pte = walk(current_proc->pagetable, iov_uaddr, 0);
+            if (!iov_pte || !(*iov_pte & PTE_V)) { tf->a0 = (uint64_t)-14; goto syscall_done; }
+            struct { uint64_t base; uint64_t len; } *iov = (void *)(PTE2PA(*iov_pte) + (iov_uaddr & 0xFFF));
+            int64_t total = 0;
+            for (int i = 0; i < iovcnt; i++) {
+                uint64_t buf_uaddr = iov[i].base;
+                uint64_t len = iov[i].len;
+                if (len == 0) continue;
+                /* Translate buffer pointer */
+                char *base;
+                if (buf_uaddr) {
+                    pte_t *bpte = walk(current_proc->pagetable, buf_uaddr, 0);
+                    if (!bpte || !(*bpte & PTE_V)) { if (total == 0) total = -14; break; }
+                    base = (char *)(PTE2PA(*bpte) + (buf_uaddr & 0xFFF));
+                } else {
+                    if (total == 0) total = -14;
+                    break;
+                }
+                if (f->is_pipe) {
+                    int pid = f->pipe_id;
+                    if (pid < 0 || !f->pipe_write) { total = -9; break; }
+                    for (uint64_t j = 0; j < len; j++) {
+                        while (pipe_avail(pid) >= PIPE_BUF) {
+                            if (!pipes[pid].read_open) break;
+                            current_proc->state = SLEEPING;
+                            swtch(&current_proc->context, &scheduler_context);
+                        }
+                        if (!pipes[pid].read_open) break;
+                        pipes[pid].buf[pipes[pid].wpos % PIPE_BUF] = base[j];
+                        pipes[pid].wpos++;
+                    }
+                    total += (int64_t)len;
+                } else if (f->ops && f->ops->write) {
+                    int64_t n = f->ops->write(f->private, base, len, &f->offset);
+                    if (n < 0) { if (total == 0) total = n; break; }
+                    total += n;
+                } else {
+                    if (total == 0) total = -9;
+                    break;
+                }
+            }
+            tf->a0 = (uint64_t)total;
+        }
+
+    } else if (sysnum == SYS_readv) {
+        /* readv(int fd, const struct iovec *iov, int iovcnt) */
+        int fd = (int)tf->a0;
+        uint64_t iov_uaddr = tf->a1;
+        int iovcnt = (int)tf->a2;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+        if (!f || iovcnt < 0) {
+            tf->a0 = (uint64_t)-9; /* -EBADF */
+        } else {
+            /* Translate iovec array pointer */
+            pte_t *iov_pte = walk(current_proc->pagetable, iov_uaddr, 0);
+            if (!iov_pte || !(*iov_pte & PTE_V)) { tf->a0 = (uint64_t)-14; goto syscall_done; }
+            struct { uint64_t base; uint64_t len; } *iov = (void *)(PTE2PA(*iov_pte) + (iov_uaddr & 0xFFF));
+            int64_t total = 0;
+            for (int i = 0; i < iovcnt; i++) {
+                uint64_t buf_uaddr = iov[i].base;
+                uint64_t len = iov[i].len;
+                if (len == 0) continue;
+                /* Translate buffer pointer */
+                char *base;
+                if (buf_uaddr) {
+                    pte_t *bpte = walk(current_proc->pagetable, buf_uaddr, 0);
+                    if (!bpte || !(*bpte & PTE_V)) { if (total == 0) total = -14; break; }
+                    base = (char *)(PTE2PA(*bpte) + (buf_uaddr & 0xFFF));
+                } else {
+                    if (total == 0) total = -14;
+                    break;
+                }
+                if (f->is_pipe) {
+                    int pid = f->pipe_id;
+                    if (pid < 0 || !f->pipe_read) { total = -9; break; }
+                    while (pipe_avail(pid) == 0 && pipes[pid].write_open)  {
+                        current_proc->state = SLEEPING;
+                        swtch(&current_proc->context, &scheduler_context);
+                    }
+                    uint64_t j;
+                    for (j = 0; j < len && pipe_avail(pid) > 0; j++) {
+                        base[j] = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
+                        pipes[pid].rpos++;
+                    }
+                    total += (int64_t)j;
+                } else if (f->ops && f->ops->read) {
+                    int64_t n = f->ops->read(f->private, base, len, &f->offset);
+                    if (n < 0) { if (total == 0) total = n; break; }
+                    total += n;
+                    if (n < (int64_t)len) break; /* short read */
+                } else {
+                    if (total == 0) total = -9;
+                    break;
+                }
+            }
+            tf->a0 = (uint64_t)total;
+        }
+
+    } else if (sysnum == SYS_prlimit64) {
+        /* prlimit64(pid, resource, new_rlim, old_rlim) */
+        int resource = (int)tf->a1;
+        uint64_t old_uaddr = tf->a3;
+        if (old_uaddr) {
+            uint64_t rlim[2];
+            if (resource == 3) { /* RLIMIT_STACK */
+                rlim[0] = 8 * 1024 * 1024; /* 8MB */
+                rlim[1] = 0xFFFFFFFFFFFFFFFFULL; /* RLIM_INFINITY */
+            } else if (resource == 7) { /* RLIMIT_NOFILE */
+                rlim[0] = 16;
+                rlim[1] = 16;
+            } else {
+                rlim[0] = 0xFFFFFFFFFFFFFFFFULL;
+                rlim[1] = 0xFFFFFFFFFFFFFFFFULL;
+            }
+            pte_t *pte = walk(current_proc->pagetable, old_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (old_uaddr & 0xFFF);
+                memcpy((void *)pa, rlim, 16);
+            }
+        }
+        tf->a0 = 0;
+
+    } else if (sysnum == SYS_getrandom) {
+        /* getrandom(void *buf, size_t buflen, unsigned int flags) */
+        char *buf = (char *)tf->a0;
+        uint64_t buflen = tf->a1;
+        if (buf && buflen > 0) {
+            /* Simple PRNG seeded from RISC-V cycle counter */
+            uint64_t state = r_time();
+            for (uint64_t i = 0; i < buflen; i++) {
+                state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                buf[i] = (char)(state >> 33);
+            }
+        }
+        tf->a0 = (uint64_t)buflen;
+
+    } else if (sysnum == SYS_setpgid) {
+        pid_t target = (pid_t)tf->a0;
+        pid_t pgid = (pid_t)tf->a1;
+        if (target == 0) target = current_proc->pid;
+        if (pgid == 0) pgid = target;
+        tf->a0 = (uint64_t)-3; /* -ESRCH */
+        for (struct proc *p = proc; p < &proc[64]; p++) {
+            if (p->pid == target && p->state != UNUSED) {
+                p->pgid = pgid;
+                tf->a0 = 0;
+                break;
+            }
+        }
+
+    } else if (sysnum == SYS_setsid) {
+        current_proc->sid = current_proc->pid;
+        current_proc->pgid = current_proc->pid;
+        tf->a0 = (uint64_t)current_proc->pid;
+
+    } else if (sysnum == SYS_getpgid) {
+        pid_t target = (pid_t)tf->a0;
+        if (target == 0) {
+            tf->a0 = (uint64_t)current_proc->pgid;
+        } else {
+            tf->a0 = (uint64_t)-3; /* -ESRCH */
+            for (struct proc *p = proc; p < &proc[64]; p++) {
+                if (p->pid == target && p->state != UNUSED) {
+                    tf->a0 = (uint64_t)p->pgid;
+                    break;
+                }
+            }
+        }
+
+    } else if (sysnum == SYS_getsid) {
+        pid_t target = (pid_t)tf->a0;
+        if (target == 0) {
+            tf->a0 = (uint64_t)current_proc->sid;
+        } else {
+            tf->a0 = (uint64_t)-3; /* -ESRCH */
+            for (struct proc *p = proc; p < &proc[64]; p++) {
+                if (p->pid == target && p->state != UNUSED) {
+                    tf->a0 = (uint64_t)p->sid;
+                    break;
+                }
+            }
+        }
+
+    } else if (sysnum == SYS_alarm) {
+        /* alarm(unsigned int seconds) — schedule SIGALRM after `seconds`.
+         * Returns the number of seconds remaining on any previous alarm. */
+        unsigned long seconds = tf->a0;
+        unsigned long remaining = 0;
+        if (current_proc->alarm_ticks > 0 && current_proc->alarm_ticks > ticks)
+            remaining = current_proc->alarm_ticks - ticks;
+        if (seconds == 0)
+            current_proc->alarm_ticks = 0; /* cancel pending alarm */
+        else
+            current_proc->alarm_ticks = ticks + seconds;
+        tf->a0 = remaining;
+
+    } else if (sysnum == SYS_madvise) {
+        /* madvise — no-op success (no real VM advice needed) */
+        tf->a0 = 0;
+
+    } else if (sysnum == SYS_ftruncate) {
+        /* ftruncate — tarfs is read-only; return -EROFS */
+        tf->a0 = (uint64_t)-30; /* -EROFS */
+
+    } else if (sysnum == SYS_tgkill) {
+        /* tgkill(tgid, tid, sig) — route to same logic as kill */
+        pid_t tid = (pid_t)tf->a1;
+        int sig = (int)tf->a2;
+        if (sig == 0) {
+            tf->a0 = 0;
+        } else {
+            tf->a0 = (uint64_t)-3; /* -ESRCH */
+            for (struct proc *p = proc; p < &proc[64]; p++) {
+                if (p->pid == tid && p->state != UNUSED) {
+                    p->sigpending |= (1UL << sig);
+                    if (p->state == SLEEPING)
+                        p->state = RUNNABLE;
+                    tf->a0 = 0;
+                    break;
+                }
+            }
+        }
+
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);
         tf->a0 = (uint64_t)-1;
     }
 syscall_done:
+    /* Deliver pending signals before returning to user mode */
+    if (current_proc && (current_proc->sigpending & ~current_proc->sigmask))
+        deliver_signal(tf, current_proc);
     return;
 }

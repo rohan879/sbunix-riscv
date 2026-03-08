@@ -324,7 +324,7 @@ static void test_time(void) {
     r = clock_gettime(CLOCK_REALTIME, &now);
     CHECK("clock_gettime ret 0", r == 0);
     CHECK("clock_gettime tv_sec >= 0", now.tv_sec >= 0);
-    CHECK("clock_gettime tv_nsec == 0", now.tv_nsec == 0);
+    CHECK("clock_gettime tv_nsec >= 0", now.tv_nsec >= 0);
 }
 
 /* -----------------------------------------------------------------------

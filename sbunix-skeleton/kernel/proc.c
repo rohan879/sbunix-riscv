@@ -1,4 +1,5 @@
 #include <proc.h>
+#include <vfs.h>
 #include <kalloc.h>
 #include <riscv.h>
 #include <string.h>
@@ -39,20 +40,54 @@ void forkret(void) {
   trap_restore(current_proc->trapframe);
 }
 
+/* Open /dev/console via VFS and assign to the next free ofile slot.
+ * Returns the fd number or -1 on failure. */
+static int kern_open_console(void) {
+  const char *relpath;
+  struct vfs_ops *ops = vfs_lookup_mount("/dev/console", &relpath);
+  if (!ops || !ops->open) return -1;
+  void *priv = NULL;
+  int ret = ops->open(relpath, 2 /* O_RDWR */, &priv);
+  if (ret < 0) return ret;
+  struct open_file *f = vfs_alloc_file();
+  if (!f) {
+    if (ops->close) ops->close(priv);
+    return -12; /* -ENOMEM */
+  }
+  f->ops = ops;
+  f->private = priv;
+  f->offset = 0;
+  f->flags = 2; /* O_RDWR */
+  f->is_pipe = 0;
+  /* Find lowest free fd slot */
+  for (int i = 0; i < NOFILE; i++) {
+    if (current_proc->ofile[i] == NULL) {
+      current_proc->ofile[i] = f;
+      return i;
+    }
+  }
+  /* No free slot */
+  if (ops->close) ops->close(priv);
+  vfs_free_file(f);
+  return -1;
+}
+
 // Helper to start the first process
 void init_starter(void) {
-    int ret = exec("./bin/sbush");
+    int ret = exec("./bin/init");
+    if (ret < 0) {
+        printk("init_starter: /bin/init not found, falling back to sbush\n");
+        ret = exec("./bin/sbush");
+    }
     if (ret < 0)
         printk("init_starter: exec failed\n");
 
-    /* Pre-populate stdin(0), stdout(1), stderr(2) as "used" so that
-     * alloc_fd() never hands them out to pipes or other files.
-     * These fds point to the UART (no pipe). */
+    /* Open /dev/console three times for stdin(0), stdout(1), stderr(2).
+     * Each gets its own open_file with independent refcount. */
     for (int i = 0; i < 3; i++) {
-        current_proc->ofile[i].used      = 1;
-        current_proc->ofile[i].pipe_read  = 0;
-        current_proc->ofile[i].pipe_write = 0;
-        current_proc->ofile[i].pipe_id    = -1;
+        int fd = kern_open_console();
+        if (fd < 0)
+            printk("init_starter: failed to open /dev/console for fd %d\n", i);
     }
 
     // Now we must jump to user mode!
@@ -72,6 +107,8 @@ struct proc* allocproc(void) {
 
 found:
   p->pid = nextpid++;
+  p->pgid = p->pid;
+  p->sid = p->pid;
   p->state = SLEEPING;
 
   // Allocate a trapframe page.
@@ -97,9 +134,25 @@ found:
   p->context.ra = (uint64_t)forkret;
   p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
 
-  // Initialize mmap tracking fields
-  memset(p->mmap_regions, 0, sizeof(p->mmap_regions));
+  // Initialize open file table
+  for (int i = 0; i < NOFILE; i++)
+    p->ofile[i] = NULL;
+
+  // Initialize VMA list and mmap base
+  p->vma_list = NULL;
   p->mmap_base = 0; /* lazily set on first mmap call */
+
+  // Initialize signal handling fields
+  memset(p->sigactions, 0, sizeof(p->sigactions));
+  p->sigmask = 0;
+  p->sigpending = 0;
+  p->alarm_ticks = 0;
+
+  // Initialize clone/thread sharing fields
+  p->clone_flags = 0;
+  p->shared_pt = NULL;
+  p->shared_ft = NULL;
+  p->shared_sa = NULL;
 
   return p;
 }
@@ -116,8 +169,8 @@ void userinit(void) {
   
   p->state = RUNNABLE;
   // We'll set the name for debugging.
-  const char *name = "sbush";
-  for(int i=0; i<6; i++) p->name[i] = name[i];
+  const char *name = "init";
+  for(int i=0; i<5; i++) p->name[i] = name[i];
 }
 
 // Wake any process sleeping on UART input (waiting_for_uart==1 only).

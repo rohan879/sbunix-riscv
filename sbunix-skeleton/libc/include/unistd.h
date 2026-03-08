@@ -52,9 +52,28 @@ int     access(const char *path, int mode);
 /* Time */
 unsigned int sleep(unsigned int seconds);
 int          usleep(unsigned int usecs);
+unsigned int alarm(unsigned int seconds);
 
 /* Miscellaneous */
 uid_t   getuid(void);
 gid_t   getgid(void);
+uid_t   geteuid(void);
+gid_t   getegid(void);
+
+/* Terminal / process group */
+int     isatty(int fd);
+pid_t   setsid(void);
+pid_t   getpgrp(void);
+int     setpgid(pid_t pid, pid_t pgid);
+pid_t   tcgetpgrp(int fd);
+int     tcsetpgrp(int fd, pid_t pgrp);
+pid_t   getpgid(pid_t pid);
+pid_t   getsid(pid_t pid);
+
+/* File operations */
+int     ftruncate(int fd, off_t length);
+
+/* Wait (convenience wrapper) */
+pid_t   wait(int *status);
 
 #endif /* _UNISTD_H */

@@ -34,5 +34,6 @@ struct tm {
 time_t time(time_t *t);
 int    clock_gettime(int clk_id, struct timespec *tp);
 int    nanosleep(const struct timespec *req, struct timespec *rem);
+int    gettimeofday(struct timeval *tv, void *tz);
 
 #endif /* _TIME_H */

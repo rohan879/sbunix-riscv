@@ -33,13 +33,60 @@
 #define SYS_nanosleep   101
 #define SYS_clock_gettime 113
 
+/* File control / access */
+#define SYS_fcntl       25
+#define SYS_ioctl       29
+#define SYS_mkdirat     34
+#define SYS_unlinkat    35
+#define SYS_linkat      37
+#define SYS_faccessat   48
+#define SYS_umask       166
+#define SYS_renameat2   276
+
+/* I/O vectors */
+#define SYS_readv       65
+#define SYS_writev      66
+
+/* Symlinks */
+#define SYS_readlinkat  78
+
+/* Process groups / session */
+#define SYS_set_tid_address 96
+#define SYS_setpgid     154
+#define SYS_getpgid     155
+#define SYS_getsid      156
+#define SYS_setsid      157
+
+/* Signal */
+#define SYS_rt_sigaction   134
+#define SYS_rt_sigprocmask 135
+#define SYS_rt_sigreturn   139
+
+/* Time */
+#define SYS_gettimeofday   169
+
+/* Credentials */
+#define SYS_geteuid     175
+#define SYS_getegid     177
+
 /* Memory */
 #define SYS_brk         214
 #define SYS_munmap      215
 #define SYS_mmap        222
 #define SYS_mprotect    226
 
+/* Resource limits */
+#define SYS_prlimit64   261
+/* Random */
+#define SYS_getrandom   278
+
+/* Additional syscalls */
+#define SYS_ftruncate   46
+#define SYS_tgkill      131
+#define SYS_madvise     233
+
 /* Custom / teaching-OS extensions */
+#define SYS_alarm       200   /* alarm(seconds) — one-shot SIGALRM */
 #define SYS_ps          500   /* snapshot process table */
 
 /* mmap flags (must match libc/include/sys/mman.h) */
@@ -51,5 +98,8 @@
 
 /* clone flags */
 #define SIGCHLD         17
+#define CLONE_VM        0x00000100
+#define CLONE_FILES     0x00000400
+#define CLONE_SIGHAND   0x00000800
 
 #endif

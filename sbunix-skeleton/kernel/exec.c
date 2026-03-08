@@ -4,9 +4,11 @@
 #include <tar.h>
 #include <elf.h>
 #include <kalloc.h>
+#include <kmalloc.h>
 #include <riscv.h>
 #include <vm.h>
 #include <proc.h>
+#include <syscall.h>
 
 extern char _tarfs_start[];
 extern char _tarfs_end[];
@@ -33,6 +35,33 @@ int exec(char *path) {
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
         ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3) return -1;
 
+    /* Detach from shared pagetable if this is a CLONE_VM thread */
+    if (current_proc->shared_pt) {
+        current_proc->shared_pt->refcount--;
+        if (current_proc->shared_pt->refcount == 0) {
+            /* We were the last user -- free old shared pagetable wrapper.
+             * The actual pagetable pages leak (pre-existing issue). */
+            kmfree(current_proc->shared_pt, sizeof(struct shared_pagetable));
+        }
+        current_proc->shared_pt = NULL;
+        current_proc->clone_flags &= ~CLONE_VM;
+        /* exec will create a brand new pagetable below */
+    }
+
+    /* Detach from shared signal handlers (exec resets all to SIG_DFL) */
+    if (current_proc->shared_sa) {
+        current_proc->shared_sa->refcount--;
+        if (current_proc->shared_sa->refcount == 0)
+            kmfree(current_proc->shared_sa, sizeof(struct shared_sigactions));
+        current_proc->shared_sa = NULL;
+        current_proc->clone_flags &= ~CLONE_SIGHAND;
+    }
+    /* Reset all sigactions to default */
+    memset(current_proc->sigactions, 0, sizeof(current_proc->sigactions));
+
+    /* Clear old VMAs before loading new binary */
+    vma_free_all(current_proc);
+
     pagetable = uvmcreate();
     if(pagetable == 0) return -1;
 
@@ -44,6 +73,15 @@ int exec(char *path) {
             if(uvmcopyin(pagetable, phdr->p_vaddr, elf_data + phdr->p_offset, phdr->p_filesz) < 0) return -1;
             uint64_t seg_end = phdr->p_vaddr + phdr->p_memsz;
             if (seg_end > sz) sz = seg_end;
+
+            /* Compute VMA protection bits from ELF phdr->p_flags */
+            int vprot = 0;
+            if (phdr->p_flags & 0x4) vprot |= PROT_READ;   /* PF_R */
+            if (phdr->p_flags & 0x2) vprot |= PROT_WRITE;  /* PF_W */
+            if (phdr->p_flags & 0x1) vprot |= PROT_EXEC;   /* PF_X */
+            uint64_t vma_start = PGROUNDDOWN(phdr->p_vaddr);
+            uint64_t vma_end   = PGROUNDUP(phdr->p_vaddr + phdr->p_memsz);
+            vma_add(current_proc, vma_start, vma_end, vprot, MAP_PRIVATE);
         }
     }
 
@@ -60,20 +98,30 @@ int exec(char *path) {
             top_page_mem = sp_mem;  /* remember physical addr of topmost page */
     }
     
+    /* Add a VMA for the user stack region */
+    vma_add(current_proc, stack_va, MAXVA, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+
     // 5. Identity map kernel and ALL RAM (No PTE_U)
     // This ensures kernel code, data, AND dynamically allocated pages (like kstack)
     // are accessible after switching satp.
-    if(mappages(pagetable, 0x80000000, PHYSTOP - 0x80000000, 0x80000000, PTE_R | PTE_W | PTE_X) < 0) return -1;
-    // Map I/O registers needed for interrupt handling and RTC
+    if(mappages_super(pagetable, 0x80000000, PHYSTOP - 0x80000000, 0x80000000, PTE_R | PTE_W | PTE_X) < 0) return -1;
+    // Map I/O registers needed for interrupt handling
     if(mappages(pagetable, 0x10000000, PAGE_SIZE, 0x10000000, PTE_R | PTE_W) < 0) return -1;  // UART
     if(mappages(pagetable, 0x101000, PAGE_SIZE, 0x101000, PTE_R | PTE_W) < 0) return -1;    // RTC
     if(mappages(pagetable, 0x2000000, 0x10000, 0x2000000, PTE_R | PTE_W) < 0) return -1;      // CLINT
-    if(mappages(pagetable, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) return -1; // PLIC
+    if(mappages_super(pagetable, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) return -1; // PLIC
+
+    // Map signal trampoline page
+    uvmmap_sigtrampoline(pagetable);
 
     // 6. Update process state
     // TODO: cleanup old pagetable
     current_proc->pagetable = pagetable;
     current_proc->sz = sz;
+
+    // Initialize stack bounds for auto-grow
+    current_proc->stack_top = MAXVA;
+    current_proc->stack_bottom = stack_va;
 
     /* Update process name from the last component of the path */
     {

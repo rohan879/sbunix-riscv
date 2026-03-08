@@ -195,5 +195,6 @@ struct virtio_blk_dev {
 int  virtio_blk_init(void);
 int  virtio_blk_rw(uint64_t sector, void *buf, int write);
 void virtio_blk_test(void);
+uint64_t virtio_blk_capacity(void);
 
 #endif

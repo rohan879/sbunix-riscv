@@ -523,3 +523,7 @@ void virtio_blk_test(void) {
 
     kfree(buf);
 }
+
+uint64_t virtio_blk_capacity(void) {
+    return blkdev.capacity;
+}
