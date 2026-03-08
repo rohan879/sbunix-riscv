@@ -240,9 +240,12 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 ### Still Open
 
 - [x] Kernel SIGCHLD generation — `SYS_exit`, SIGKILL, and `deliver_signal` SIG_DFL all set `parent->sigpending |= (1 << SIGCHLD)` on child death
-- [ ] devfs integration for stdin/stdout/stderr — fd 0/1/2 still handled as special UART case, not routed through `/dev/console` VFS ops
-- [ ] On-disk read/write file system (ext2 or similar over virtio-blk)
-- [ ] On-disk swap and paging
+- [x] devfs integration for stdin/stdout/stderr — fd 0/1/2 opened via `/dev/console` VFS ops in `init_starter()`; UART special-case removed from trap.c
+- [x] Input discipline (termios) — `kernel/tty.c` line discipline; cooked mode with echo/backspace/^C/^D; raw mode; ioctl TCGETS/TCSETS
+- [x] User-level threads — `sys_clone` extended with CLONE_VM/CLONE_FILES/CLONE_SIGHAND; refcounted shared resources
+- [x] Super pages — Sv39 2MB megapages for kernel identity maps; `walk()` detects level-1 leaf PTEs; COW fork splits to 4KB
+- [x] On-disk read/write file system — ext2-lite over virtio-blk (`kernel/ext2.c`); mounted at `/disk`; open/read/write/mkdir/unlink
+- [x] On-disk swap and paging — clock eviction in `kernel/swap.c`; 1024 swap slots at end of disk; swap-in on page fault
 - [ ] TCP/IP networking via lwIP
 - [ ] Multi-core support
 
@@ -251,8 +254,8 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Cooperative multi-tasking + all functional requirements (50 pts) — scheduler, fork, exec, wait, pipes, VFS, tarfs, user binaries all working
 - [x] Preemptive multi-tasking (+10 pts) — timer-driven scheduler tick yields RUNNING processes via `swtch()`; tested with `bin/spin` (two CPU-bound fork'd loops both complete)
 - [x] Signals (INT on ^C, ALARM, SEGV) and pipes (+10 pts) — SIGINT via `sigpending`, SIGALRM via `alarm()` syscall, SIGSEGV via `deliver_signal()`, SIGCHLD on exit; pipes work; tested with `spin`, `alarmtest`, `segvtest`
-- [ ] On-disk r/w file system (+10 pts)
-- [ ] On-disk swap and paging (+10 pts)
+- [x] On-disk r/w file system (+10 pts) — ext2-lite with block cache, inode cache, directory ops over virtio-blk
+- [x] On-disk swap and paging (+10 pts) — clock eviction, swap bitmap, PTE_SWAP encoding, transparent swap-in on page fault
 - [ ] TCP/IP networking via lwIP (+10 pts)
 - [ ] Multi-core (+20 pts)
 
