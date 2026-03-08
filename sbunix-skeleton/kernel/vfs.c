@@ -165,10 +165,10 @@ void vfs_init(void) {
   vfs_register_mount("/dev", &devfs_ops);
   /* Register procfs at /proc */
   vfs_register_mount("/proc", &procfs_ops);
-  /* Register ext2 at /disk (if mounted) */
+  /* Register ext2 at /mnt (if mounted) */
   extern int ext2_mounted_flag(void);
   if (ext2_mounted_flag())
-    vfs_register_mount("/disk", &ext2_ops);
+    vfs_register_mount("/mnt", &ext2_ops);
   /* Register tarfs at / (root) */
   vfs_register_mount("/", &tarfs_ops);
 

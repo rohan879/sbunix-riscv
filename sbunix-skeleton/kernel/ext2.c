@@ -682,7 +682,7 @@ static const char *path_parent(const char *path, char *parent_out,
 
 /* Resolve path relative to ext2 root.
  * Returns inode with refcount++ on success.
- * The path is relative to the /disk mount point (VFS strips prefix). */
+ * The path is relative to the /mnt mount point (VFS strips prefix). */
 static struct ext2_inode_mem *ext2_namei(const char *path) {
   /* Start from root inode */
   struct ext2_inode_mem *ip = icache_get(EXT2_ROOT_INO);
