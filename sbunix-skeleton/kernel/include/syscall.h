@@ -64,6 +64,7 @@
 /* Signal */
 #define SYS_rt_sigaction   134
 #define SYS_rt_sigprocmask 135
+#define SYS_sigaltstack 132
 #define SYS_rt_sigreturn   139
 
 /* Time */

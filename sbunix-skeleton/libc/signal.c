@@ -94,3 +94,7 @@ void (*signal(int signum, void (*handler)(int)))(int) {
         return SIG_ERR;
     return old.sa_handler;
 }
+
+int sigaltstack(const stack_t *ss, stack_t *old_ss) {
+    return (int)__syscall_ret(syscall(SYS_sigaltstack, ss, old_ss));
+}

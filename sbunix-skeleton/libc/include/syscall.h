@@ -42,6 +42,7 @@
 #define SYS_kill        129
 #define SYS_rt_sigaction  134
 #define SYS_rt_sigprocmask 135
+#define SYS_sigaltstack 132
 
 /* Time */
 #define SYS_nanosleep   101

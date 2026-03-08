@@ -110,4 +110,18 @@ int sigismember(const sigset_t *set, int signum);
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 
+/* Alternate signal stack */
+#define SS_ONSTACK  1
+#define SS_DISABLE  2
+#define MINSIGSTKSZ 2048
+#define SIGSTKSZ    8192
+
+typedef struct {
+    void   *ss_sp;
+    int     ss_flags;
+    size_t  ss_size;
+} stack_t;
+
+int sigaltstack(const stack_t *ss, stack_t *old_ss);
+
 #endif /* _SIGNAL_H */

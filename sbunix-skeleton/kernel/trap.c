@@ -736,6 +736,17 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* User handler: save trapframe on user stack, redirect execution */
     uint64_t sp = tf->sp;
 
+    /* Use alternate signal stack if SA_ONSTACK and alt stack is configured */
+    if ((sa[signum].flags & 0x08000000) && /* SA_ONSTACK */
+        !(p->ss_flags & 2) &&              /* not SS_DISABLE */
+        p->ss_sp != 0 && p->ss_size != 0) {
+        /* Check if already on alt stack */
+        if (sp < p->ss_sp || sp >= p->ss_sp + p->ss_size) {
+            sp = p->ss_sp + p->ss_size;
+            p->ss_flags |= 1; /* SS_ONSTACK */
+        }
+    }
+
     /* Push original trapframe onto user stack */
     sp -= sizeof(struct trapframe);
     sp &= ~15UL; /* 16-byte align */
@@ -2327,6 +2338,38 @@ static long sys_tgkill_handler(struct trapframe *tf) {
     }
 }
 
+static long sys_sigaltstack_handler(struct trapframe *tf) {
+    uint64_t new_addr = tf->a0;
+    uint64_t old_addr = tf->a1;
+
+    /* stack_t layout: { uint64_t ss_sp; int32_t ss_flags; int32_t _pad; uint64_t ss_size; } = 24 bytes */
+    if (old_addr != 0) {
+        uint8_t kold[24];
+        memset(kold, 0, sizeof(kold));
+        *(uint64_t *)(kold + 0) = current_proc->ss_sp;
+        *(int32_t *)(kold + 8) = (int32_t)current_proc->ss_flags;
+        *(uint64_t *)(kold + 16) = current_proc->ss_size;
+        if (copyout(current_proc->pagetable, old_addr, kold, 24) < 0)
+            return (long)-14;
+    }
+
+    if (new_addr != 0) {
+        /* Cannot change alt stack while executing on it */
+        if (current_proc->ss_flags & 1) /* SS_ONSTACK */
+            return (long)-1; /* EPERM */
+
+        uint8_t knew[24];
+        if (copyin(current_proc->pagetable, knew, new_addr, 24) < 0)
+            return (long)-14;
+
+        current_proc->ss_sp = *(uint64_t *)(knew + 0);
+        current_proc->ss_flags = (int)(*(int32_t *)(knew + 8));
+        current_proc->ss_size = *(uint64_t *)(knew + 16);
+    }
+
+    return 0;
+}
+
 /* Static storage for dynamically mounted paths */
 static char mount_path_storage[8][256];
 static int mount_path_next = 0;
@@ -2452,6 +2495,7 @@ void syscall_init(void) {
     syscall_table[SYS_ftruncate]       = sys_ftruncate_handler;
     syscall_table[SYS_tgkill]          = sys_tgkill_handler;
     syscall_table[SYS_uname]           = sys_uname_handler;
+    syscall_table[SYS_sigaltstack]     = sys_sigaltstack_handler;
     syscall_table[SYS_mount]           = sys_mount_handler;
     syscall_table[SYS_umount2]         = sys_umount2_handler;
 }
