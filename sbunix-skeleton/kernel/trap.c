@@ -1433,14 +1433,14 @@ pipe_eof:
             if (whence == 0)       /* SEEK_SET */ new_off = (int64_t)offset;
             else if (whence == 1)  /* SEEK_CUR */ new_off = cur + (int64_t)offset;
             else if (whence == 2)  /* SEEK_END */ {
-                /* Need file size: try stat if available */
-                if (f->ops && f->ops->stat) {
-                    /* We don't easily have the path. For tarfs, offset is clamped
-                     * during read anyway. Just set to offset (treat as 0+offset for end). */
-                    new_off = (int64_t)offset; /* SEEK_END without size info is limited */
-                } else {
-                    new_off = (int64_t)offset;
+                /* Get file size via fstat */
+                int64_t file_size = 0;
+                if (f->ops && f->ops->fstat) {
+                    uint8_t stbuf[128];
+                    if (f->ops->fstat(f->private, stbuf) == 0)
+                        memcpy(&file_size, stbuf + 48, 8); /* st_size */
                 }
+                new_off = file_size + (int64_t)offset;
             }
             else { tf->a0 = (uint64_t)-1; goto syscall_done; }
             if (new_off < 0) new_off = 0;
