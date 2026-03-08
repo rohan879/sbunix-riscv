@@ -92,6 +92,7 @@ struct proc {
   char name[16];               // Process name (debugging)
   int waiting_for_uart;        // 1 if sleeping for UART input; 2 if timed sleep
   uint64_t sleep_until;        // for timed sleep: wake when ticks >= this value
+  unsigned long alarm_ticks;   // tick count when alarm fires (0 = no alarm)
   int exit_status;             // exit status (for wait4)
   char cwd[256];               // current working directory
   struct open_file *ofile[NOFILE]; // open file descriptors (VFS)

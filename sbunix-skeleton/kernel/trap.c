@@ -253,6 +253,21 @@ static void handle_timer_interrupt(void) {
             p->state = RUNNABLE;
         }
     }
+    /* Check for expired alarms and deliver SIGALRM */
+    for (struct proc *p = proc; p < &proc[64]; p++) {
+        if (p->state != UNUSED && p->state != ZOMBIE &&
+            p->alarm_ticks > 0 && ticks >= p->alarm_ticks) {
+            p->alarm_ticks = 0;  /* one-shot */
+            p->sigpending |= (1UL << 14);  /* SIGALRM = 14 */
+            if (p->state == SLEEPING)
+                p->state = RUNNABLE;
+        }
+    }
+    /* Preempt current process on timer tick (round-robin) */
+    if (current_proc && current_proc->state == RUNNING) {
+        current_proc->state = RUNNABLE;
+        swtch(&current_proc->context, &scheduler_context);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1708,6 +1723,19 @@ pipe_eof:
 
     } else if (sysnum == SYS_umask) {
         tf->a0 = 0022; /* return old umask, always 022 */
+
+    } else if (sysnum == SYS_alarm) {
+        /* alarm(unsigned int seconds) — schedule SIGALRM after `seconds`.
+         * Returns the number of seconds remaining on any previous alarm. */
+        unsigned long seconds = tf->a0;
+        unsigned long remaining = 0;
+        if (current_proc->alarm_ticks > 0 && current_proc->alarm_ticks > ticks)
+            remaining = current_proc->alarm_ticks - ticks;
+        if (seconds == 0)
+            current_proc->alarm_ticks = 0; /* cancel pending alarm */
+        else
+            current_proc->alarm_ticks = ticks + seconds;
+        tf->a0 = remaining;
 
     } else {
         printk("Unknown syscall %ld at epc 0x%lx\n", sysnum, tf->epc - size);

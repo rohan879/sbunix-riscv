@@ -180,3 +180,7 @@ int tcsetpgrp(int fd, pid_t pgrp) {
     (void)fd; (void)pgrp;
     return 0;
 }
+
+unsigned int alarm(unsigned int seconds) {
+    return (unsigned int)syscall(SYS_alarm, seconds);
+}

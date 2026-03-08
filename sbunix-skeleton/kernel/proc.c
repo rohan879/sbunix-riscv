@@ -119,6 +119,7 @@ found:
   memset(p->sigactions, 0, sizeof(p->sigactions));
   p->sigmask = 0;
   p->sigpending = 0;
+  p->alarm_ticks = 0;
 
   return p;
 }

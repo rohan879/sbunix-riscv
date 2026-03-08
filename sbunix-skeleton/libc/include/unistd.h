@@ -52,6 +52,7 @@ int     access(const char *path, int mode);
 /* Time */
 unsigned int sleep(unsigned int seconds);
 int          usleep(unsigned int usecs);
+unsigned int alarm(unsigned int seconds);
 
 /* Miscellaneous */
 uid_t   getuid(void);

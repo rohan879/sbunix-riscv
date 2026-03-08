@@ -51,6 +51,7 @@
 #define SYS_mprotect    226
 
 /* Custom / teaching-OS extensions */
+#define SYS_alarm       200   /* alarm(seconds) — one-shot SIGALRM */
 #define SYS_ps          500   /* snapshot process table */
 
 /* I/O control */
