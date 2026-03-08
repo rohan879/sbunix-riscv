@@ -84,6 +84,12 @@
 /* Random */
 #define SYS_getrandom   278
 
+/* Additional syscalls */
+#define SYS_ftruncate   46
+#define SYS_tgkill      131
+#define SYS_rt_sigreturn 139
+#define SYS_madvise     233
+
 /* Flags & constants (kept here for backward compatibility) */
 #define O_RDONLY  0
 #define O_WRONLY  1

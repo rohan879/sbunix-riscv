@@ -172,27 +172,50 @@ int isatty(int fd) {
 }
 
 pid_t setsid(void) {
-    /* No kernel support yet -- return current PID as stub */
-    return getpid();
+    return (pid_t)__syscall_ret(syscall(SYS_setsid));
 }
 
 pid_t getpgrp(void) {
-    return getpid();
+    return (pid_t)syscall(SYS_getpgid, 0);
 }
 
 int setpgid(pid_t pid, pid_t pgid) {
-    (void)pid; (void)pgid;
-    return 0;
+    return (int)__syscall_ret(syscall(SYS_setpgid, pid, pgid));
 }
 
 pid_t tcgetpgrp(int fd) {
-    (void)fd;
-    return getpid();
+    pid_t pgrp;
+    int ret = ioctl(fd, 0x540F, &pgrp); /* TIOCGPGRP */
+    if (ret < 0) return (pid_t)-1;
+    return pgrp;
 }
 
 int tcsetpgrp(int fd, pid_t pgrp) {
-    (void)fd; (void)pgrp;
-    return 0;
+    return ioctl(fd, 0x5410, &pgrp); /* TIOCSPGRP */
+}
+
+pid_t getpgid(pid_t pid) {
+    return (pid_t)__syscall_ret(syscall(SYS_getpgid, pid));
+}
+
+pid_t getsid(pid_t pid) {
+    return (pid_t)__syscall_ret(syscall(SYS_getsid, pid));
+}
+
+int ftruncate(int fd, off_t length) {
+    return (int)__syscall_ret(syscall(SYS_ftruncate, fd, length));
+}
+
+uid_t geteuid(void) {
+    return (uid_t)syscall(SYS_geteuid);
+}
+
+gid_t getegid(void) {
+    return (gid_t)syscall(SYS_getegid);
+}
+
+pid_t wait(int *status) {
+    return waitpid(-1, status, 0);
 }
 
 unsigned int alarm(unsigned int seconds) {

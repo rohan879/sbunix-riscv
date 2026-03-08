@@ -5,6 +5,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <unistd.h>
 
 /* -----------------------------------------------------------------------
  * String-to-number conversions
@@ -263,10 +265,10 @@ void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
 
 /*
  * abort() — terminate the process abnormally.
- * On SBUnix there is no SIGABRT delivery; just exit with status 134.
  */
 void abort(void) {
-    exit(134);
+    raise(SIGABRT);
+    _exit(134);
 }
 
 /*
