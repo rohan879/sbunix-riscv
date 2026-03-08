@@ -1935,6 +1935,127 @@ pipe_eof:
     } else if (sysnum == SYS_umask) {
         tf->a0 = 0022; /* return old umask, always 022 */
 
+    } else if (sysnum == SYS_geteuid) {
+        tf->a0 = 0; /* root */
+
+    } else if (sysnum == SYS_getegid) {
+        tf->a0 = 0; /* root */
+
+    } else if (sysnum == SYS_set_tid_address) {
+        tf->a0 = (uint64_t)current_proc->pid;
+
+    } else if (sysnum == SYS_readlinkat) {
+        tf->a0 = (uint64_t)-2; /* -ENOENT: no symlinks */
+
+    } else if (sysnum == SYS_writev) {
+        /* writev(int fd, const struct iovec *iov, int iovcnt) */
+        int fd = (int)tf->a0;
+        struct { uint64_t base; uint64_t len; } *iov = (void *)tf->a1;
+        int iovcnt = (int)tf->a2;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+        if (!f || iovcnt < 0) {
+            tf->a0 = (uint64_t)-9; /* -EBADF */
+        } else {
+            int64_t total = 0;
+            for (int i = 0; i < iovcnt; i++) {
+                char *base = (char *)iov[i].base;
+                uint64_t len = iov[i].len;
+                if (len == 0) continue;
+                if (f->is_pipe) {
+                    int pid = f->pipe_id;
+                    if (pid < 0 || !f->pipe_write) { total = -9; break; }
+                    for (uint64_t j = 0; j < len; j++) {
+                        while (pipe_avail(pid) >= PIPE_BUF) {
+                            if (!pipes[pid].read_open) break;
+                            current_proc->state = SLEEPING;
+                            swtch(&current_proc->context, &scheduler_context);
+                        }
+                        if (!pipes[pid].read_open) break;
+                        pipes[pid].buf[pipes[pid].wpos % PIPE_BUF] = base[j];
+                        pipes[pid].wpos++;
+                    }
+                    total += (int64_t)len;
+                } else if (f->ops && f->ops->write) {
+                    int64_t n = f->ops->write(f->private, base, len, &f->offset);
+                    if (n < 0) { if (total == 0) total = n; break; }
+                    total += n;
+                } else {
+                    if (total == 0) total = -9;
+                    break;
+                }
+            }
+            tf->a0 = (uint64_t)total;
+        }
+
+    } else if (sysnum == SYS_readv) {
+        /* readv(int fd, const struct iovec *iov, int iovcnt) */
+        int fd = (int)tf->a0;
+        struct { uint64_t base; uint64_t len; } *iov = (void *)tf->a1;
+        int iovcnt = (int)tf->a2;
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+        if (!f || iovcnt < 0) {
+            tf->a0 = (uint64_t)-9; /* -EBADF */
+        } else {
+            int64_t total = 0;
+            for (int i = 0; i < iovcnt; i++) {
+                char *base = (char *)iov[i].base;
+                uint64_t len = iov[i].len;
+                if (len == 0) continue;
+                if (f->is_pipe) {
+                    int pid = f->pipe_id;
+                    if (pid < 0 || !f->pipe_read) { total = -9; break; }
+                    while (pipe_avail(pid) == 0 && pipes[pid].write_open)  {
+                        current_proc->state = SLEEPING;
+                        swtch(&current_proc->context, &scheduler_context);
+                    }
+                    uint64_t j;
+                    for (j = 0; j < len && pipe_avail(pid) > 0; j++) {
+                        base[j] = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
+                        pipes[pid].rpos++;
+                    }
+                    total += (int64_t)j;
+                } else if (f->ops && f->ops->read) {
+                    int64_t n = f->ops->read(f->private, base, len, &f->offset);
+                    if (n < 0) { if (total == 0) total = n; break; }
+                    total += n;
+                    if (n < (int64_t)len) break; /* short read */
+                } else {
+                    if (total == 0) total = -9;
+                    break;
+                }
+            }
+            tf->a0 = (uint64_t)total;
+        }
+
+    } else if (sysnum == SYS_prlimit64) {
+        tf->a0 = (uint64_t)-38; /* -ENOSYS */
+
+    } else if (sysnum == SYS_getrandom) {
+        /* getrandom(void *buf, size_t buflen, unsigned int flags) */
+        char *buf = (char *)tf->a0;
+        uint64_t buflen = tf->a1;
+        if (buf && buflen > 0) {
+            /* Simple PRNG seeded from RISC-V cycle counter */
+            uint64_t state = r_time();
+            for (uint64_t i = 0; i < buflen; i++) {
+                state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                buf[i] = (char)(state >> 33);
+            }
+        }
+        tf->a0 = (uint64_t)buflen;
+
+    } else if (sysnum == SYS_setpgid) {
+        tf->a0 = 0;
+
+    } else if (sysnum == SYS_setsid) {
+        tf->a0 = (uint64_t)current_proc->pid;
+
+    } else if (sysnum == SYS_getpgid) {
+        tf->a0 = (uint64_t)current_proc->pid;
+
+    } else if (sysnum == SYS_getsid) {
+        tf->a0 = (uint64_t)current_proc->pid;
+
     } else if (sysnum == SYS_alarm) {
         /* alarm(unsigned int seconds) — schedule SIGALRM after `seconds`.
          * Returns the number of seconds remaining on any previous alarm. */

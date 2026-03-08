@@ -58,14 +58,31 @@
 #define SYS_ioctl       29
 #define SYS_fcntl       25
 
-/* Process groups */
+/* I/O vectors */
+#define SYS_readv       65
+#define SYS_writev      66
+
+/* Symlinks */
+#define SYS_readlinkat  78
+
+/* Process groups / session */
+#define SYS_set_tid_address 96
 #define SYS_setpgid     154
+#define SYS_getpgid     155
+#define SYS_getsid      156
 #define SYS_setsid      157
 
 /* Misc */
 #define SYS_umask       166
 #define SYS_getuid      174
+#define SYS_geteuid     175
 #define SYS_getgid      176
+#define SYS_getegid     177
+
+/* Resource limits */
+#define SYS_prlimit64   261
+/* Random */
+#define SYS_getrandom   278
 
 /* Flags & constants (kept here for backward compatibility) */
 #define O_RDONLY  0

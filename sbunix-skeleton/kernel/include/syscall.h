@@ -43,6 +43,20 @@
 #define SYS_umask       166
 #define SYS_renameat2   276
 
+/* I/O vectors */
+#define SYS_readv       65
+#define SYS_writev      66
+
+/* Symlinks */
+#define SYS_readlinkat  78
+
+/* Process groups / session */
+#define SYS_set_tid_address 96
+#define SYS_setpgid     154
+#define SYS_getpgid     155
+#define SYS_getsid      156
+#define SYS_setsid      157
+
 /* Signal */
 #define SYS_rt_sigaction   134
 #define SYS_rt_sigprocmask 135
@@ -51,11 +65,20 @@
 /* Time */
 #define SYS_gettimeofday   169
 
+/* Credentials */
+#define SYS_geteuid     175
+#define SYS_getegid     177
+
 /* Memory */
 #define SYS_brk         214
 #define SYS_munmap      215
 #define SYS_mmap        222
 #define SYS_mprotect    226
+
+/* Resource limits */
+#define SYS_prlimit64   261
+/* Random */
+#define SYS_getrandom   278
 
 /* Custom / teaching-OS extensions */
 #define SYS_alarm       200   /* alarm(seconds) — one-shot SIGALRM */
