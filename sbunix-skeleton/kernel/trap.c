@@ -2269,6 +2269,27 @@ static long sys_tgkill_handler(struct trapframe *tf) {
     }
 }
 
+static long sys_uname_handler(struct trapframe *tf) {
+    /* struct utsname: 5 fields of 65 bytes each = 325 bytes */
+    char kbuf[325];
+    memset(kbuf, 0, sizeof(kbuf));
+
+    /* sysname */
+    memcpy(kbuf + 0, "SBUnix", 6);
+    /* nodename */
+    memcpy(kbuf + 65, "sbunix", 6);
+    /* release */
+    memcpy(kbuf + 130, "1.0.0", 5);
+    /* version */
+    memcpy(kbuf + 195, "SBUnix RISC-V64", 15);
+    /* machine */
+    memcpy(kbuf + 260, "riscv64", 7);
+
+    if (copyout(current_proc->pagetable, tf->a0, kbuf, sizeof(kbuf)) < 0)
+        return (long)-14; /* EFAULT */
+    return 0;
+}
+
 /* ---- syscall_init: populate the dispatch table ---- */
 
 void syscall_init(void) {
@@ -2330,6 +2351,7 @@ void syscall_init(void) {
     syscall_table[SYS_madvise]         = sys_madvise_handler;
     syscall_table[SYS_ftruncate]       = sys_ftruncate_handler;
     syscall_table[SYS_tgkill]          = sys_tgkill_handler;
+    syscall_table[SYS_uname]           = sys_uname_handler;
 }
 
 /* ------------------------------------------------------------------ */

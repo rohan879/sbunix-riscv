@@ -85,6 +85,7 @@
 #define SYS_ftruncate   46
 #define SYS_tgkill      131
 #define SYS_madvise     233
+#define SYS_uname       160
 
 /* Custom / teaching-OS extensions */
 #define SYS_alarm       200   /* alarm(seconds) — one-shot SIGALRM */

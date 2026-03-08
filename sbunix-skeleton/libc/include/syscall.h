@@ -90,6 +90,7 @@
 #define SYS_tgkill      131
 #define SYS_rt_sigreturn 139
 #define SYS_madvise     233
+#define SYS_uname       160
 
 /* Flags & constants (kept here for backward compatibility) */
 #define O_RDONLY  0
