@@ -199,8 +199,10 @@ void scheduler(void) {
      * kernel; we must re-enable it here or UART wakeups can never arrive. */
     w_sstatus(r_sstatus() | SSTATUS_SIE);
 
+    int found = 0;
     for(p = proc; p < &proc[64]; p++) {
       if(p->state == RUNNABLE) {
+        found = 1;
         p->state = RUNNING;
         current_proc = p;
 
@@ -240,5 +242,10 @@ void scheduler(void) {
         asm volatile("csrw sscratch, zero");
       }
     }
+
+    /* No RUNNABLE process found — halt until next interrupt (timer, UART).
+     * Interrupts are already enabled (SSTATUS_SIE set above). */
+    if (!found)
+      asm volatile("wfi");
   }
 }
