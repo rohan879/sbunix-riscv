@@ -31,7 +31,7 @@ int lstat(const char *path, struct stat *buf) {
 
 int mkdir(const char *path, mode_t mode) {
     /* SYS_mkdirat = 34 */
-    return (int)syscall(34, AT_FDCWD, path, mode);
+    return (int)__syscall_ret(syscall(34, AT_FDCWD, path, mode));
 }
 
 mode_t umask(mode_t mask) {
