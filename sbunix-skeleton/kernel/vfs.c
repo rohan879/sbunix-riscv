@@ -103,6 +103,10 @@ void vfs_init(void) {
 
   /* Register devfs at /dev first (longer prefix wins) */
   vfs_register_mount("/dev", &devfs_ops);
+  /* Register ext2 at /disk (if mounted) */
+  extern int ext2_mounted_flag(void);
+  if (ext2_mounted_flag())
+    vfs_register_mount("/disk", &ext2_ops);
   /* Register tarfs at / (root) */
   vfs_register_mount("/", &tarfs_ops);
 
