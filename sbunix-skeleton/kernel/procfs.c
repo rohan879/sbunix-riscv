@@ -17,6 +17,7 @@ enum procfs_type {
   PROCFS_PIDDIR,    /* /proc/<pid> directory */
   PROCFS_STATUS,    /* /proc/<pid>/status */
   PROCFS_CMDLINE,   /* /proc/<pid>/cmdline */
+  PROCFS_DMESG,     /* /proc/dmesg */
 };
 
 struct procfs_private {
@@ -136,6 +137,14 @@ static int procfs_open(const char *path, int flags, void **private) {
     return 0;
   }
 
+  /* /proc/dmesg */
+  if (strcmp(p, "dmesg") == 0) {
+    priv->type = PROCFS_DMESG;
+    priv->len = 0; /* will read directly from ring buffer */
+    *private = priv;
+    return 0;
+  }
+
   /* Extract PID component */
   char pidstr[16];
   int i = 0;
@@ -189,6 +198,13 @@ static int procfs_open(const char *path, int flags, void **private) {
 static int64_t procfs_read(void *private, char *buf, uint64_t count, int64_t *offset) {
   struct procfs_private *priv = (struct procfs_private *)private;
   if (!priv) return 0;
+
+  if (priv->type == PROCFS_DMESG) {
+    int off = (int)*offset;
+    int n = dmesg_read(buf, (int)count, off);
+    *offset += (int64_t)n;
+    return (int64_t)n;
+  }
 
   if (priv->type != PROCFS_STATUS && priv->type != PROCFS_CMDLINE)
     return 0;
@@ -246,6 +262,14 @@ static int procfs_stat(const char *path, uint8_t *st) {
     return 0;
   }
 
+  if (strcmp(p, "dmesg") == 0) {
+    uint32_t mode = (uint32_t)(0x8000 | 0444); /* S_IFREG | r--r--r-- */
+    uint64_t ino = 201;
+    memcpy(st + 8, &ino, 8);
+    memcpy(st + 16, &mode, 4);
+    return 0;
+  }
+
   /* Extract PID */
   char pidstr[16];
   int i = 0;
@@ -294,6 +318,13 @@ static int procfs_fstat(void *private, uint8_t *st) {
   memcpy(st + 20, &nlink, 4);
   memcpy(st + 56, &blksz, 4);
 
+  if (priv->type == PROCFS_DMESG) {
+    uint32_t mode = (uint32_t)(0x8000 | 0444);
+    uint64_t ino = 201;
+    memcpy(st + 8, &ino, 8);
+    memcpy(st + 16, &mode, 4);
+    return 0;
+  }
   if (priv->type == PROCFS_ROOT || priv->type == PROCFS_PIDDIR) {
     uint32_t mode = (uint32_t)(0x4000 | 0555);
     uint64_t ino = (priv->type == PROCFS_ROOT) ? 200 : (uint64_t)(300 + priv->pid);
@@ -345,9 +376,10 @@ static int procfs_readdir(void *private, char *ubuf, unsigned int count, int64_t
   } while(0)
 
   if (priv->type == PROCFS_ROOT) {
-    /* List: . .. <pid1> <pid2> ... */
+    /* List: . .. dmesg <pid1> <pid2> ... */
     EMIT_DIRENT(".", 200, 4);   /* DT_DIR */
     EMIT_DIRENT("..", 1, 4);    /* DT_DIR */
+    EMIT_DIRENT("dmesg", 201, 8); /* DT_REG */
 
     for (struct proc *p = proc; p < &proc[64]; p++) {
       if (p->state != UNUSED) {
