@@ -1540,13 +1540,18 @@ pipe_eof:
          * struct timespec: { uint64_t tv_sec; uint64_t tv_nsec; }
          * We sleep for tv_sec seconds (ignoring tv_nsec for simplicity).
          * One timer tick = 1 second (TIMER_FREQ = 10 MHz). */
-        uint64_t *req = (uint64_t *)tf->a0;
-        if (req && current_proc) {
-            uint64_t secs = req[0]; /* tv_sec */
-            current_proc->sleep_until     = ticks + secs;
-            current_proc->waiting_for_uart = 2;
-            current_proc->state           = SLEEPING;
-            swtch(&current_proc->context, &scheduler_context);
+        uint64_t req_uaddr = tf->a0;
+        if (req_uaddr && current_proc) {
+            pte_t *pte = walk(current_proc->pagetable, req_uaddr, 0);
+            if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                uint64_t pa = PTE2PA(*pte) + (req_uaddr & 0xFFF);
+                uint64_t *req = (uint64_t *)pa;
+                uint64_t secs = req[0]; /* tv_sec */
+                current_proc->sleep_until     = ticks + secs;
+                current_proc->waiting_for_uart = 2;
+                current_proc->state           = SLEEPING;
+                swtch(&current_proc->context, &scheduler_context);
+            }
         }
         tf->a0 = 0;
 
