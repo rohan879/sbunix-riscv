@@ -297,6 +297,9 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Libc errno handling — `__syscall_ret` applied to all error-returning syscall wrappers in unistd.c and stat.c
 - [x] nanosleep VA translation — user timespec pointer translated via walk()
 - [x] Ext2 timestamps — ext2_stat/ext2_fstat populate st_atime/st_mtime/st_ctime from on-disk inode
+- [x] getdents64 VA translation — uses kernel buffer for readdir, copies to user space page-by-page via walk()
+- [x] PCIe MMIO mappings in process page tables — exec and fork map PCIe ECAM (2MB) and MMIO BAR (1GB) so virtio-blk I/O works during syscalls
+- [x] Mount point injection in readdir — getdents64 appends synthetic DT_DIR entries for child mount points (dev, proc, disk) after filesystem readdir exhausts
 
 ## POSIX Compliance Checklist (Required Components)
 
