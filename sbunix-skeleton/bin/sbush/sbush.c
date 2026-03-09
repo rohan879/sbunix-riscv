@@ -97,6 +97,10 @@ void execute_line(char *line) {
         return;
     }
 
+    /* Function definition check */
+    if (func_handle_line(line))
+        return;
+
     if (cf_handle_line(line))
         return;
 
@@ -252,7 +256,7 @@ int main(int argc, char *argv[], char *envp[]) {
     while (1) {
         reap_zombies();
         char *ps1;
-        if (cf_active() || heredoc_active())
+        if (cf_active() || heredoc_active() || func_def_active())
             ps1 = "> ";
         else {
             ps1 = var_get("PS1");

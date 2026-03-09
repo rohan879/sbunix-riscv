@@ -172,7 +172,8 @@ int is_builtin(const char *cmd) {
             strcmp(cmd, "exit") == 0 ||
             strcmp(cmd, "jobs") == 0 ||
             strcmp(cmd, "fg") == 0 ||
-            strcmp(cmd, "bg") == 0);
+            strcmp(cmd, "bg") == 0 ||
+            strcmp(cmd, "return") == 0);
 }
 
 int run_builtin(struct command *cmd) {
@@ -293,6 +294,21 @@ int run_builtin(struct command *cmd) {
         }
         job_remove(j->pid);
         return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    }
+
+    if (strcmp(cmd->argv[0], "return") == 0) {
+        int code = 0;
+        if (cmd->argc > 1) {
+            const char *s = cmd->argv[1];
+            int neg = 0;
+            if (*s == '-') { neg = 1; s++; }
+            while (*s >= '0' && *s <= '9')
+                code = code * 10 + (*s++ - '0');
+            if (neg) code = -code;
+        }
+        last_exit_status = code;
+        func_return_flag = 1;
+        return code;
     }
 
     if (strcmp(cmd->argv[0], "bg") == 0) {

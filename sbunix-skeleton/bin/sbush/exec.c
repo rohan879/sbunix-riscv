@@ -16,6 +16,12 @@ int execute_pipeline(struct pipeline *pl) {
         return run_builtin(&pl->cmds[0]);
     }
 
+    /* single shell function — run in-process */
+    if (pl->ncmds == 1 && !pl->background && func_find(pl->cmds[0].argv[0])) {
+        return func_call(pl->cmds[0].argv[0],
+                         pl->cmds[0].argc, pl->cmds[0].argv);
+    }
+
     pid_t pids[MAX_PIPES];
     int prev_fd = -1;
     pid_t pgid = 0;  /* process group for this pipeline */

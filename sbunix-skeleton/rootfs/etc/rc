@@ -71,3 +71,14 @@ HD2_world
 EOF
 echo HD3_after
 echo === Task8 Done ===
+echo === Task9 Test ===
+greet() { echo FN1_hello_$1; }
+greet world
+add() {
+    echo FN2_$(($1 + $2))
+}
+add 3 7
+retfn() { return 42; }
+retfn
+echo FN3_$?
+echo === Task9 Done ===

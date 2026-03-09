@@ -43,6 +43,13 @@ static long arith_factor(void) {
     if (*arith_p == '!') { arith_p++; return !arith_factor(); }
     if (*arith_p == '$') {
         arith_p++;
+        if (*arith_p == '?') { arith_p++; return (long)last_exit_status; }
+        if (*arith_p == '#') { arith_p++; return (long)positional_count; }
+        if (*arith_p >= '0' && *arith_p <= '9') {
+            int idx = *arith_p - '0'; arith_p++;
+            char *val = positional_get(idx);
+            return val ? atol(val) : 0;
+        }
         char name[64];
         int i = 0;
         while (is_name_char(*arith_p) && i < 63)

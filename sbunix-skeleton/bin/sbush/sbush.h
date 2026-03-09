@@ -132,6 +132,13 @@ int  cf_active(void);
 extern int cf_break_count;
 extern int cf_continue_flag;
 
+/* func.c */
+int  func_handle_line(char *line);
+int  func_def_active(void);
+int  func_call(const char *name, int argc, char **argv);
+struct shell_func *func_find(const char *name);
+extern int func_return_flag;
+
 /* sbush.c */
 void execute_line(char *line);
 int  heredoc_active(void);
