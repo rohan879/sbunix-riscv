@@ -13,9 +13,9 @@
 #include <stdarg.h>
 
 /* Static FILE objects for stdin, stdout, stderr */
-static FILE __stdin  = { 0, 0, 0 };
-static FILE __stdout = { 1, 0, 0 };
-static FILE __stderr = { 2, 0, 0 };
+static FILE __stdin  = { .fd = 0, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0 };
+static FILE __stdout = { .fd = 1, .eof = 0, .error = 0, .buf_mode = _IOLBF, .wpos = 0 };
+static FILE __stderr = { .fd = 2, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0 };
 
 FILE *stdin  = &__stdin;
 FILE *stdout = &__stdout;
