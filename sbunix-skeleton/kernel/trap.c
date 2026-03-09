@@ -452,8 +452,7 @@ static pid_t sys_clone(void) {
                      PTE_R | PTE_W | PTE_X) < 0) goto bad;
         if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000,
                      PTE_R | PTE_W) < 0) goto bad;
-        if (mappages(new_pt, 0x101000, PAGE_SIZE, 0x101000,
-                     PTE_R | PTE_W) < 0) goto bad;
+        /* RTC (0x101000) NOT mapped — only used during kernel boot */
         if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000,
                      PTE_R | PTE_W) < 0) goto bad;
         if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000,
