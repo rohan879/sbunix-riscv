@@ -50,13 +50,47 @@ static void execute_heredoc(void) {
     waitpid(wpid, NULL, 0);
 }
 
-/* Scan line for unquoted << and enter heredoc mode. Returns 1 if found. */
+/* Scan line for unquoted << and enter heredoc mode. Returns 1 if found.
+ * Skips over $((...)) and $(...) so that << inside arithmetic or command
+ * substitution is not mistaken for a heredoc operator. */
 static int check_heredoc(char *line) {
     char *p = line;
     int in_sq = 0, in_dq = 0;
     while (*p) {
         if (*p == '\'' && !in_dq) { in_sq = !in_sq; p++; continue; }
         if (*p == '"'  && !in_sq) { in_dq = !in_dq; p++; continue; }
+        if (!in_sq) {
+            /* Skip over $((…)) arithmetic expansion */
+            if (*p == '$' && p[1] == '(' && p[2] == '(') {
+                p += 3;
+                int depth = 1;
+                while (*p && depth > 0) {
+                    if (p[0] == '(' && p[1] == '(') { depth++; p += 2; }
+                    else if (p[0] == ')' && p[1] == ')') { depth--; p += 2; }
+                    else p++;
+                }
+                continue;
+            }
+            /* Skip over $(…) command substitution */
+            if (*p == '$' && p[1] == '(') {
+                p += 2;
+                int depth = 1;
+                while (*p && depth > 0) {
+                    if (*p == '(') depth++;
+                    else if (*p == ')') depth--;
+                    if (depth > 0) p++;
+                }
+                if (*p == ')') p++;
+                continue;
+            }
+            /* Skip over `…` backtick command substitution */
+            if (*p == '`') {
+                p++;
+                while (*p && *p != '`') p++;
+                if (*p == '`') p++;
+                continue;
+            }
+        }
         if (!in_sq && !in_dq && *p == '<' && *(p+1) == '<' && *(p+2) != '<') {
             char *hd_start = p;
             p += 2;

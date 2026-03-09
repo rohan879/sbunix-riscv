@@ -63,6 +63,8 @@ echo AR6_$((x + 5))
 echo AR7_$(( (2 + 3) * 4 ))
 echo AR8_$((10 == 10))
 echo AR9_$((10 != 5))
+echo AR10_$((1 << 4))
+echo AR11_$((32 >> 2))
 echo === Task7 Done ===
 echo === Task8 Test ===
 cat <<EOF
