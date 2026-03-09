@@ -594,19 +594,40 @@ int glob_match(const char *pat, const char *name) {
             while (*pat == '*') pat++;
             if (!*pat) return 1;
             while (*name) {
-                if (glob_match(pat, name))
-                    return 1;
+                if (glob_match(pat, name)) return 1;
                 name++;
             }
             return 0;
         } else if (*pat == '?') {
             if (!*name) return 0;
+            pat++; name++;
+        } else if (*pat == '[') {
+            if (!*name) return 0;
             pat++;
+            int negate = 0;
+            if (*pat == '!' || *pat == '^') { negate = 1; pat++; }
+            int matched = 0;
+            int first = 1;
+            while (*pat && (*pat != ']' || first)) {
+                first = 0;
+                char lo = *pat++;
+                if (*pat == '-' && pat[1] && pat[1] != ']') {
+                    pat++;
+                    char hi = *pat++;
+                    if ((unsigned char)*name >= (unsigned char)lo &&
+                        (unsigned char)*name <= (unsigned char)hi)
+                        matched = 1;
+                } else {
+                    if (*name == lo) matched = 1;
+                }
+            }
+            if (*pat == ']') pat++;
+            if (negate) matched = !matched;
+            if (!matched) return 0;
             name++;
         } else {
             if (*pat != *name) return 0;
-            pat++;
-            name++;
+            pat++; name++;
         }
     }
     return *name == '\0';
@@ -633,7 +654,7 @@ static int str_ptr_cmp(const void *a, const void *b) {
 }
 
 static void glob_expand_token(const char *token, struct command *cmd) {
-    if (!strchr(token, '*') && !strchr(token, '?')) {
+    if (!strchr(token, '*') && !strchr(token, '?') && !strchr(token, '[')) {
         if (cmd->argc < MAX_ARGS - 1)
             cmd->argv[cmd->argc++] = (char *)token;
         return;
@@ -706,7 +727,7 @@ static void glob_expand_token(const char *token, struct command *cmd) {
 static void glob_expand_cmd(struct command *cmd) {
     int has_glob = 0;
     for (int i = 0; i < cmd->argc; i++) {
-        if (strchr(cmd->argv[i], '*') || strchr(cmd->argv[i], '?')) {
+        if (strchr(cmd->argv[i], '*') || strchr(cmd->argv[i], '?') || strchr(cmd->argv[i], '[')) {
             has_glob = 1;
             break;
         }
