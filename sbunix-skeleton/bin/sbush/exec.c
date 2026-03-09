@@ -12,10 +12,54 @@ int execute_pipeline(struct pipeline *pl) {
         return 0;
 
     /* single builtin — run in-process (unless it's in a pipe or has redirections) */
-    if (pl->ncmds == 1 && !pl->background && is_builtin(pl->cmds[0].argv[0]) &&
-        !pl->cmds[0].redir_in && !pl->cmds[0].redir_out &&
-        !pl->cmds[0].redir_append && !pl->cmds[0].redir_err) {
-        return run_builtin(&pl->cmds[0]);
+    if (pl->ncmds == 1 && !pl->background && is_builtin(pl->cmds[0].argv[0])) {
+        struct command *c = &pl->cmds[0];
+        int has_redir = c->redir_in || c->redir_out ||
+                        c->redir_append || c->redir_err;
+        if (strcmp(c->argv[0], "exec") == 0 && has_redir) {
+            /* exec with redirections: apply redirections to the shell itself */
+            if (c->redir_in) {
+                int fd = open(c->redir_in, O_RDONLY);
+                if (fd < 0) {
+                    dprintf(2, "sbush: %s: No such file or directory\n", c->redir_in);
+                    return 1;
+                }
+                dup2(fd, STDIN_FILENO);
+                close(fd);
+            }
+            if (c->redir_out) {
+                int fd = open(c->redir_out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd < 0) {
+                    dprintf(2, "sbush: %s: Cannot create file\n", c->redir_out);
+                    return 1;
+                }
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+            }
+            if (c->redir_append) {
+                int fd = open(c->redir_append, O_WRONLY | O_CREAT | O_APPEND, 0644);
+                if (fd < 0) {
+                    dprintf(2, "sbush: %s: Cannot open file\n", c->redir_append);
+                    return 1;
+                }
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+            }
+            if (c->redir_err) {
+                int fd = open(c->redir_err, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd < 0) {
+                    dprintf(2, "sbush: %s: Cannot create file\n", c->redir_err);
+                    return 1;
+                }
+                dup2(fd, STDERR_FILENO);
+                close(fd);
+            }
+            if (c->redir_err_to_out)
+                dup2(STDOUT_FILENO, STDERR_FILENO);
+            return run_builtin(c);
+        }
+        if (!has_redir)
+            return run_builtin(c);
     }
 
     /* single shell function — run in-process (unless it has redirections) */

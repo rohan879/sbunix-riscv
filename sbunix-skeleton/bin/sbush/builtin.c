@@ -229,7 +229,8 @@ int is_builtin(const char *cmd) {
             strcmp(cmd, "clear") == 0 ||
             strcmp(cmd, "which") == 0 ||
             strcmp(cmd, "alias") == 0 ||
-            strcmp(cmd, "unalias") == 0);
+            strcmp(cmd, "unalias") == 0 ||
+            strcmp(cmd, "exec") == 0);
 }
 
 /* -----------------------------------------------------------------------
@@ -563,6 +564,19 @@ int run_builtin(struct command *cmd) {
 
     if (strcmp(cmd->argv[0], "which") == 0)
         return builtin_which(cmd);
+
+    if (strcmp(cmd->argv[0], "exec") == 0) {
+        if (cmd->argc == 1) return 0;
+        char *path = resolve_path(cmd->argv[1]);
+        if (!path) {
+            dprintf(2, "sbush: exec: %s: command not found\n", cmd->argv[1]);
+            return 127;
+        }
+        char **envp = build_environ();
+        execve(path, cmd->argv + 1, envp);
+        dprintf(2, "sbush: exec: %s: exec failed\n", cmd->argv[1]);
+        return 126;
+    }
 
     if (strcmp(cmd->argv[0], "alias") == 0) {
         if (cmd->argc == 1) {
