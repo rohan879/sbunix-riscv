@@ -543,8 +543,13 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
             if (p->state == ZOMBIE) {
                 pid_t pid = p->pid;
                 if (wstatus) {
-                    /* encode exit status as Linux wait status */
-                    *wstatus = (p->exit_status & 0xff) << 8;
+                    if (p->killed_by_signal) {
+                        /* Signal kill: low 7 bits = signal number */
+                        *wstatus = p->killed_by_signal & 0x7f;
+                    } else {
+                        /* Normal exit: exit code in upper byte, low byte = 0 */
+                        *wstatus = (p->exit_status & 0xff) << 8;
+                    }
                 }
                 /* free child resources */
                 p->state = UNUSED;
@@ -717,6 +722,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
             return;
         /* Default: terminate process */
         p->exit_status = 128 + signum;
+        p->killed_by_signal = signum;
         cleanup_proc_resources(p);
         p->state = ZOMBIE;
         /* Notify parent via SIGCHLD and wake it */
@@ -807,8 +813,18 @@ static long sys_write_handler(struct trapframe *tf) {
 
     if (f && f->is_pipe && f->pipe_write) {
         int pid = f->pipe_id;
+        /* Check for broken pipe before writing */
+        if (pipes[pid].read_open <= 0) {
+            current_proc->sigpending |= (1UL << SIGPIPE);
+            return (long)-32; /* -EPIPE */
+        }
         size_t written = 0;
         while (written < len) {
+            /* Re-check after sleeping: reader may have closed */
+            if (pipes[pid].read_open <= 0) {
+                current_proc->sigpending |= (1UL << SIGPIPE);
+                return (written > 0) ? (long)written : (long)-32;
+            }
             int avail = PIPE_BUF - pipe_avail(pid);
             if (avail <= 0) {
                 current_proc->state = SLEEPING;
@@ -1286,6 +1302,7 @@ static long sys_kill_handler(struct trapframe *tf) {
     } else {
         if (sig == 9) {
             target->exit_status = 128 + 9;
+            target->killed_by_signal = 9;
             cleanup_proc_resources(target);
             target->state = ZOMBIE;
             if (target->parent) {
@@ -1515,6 +1532,7 @@ static long sys_exit_handler(struct trapframe *tf) {
     int status = (int)tf->a0;
     if (current_proc) {
         current_proc->exit_status = status;
+        current_proc->killed_by_signal = 0;
         cleanup_proc_resources(current_proc);
         if (current_proc->pid == 1) {
             printk("\nSystem halted (init exited with status %d).\n", status);
@@ -2087,6 +2105,11 @@ static long sys_writev_handler(struct trapframe *tf) {
             if (f->is_pipe) {
                 int pid = f->pipe_id;
                 if (pid < 0 || !f->pipe_write) { total = -9; break; }
+                if (pipes[pid].read_open <= 0) {
+                    current_proc->sigpending |= (1UL << SIGPIPE);
+                    if (total == 0) total = -32; /* -EPIPE */
+                    goto writev_out;
+                }
                 char kchunk[512];
                 uint64_t done = 0;
                 while (done < len) {
@@ -2102,7 +2125,11 @@ static long sys_writev_handler(struct trapframe *tf) {
                             current_proc->state = SLEEPING;
                             swtch(&current_proc->context, &scheduler_context);
                         }
-                        if (!pipes[pid].read_open) break;
+                        if (!pipes[pid].read_open) {
+                            current_proc->sigpending |= (1UL << SIGPIPE);
+                            if (total == 0) total = -32;
+                            goto writev_out;
+                        }
                         pipes[pid].buf[pipes[pid].wpos % PIPE_BUF] = kchunk[j];
                         pipes[pid].wpos++;
                     }
@@ -2867,7 +2894,7 @@ void trap_handler(struct trapframe *tf) {
 
             /* --- Stack auto-grow (any page fault near current stack) --- */
             if (current_proc && current_proc->stack_top > 0 &&
-                stval >= current_proc->stack_bottom - 16 * PAGE_SIZE &&
+                stval >= current_proc->stack_bottom - 256 * PAGE_SIZE &&
                 stval < current_proc->stack_top) {
                 uint64_t va = PGROUNDDOWN(stval);
                 int grew = 0;

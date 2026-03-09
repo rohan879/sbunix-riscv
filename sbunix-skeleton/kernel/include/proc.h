@@ -98,6 +98,7 @@ struct shared_sigactions {
 
 /* Signal constants */
 #define SIGSEGV   11
+#define SIGPIPE   13
 #define SIGCHLD   17
 #define SIGURG    23
 #define SIGWINCH  28
@@ -119,6 +120,7 @@ struct proc {
   uint64_t sleep_until;        // for timed sleep: wake when ticks >= this value
   unsigned long alarm_ticks;   // tick count when alarm fires (0 = no alarm)
   int exit_status;             // exit status (for wait4)
+  int killed_by_signal;        // signal number if killed by signal, 0 otherwise
   char cwd[256];               // current working directory
   unsigned int umask_val;       // file creation mask
   struct open_file *ofile[NOFILE]; // open file descriptors (VFS)

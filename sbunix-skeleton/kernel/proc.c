@@ -147,6 +147,7 @@ found:
   p->sigmask = 0;
   p->sigpending = 0;
   p->alarm_ticks = 0;
+  p->killed_by_signal = 0;
 
   // Initialize clone/thread sharing fields
   p->clone_flags = 0;
