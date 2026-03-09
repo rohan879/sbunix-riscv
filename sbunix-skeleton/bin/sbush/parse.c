@@ -480,6 +480,22 @@ static void expand_vars(char *line) {
             bt_cmd[bi] = '\0';
             if (*src == '`') src++;
             dst = run_cmdsub(bt_cmd, dst, end);
+        } else if (*src == '~' && !in_sq) {
+            int at_word_start = (src == line) ||
+                                (src > line && (src[-1] == ' '  || src[-1] == '\t' ||
+                                                src[-1] == '='  || src[-1] == ':'));
+            if (at_word_start && (src[1] == '\0' || src[1] == '/' ||
+                                   src[1] == ' '  || src[1] == '\t' ||
+                                   src[1] == ':'  || src[1] == '\n')) {
+                char *home = var_get("HOME");
+                if (home) {
+                    while (*home && dst < end)
+                        *dst++ = *home++;
+                }
+                src++;
+            } else {
+                *dst++ = *src++;
+            }
         } else {
             *dst++ = *src++;
         }
