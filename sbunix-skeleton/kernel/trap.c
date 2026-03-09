@@ -258,7 +258,7 @@ static void handle_timer_interrupt(void) {
         if (p->state != UNUSED && p->state != ZOMBIE &&
             p->alarm_ticks > 0 && ticks >= p->alarm_ticks) {
             p->alarm_ticks = 0;  /* one-shot */
-            p->sigpending |= (1UL << 14);  /* SIGALRM = 14 */
+            p->sigpending |= signal_bit(14);  /* SIGALRM = 14 */
             if (p->state == SLEEPING)
                 p->state = RUNNABLE;
         }
@@ -703,14 +703,14 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
 
     int signum = 0;
     for (int i = 1; i < 32; i++) {
-        if (deliverable & (1UL << i)) {
+        if (deliverable & signal_bit(i)) {
             signum = i;
             break;
         }
     }
 
     /* Clear from pending */
-    p->sigpending &= ~(1UL << signum);
+    p->sigpending &= ~signal_bit(signum);
 
     struct kern_sigaction *sa = proc_sigactions(p);
     uint64_t handler = sa[signum].handler;
@@ -727,7 +727,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         p->state = ZOMBIE;
         /* Notify parent via SIGCHLD and wake it */
         if (p->parent) {
-            p->parent->sigpending |= (1UL << SIGCHLD);
+            p->parent->sigpending |= signal_bit(SIGCHLD);
             if (p->parent->state == SLEEPING)
                 p->parent->state = RUNNABLE;
         }
@@ -770,7 +770,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* Block this signal during handler execution */
     p->sigmask |= sa[signum].mask;
     if (!(sa[signum].flags & 0x40000000)) /* SA_NODEFER */
-        p->sigmask |= (1UL << signum);
+        p->sigmask |= signal_bit(signum);
 }
 
 /* ------------------------------------------------------------------ */
@@ -815,14 +815,14 @@ static long sys_write_handler(struct trapframe *tf) {
         int pid = f->pipe_id;
         /* Check for broken pipe before writing */
         if (pipes[pid].read_open <= 0) {
-            current_proc->sigpending |= (1UL << SIGPIPE);
+            current_proc->sigpending |= signal_bit(SIGPIPE);
             return (long)-32; /* -EPIPE */
         }
         size_t written = 0;
         while (written < len) {
             /* Re-check after sleeping: reader may have closed */
             if (pipes[pid].read_open <= 0) {
-                current_proc->sigpending |= (1UL << SIGPIPE);
+                current_proc->sigpending |= signal_bit(SIGPIPE);
                 return (written > 0) ? (long)written : (long)-32;
             }
             int avail = PIPE_BUF - pipe_avail(pid);
@@ -1391,12 +1391,12 @@ static long sys_kill_handler(struct trapframe *tf) {
             cleanup_proc_resources(target);
             target->state = ZOMBIE;
             if (target->parent) {
-                target->parent->sigpending |= (1UL << SIGCHLD);
+                target->parent->sigpending |= signal_bit(SIGCHLD);
                 if (target->parent->state == SLEEPING)
                     target->parent->state = RUNNABLE;
             }
-        } else if (sig > 0 && sig < 32) {
-            target->sigpending |= (1UL << sig);
+        } else if (signal_is_valid(sig)) {
+            target->sigpending |= signal_bit(sig);
             if (target->state == SLEEPING)
                 target->state = RUNNABLE;
         }
@@ -1629,7 +1629,7 @@ static long sys_exit_handler(struct trapframe *tf) {
         }
         current_proc->state = ZOMBIE;
         if (current_proc->parent) {
-            current_proc->parent->sigpending |= (1UL << SIGCHLD);
+            current_proc->parent->sigpending |= signal_bit(SIGCHLD);
             if (current_proc->parent->state == SLEEPING)
                 current_proc->parent->state = RUNNABLE;
         }
@@ -2191,7 +2191,7 @@ static long sys_writev_handler(struct trapframe *tf) {
                 int pid = f->pipe_id;
                 if (pid < 0 || !f->pipe_write) { total = -9; break; }
                 if (pipes[pid].read_open <= 0) {
-                    current_proc->sigpending |= (1UL << SIGPIPE);
+                    current_proc->sigpending |= signal_bit(SIGPIPE);
                     if (total == 0) total = -32; /* -EPIPE */
                     goto writev_out;
                 }
@@ -2211,7 +2211,7 @@ static long sys_writev_handler(struct trapframe *tf) {
                             swtch(&current_proc->context, &scheduler_context);
                         }
                         if (!pipes[pid].read_open) {
-                            current_proc->sigpending |= (1UL << SIGPIPE);
+                            current_proc->sigpending |= signal_bit(SIGPIPE);
                             if (total == 0) total = -32;
                             goto writev_out;
                         }
@@ -2455,11 +2455,11 @@ static long sys_tgkill_handler(struct trapframe *tf) {
     int sig = (int)tf->a2;
     if (sig == 0) {
         return (long)0;
-    } else {
+    } else if (signal_is_valid(sig)) {
         long result = (long)-3;
         for (struct proc *p = proc; p < &proc[64]; p++) {
             if (p->pid == tid && p->state != UNUSED) {
-                p->sigpending |= (1UL << sig);
+                p->sigpending |= signal_bit(sig);
                 if (p->state == SLEEPING)
                     p->state = RUNNABLE;
                 result = 0;
@@ -2467,6 +2467,8 @@ static long sys_tgkill_handler(struct trapframe *tf) {
             }
         }
         return result;
+    } else {
+        return (long)-22;
     }
 }
 
@@ -3035,7 +3037,7 @@ pagefault_kill:
             printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
                    current_proc ? current_proc->pid : -1, tf->epc, stval, cause);
             if (current_proc) {
-                current_proc->sigpending |= (1UL << SIGSEGV);
+                current_proc->sigpending |= signal_bit(SIGSEGV);
                 deliver_signal(tf, current_proc);
                 /* If deliver_signal returned (handler caught it), resume */
                 return;

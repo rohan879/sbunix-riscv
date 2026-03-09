@@ -113,7 +113,7 @@ static void tty_signal_fg(int sig) {
         /* If a foreground group is set, only signal that group */
         if (target_pgid > 0 && p->pgid != target_pgid)
             continue;
-        p->sigpending |= (1UL << sig);
+        p->sigpending |= signal_bit(sig);
         if (p->state == SLEEPING)
             p->state = RUNNABLE;
     }

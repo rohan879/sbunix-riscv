@@ -154,6 +154,14 @@ static inline struct kern_sigaction *proc_sigactions(struct proc *p) {
   return p->shared_sa ? p->shared_sa->actions : p->sigactions;
 }
 
+static inline uint64_t signal_bit(int signum) {
+  return 1UL << (signum - 1);
+}
+
+static inline int signal_is_valid(int signum) {
+  return signum > 0 && signum < 32;
+}
+
 void            procinit(void);
 struct proc*    allocproc(void);
 void            userinit(void);
