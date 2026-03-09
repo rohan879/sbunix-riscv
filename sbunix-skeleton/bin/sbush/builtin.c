@@ -180,7 +180,89 @@ int is_builtin(const char *cmd) {
             strcmp(cmd, "read") == 0 ||
             strcmp(cmd, "trap") == 0 ||
             strcmp(cmd, "break") == 0 ||
-            strcmp(cmd, "continue") == 0);
+            strcmp(cmd, "continue") == 0 ||
+            strcmp(cmd, "clear") == 0 ||
+            strcmp(cmd, "which") == 0);
+}
+
+/* -----------------------------------------------------------------------
+ * clear builtin — clear screen via ANSI escape
+ * ---------------------------------------------------------------------- */
+static int builtin_clear(struct command *cmd) {
+    (void)cmd;
+    write(STDOUT_FILENO, "\033[2J\033[H", 7);
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * which builtin — locate a command
+ * ---------------------------------------------------------------------- */
+static int builtin_which(struct command *cmd) {
+    if (cmd->argc < 2) {
+        dprintf(2, "sbush: which: argument required\n");
+        return 1;
+    }
+
+    int ret = 0;
+    for (int i = 1; i < cmd->argc; i++) {
+        const char *name = cmd->argv[i];
+
+        /* Check if it's a shell builtin */
+        if (is_builtin(name)) {
+            dprintf(STDOUT_FILENO, "%s: shell builtin\n", name);
+            continue;
+        }
+
+        /* Check if it's a shell function */
+        if (func_find(name)) {
+            dprintf(STDOUT_FILENO, "%s: shell function\n", name);
+            continue;
+        }
+
+        /* Search $PATH for an executable */
+        char *path = var_get("PATH");
+        if (!path)
+            path = "/bin";
+
+        char buf[MAX_LINE];
+        char *p = path;
+        int found = 0;
+        while (*p) {
+            char *colon = strchr(p, ':');
+            int dlen;
+            if (colon)
+                dlen = colon - p;
+            else
+                dlen = strlen(p);
+
+            if (dlen == 0) {
+                strcpy(buf, name);
+            } else {
+                strncpy(buf, p, dlen);
+                buf[dlen] = '/';
+                strcpy(buf + dlen + 1, name);
+            }
+
+            struct stat st;
+            if (stat(buf, &st) == 0 && S_ISREG(st.st_mode) &&
+                (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+                dprintf(STDOUT_FILENO, "%s\n", buf);
+                found = 1;
+                break;
+            }
+
+            if (colon)
+                p = colon + 1;
+            else
+                break;
+        }
+
+        if (!found) {
+            dprintf(2, "sbush: which: no %s in PATH\n", name);
+            ret = 1;
+        }
+    }
+    return ret;
 }
 
 int run_builtin(struct command *cmd) {
@@ -428,6 +510,12 @@ int run_builtin(struct command *cmd) {
         printf("[%d] %s &\n", j->id, j->cmd);
         return 0;
     }
+
+    if (strcmp(cmd->argv[0], "clear") == 0)
+        return builtin_clear(cmd);
+
+    if (strcmp(cmd->argv[0], "which") == 0)
+        return builtin_which(cmd);
 
     return 1;
 }
