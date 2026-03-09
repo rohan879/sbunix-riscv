@@ -37,3 +37,18 @@ case xyz in
         ;;
 esac
 echo === Task345 Done ===
+echo === Task6 Test ===
+set myvar hello
+echo PE1_${myvar}
+echo PE2_${myvar:-fallback}
+echo PE3_${unsetvar:-fallback}
+echo PE4_${myvar:+alternate}
+echo PE5_${unsetvar:+alternate}
+set path /usr/local/bin/program
+echo PE6_${path##*/}
+echo PE7_${path%/*}
+set fname file.tar.gz
+echo PE8_${fname#*.}
+echo PE9_${fname%%.*}
+echo PE10_${#myvar}
+echo === Task6 Done ===

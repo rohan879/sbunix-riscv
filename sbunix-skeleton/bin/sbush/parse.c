@@ -5,6 +5,170 @@
 
 static char expand_buf[MAX_LINE];
 
+/* Helper: emit string to dst, return updated dst */
+static char *emit_str(char *dst, char *end, const char *s) {
+    while (*s && dst < end)
+        *dst++ = *s++;
+    return dst;
+}
+
+/* Handle ${...} parameter expansion; src points past '{'. Returns updated dst. */
+static char *expand_braces(char **srcp, char *dst, char *end) {
+    char *src = *srcp;
+
+    /* ${#VAR} — string length */
+    if (*src == '#' && src[1] != '}') {
+        src++;
+        char name[64];
+        int i = 0;
+        while (*src && *src != '}' && i < 63)
+            name[i++] = *src++;
+        name[i] = '\0';
+        if (*src == '}') src++;
+        *srcp = src;
+        char *val = var_get(name);
+        char tmp[16];
+        itoa(val ? (int)strlen(val) : 0, tmp, 10);
+        return emit_str(dst, end, tmp);
+    }
+
+    /* Extract variable name */
+    char name[64];
+    int ni = 0;
+    while (*src && is_name_char(*src) && ni < 63)
+        name[ni++] = *src++;
+    name[ni] = '\0';
+
+    char *val = var_get(name);
+
+    if (*src == '}') {
+        /* ${VAR} — simple expansion */
+        src++;
+        *srcp = src;
+        if (val)
+            dst = emit_str(dst, end, val);
+        return dst;
+    }
+
+    /* Determine operator */
+    char op1 = *src++;
+    char op2 = '\0';
+    if ((op1 == '#' && *src == '#') || (op1 == '%' && *src == '%'))
+        op2 = *src++;
+    else if (op1 == ':')
+        op2 = *src++;
+
+    /* Extract operand until matching } */
+    char operand[256];
+    int oi = 0;
+    int brace_depth = 1;
+    while (*src && brace_depth > 0 && oi < 255) {
+        if (*src == '{') brace_depth++;
+        else if (*src == '}') { brace_depth--; if (brace_depth == 0) break; }
+        operand[oi++] = *src++;
+    }
+    operand[oi] = '\0';
+    if (*src == '}') src++;
+    *srcp = src;
+
+    if (op1 == ':') {
+        int is_empty = (!val || val[0] == '\0');
+        if (op2 == '-') {
+            /* ${VAR:-default} */
+            return emit_str(dst, end, is_empty ? operand : val);
+        } else if (op2 == '=') {
+            /* ${VAR:=default} */
+            if (is_empty) {
+                var_set(name, operand);
+                val = operand;
+            }
+            return emit_str(dst, end, val ? val : operand);
+        } else if (op2 == '+') {
+            /* ${VAR:+alternate} */
+            if (!is_empty)
+                dst = emit_str(dst, end, operand);
+            return dst;
+        } else if (op2 == '?') {
+            /* ${VAR:?message} */
+            if (is_empty)
+                dprintf(2, "sbush: %s: %s\n", name,
+                        oi ? operand : "parameter null or not set");
+            else
+                dst = emit_str(dst, end, val);
+            return dst;
+        }
+    }
+
+    if (op1 == '#' && val) {
+        /* ${VAR#pattern} or ${VAR##pattern} — prefix removal */
+        static char pe_vbuf[MAX_LINE];
+        strncpy(pe_vbuf, val, MAX_LINE - 1);
+        pe_vbuf[MAX_LINE - 1] = '\0';
+        int vlen = strlen(pe_vbuf);
+        char *result = pe_vbuf;
+        if (op2 == '#') {
+            /* longest prefix */
+            for (int k = vlen; k >= 0; k--) {
+                char saved = pe_vbuf[k];
+                pe_vbuf[k] = '\0';
+                if (glob_match(operand, pe_vbuf)) {
+                    pe_vbuf[k] = saved;
+                    result = pe_vbuf + k;
+                    break;
+                }
+                pe_vbuf[k] = saved;
+            }
+        } else {
+            /* shortest prefix */
+            for (int k = 0; k <= vlen; k++) {
+                char saved = pe_vbuf[k];
+                pe_vbuf[k] = '\0';
+                if (glob_match(operand, pe_vbuf)) {
+                    pe_vbuf[k] = saved;
+                    result = pe_vbuf + k;
+                    break;
+                }
+                pe_vbuf[k] = saved;
+            }
+        }
+        return emit_str(dst, end, result);
+    }
+
+    if (op1 == '%' && val) {
+        /* ${VAR%pattern} or ${VAR%%pattern} — suffix removal */
+        static char pe_vbuf2[MAX_LINE];
+        strncpy(pe_vbuf2, val, MAX_LINE - 1);
+        pe_vbuf2[MAX_LINE - 1] = '\0';
+        int vlen = strlen(pe_vbuf2);
+        int cut = vlen;
+        if (op2 == '%') {
+            /* longest suffix */
+            for (int k = 0; k <= vlen; k++) {
+                if (glob_match(operand, pe_vbuf2 + k)) {
+                    cut = k;
+                    break;
+                }
+            }
+        } else {
+            /* shortest suffix */
+            for (int k = vlen; k >= 0; k--) {
+                if (glob_match(operand, pe_vbuf2 + k)) {
+                    cut = k;
+                    break;
+                }
+            }
+        }
+        for (int k = 0; k < cut && dst < end; k++)
+            *dst++ = pe_vbuf2[k];
+        return dst;
+    }
+
+    /* Unrecognized — just emit the value */
+    if (val)
+        dst = emit_str(dst, end, val);
+    return dst;
+}
+
 static void expand_vars(char *line) {
     char *src = line;
     char *dst = expand_buf;
@@ -63,6 +227,9 @@ static void expand_vars(char *line) {
                 if (pv) {
                     while (*pv && dst < end) *dst++ = *pv++;
                 }
+            } else if (*src == '{') {
+                src++; /* skip { */
+                dst = expand_braces(&src, dst, end);
             } else {
                 /* $NAME -- regular variable */
                 char name[64];
