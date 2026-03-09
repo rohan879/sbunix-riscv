@@ -60,6 +60,11 @@ struct trapframe {
   /* 248 */ uint64_t epc;
 };
 
+struct signal_frame {
+  uint64_t saved_sigmask;
+  struct trapframe saved_tf;
+};
+
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 /* Maximum open file descriptors per process */

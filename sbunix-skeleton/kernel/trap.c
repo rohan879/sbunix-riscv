@@ -753,12 +753,16 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         }
     }
 
-    /* Push original trapframe onto user stack */
-    sp -= sizeof(struct trapframe);
+    /* Push the saved mask and original trapframe onto user stack */
+    sp -= sizeof(struct signal_frame);
     sp &= ~15UL; /* 16-byte align */
 
-    /* Copy trapframe to user stack via copyout */
-    if (copyout(p->pagetable, sp, tf, sizeof(struct trapframe)) < 0)
+    struct signal_frame frame;
+    frame.saved_sigmask = p->sigmask;
+    memcpy(&frame.saved_tf, tf, sizeof(frame.saved_tf));
+
+    /* Copy signal frame to user stack via copyout */
+    if (copyout(p->pagetable, sp, &frame, sizeof(frame)) < 0)
         return; /* can't deliver signal -- just drop it */
 
     /* Set up trapframe to call handler(signum) with return to trampoline */
@@ -1913,13 +1917,14 @@ static long sys_rt_sigprocmask_handler(struct trapframe *tf) {
 static long sys_rt_sigreturn_handler(struct trapframe *tf) {
     uint64_t usp = tf->sp;
 
-    struct trapframe saved;
-    memset(&saved, 0, sizeof(saved));
-    if (copyin(current_proc->pagetable, &saved, usp, sizeof(saved)) < 0) {
+    struct signal_frame frame;
+    memset(&frame, 0, sizeof(frame));
+    if (copyin(current_proc->pagetable, &frame, usp, sizeof(frame)) < 0) {
         return (long)-14;
     }
 
-    memcpy(tf, &saved, sizeof(struct trapframe));
+    current_proc->sigmask = frame.saved_sigmask;
+    memcpy(tf, &frame.saved_tf, sizeof(frame.saved_tf));
     return SYSCALL_NORETURN;
 }
 
