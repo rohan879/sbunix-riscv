@@ -119,6 +119,35 @@ void execute_line(char *line) {
 }
 
 /* -----------------------------------------------------------------------
+ * Shell trap table — stores commands to run on signal delivery
+ * ---------------------------------------------------------------------- */
+#define MAX_TRAPS 32
+static char trap_cmds[MAX_TRAPS][256];
+static int  trap_set_flag[MAX_TRAPS];
+
+void trap_set(int sig, const char *action) {
+    if (sig < 0 || sig >= MAX_TRAPS) return;
+    if (action[0] == '\0' || strcmp(action, "-") == 0) {
+        /* Reset trap */
+        trap_set_flag[sig] = 0;
+        trap_cmds[sig][0] = '\0';
+    } else {
+        strncpy(trap_cmds[sig], action, 255);
+        trap_cmds[sig][255] = '\0';
+        trap_set_flag[sig] = 1;
+    }
+}
+
+void trap_run(int sig) {
+    if (sig >= 0 && sig < MAX_TRAPS && trap_set_flag[sig]) {
+        static char trap_line[256];
+        strncpy(trap_line, trap_cmds[sig], 255);
+        trap_line[255] = '\0';
+        execute_line(trap_line);
+    }
+}
+
+/* -----------------------------------------------------------------------
  * Signal handlers
  * ---------------------------------------------------------------------- */
 

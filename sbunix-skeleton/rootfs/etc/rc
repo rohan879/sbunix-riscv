@@ -87,3 +87,20 @@ echo CS1_$(echo hello)
 set mydir $(pwd)
 echo CS2_$mydir
 echo === Task10 Done ===
+echo === Task11_14 Test ===
+eval echo EV1_hello
+set cnt 0
+for i in 1 2 3 4 5
+do
+    if test $i = 3; then break; fi
+    set cnt $i
+done
+echo BRK_$cnt
+set cnt 0
+for i in 1 2 3
+do
+    if test $i = 2; then continue; fi
+    set cnt ${cnt}$i
+done
+echo CNT_$cnt
+echo === Task11_14 Done ===

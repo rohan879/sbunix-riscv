@@ -173,7 +173,14 @@ int is_builtin(const char *cmd) {
             strcmp(cmd, "jobs") == 0 ||
             strcmp(cmd, "fg") == 0 ||
             strcmp(cmd, "bg") == 0 ||
-            strcmp(cmd, "return") == 0);
+            strcmp(cmd, "return") == 0 ||
+            strcmp(cmd, "source") == 0 ||
+            strcmp(cmd, ".") == 0 ||
+            strcmp(cmd, "eval") == 0 ||
+            strcmp(cmd, "read") == 0 ||
+            strcmp(cmd, "trap") == 0 ||
+            strcmp(cmd, "break") == 0 ||
+            strcmp(cmd, "continue") == 0);
 }
 
 int run_builtin(struct command *cmd) {
@@ -309,6 +316,103 @@ int run_builtin(struct command *cmd) {
         last_exit_status = code;
         func_return_flag = 1;
         return code;
+    }
+
+    if (strcmp(cmd->argv[0], "source") == 0 || strcmp(cmd->argv[0], ".") == 0) {
+        if (cmd->argc < 2) {
+            dprintf(2, "sbush: %s: filename argument required\n", cmd->argv[0]);
+            return 2;
+        }
+        return run_script(cmd->argv[1]);
+    }
+
+    if (strcmp(cmd->argv[0], "break") == 0) {
+        cf_break_count = cmd->argc > 1 ? atoi(cmd->argv[1]) : 1;
+        if (cf_break_count < 1) cf_break_count = 1;
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "continue") == 0) {
+        cf_continue_flag = 1;
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "trap") == 0) {
+        /* trap 'cmd' SIGNAL or trap '' SIGNAL (reset) or trap - SIGNAL */
+        if (cmd->argc < 3) {
+            /* List traps or usage — just return OK for now */
+            return 0;
+        }
+        const char *action = cmd->argv[1];
+        for (int i = 2; i < cmd->argc; i++) {
+            int sig = atoi(cmd->argv[i]);
+            /* Also accept signal names */
+            if (strcmp(cmd->argv[i], "INT") == 0) sig = SIGINT;
+            else if (strcmp(cmd->argv[i], "TERM") == 0) sig = SIGTERM;
+            else if (strcmp(cmd->argv[i], "EXIT") == 0) sig = 0;
+            else if (strcmp(cmd->argv[i], "HUP") == 0) sig = SIGHUP;
+
+            if (sig >= 0 && sig < 32)
+                trap_set(sig, action);
+        }
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "read") == 0) {
+        if (cmd->argc < 2) {
+            dprintf(2, "sbush: read: variable name required\n");
+            return 1;
+        }
+        static char rbuf[MAX_LINE];
+        int ri = 0;
+        char ch;
+        while (ri < MAX_LINE - 1 && read(STDIN_FILENO, &ch, 1) == 1) {
+            if (ch == '\n') break;
+            rbuf[ri++] = ch;
+        }
+        rbuf[ri] = '\0';
+        if (ri == 0 && ch != '\n')
+            return 1; /* EOF */
+
+        if (cmd->argc == 2) {
+            /* Single variable gets entire line */
+            var_set(cmd->argv[1], rbuf);
+        } else {
+            /* Multiple variables: split by whitespace, last gets remainder */
+            char *p = rbuf;
+            for (int i = 1; i < cmd->argc; i++) {
+                while (*p == ' ' || *p == '\t') p++;
+                if (i == cmd->argc - 1) {
+                    /* Last variable gets the rest */
+                    var_set(cmd->argv[i], p);
+                } else {
+                    char word[256];
+                    int wi = 0;
+                    while (*p && *p != ' ' && *p != '\t' && wi < 255)
+                        word[wi++] = *p++;
+                    word[wi] = '\0';
+                    var_set(cmd->argv[i], word);
+                }
+            }
+        }
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "eval") == 0) {
+        if (cmd->argc < 2)
+            return 0;
+        /* Concatenate all args into one string and execute */
+        static char eval_buf[MAX_LINE];
+        int len = 0;
+        for (int i = 1; i < cmd->argc && len < MAX_LINE - 2; i++) {
+            if (i > 1 && len < MAX_LINE - 1) eval_buf[len++] = ' ';
+            const char *a = cmd->argv[i];
+            while (*a && len < MAX_LINE - 1)
+                eval_buf[len++] = *a++;
+        }
+        eval_buf[len] = '\0';
+        execute_line(eval_buf);
+        return last_exit_status;
     }
 
     if (strcmp(cmd->argv[0], "bg") == 0) {

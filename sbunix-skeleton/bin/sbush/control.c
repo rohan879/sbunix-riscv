@@ -85,6 +85,8 @@ static void cf_run_lines(char *buf, int len) {
         if (pos < len) pos++; /* skip NUL separator */
         if (i > 0)
             execute_line(cf_run_tmp);
+        if (cf_break_count > 0 || cf_continue_flag || func_return_flag)
+            break;
     }
 }
 

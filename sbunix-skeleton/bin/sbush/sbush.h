@@ -143,6 +143,9 @@ extern int func_return_flag;
 void execute_line(char *line);
 int  heredoc_active(void);
 
+/* trap.c (or inline trap support) */
+void trap_set(int sig, const char *action);
+
 /* signal globals (sbush.c) */
 extern volatile sig_atomic_t fg_pid;
 extern volatile sig_atomic_t g_sigchld_flag;
