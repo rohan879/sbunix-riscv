@@ -85,15 +85,21 @@ static char *expand_cmdsub(char **srcp, char *dst, char *end) {
 
 /* -----------------------------------------------------------------------
  * Arithmetic expansion: $((...))
- * Recursive descent parser: expr → cmp ( (==|!=|<|>|<=|>=) cmp )*
- *   cmp → term ( (+|-) term )*
- *   term → factor ( (*|/|%) factor )*
- *   factor → unary | '(' expr ')' | number | $VAR | VAR
- *   unary → -factor | +factor | !factor
+ * Recursive descent parser with full operator precedence:
+ *   ternary → bitor ( '?' ternary ':' ternary )?
+ *   bitor   → bitxor ( '|' bitxor )*        (but not ||)
+ *   bitxor  → bitand ( '^' bitand )*
+ *   bitand  → cmp ( '&' cmp )*              (but not &&)
+ *   cmp     → shift ( (==|!=|<|>|<=|>=) shift )*
+ *   shift   → add ( (<<|>>) add )*
+ *   add     → term ( (+|-) term )*
+ *   term    → factor ( (*|/|%) factor )*
+ *   factor  → unary | '(' ternary ')' | number | $VAR | VAR
+ *   unary   → -factor | +factor | !factor | ~factor
  * ---------------------------------------------------------------------- */
 static const char *arith_p;
 
-static long arith_expr(void);
+static long arith_ternary(void);
 
 static void arith_skip_ws(void) {
     while (*arith_p == ' ' || *arith_p == '\t')
@@ -104,7 +110,7 @@ static long arith_factor(void) {
     arith_skip_ws();
     if (*arith_p == '(') {
         arith_p++;
-        long v = arith_expr();
+        long v = arith_ternary();
         arith_skip_ws();
         if (*arith_p == ')') arith_p++;
         return v;
@@ -112,6 +118,7 @@ static long arith_factor(void) {
     if (*arith_p == '-') { arith_p++; return -arith_factor(); }
     if (*arith_p == '+') { arith_p++; return arith_factor(); }
     if (*arith_p == '!') { arith_p++; return !arith_factor(); }
+    if (*arith_p == '~') { arith_p++; return ~arith_factor(); }
     if (*arith_p == '$') {
         arith_p++;
         if (*arith_p == '?') { arith_p++; return (long)last_exit_status; }
@@ -175,17 +182,74 @@ static long arith_add(void) {
     return v;
 }
 
-static long arith_expr(void) {
+static long arith_shift(void) {
     long v = arith_add();
     while (1) {
         arith_skip_ws();
-        if (arith_p[0] == '=' && arith_p[1] == '=') { arith_p += 2; v = (v == arith_add()); }
-        else if (arith_p[0] == '!' && arith_p[1] == '=') { arith_p += 2; v = (v != arith_add()); }
-        else if (arith_p[0] == '<' && arith_p[1] == '=') { arith_p += 2; v = (v <= arith_add()); }
-        else if (arith_p[0] == '>' && arith_p[1] == '=') { arith_p += 2; v = (v >= arith_add()); }
-        else if (*arith_p == '<') { arith_p++; v = (v < arith_add()); }
-        else if (*arith_p == '>') { arith_p++; v = (v > arith_add()); }
+        if (arith_p[0] == '<' && arith_p[1] == '<') {
+            arith_p += 2; v <<= arith_add();
+        } else if (arith_p[0] == '>' && arith_p[1] == '>') {
+            arith_p += 2; v >>= arith_add();
+        } else break;
+    }
+    return v;
+}
+
+static long arith_cmp(void) {
+    long v = arith_shift();
+    while (1) {
+        arith_skip_ws();
+        if (arith_p[0] == '=' && arith_p[1] == '=') { arith_p += 2; v = (v == arith_shift()); }
+        else if (arith_p[0] == '!' && arith_p[1] == '=') { arith_p += 2; v = (v != arith_shift()); }
+        else if (arith_p[0] == '<' && arith_p[1] == '=') { arith_p += 2; v = (v <= arith_shift()); }
+        else if (arith_p[0] == '>' && arith_p[1] == '=') { arith_p += 2; v = (v >= arith_shift()); }
+        else if (arith_p[0] == '<' && arith_p[1] != '<') { arith_p++; v = (v < arith_shift()); }
+        else if (arith_p[0] == '>' && arith_p[1] != '>') { arith_p++; v = (v > arith_shift()); }
         else break;
+    }
+    return v;
+}
+
+static long arith_bitand(void) {
+    long v = arith_cmp();
+    while (1) {
+        arith_skip_ws();
+        if (*arith_p == '&' && arith_p[1] != '&') { arith_p++; v &= arith_cmp(); }
+        else break;
+    }
+    return v;
+}
+
+static long arith_bitxor(void) {
+    long v = arith_bitand();
+    while (1) {
+        arith_skip_ws();
+        if (*arith_p == '^') { arith_p++; v ^= arith_bitand(); }
+        else break;
+    }
+    return v;
+}
+
+static long arith_bitor(void) {
+    long v = arith_bitxor();
+    while (1) {
+        arith_skip_ws();
+        if (*arith_p == '|' && arith_p[1] != '|') { arith_p++; v |= arith_bitxor(); }
+        else break;
+    }
+    return v;
+}
+
+static long arith_ternary(void) {
+    long v = arith_bitor();
+    arith_skip_ws();
+    if (*arith_p == '?') {
+        arith_p++;
+        long t = arith_ternary();
+        arith_skip_ws();
+        if (*arith_p == ':') arith_p++;
+        long f = arith_ternary();
+        return v ? t : f;
     }
     return v;
 }
@@ -208,7 +272,7 @@ static char *expand_arith(char **srcp, char *dst, char *end) {
     *srcp = src;
 
     arith_p = arith_buf;
-    long result = arith_expr();
+    long result = arith_ternary();
     char tmp[24];
     /* Convert long to string */
     int neg = 0;
