@@ -52,3 +52,15 @@ echo PE8_${fname#*.}
 echo PE9_${fname%%.*}
 echo PE10_${#myvar}
 echo === Task6 Done ===
+echo === Task7 Test ===
+echo AR1_$((2 + 3))
+echo AR2_$((10 - 4))
+echo AR3_$((3 * 7))
+echo AR4_$((20 / 4))
+echo AR5_$((17 % 5))
+set x 10
+echo AR6_$((x + 5))
+echo AR7_$(( (2 + 3) * 4 ))
+echo AR8_$((10 == 10))
+echo AR9_$((10 != 5))
+echo === Task7 Done ===

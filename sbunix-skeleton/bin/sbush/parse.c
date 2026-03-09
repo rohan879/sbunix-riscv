@@ -12,6 +12,142 @@ static char *emit_str(char *dst, char *end, const char *s) {
     return dst;
 }
 
+/* -----------------------------------------------------------------------
+ * Arithmetic expansion: $((...))
+ * Recursive descent parser: expr → cmp ( (==|!=|<|>|<=|>=) cmp )*
+ *   cmp → term ( (+|-) term )*
+ *   term → factor ( (*|/|%) factor )*
+ *   factor → unary | '(' expr ')' | number | $VAR | VAR
+ *   unary → -factor | +factor | !factor
+ * ---------------------------------------------------------------------- */
+static const char *arith_p;
+
+static long arith_expr(void);
+
+static void arith_skip_ws(void) {
+    while (*arith_p == ' ' || *arith_p == '\t')
+        arith_p++;
+}
+
+static long arith_factor(void) {
+    arith_skip_ws();
+    if (*arith_p == '(') {
+        arith_p++;
+        long v = arith_expr();
+        arith_skip_ws();
+        if (*arith_p == ')') arith_p++;
+        return v;
+    }
+    if (*arith_p == '-') { arith_p++; return -arith_factor(); }
+    if (*arith_p == '+') { arith_p++; return arith_factor(); }
+    if (*arith_p == '!') { arith_p++; return !arith_factor(); }
+    if (*arith_p == '$') {
+        arith_p++;
+        char name[64];
+        int i = 0;
+        while (is_name_char(*arith_p) && i < 63)
+            name[i++] = *arith_p++;
+        name[i] = '\0';
+        char *val = var_get(name);
+        return val ? atol(val) : 0;
+    }
+    if (*arith_p >= '0' && *arith_p <= '9') {
+        long v = 0;
+        while (*arith_p >= '0' && *arith_p <= '9')
+            v = v * 10 + (*arith_p++ - '0');
+        return v;
+    }
+    /* bare variable name */
+    if (is_name_char(*arith_p)) {
+        char name[64];
+        int i = 0;
+        while (is_name_char(*arith_p) && i < 63)
+            name[i++] = *arith_p++;
+        name[i] = '\0';
+        char *val = var_get(name);
+        return val ? atol(val) : 0;
+    }
+    return 0;
+}
+
+static long arith_term(void) {
+    long v = arith_factor();
+    while (1) {
+        arith_skip_ws();
+        if (*arith_p == '*') { arith_p++; v *= arith_factor(); }
+        else if (*arith_p == '/' && arith_p[1] != '/') {
+            arith_p++;
+            long d = arith_factor();
+            v = d ? v / d : 0;
+        }
+        else if (*arith_p == '%') { arith_p++; long d = arith_factor(); v = d ? v % d : 0; }
+        else break;
+    }
+    return v;
+}
+
+static long arith_add(void) {
+    long v = arith_term();
+    while (1) {
+        arith_skip_ws();
+        if (*arith_p == '+') { arith_p++; v += arith_term(); }
+        else if (*arith_p == '-') { arith_p++; v -= arith_term(); }
+        else break;
+    }
+    return v;
+}
+
+static long arith_expr(void) {
+    long v = arith_add();
+    while (1) {
+        arith_skip_ws();
+        if (arith_p[0] == '=' && arith_p[1] == '=') { arith_p += 2; v = (v == arith_add()); }
+        else if (arith_p[0] == '!' && arith_p[1] == '=') { arith_p += 2; v = (v != arith_add()); }
+        else if (arith_p[0] == '<' && arith_p[1] == '=') { arith_p += 2; v = (v <= arith_add()); }
+        else if (arith_p[0] == '>' && arith_p[1] == '=') { arith_p += 2; v = (v >= arith_add()); }
+        else if (*arith_p == '<') { arith_p++; v = (v < arith_add()); }
+        else if (*arith_p == '>') { arith_p++; v = (v > arith_add()); }
+        else break;
+    }
+    return v;
+}
+
+/* Expand $((...)); src points past '((' */
+static char *expand_arith(char **srcp, char *dst, char *end) {
+    char *src = *srcp;
+    /* Find matching )) */
+    static char arith_buf[256];
+    int ai = 0, depth = 2;
+    while (*src && ai < 255) {
+        if (src[0] == ')' && src[1] == ')') {
+            depth -= 2;
+            if (depth <= 0) { src += 2; break; }
+        }
+        if (src[0] == '(' && src[1] == '(') depth += 2;
+        arith_buf[ai++] = *src++;
+    }
+    arith_buf[ai] = '\0';
+    *srcp = src;
+
+    arith_p = arith_buf;
+    long result = arith_expr();
+    char tmp[24];
+    /* Convert long to string */
+    int neg = 0;
+    long r = result;
+    if (r < 0) { neg = 1; r = -r; }
+    int ti = 0;
+    if (r == 0) tmp[ti++] = '0';
+    while (r > 0) { tmp[ti++] = '0' + (int)(r % 10); r /= 10; }
+    if (neg) tmp[ti++] = '-';
+    /* reverse */
+    for (int j = 0; j < ti / 2; j++) {
+        char c = tmp[j]; tmp[j] = tmp[ti - 1 - j]; tmp[ti - 1 - j] = c;
+    }
+    tmp[ti] = '\0';
+    return emit_str(dst, end, tmp);
+}
+
 /* Handle ${...} parameter expansion; src points past '{'. Returns updated dst. */
 static char *expand_braces(char **srcp, char *dst, char *end) {
     char *src = *srcp;
@@ -227,6 +363,10 @@ static void expand_vars(char *line) {
                 if (pv) {
                     while (*pv && dst < end) *dst++ = *pv++;
                 }
+            } else if (*src == '(' && *(src+1) == '(') {
+                /* $(( ... )) — arithmetic expansion */
+                src += 2; /* skip (( */
+                dst = expand_arith(&src, dst, end);
             } else if (*src == '{') {
                 src++; /* skip { */
                 dst = expand_braces(&src, dst, end);
