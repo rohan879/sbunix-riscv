@@ -1170,6 +1170,82 @@ static long sys_execve_handler(struct trapframe *tf) {
     if (ret < 0) {
         ret = exec(kpath);
     }
+
+    /* Shebang (#!) handling: if exec failed, check if file is a script */
+    if (ret < 0) {
+        char first_bytes[256];
+        int got = 0;
+        struct posix_header *th = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+        if (!th) {
+            char orig_tp[256];
+            to_tarfs_path(kpath, orig_tp);
+            th = tar_find_file(_tarfs_start, _tarfs_end, orig_tp);
+        }
+        if (th) {
+            char *data = (char *)th + sizeof(struct posix_header);
+            for (int j = 0; j < 255 && data[j] != '\n' && data[j] != '\0'; j++)
+                first_bytes[got++] = data[j];
+            first_bytes[got] = '\0';
+        }
+        if (got >= 2 && first_bytes[0] == '#' && first_bytes[1] == '!') {
+            /* Parse interpreter path */
+            char interp[256];
+            int j = 2;
+            while (first_bytes[j] == ' ' || first_bytes[j] == '\t') j++;
+            int k = 0;
+            while (j < got && first_bytes[j] != '\n' && first_bytes[j] != '\r' &&
+                   first_bytes[j] != ' ' && first_bytes[j] != '\t' && k < 254)
+                interp[k++] = first_bytes[j++];
+            interp[k] = '\0';
+
+            if (k > 0) {
+                /* Rebuild argv: [interp, script_path, original_args[1:]...] */
+                int interp_len = strlen(interp) + 1;
+                int script_len = strlen(resolved) + 1;
+
+                /* Rebuild argv: [interp, script_path, old_argv[1:]...] */
+                int new_kstroff = 0;
+                char *tmpbuf = (char *)kalloc();
+                if (tmpbuf) {
+                    /* Copy interp */
+                    memcpy(tmpbuf, interp, interp_len);
+                    int new_offsets[EXECVE_MAXARGS];
+                    int new_argc = 0;
+                    new_offsets[new_argc++] = 0;
+                    new_kstroff = interp_len;
+
+                    /* Copy script path */
+                    new_offsets[new_argc++] = new_kstroff;
+                    memcpy(tmpbuf + new_kstroff, resolved, script_len);
+                    new_kstroff += script_len;
+
+                    /* Copy old_argv[1..] */
+                    for (int a = 1; a < kargc && new_argc < EXECVE_MAXARGS; a++) {
+                        int slen = strlen(kstrbuf + kstroff_arr[a]) + 1;
+                        if (new_kstroff + slen > (int)PAGE_SIZE) break;
+                        new_offsets[new_argc] = new_kstroff;
+                        memcpy(tmpbuf + new_kstroff, kstrbuf + kstroff_arr[a], slen);
+                        new_kstroff += slen;
+                        new_argc++;
+                    }
+
+                    /* Replace kstrbuf with new argv */
+                    memcpy(kstrbuf, tmpbuf, new_kstroff);
+                    kargc = new_argc;
+                    kstroff = new_kstroff;
+                    for (int a = 0; a < kargc; a++)
+                        kstroff_arr[a] = new_offsets[a];
+                    kfree(tmpbuf);
+
+                    /* Now exec the interpreter */
+                    char interp_tarpath[256];
+                    to_tarfs_path(interp, interp_tarpath);
+                    ret = exec(interp_tarpath);
+                }
+            }
+        }
+    }
+
     if (ret < 0) {
         kfree(kstrbuf);
         if (kenvbuf) kfree(kenvbuf);
