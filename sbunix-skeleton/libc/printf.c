@@ -259,17 +259,13 @@ int sprintf(char *buf, const char *fmt, ...) {
  * ---------------------------------------------------------------------- */
 
 int vprintf(const char *fmt, va_list ap) {
-    char tmp[1024];
-    int  n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
-    int  w = n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1;
-    write(1, tmp, w);
-    return n;
+    return vfprintf(stdout, fmt, ap);
 }
 
 int printf(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    int n = vprintf(fmt, ap);
+    int n = vfprintf(stdout, fmt, ap);
     va_end(ap);
     return n;
 }
@@ -299,15 +295,13 @@ int dprintf(int fd, const char *fmt, ...) {
  * ---------------------------------------------------------------------- */
 
 int puts(const char *s) {
-    write(1, s, strlen(s));
-    write(1, "\n", 1);
+    if (fputs(s, stdout) == EOF) return EOF;
+    if (fputc('\n', stdout) == EOF) return EOF;
     return 0;
 }
 
 int putchar(int c) {
-    char ch = (char)c;
-    write(1, &ch, 1);
-    return c;
+    return fputc(c, stdout);
 }
 
 int getchar(void) {
