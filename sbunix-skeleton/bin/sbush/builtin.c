@@ -2,6 +2,51 @@
 #include <sys/stat.h>
 
 /* -----------------------------------------------------------------------
+ * Alias table
+ * ---------------------------------------------------------------------- */
+static struct alias_entry aliases[MAX_ALIASES];
+static int nalias = 0;
+
+char *alias_get(const char *name) {
+    for (int i = 0; i < nalias; i++) {
+        if (strcmp(aliases[i].name, name) == 0)
+            return aliases[i].value;
+    }
+    return NULL;
+}
+
+void alias_set(const char *name, const char *value) {
+    for (int i = 0; i < nalias; i++) {
+        if (strcmp(aliases[i].name, name) == 0) {
+            strncpy(aliases[i].value, value, 255);
+            aliases[i].value[255] = '\0';
+            return;
+        }
+    }
+    if (nalias < MAX_ALIASES) {
+        strncpy(aliases[nalias].name, name, 63);
+        aliases[nalias].name[63] = '\0';
+        strncpy(aliases[nalias].value, value, 255);
+        aliases[nalias].value[255] = '\0';
+        nalias++;
+    }
+}
+
+void alias_unset(const char *name) {
+    for (int i = 0; i < nalias; i++) {
+        if (strcmp(aliases[i].name, name) == 0) {
+            aliases[i] = aliases[--nalias];
+            return;
+        }
+    }
+}
+
+void alias_list(void) {
+    for (int i = 0; i < nalias; i++)
+        printf("alias %s='%s'\n", aliases[i].name, aliases[i].value);
+}
+
+/* -----------------------------------------------------------------------
  * test / [ builtin — recursive descent evaluator
  * ---------------------------------------------------------------------- */
 static char **t_argv;
@@ -182,7 +227,9 @@ int is_builtin(const char *cmd) {
             strcmp(cmd, "break") == 0 ||
             strcmp(cmd, "continue") == 0 ||
             strcmp(cmd, "clear") == 0 ||
-            strcmp(cmd, "which") == 0);
+            strcmp(cmd, "which") == 0 ||
+            strcmp(cmd, "alias") == 0 ||
+            strcmp(cmd, "unalias") == 0);
 }
 
 /* -----------------------------------------------------------------------
@@ -516,6 +563,38 @@ int run_builtin(struct command *cmd) {
 
     if (strcmp(cmd->argv[0], "which") == 0)
         return builtin_which(cmd);
+
+    if (strcmp(cmd->argv[0], "alias") == 0) {
+        if (cmd->argc == 1) {
+            alias_list();
+            return 0;
+        }
+        for (int i = 1; i < cmd->argc; i++) {
+            char *eq = strchr(cmd->argv[i], '=');
+            if (eq) {
+                *eq = '\0';
+                alias_set(cmd->argv[i], eq + 1);
+                *eq = '=';
+            } else {
+                char *val = alias_get(cmd->argv[i]);
+                if (val)
+                    printf("alias %s='%s'\n", cmd->argv[i], val);
+                else
+                    dprintf(2, "sbush: alias: %s: not found\n", cmd->argv[i]);
+            }
+        }
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "unalias") == 0) {
+        if (cmd->argc < 2) {
+            dprintf(2, "sbush: unalias: usage: unalias name\n");
+            return 1;
+        }
+        for (int i = 1; i < cmd->argc; i++)
+            alias_unset(cmd->argv[i]);
+        return 0;
+    }
 
     return 1;
 }

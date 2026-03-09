@@ -86,6 +86,13 @@ static inline int is_name_char(char c) {
 /* Recursion depth limit for execute_line */
 #define MAX_EXEC_DEPTH 4
 
+#define MAX_ALIASES 32
+struct alias_entry { char name[64]; char value[256]; };
+char *alias_get(const char *name);
+void  alias_set(const char *name, const char *value);
+void  alias_unset(const char *name);
+void  alias_list(void);
+
 /* vars.c */
 void  env_init(char **envp);
 char *var_get(const char *name);

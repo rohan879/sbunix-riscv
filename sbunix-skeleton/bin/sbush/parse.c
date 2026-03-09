@@ -867,5 +867,35 @@ int parse_line(char *line, struct cmdlist *cl) {
 
 int expand_and_parse_pipeline(char *seg, struct pipeline *pl) {
     expand_vars(seg);
+
+    /* Alias expansion: extract first word and substitute if aliased */
+    {
+        char *p = seg;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p) {
+            char *word_start = p;
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+                p++;
+            int wlen = p - word_start;
+            char word[64];
+            if (wlen > 0 && wlen < 64) {
+                memcpy(word, word_start, wlen);
+                word[wlen] = '\0';
+                char *aval = alias_get(word);
+                if (aval) {
+                    static char alias_buf[MAX_LINE];
+                    int alen = strlen(aval);
+                    int rest_len = strlen(p);
+                    if (alen + rest_len < MAX_LINE - 1) {
+                        memcpy(alias_buf, aval, alen);
+                        memcpy(alias_buf + alen, p, rest_len);
+                        alias_buf[alen + rest_len] = '\0';
+                        strcpy(seg, alias_buf);
+                    }
+                }
+            }
+        }
+    }
+
     return parse_pipeline(seg, pl);
 }
