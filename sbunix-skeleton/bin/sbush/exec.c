@@ -11,13 +11,17 @@ int execute_pipeline(struct pipeline *pl) {
     if (pl->ncmds == 0)
         return 0;
 
-    /* single builtin — run in-process (unless it's in a pipe) */
-    if (pl->ncmds == 1 && !pl->background && is_builtin(pl->cmds[0].argv[0])) {
+    /* single builtin — run in-process (unless it's in a pipe or has redirections) */
+    if (pl->ncmds == 1 && !pl->background && is_builtin(pl->cmds[0].argv[0]) &&
+        !pl->cmds[0].redir_in && !pl->cmds[0].redir_out &&
+        !pl->cmds[0].redir_append && !pl->cmds[0].redir_err) {
         return run_builtin(&pl->cmds[0]);
     }
 
-    /* single shell function — run in-process */
-    if (pl->ncmds == 1 && !pl->background && func_find(pl->cmds[0].argv[0])) {
+    /* single shell function — run in-process (unless it has redirections) */
+    if (pl->ncmds == 1 && !pl->background && func_find(pl->cmds[0].argv[0]) &&
+        !pl->cmds[0].redir_in && !pl->cmds[0].redir_out &&
+        !pl->cmds[0].redir_append && !pl->cmds[0].redir_err) {
         return func_call(pl->cmds[0].argv[0],
                          pl->cmds[0].argc, pl->cmds[0].argv);
     }
