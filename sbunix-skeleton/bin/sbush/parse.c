@@ -85,15 +85,21 @@ static char *expand_cmdsub(char **srcp, char *dst, char *end) {
 
 /* -----------------------------------------------------------------------
  * Arithmetic expansion: $((...))
- * Recursive descent parser: expr → cmp ( (==|!=|<|>|<=|>=) cmp )*
- *   cmp → term ( (+|-) term )*
- *   term → factor ( (*|/|%) factor )*
- *   factor → unary | '(' expr ')' | number | $VAR | VAR
- *   unary → -factor | +factor | !factor
+ * Recursive descent parser with full operator precedence:
+ *   ternary → bitor ( '?' ternary ':' ternary )?
+ *   bitor   → bitxor ( '|' bitxor )*        (but not ||)
+ *   bitxor  → bitand ( '^' bitand )*
+ *   bitand  → cmp ( '&' cmp )*              (but not &&)
+ *   cmp     → shift ( (==|!=|<|>|<=|>=) shift )*
+ *   shift   → add ( (<<|>>) add )*
+ *   add     → term ( (+|-) term )*
+ *   term    → factor ( (*|/|%) factor )*
+ *   factor  → unary | '(' ternary ')' | number | $VAR | VAR
+ *   unary   → -factor | +factor | !factor | ~factor
  * ---------------------------------------------------------------------- */
 static const char *arith_p;
 
-static long arith_expr(void);
+static long arith_ternary(void);
 
 static void arith_skip_ws(void) {
     while (*arith_p == ' ' || *arith_p == '\t')
@@ -104,7 +110,7 @@ static long arith_factor(void) {
     arith_skip_ws();
     if (*arith_p == '(') {
         arith_p++;
-        long v = arith_expr();
+        long v = arith_ternary();
         arith_skip_ws();
         if (*arith_p == ')') arith_p++;
         return v;
@@ -112,6 +118,7 @@ static long arith_factor(void) {
     if (*arith_p == '-') { arith_p++; return -arith_factor(); }
     if (*arith_p == '+') { arith_p++; return arith_factor(); }
     if (*arith_p == '!') { arith_p++; return !arith_factor(); }
+    if (*arith_p == '~') { arith_p++; return ~arith_factor(); }
     if (*arith_p == '$') {
         arith_p++;
         if (*arith_p == '?') { arith_p++; return (long)last_exit_status; }
@@ -175,17 +182,74 @@ static long arith_add(void) {
     return v;
 }
 
-static long arith_expr(void) {
+static long arith_shift(void) {
     long v = arith_add();
     while (1) {
         arith_skip_ws();
-        if (arith_p[0] == '=' && arith_p[1] == '=') { arith_p += 2; v = (v == arith_add()); }
-        else if (arith_p[0] == '!' && arith_p[1] == '=') { arith_p += 2; v = (v != arith_add()); }
-        else if (arith_p[0] == '<' && arith_p[1] == '=') { arith_p += 2; v = (v <= arith_add()); }
-        else if (arith_p[0] == '>' && arith_p[1] == '=') { arith_p += 2; v = (v >= arith_add()); }
-        else if (*arith_p == '<') { arith_p++; v = (v < arith_add()); }
-        else if (*arith_p == '>') { arith_p++; v = (v > arith_add()); }
+        if (arith_p[0] == '<' && arith_p[1] == '<') {
+            arith_p += 2; v <<= arith_add();
+        } else if (arith_p[0] == '>' && arith_p[1] == '>') {
+            arith_p += 2; v >>= arith_add();
+        } else break;
+    }
+    return v;
+}
+
+static long arith_cmp(void) {
+    long v = arith_shift();
+    while (1) {
+        arith_skip_ws();
+        if (arith_p[0] == '=' && arith_p[1] == '=') { arith_p += 2; v = (v == arith_shift()); }
+        else if (arith_p[0] == '!' && arith_p[1] == '=') { arith_p += 2; v = (v != arith_shift()); }
+        else if (arith_p[0] == '<' && arith_p[1] == '=') { arith_p += 2; v = (v <= arith_shift()); }
+        else if (arith_p[0] == '>' && arith_p[1] == '=') { arith_p += 2; v = (v >= arith_shift()); }
+        else if (arith_p[0] == '<' && arith_p[1] != '<') { arith_p++; v = (v < arith_shift()); }
+        else if (arith_p[0] == '>' && arith_p[1] != '>') { arith_p++; v = (v > arith_shift()); }
         else break;
+    }
+    return v;
+}
+
+static long arith_bitand(void) {
+    long v = arith_cmp();
+    while (1) {
+        arith_skip_ws();
+        if (*arith_p == '&' && arith_p[1] != '&') { arith_p++; v &= arith_cmp(); }
+        else break;
+    }
+    return v;
+}
+
+static long arith_bitxor(void) {
+    long v = arith_bitand();
+    while (1) {
+        arith_skip_ws();
+        if (*arith_p == '^') { arith_p++; v ^= arith_bitand(); }
+        else break;
+    }
+    return v;
+}
+
+static long arith_bitor(void) {
+    long v = arith_bitxor();
+    while (1) {
+        arith_skip_ws();
+        if (*arith_p == '|' && arith_p[1] != '|') { arith_p++; v |= arith_bitxor(); }
+        else break;
+    }
+    return v;
+}
+
+static long arith_ternary(void) {
+    long v = arith_bitor();
+    arith_skip_ws();
+    if (*arith_p == '?') {
+        arith_p++;
+        long t = arith_ternary();
+        arith_skip_ws();
+        if (*arith_p == ':') arith_p++;
+        long f = arith_ternary();
+        return v ? t : f;
     }
     return v;
 }
@@ -208,7 +272,7 @@ static char *expand_arith(char **srcp, char *dst, char *end) {
     *srcp = src;
 
     arith_p = arith_buf;
-    long result = arith_expr();
+    long result = arith_ternary();
     char tmp[24];
     /* Convert long to string */
     int neg = 0;
@@ -480,6 +544,22 @@ static void expand_vars(char *line) {
             bt_cmd[bi] = '\0';
             if (*src == '`') src++;
             dst = run_cmdsub(bt_cmd, dst, end);
+        } else if (*src == '~' && !in_sq) {
+            int at_word_start = (src == line) ||
+                                (src > line && (src[-1] == ' '  || src[-1] == '\t' ||
+                                                src[-1] == '='  || src[-1] == ':'));
+            if (at_word_start && (src[1] == '\0' || src[1] == '/' ||
+                                   src[1] == ' '  || src[1] == '\t' ||
+                                   src[1] == ':'  || src[1] == '\n')) {
+                char *home = var_get("HOME");
+                if (home) {
+                    while (*home && dst < end)
+                        *dst++ = *home++;
+                }
+                src++;
+            } else {
+                *dst++ = *src++;
+            }
         } else {
             *dst++ = *src++;
         }
@@ -578,19 +658,40 @@ int glob_match(const char *pat, const char *name) {
             while (*pat == '*') pat++;
             if (!*pat) return 1;
             while (*name) {
-                if (glob_match(pat, name))
-                    return 1;
+                if (glob_match(pat, name)) return 1;
                 name++;
             }
             return 0;
         } else if (*pat == '?') {
             if (!*name) return 0;
+            pat++; name++;
+        } else if (*pat == '[') {
+            if (!*name) return 0;
             pat++;
+            int negate = 0;
+            if (*pat == '!' || *pat == '^') { negate = 1; pat++; }
+            int matched = 0;
+            int first = 1;
+            while (*pat && (*pat != ']' || first)) {
+                first = 0;
+                char lo = *pat++;
+                if (*pat == '-' && pat[1] && pat[1] != ']') {
+                    pat++;
+                    char hi = *pat++;
+                    if ((unsigned char)*name >= (unsigned char)lo &&
+                        (unsigned char)*name <= (unsigned char)hi)
+                        matched = 1;
+                } else {
+                    if (*name == lo) matched = 1;
+                }
+            }
+            if (*pat == ']') pat++;
+            if (negate) matched = !matched;
+            if (!matched) return 0;
             name++;
         } else {
             if (*pat != *name) return 0;
-            pat++;
-            name++;
+            pat++; name++;
         }
     }
     return *name == '\0';
@@ -617,7 +718,7 @@ static int str_ptr_cmp(const void *a, const void *b) {
 }
 
 static void glob_expand_token(const char *token, struct command *cmd) {
-    if (!strchr(token, '*') && !strchr(token, '?')) {
+    if (!strchr(token, '*') && !strchr(token, '?') && !strchr(token, '[')) {
         if (cmd->argc < MAX_ARGS - 1)
             cmd->argv[cmd->argc++] = (char *)token;
         return;
@@ -690,7 +791,7 @@ static void glob_expand_token(const char *token, struct command *cmd) {
 static void glob_expand_cmd(struct command *cmd) {
     int has_glob = 0;
     for (int i = 0; i < cmd->argc; i++) {
-        if (strchr(cmd->argv[i], '*') || strchr(cmd->argv[i], '?')) {
+        if (strchr(cmd->argv[i], '*') || strchr(cmd->argv[i], '?') || strchr(cmd->argv[i], '[')) {
             has_glob = 1;
             break;
         }
@@ -851,5 +952,35 @@ int parse_line(char *line, struct cmdlist *cl) {
 
 int expand_and_parse_pipeline(char *seg, struct pipeline *pl) {
     expand_vars(seg);
+
+    /* Alias expansion: extract first word and substitute if aliased */
+    {
+        char *p = seg;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p) {
+            char *word_start = p;
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+                p++;
+            int wlen = p - word_start;
+            char word[64];
+            if (wlen > 0 && wlen < 64) {
+                memcpy(word, word_start, wlen);
+                word[wlen] = '\0';
+                char *aval = alias_get(word);
+                if (aval) {
+                    static char alias_buf[MAX_LINE];
+                    int alen = strlen(aval);
+                    int rest_len = strlen(p);
+                    if (alen + rest_len < MAX_LINE - 1) {
+                        memcpy(alias_buf, aval, alen);
+                        memcpy(alias_buf + alen, p, rest_len);
+                        alias_buf[alen + rest_len] = '\0';
+                        strcpy(seg, alias_buf);
+                    }
+                }
+            }
+        }
+    }
+
     return parse_pipeline(seg, pl);
 }

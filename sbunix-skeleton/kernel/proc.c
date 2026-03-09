@@ -168,6 +168,7 @@ void userinit(void) {
   p->context.ra = (uint64_t)init_starter;
   
   p->state = RUNNABLE;
+  p->umask_val = 0022;
   // We'll set the name for debugging.
   const char *name = "init";
   for(int i=0; i<5; i++) p->name[i] = name[i];

@@ -405,6 +405,7 @@ static pid_t sys_clone(void) {
 
     /* ---- Common path (all modes) ---- */
     memcpy(p->cwd, current_proc->cwd, sizeof(p->cwd));
+    p->umask_val = current_proc->umask_val;
     memcpy(p->name, current_proc->name, sizeof(p->name));
 
     /* Copy trapframe -- child starts after the ecall just like parent */
@@ -1995,8 +1996,10 @@ static long sys_mknodat_handler(struct trapframe *tf) {
 }
 
 static long sys_umask_handler(struct trapframe *tf) {
-    (void)tf;
-    return (long)0022;
+    unsigned int new_mask = (unsigned int)tf->a0 & 0777;
+    unsigned int old_mask = current_proc->umask_val;
+    current_proc->umask_val = new_mask;
+    return (long)old_mask;
 }
 
 static long sys_geteuid_handler(struct trapframe *tf) {
