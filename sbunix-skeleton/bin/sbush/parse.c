@@ -223,8 +223,8 @@ static void glob_expand_token(const char *token, struct command *cmd) {
         return;
     }
 
-    char dirpart[512];
-    char basepart[256];
+    static char dirpart[512];
+    static char basepart[256];
     const char *slash = strrchr(token, '/');
     if (slash) {
         int dlen = slash - token;
@@ -250,7 +250,7 @@ static void glob_expand_token(const char *token, struct command *cmd) {
         return;
     }
 
-    const char *matches[GLOB_MAX_MATCHES];
+    static const char *matches[GLOB_MAX_MATCHES];
     int nmatches = 0;
 
     struct dirent *de;
@@ -260,7 +260,7 @@ static void glob_expand_token(const char *token, struct command *cmd) {
         if (!glob_match(basepart, de->d_name))
             continue;
 
-        char fullpath[512];
+        static char fullpath[512];
         if (strcmp(dirpart, ".") == 0) {
             snprintf(fullpath, sizeof(fullpath), "%s", de->d_name);
         } else if (dirpart[0] == '/' && dirpart[1] == '\0') {
@@ -299,7 +299,7 @@ static void glob_expand_cmd(struct command *cmd) {
 
     glob_strbuf_pos = 0;
 
-    char *orig[MAX_ARGS];
+    static char *orig[MAX_ARGS];
     int norig = cmd->argc;
     for (int i = 0; i < norig; i++)
         orig[i] = cmd->argv[i];

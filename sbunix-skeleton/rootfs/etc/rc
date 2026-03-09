@@ -1,2 +1,39 @@
 #!/bin/sbush
 echo SBUnix booting...
+echo === Task345 Test ===
+if true; then echo IF1_PASS; fi
+if false; then echo IF2_FAIL; else echo IF2_PASS; fi
+if false; then echo IF3_FAIL; elif true; then echo IF3_PASS; fi
+if test -f /bin/sbush; then echo IF4_PASS; else echo IF4_FAIL; fi
+if true; then
+    if false; then echo IF5_FAIL; else echo IF5_PASS; fi
+fi
+for x in alpha beta gamma
+do
+    echo FOR_$x
+done
+set result ""
+for f in /bin/echo /bin/cat
+do
+    set result found
+done
+echo FORGLOB_$result
+echo BEFORE_CASE1
+case hello in
+    hello)
+        echo CASE1_PASS
+        ;;
+    *)
+        echo CASE1_FAIL
+        ;;
+esac
+echo AFTER_CASE1
+case xyz in
+    abc)
+        echo CASE2_FAIL
+        ;;
+    *)
+        echo CASE2_PASS
+        ;;
+esac
+echo === Task345 Done ===

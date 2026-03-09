@@ -222,12 +222,10 @@ void execute_cmdlist(struct cmdlist *cl) {
             /* CONN_SEQ always runs */
         }
 
-        /* Expand variables and parse now (deferred from parse_line) */
-        char buf[MAX_LINE];
-        strncpy(buf, pl->raw, MAX_LINE - 1);
-        buf[MAX_LINE - 1] = '\0';
+        /* Expand variables and parse now (deferred from parse_line).
+         * Use pl->raw directly — it's not needed after expansion. */
         int saved_conn = pl->connector;
-        if (!expand_and_parse_pipeline(buf, pl)) {
+        if (!expand_and_parse_pipeline(pl->raw, pl)) {
             pl->connector = saved_conn;
             continue;
         }

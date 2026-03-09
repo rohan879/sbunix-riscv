@@ -11,6 +11,8 @@ static int exec_depth = 0;
 static struct cmdlist cl_stack[MAX_EXEC_DEPTH];
 
 void execute_line(char *line) {
+    if (cf_handle_line(line))
+        return;
     if (exec_depth >= MAX_EXEC_DEPTH) {
         dprintf(2, "sbush: execution recursion limit reached\n");
         return;
@@ -155,11 +157,16 @@ int main(int argc, char *argv[], char *envp[]) {
         return run_script(argv[1]);
 
     /* interactive REPL */
-    char line[MAX_LINE];
+    static char line[MAX_LINE];
     while (1) {
         reap_zombies();
-        char *ps1 = var_get("PS1");
-        if (!ps1) ps1 = "sbush$ ";
+        char *ps1;
+        if (cf_active())
+            ps1 = "> ";
+        else {
+            ps1 = var_get("PS1");
+            if (!ps1) ps1 = "sbush$ ";
+        }
         int r = read_line(line, sizeof(line), ps1);
         if (r == -1)
             break;       /* EOF */

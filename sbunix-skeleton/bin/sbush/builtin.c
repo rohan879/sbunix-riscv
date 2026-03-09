@@ -160,6 +160,7 @@ static int builtin_test(struct command *cmd) {
 
 int is_builtin(const char *cmd) {
     return (strcmp(cmd, "cd") == 0 ||
+            strcmp(cmd, "echo") == 0 ||
             strcmp(cmd, "export") == 0 ||
             strcmp(cmd, "set") == 0 ||
             strcmp(cmd, "unset") == 0 ||
@@ -236,6 +237,15 @@ int run_builtin(struct command *cmd) {
 
     if (strcmp(cmd->argv[0], "test") == 0 || strcmp(cmd->argv[0], "[") == 0)
         return builtin_test(cmd);
+
+    if (strcmp(cmd->argv[0], "echo") == 0) {
+        for (int i = 1; i < cmd->argc; i++) {
+            if (i > 1) write(STDOUT_FILENO, " ", 1);
+            write(STDOUT_FILENO, cmd->argv[i], strlen(cmd->argv[i]));
+        }
+        write(STDOUT_FILENO, "\n", 1);
+        return 0;
+    }
 
     if (strcmp(cmd->argv[0], "exit") == 0) {
         int code = 0;

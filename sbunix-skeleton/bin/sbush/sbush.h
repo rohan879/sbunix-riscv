@@ -123,6 +123,15 @@ extern pid_t last_bg_pid;
 /* script.c */
 int run_script(const char *path);
 
+/* control.c */
+#define CF_MAX_DEPTH    8
+#define CF_BODY_SIZE    4096
+int  cf_handle_line(char *line);
+void cf_reset(void);
+int  cf_active(void);
+extern int cf_break_count;
+extern int cf_continue_flag;
+
 /* sbush.c */
 void execute_line(char *line);
 
