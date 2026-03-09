@@ -64,31 +64,36 @@ static int func_store(const char *name, const char *body, int body_len) {
     return 0;
 }
 
-/* Save/restore positional parameters for function calls */
-#define FUNC_SAVE_ARGS 16
-static char saved_pos[FUNC_SAVE_ARGS][256];
-static char saved_zero[256];
-static int  saved_count;
+/* Save/restore positional parameters for function calls (stacked) */
+#define FUNC_SAVE_ARGS   8
+#define FUNC_SAVE_LEVELS 4
+static char saved_pos[FUNC_SAVE_LEVELS][FUNC_SAVE_ARGS][256];
+static char saved_zero[FUNC_SAVE_LEVELS][256];
+static int  saved_count[FUNC_SAVE_LEVELS];
 static int  save_depth = 0;
+
+void func_reset_depth(void) { save_depth = 0; }
 
 int func_call(const char *name, int argc, char **argv) {
     struct shell_func *f = func_find(name);
     if (!f) return -1;
 
-    if (save_depth > 0) {
-        dprintf(2, "sbush: nested function calls not supported\n");
+    if (save_depth >= FUNC_SAVE_LEVELS) {
+        dprintf(2, "sbush: function call nesting too deep\n");
         return 1;
     }
 
+    int d = save_depth;
+
     /* Save positional parameters */
-    saved_count = positional_count;
-    strncpy(saved_zero, positional_get(0), 255);
-    saved_zero[255] = '\0';
-    for (int i = 0; i < saved_count && i < FUNC_SAVE_ARGS; i++) {
+    saved_count[d] = positional_count;
+    strncpy(saved_zero[d], positional_get(0), 255);
+    saved_zero[d][255] = '\0';
+    for (int i = 0; i < positional_count && i < FUNC_SAVE_ARGS; i++) {
         char *p = positional_get(i + 1);
-        if (p) strncpy(saved_pos[i], p, 255);
-        else saved_pos[i][0] = '\0';
-        saved_pos[i][255] = '\0';
+        if (p) strncpy(saved_pos[d][i], p, 255);
+        else saved_pos[d][i][0] = '\0';
+        saved_pos[d][i][255] = '\0';
     }
     save_depth++;
 
@@ -115,16 +120,17 @@ int func_call(const char *name, int argc, char **argv) {
     int ret = last_exit_status;
 
     /* Restore positional parameters */
-    if (saved_count > 0) {
+    save_depth--;
+    d = save_depth;
+    if (saved_count[d] > 0) {
         static char *rargv[FUNC_SAVE_ARGS];
-        for (int i = 0; i < saved_count && i < FUNC_SAVE_ARGS; i++)
-            rargv[i] = saved_pos[i];
-        positional_set_args(saved_count, rargv);
+        for (int i = 0; i < saved_count[d] && i < FUNC_SAVE_ARGS; i++)
+            rargv[i] = saved_pos[d][i];
+        positional_set_args(saved_count[d], rargv);
     } else {
         positional_set_args(0, NULL);
     }
-    positional_set_zero(saved_zero);
-    save_depth--;
+    positional_set_zero(saved_zero[d]);
 
     return ret;
 }

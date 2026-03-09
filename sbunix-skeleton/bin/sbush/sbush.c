@@ -11,6 +11,8 @@ volatile sig_atomic_t g_sigchld_flag = 0;
 static int exec_depth = 0;
 static struct cmdlist cl_stack[MAX_EXEC_DEPTH];
 
+void exec_reset_depth(void) { exec_depth = 0; }
+
 /* -----------------------------------------------------------------------
  * Here-document state
  * ---------------------------------------------------------------------- */

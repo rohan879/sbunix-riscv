@@ -136,12 +136,14 @@ extern int cf_continue_flag;
 int  func_handle_line(char *line);
 int  func_def_active(void);
 int  func_call(const char *name, int argc, char **argv);
+void func_reset_depth(void);
 struct shell_func *func_find(const char *name);
 extern int func_return_flag;
 
 /* sbush.c */
 void execute_line(char *line);
 int  heredoc_active(void);
+void exec_reset_depth(void);
 
 /* trap.c (or inline trap support) */
 void trap_set(int sig, const char *action);

@@ -32,6 +32,9 @@ static char *run_cmdsub(const char *cmd, char *dst, char *end) {
         close(pfd[0]);
         dup2(pfd[1], STDOUT_FILENO);
         close(pfd[1]);
+        /* Reset function call depth and exec depth (child is independent) */
+        func_reset_depth();
+        exec_reset_depth();
         /* Restore default signal handlers */
         struct sigaction sa;
         sa.sa_handler = SIG_DFL;

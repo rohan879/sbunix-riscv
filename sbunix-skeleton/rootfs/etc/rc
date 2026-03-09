@@ -104,3 +104,24 @@ do
 done
 echo CNT_$cnt
 echo === Task11_14 Done ===
+echo === Integration Test ===
+double() { echo $(($1 * 2)); }
+set result $(double 21)
+echo INT1_$result
+factorial() {
+    if test $1 -le 1; then echo 1; return; fi
+    set prev $(factorial $(($1 - 1)))
+    echo $(($1 * $prev))
+}
+set f5 $(factorial 5)
+echo INT2_$f5
+set sum 0
+for n in 1 2 3 4 5 6 7 8 9 10
+do
+    set sum $(($sum + $n))
+done
+echo INT3_$sum
+set msg "hello world"
+echo INT4_${#msg}
+echo INT5_${msg%% *}
+echo === Integration Done ===
