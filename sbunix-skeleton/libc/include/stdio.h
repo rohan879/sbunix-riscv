@@ -17,11 +17,16 @@
 #define SEEK_CUR 1
 #define SEEK_END 2
 
+#define FILE_BUF_SIZE 256
+
 /* FILE stream type */
-typedef struct {
+typedef struct _FILE {
     int fd;
     int eof;
     int error;
+    int buf_mode;                 /* _IONBF, _IOLBF, or _IOFBF */
+    char wbuf[FILE_BUF_SIZE];    /* write buffer */
+    int  wpos;                   /* current position in write buffer */
 } FILE;
 
 extern FILE *stdin;
