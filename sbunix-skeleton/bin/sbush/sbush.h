@@ -134,6 +134,7 @@ extern int cf_continue_flag;
 
 /* sbush.c */
 void execute_line(char *line);
+int  heredoc_active(void);
 
 /* signal globals (sbush.c) */
 extern volatile sig_atomic_t fg_pid;
