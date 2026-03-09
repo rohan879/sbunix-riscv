@@ -167,8 +167,16 @@ static int tarfs_fstat(void *private, uint8_t *st) {
   uint64_t ino = priv->hdr
     ? (uint64_t)((unsigned long)priv->hdr / 512) + 2
     : 1;
-  uint32_t mode = priv->is_dir ? (uint32_t)(0x4000 | 0755)
-                                : (uint32_t)(0x8000 | 0644);
+  /* Parse permission bits from the tar header's octal mode field */
+  uint32_t hdr_mode = 0;
+  if (priv->hdr) {
+    for (int mi = 0; mi < 8 && priv->hdr->mode[mi] >= '0' && priv->hdr->mode[mi] <= '7'; mi++)
+      hdr_mode = (hdr_mode << 3) | (uint32_t)(priv->hdr->mode[mi] - '0');
+  } else {
+    hdr_mode = priv->is_dir ? 0755 : 0644;
+  }
+  uint32_t mode = priv->is_dir ? (uint32_t)(0x4000 | (hdr_mode & 0777))
+                                : (uint32_t)(0x8000 | (hdr_mode & 0777));
   uint32_t nlink = 1;
   int64_t size = (int64_t)priv->size;
   int32_t blksz = 512;
@@ -227,8 +235,12 @@ static int tarfs_stat(const char *path, uint8_t *st) {
   /* Use header address as a unique inode number */
   uint64_t tino = (uint64_t)((unsigned long)hdr / 512) + 2;
   uint64_t fsz = tar_get_file_size(hdr);
-  uint32_t mode = (hdr->typeflag == '5') ? (uint32_t)(0x4000 | 0755)
-                                          : (uint32_t)(0x8000 | 0644);
+  /* Parse permission bits from the tar header's octal mode field */
+  uint32_t hdr_mode = 0;
+  for (int mi = 0; mi < 8 && hdr->mode[mi] >= '0' && hdr->mode[mi] <= '7'; mi++)
+    hdr_mode = (hdr_mode << 3) | (uint32_t)(hdr->mode[mi] - '0');
+  uint32_t mode = (hdr->typeflag == '5') ? (uint32_t)(0x4000 | (hdr_mode & 0777))
+                                          : (uint32_t)(0x8000 | (hdr_mode & 0777));
   uint32_t nlink = 1;
   int64_t size = (int64_t)fsz;
   int32_t blksz = 512;
