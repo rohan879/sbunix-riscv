@@ -82,3 +82,8 @@ retfn() { return 42; }
 retfn
 echo FN3_$?
 echo === Task9 Done ===
+echo === Task10 Test ===
+echo CS1_$(echo hello)
+set mydir $(pwd)
+echo CS2_$mydir
+echo === Task10 Done ===

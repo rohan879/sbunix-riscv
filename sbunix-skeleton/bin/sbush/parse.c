@@ -13,6 +13,74 @@ static char *emit_str(char *dst, char *end, const char *s) {
 }
 
 /* -----------------------------------------------------------------------
+ * Command substitution: $(cmd) and `cmd`
+ * Fork a child, capture stdout via pipe, insert output.
+ * ---------------------------------------------------------------------- */
+static char *run_cmdsub(const char *cmd, char *dst, char *end) {
+    int pfd[2];
+    if (pipe(pfd) < 0)
+        return dst;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        return dst;
+    }
+    if (pid == 0) {
+        /* Child: redirect stdout to pipe, run command */
+        close(pfd[0]);
+        dup2(pfd[1], STDOUT_FILENO);
+        close(pfd[1]);
+        /* Restore default signal handlers */
+        struct sigaction sa;
+        sa.sa_handler = SIG_DFL;
+        sa.sa_mask = 0;
+        sa.sa_flags = 0;
+        sa.sa_restorer = NULL;
+        sigaction(SIGINT, &sa, NULL);
+        sigaction(SIGTSTP, &sa, NULL);
+        sigaction(SIGCHLD, &sa, NULL);
+        /* Execute via the shell itself */
+        static char cmdbuf[256];
+        strncpy(cmdbuf, cmd, 255);
+        cmdbuf[255] = '\0';
+        execute_line(cmdbuf);
+        _exit(last_exit_status);
+    }
+
+    /* Parent: read child's stdout */
+    close(pfd[1]);
+    char ch;
+    while (dst < end && read(pfd[0], &ch, 1) == 1) {
+        *dst++ = ch;
+    }
+    close(pfd[0]);
+    waitpid(pid, NULL, 0);
+
+    /* Strip trailing newlines */
+    while (dst > expand_buf && *(dst - 1) == '\n')
+        dst--;
+
+    return dst;
+}
+
+/* $(cmd): src points past '('. Find matching ')' and run. */
+static char *expand_cmdsub(char **srcp, char *dst, char *end) {
+    char *src = *srcp;
+    static char cs_buf[512];
+    int ci = 0, depth = 1;
+    while (*src && depth > 0 && ci < 511) {
+        if (*src == '(') depth++;
+        else if (*src == ')') { depth--; if (depth == 0) { src++; break; } }
+        cs_buf[ci++] = *src++;
+    }
+    cs_buf[ci] = '\0';
+    *srcp = src;
+    return run_cmdsub(cs_buf, dst, end);
+}
+
+/* -----------------------------------------------------------------------
  * Arithmetic expansion: $((...))
  * Recursive descent parser: expr → cmp ( (==|!=|<|>|<=|>=) cmp )*
  *   cmp → term ( (+|-) term )*
@@ -374,6 +442,10 @@ static void expand_vars(char *line) {
                 /* $(( ... )) — arithmetic expansion */
                 src += 2; /* skip (( */
                 dst = expand_arith(&src, dst, end);
+            } else if (*src == '(') {
+                /* $(cmd) — command substitution */
+                src++; /* skip ( */
+                dst = expand_cmdsub(&src, dst, end);
             } else if (*src == '{') {
                 src++; /* skip { */
                 dst = expand_braces(&src, dst, end);
@@ -394,6 +466,17 @@ static void expand_vars(char *line) {
                         *dst++ = *val++;
                 }
             }
+        } else if (*src == '`' && !in_sq) {
+            /* `cmd` — backtick command substitution */
+            src++; /* skip opening backtick */
+            /* Find closing backtick and extract command */
+            static char bt_cmd[256];
+            int bi = 0;
+            while (*src && *src != '`' && bi < 255)
+                bt_cmd[bi++] = *src++;
+            bt_cmd[bi] = '\0';
+            if (*src == '`') src++;
+            dst = run_cmdsub(bt_cmd, dst, end);
         } else {
             *dst++ = *src++;
         }
