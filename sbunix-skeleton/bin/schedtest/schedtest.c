@@ -135,15 +135,12 @@ static void test_preempt_three_children(void)
 
 static void test_preempt_parent_child(void)
 {
-    int cpipe[2], ppipe[2];
+    int cpipe[2];
     pipe(cpipe);
-    pipe(ppipe);
 
     pid_t pid = fork();
     if (pid == 0) {
         close(cpipe[0]);
-        close(ppipe[0]);
-        close(ppipe[1]);
         for (volatile int i = 0; i < 5000000; i++);
         write(cpipe[1], "C", 1);
         close(cpipe[1]);
@@ -151,12 +148,9 @@ static void test_preempt_parent_child(void)
     }
 
     close(cpipe[1]);
-    close(ppipe[0]);
 
-    /* Parent also does a spin loop */
+    /* Parent also does a spin loop while child runs concurrently */
     for (volatile int i = 0; i < 5000000; i++);
-    write(ppipe[1], "P", 1);
-    close(ppipe[1]);
 
     /* Read child's byte from child pipe */
     char cbuf;
@@ -166,7 +160,7 @@ static void test_preempt_parent_child(void)
     int s;
     waitpid(pid, &s, 0);
 
-    /* Both parent and child completed their spin loops without blocking */
+    /* Both parent and child completed their spin loops */
     CHECK("preempt_parent_child",
           rc == 1 && cbuf == 'C' &&
           WIFEXITED(s) && WEXITSTATUS(s) == 0);

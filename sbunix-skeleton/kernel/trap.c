@@ -854,6 +854,15 @@ static long sys_write_handler(struct trapframe *tf) {
         }
         return (long)written;
     } else if (f && f->ops && f->ops->write) {
+        /* O_APPEND: seek to end of file before each write */
+        if ((f->flags & 02000) && f->ops->fstat) {
+            uint8_t st[128];
+            if (f->ops->fstat(f->private, st) == 0) {
+                int64_t fsize;
+                memcpy(&fsize, st + 48, 8);
+                f->offset = fsize;
+            }
+        }
         char kbuf[512];
         int64_t total = 0;
         while ((size_t)total < len) {
@@ -882,26 +891,26 @@ static long sys_read_handler(struct trapframe *tf) {
     if (f && f->is_pipe && f->pipe_read) {
         int pid = f->pipe_id;
         size_t read_bytes = 0;
-        while (read_bytes < len) {
-            while (pipe_avail(pid) == 0) {
-                if (pipes[pid].write_open == 0) goto pipe_eof;
-                current_proc->state = SLEEPING;
-                swtch(&current_proc->context, &scheduler_context);
+        /* Block until at least one byte is available (or EOF) */
+        while (pipe_avail(pid) == 0) {
+            if (pipes[pid].write_open == 0) goto pipe_eof;
+            current_proc->state = SLEEPING;
+            swtch(&current_proc->context, &scheduler_context);
+        }
+        /* Drain all available bytes (up to len) without re-blocking */
+        while (read_bytes < len && pipe_avail(pid) > 0) {
+            char kc = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
+            pipes[pid].rpos++;
+            if (copyout(current_proc->pagetable, ubuf + read_bytes, &kc, 1) < 0) {
+                return (read_bytes > 0) ? (long)read_bytes : (long)-14;
             }
-            {
-                char kc = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
-                pipes[pid].rpos++;
-                if (copyout(current_proc->pagetable, ubuf + read_bytes, &kc, 1) < 0) {
-                    return (read_bytes > 0) ? (long)read_bytes : (long)-14;
-                }
-                read_bytes++;
-            }
-            for (struct proc *p = proc; p < &proc[64]; p++) {
-                if (p->state == SLEEPING && p != current_proc &&
-                    p->waiting_for_uart != 2)
-                    p->state = RUNNABLE;
-            }
-            break;
+            read_bytes++;
+        }
+        /* Wake any blocked pipe writers since we freed buffer space */
+        for (struct proc *p = proc; p < &proc[64]; p++) {
+            if (p->state == SLEEPING && p != current_proc &&
+                p->waiting_for_uart != 2)
+                p->state = RUNNABLE;
         }
 pipe_eof:
         return (long)read_bytes;
@@ -2213,6 +2222,15 @@ static long sys_writev_handler(struct trapframe *tf) {
                 }
                 total += (int64_t)len;
             } else if (f->ops && f->ops->write) {
+                /* O_APPEND: seek to end before each iov write */
+                if ((f->flags & 02000) && f->ops->fstat) {
+                    uint8_t st[128];
+                    if (f->ops->fstat(f->private, st) == 0) {
+                        int64_t fsize;
+                        memcpy(&fsize, st + 48, 8);
+                        f->offset = fsize;
+                    }
+                }
                 char kchunk[512];
                 uint64_t done = 0;
                 while (done < len) {
