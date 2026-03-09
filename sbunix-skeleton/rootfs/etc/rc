@@ -1,8 +1,9 @@
 #!/bin/sbush
 
-# TODO: 
+# TODO:
 # - Remove test cases from this file when merging into main
 # - REV: Revert file back to commit: 33eada018f1e7414ce5215804f17312a613b1310
+/etc/test.sh
 echo SBUnix booting...
 echo === Task345 Test ===
 if true; then echo IF1_PASS; fi

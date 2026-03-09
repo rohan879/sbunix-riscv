@@ -88,6 +88,9 @@ qemu: build/kernel.elf $(DISK_IMG)
 		-netdev user,id=net0 \
 		-nographic
 
+test: build/kernel.elf $(DISK_IMG)
+	bash tools/run_tests.sh
+
 clean:
 	rm -rf build zig-out .zig-cache
 
@@ -113,4 +116,4 @@ submit:
 	echo "Submitted to $(SUBMIT_DIR)/sbunix"
 
 .PRECIOUS: build/%.S.o build/%.c.o
-.PHONY: all qemu clean thirdparty submit
+.PHONY: all qemu clean thirdparty submit test
