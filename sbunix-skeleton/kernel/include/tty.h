@@ -20,6 +20,8 @@
 #define TCSETS  0x5402
 #define TCSETSW 0x5403   /* drain output, then set */
 #define TCSETSF 0x5404   /* drain output, flush input, then set */
+#define TIOCGPGRP 0x540F
+#define TIOCSPGRP 0x5410
 
 /* Special control character indices */
 #define VINTR    0   /* ^C  -> SIGINT  */
@@ -54,5 +56,8 @@ int tty_read(char *buf, int len);
 /* ioctl dispatch -- called from SYS_ioctl handler.
  * Returns 0 on success, negative errno on failure. */
 int tty_ioctl(unsigned long request, void *argp);
+
+/* Return the foreground process group ID stored in the TTY */
+int tty_fg_pgid(void);
 
 #endif

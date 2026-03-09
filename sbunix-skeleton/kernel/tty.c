@@ -27,6 +27,9 @@ struct tty {
   char   raw_buf[TTY_BUF_SIZE];
   int    raw_r;
   int    raw_w;
+
+  /* Foreground process group — signals go here on ^C / ^Z */
+  int    fg_pgid;
 };
 
 static struct tty tty0;
@@ -336,7 +339,25 @@ int tty_ioctl(unsigned long request, void *argp) {
     tty0.cooked_eof = 0;
     return 0;
 
+  case 0x540F: /* TIOCGPGRP */
+    if (argp) {
+      int *pgid_out = (int *)argp;
+      *pgid_out = tty0.fg_pgid;
+    }
+    return tty0.fg_pgid;
+
+  case 0x5410: /* TIOCSPGRP */
+    if (argp) {
+      int *pgid_in = (int *)argp;
+      tty0.fg_pgid = *pgid_in;
+    }
+    return 0;
+
   default:
     return -25; /* -ENOTTY */
   }
+}
+
+int tty_fg_pgid(void) {
+    return tty0.fg_pgid;
 }

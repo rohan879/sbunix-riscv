@@ -1703,10 +1703,19 @@ static long sys_ioctl_handler(struct trapframe *tf) {
         } else {
             return (long)-25;
         }
-    } else if (request == 0x540F) { /* TIOCGPGRP */
-        return (long)current_proc->pid;
-    } else if (request == 0x5410) { /* TIOCSPGRP */
-        return (long)0;
+    } else if (request == 0x540F || request == 0x5410) {
+        /* TIOCGPGRP / TIOCSPGRP — delegate to tty_ioctl */
+        int kpgid = 0;
+        if (request == 0x5410 && argp) {
+            if (copyin(current_proc->pagetable, &kpgid, argp, sizeof(kpgid)) < 0)
+                return (long)-14;
+        }
+        long result = (long)tty_ioctl(request, (void *)&kpgid);
+        if (request == 0x540F && argp) {
+            if (copyout(current_proc->pagetable, argp, &kpgid, sizeof(kpgid)) < 0)
+                return (long)-14;
+        }
+        return result;
     } else if (request >= TCGETS && request <= TCSETSF) {
         if (fd >= 0 && fd <= 2) {
             char ktermios[128];
