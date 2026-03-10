@@ -1,4 +1,4 @@
-#!/bin/sbush
+#!/bin/sh
 
 echo === SBUnix Test Suite ===
 

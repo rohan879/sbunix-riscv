@@ -12,7 +12,7 @@
 static char root_name[]   = "root";
 static char root_passwd[] = "x";
 static char root_dir[]    = "/";
-static char root_shell[]  = "/bin/sbush";
+static char root_shell[]  = "/bin/sh";
 static char *root_mem[]   = { root_name, (char *)0 };
 
 static struct passwd root_pw = {

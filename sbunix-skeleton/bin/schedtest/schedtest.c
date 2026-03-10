@@ -177,7 +177,10 @@ static void test_alarm_signal(void)
 
     alarm_flag = 0;
     alarm(1);
-    for (volatile int i = 0; i < 50000000 && !alarm_flag; i++);
+    time_t deadline = time(NULL) + 3;
+    while (!alarm_flag && time(NULL) < deadline) {
+        for (volatile int i = 0; i < 100000; i++);
+    }
     CHECK("alarm_signal", alarm_flag == 1);
 }
 

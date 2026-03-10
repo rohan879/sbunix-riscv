@@ -1,4 +1,4 @@
-#!/bin/sbush
+#!/bin/sh
 
 # TODO:
 # - Remove test cases from this file when merging into main
