@@ -27,6 +27,15 @@ static unsigned long ticks;
 static uint64_t boot_epoch_ns;  /* RTC nanoseconds at boot */
 static unsigned char last_key = 0;
 
+static uint64_t ns_to_time_ticks(uint64_t ns) {
+    return (ns + 99) / 100;
+}
+
+static uint64_t timespec_rel_deadline(uint64_t sec, uint64_t nsec) {
+    uint64_t delta = sec * TIMER_FREQ + ns_to_time_ticks(nsec);
+    return r_time() + delta;
+}
+
 static void rtc_init(void) {
     volatile uint32_t *rtc = (volatile uint32_t *)GOLDFISH_RTC_BASE;
     uint32_t lo = rtc[0];  /* TIME_LOW */
@@ -248,7 +257,7 @@ static void handle_timer_interrupt(void) {
     /* Wake processes whose timed sleep has expired */
     for (struct proc *p = proc; p < &proc[64]; p++) {
         if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
-            ticks >= p->sleep_until) {
+            r_time() >= p->sleep_until) {
             p->waiting_for_uart = 0;
             p->state = RUNNABLE;
         }
@@ -1606,11 +1615,14 @@ static long sys_nanosleep_handler(struct trapframe *tf) {
     uint64_t req_uaddr = tf->a0;
     if (req_uaddr && current_proc) {
         uint64_t kreq[2];
-        if (copyin(current_proc->pagetable, kreq, req_uaddr, 16) == 0) {
-            uint64_t secs = kreq[0];
-            current_proc->sleep_until     = ticks + secs;
+        if (copyin(current_proc->pagetable, kreq, req_uaddr, 16) < 0)
+            return (long)-14;
+        if (kreq[1] >= 1000000000UL)
+            return (long)-22;
+        if (kreq[0] != 0 || kreq[1] != 0) {
+            current_proc->sleep_until = timespec_rel_deadline(kreq[0], kreq[1]);
             current_proc->waiting_for_uart = 2;
-            current_proc->state           = SLEEPING;
+            current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
         }
     }
@@ -2528,7 +2540,10 @@ static long sys_clock_nanosleep_handler(struct trapframe *tf) {
     if (copyin(current_proc->pagetable, kreq, tf->a2, 16) < 0)
         return (long)-14;
 
-    uint64_t sleep_ticks = kreq[0] * (TIMER_FREQ / 10) + kreq[1] / 100;
+    if (kreq[1] >= 1000000000UL)
+        return (long)-22;
+
+    uint64_t deadline = timespec_rel_deadline(kreq[0], kreq[1]);
 
     if (flags & 1) {
         /* TIMER_ABSTIME: kreq is absolute wall time */
@@ -2539,10 +2554,10 @@ static long sys_clock_nanosleep_handler(struct trapframe *tf) {
         if (target <= now_total)
             return 0; /* already past */
         uint64_t diff_ns = target - now_total;
-        sleep_ticks = diff_ns / 100; /* 100ns per tick */
+        deadline = r_time() + ns_to_time_ticks(diff_ns);
     }
 
-    current_proc->sleep_until = ticks + sleep_ticks;
+    current_proc->sleep_until = deadline;
     current_proc->waiting_for_uart = 2;
     current_proc->state = SLEEPING;
     swtch(&current_proc->context, &scheduler_context);
@@ -2591,8 +2606,11 @@ static long sys_ppoll_handler(struct trapframe *tf) {
         if (kts[0] == 0 && kts[1] == 0) {
             /* Non-blocking poll */
         } else {
-            uint64_t ns = kts[0] * 1000000000UL + kts[1];
-            sleep_until_val = ticks + ns / 100;
+            if (kts[1] >= 1000000000UL) {
+                current_proc->sigmask = old_mask;
+                return (long)-22;
+            }
+            sleep_until_val = timespec_rel_deadline(kts[0], kts[1]);
         }
     }
 
@@ -2611,7 +2629,7 @@ static long sys_ppoll_handler(struct trapframe *tf) {
     }
 
     /* If none ready and timeout allows blocking */
-    if (ready == 0 && (!has_timeout || sleep_until_val > ticks)) {
+    if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
             current_proc->waiting_for_uart = 2;
@@ -2672,8 +2690,9 @@ static long sys_pselect6_handler(struct trapframe *tf) {
         if (kts[0] == 0 && kts[1] == 0) {
             /* Non-blocking */
         } else {
-            uint64_t ns = kts[0] * 1000000000UL + kts[1];
-            sleep_until_val = ticks + ns / 100;
+            if (kts[1] >= 1000000000UL)
+                return (long)-22;
+            sleep_until_val = timespec_rel_deadline(kts[0], kts[1]);
         }
     }
 
@@ -2711,7 +2730,7 @@ static long sys_pselect6_handler(struct trapframe *tf) {
     }
 
     /* Block if none ready and timeout allows */
-    if (ready == 0 && (!has_timeout || sleep_until_val > ticks)) {
+    if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
             current_proc->waiting_for_uart = 2;
