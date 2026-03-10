@@ -60,6 +60,11 @@ struct trapframe {
   /* 248 */ uint64_t epc;
 };
 
+struct signal_frame {
+  uint64_t saved_sigmask;
+  struct trapframe saved_tf;
+};
+
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 /* Maximum open file descriptors per process */
@@ -98,6 +103,7 @@ struct shared_sigactions {
 
 /* Signal constants */
 #define SIGSEGV   11
+#define SIGPIPE   13
 #define SIGCHLD   17
 #define SIGURG    23
 #define SIGWINCH  28
@@ -116,10 +122,12 @@ struct proc {
   struct context context;      // swtch() here to run process
   char name[16];               // Process name (debugging)
   int waiting_for_uart;        // 1 if sleeping for UART input; 2 if timed sleep
-  uint64_t sleep_until;        // for timed sleep: wake when ticks >= this value
+  uint64_t sleep_until;        // for timed sleep: wake when r_time() >= this deadline
   unsigned long alarm_ticks;   // tick count when alarm fires (0 = no alarm)
   int exit_status;             // exit status (for wait4)
+  int killed_by_signal;        // signal number if killed by signal, 0 otherwise
   char cwd[256];               // current working directory
+  unsigned int umask_val;       // file creation mask
   struct open_file *ofile[NOFILE]; // open file descriptors (VFS)
   /* VMA list for tracking all user memory regions */
   struct vm_area *vma_list;    // sorted linked list of virtual memory areas
@@ -149,6 +157,14 @@ static inline struct open_file **proc_ofile(struct proc *p) {
 
 static inline struct kern_sigaction *proc_sigactions(struct proc *p) {
   return p->shared_sa ? p->shared_sa->actions : p->sigactions;
+}
+
+static inline uint64_t signal_bit(int signum) {
+  return 1UL << (signum - 1);
+}
+
+static inline int signal_is_valid(int signum) {
+  return signum > 0 && signum < 32;
 }
 
 void            procinit(void);

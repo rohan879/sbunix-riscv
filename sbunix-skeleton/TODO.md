@@ -239,6 +239,7 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] `SYS_geteuid` (175), `SYS_getegid` (177) — return 0 (root)
 - [x] `SYS_set_tid_address` (96) — returns current pid
 - [x] `SYS_readlinkat` (78) — returns -ENOENT (no symlinks)
+- [ ] tarfs/exec symlink resolution — update tarfs and `execve` path handling so tar symlink entries can resolve executable targets such as `/bin/sh -> /bin/sbush`
 - [x] `SYS_getrandom` (278) — LCG PRNG seeded from r_time()
 - [x] `SYS_writev` (66), `SYS_readv` (65) — basic iovec iteration (partial, see Remaining Fixes)
 - [x] `SYS_prlimit64` (261) — returns -ENOSYS stub

@@ -161,6 +161,7 @@ int vfs_get_mount_info(int index, const char **path, const char **fstype) {
     else if (m->ops == &procfs_ops) *fstype = "procfs";
     else if (m->ops == &ext2_ops)   *fstype = "ext2";
     else if (m->ops == &sysfs_ops)  *fstype = "sysfs";
+    else if (m->ops == &ramfs_ops)  *fstype = "ramfs";
     else                            *fstype = "unknown";
   }
   return 0;
@@ -184,8 +185,11 @@ void vfs_init(void) {
   extern int ext2_mounted_flag(void);
   if (ext2_mounted_flag())
     vfs_register_mount("/mnt", &ext2_ops);
+  /* Register ramfs at /tmp (writable in-memory filesystem) */
+  ramfs_init();
+  vfs_register_mount("/tmp", &ramfs_ops);
   /* Register tarfs at / (root) */
   vfs_register_mount("/", &tarfs_ops);
 
-  printk("vfs: initialized (/dev -> devfs, /proc -> procfs, /sys -> sysfs, / -> tarfs)\n");
+  printk("vfs: initialized (/dev -> devfs, /proc -> procfs, /sys -> sysfs, /tmp -> ramfs, / -> tarfs)\n");
 }

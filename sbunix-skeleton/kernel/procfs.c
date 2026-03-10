@@ -153,8 +153,8 @@ static int procfs_open(const char *path, int flags, void **private) {
     const char *mpath, *fstype;
     for (int i = 0; vfs_get_mount_info(i, &mpath, &fstype) == 0; i++) {
       const char *rw = "ro";
-      /* ext2 is read-write */
-      if (strcmp(fstype, "ext2") == 0)
+      /* ext2 and ramfs are read-write */
+      if (strcmp(fstype, "ext2") == 0 || strcmp(fstype, "ramfs") == 0)
         rw = "rw";
       /* Render: "<fstype> on <path> (<rw>)\n" */
       int fl = strlen(fstype);

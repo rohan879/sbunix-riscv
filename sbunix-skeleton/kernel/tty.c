@@ -27,6 +27,9 @@ struct tty {
   char   raw_buf[TTY_BUF_SIZE];
   int    raw_r;
   int    raw_w;
+
+  /* Foreground process group — signals go here on ^C / ^Z */
+  int    fg_pgid;
 };
 
 static struct tty tty0;
@@ -98,6 +101,24 @@ void tty_init(void) {
   tty0.termios.c_cc[VTIME]  = 0;
 }
 
+/* Deliver a signal to the foreground process group.
+ * If fg_pgid is 0 (not yet set), fall back to all processes pid > 1. */
+static void tty_signal_fg(int sig) {
+    int target_pgid = tty0.fg_pgid;
+    for (struct proc *p = proc; p < &proc[64]; p++) {
+        if (p->state == UNUSED || p->state == ZOMBIE)
+            continue;
+        if (p->pid <= 1)
+            continue;
+        /* If a foreground group is set, only signal that group */
+        if (target_pgid > 0 && p->pgid != target_pgid)
+            continue;
+        p->sigpending |= signal_bit(sig);
+        if (p->state == SLEEPING)
+            p->state = RUNNABLE;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* tty_input -- called from UART interrupt handler (interrupt context)  */
 /* ------------------------------------------------------------------ */
@@ -115,25 +136,11 @@ void tty_input(char c) {
     /* ISIG handling in raw mode */
     if (lflag & ISIG) {
       if ((uint8_t)c == tty0.termios.c_cc[VINTR]) {
-        /* Deliver SIGINT to all processes pid > 1 */
-        for (struct proc *p = proc; p < &proc[64]; p++) {
-          if (p->state != UNUSED && p->state != ZOMBIE && p->pid > 1) {
-            p->sigpending |= (1UL << 2); /* SIGINT */
-            if (p->state == SLEEPING)
-              p->state = RUNNABLE;
-          }
-        }
+        tty_signal_fg(2); /* SIGINT */
         return;
       }
       if ((uint8_t)c == tty0.termios.c_cc[VSUSP]) {
-        /* Deliver SIGTSTP to all processes pid > 1 */
-        for (struct proc *p = proc; p < &proc[64]; p++) {
-          if (p->state != UNUSED && p->state != ZOMBIE && p->pid > 1) {
-            p->sigpending |= (1UL << 20); /* SIGTSTP */
-            if (p->state == SLEEPING)
-              p->state = RUNNABLE;
-          }
-        }
+        tty_signal_fg(20); /* SIGTSTP */
         return;
       }
     }
@@ -156,34 +163,19 @@ void tty_input(char c) {
   /* Check for signal-generating characters */
   if (lflag & ISIG) {
     if ((uint8_t)c == tty0.termios.c_cc[VINTR]) {
-      /* ^C: deliver SIGINT, echo ^C\n, discard line buffer */
-      for (struct proc *p = proc; p < &proc[64]; p++) {
-        if (p->state != UNUSED && p->state != ZOMBIE && p->pid > 1) {
-          p->sigpending |= (1UL << 2); /* SIGINT */
-          if (p->state == SLEEPING)
-            p->state = RUNNABLE;
-        }
-      }
+      tty_signal_fg(2); /* SIGINT */
       if (lflag & ECHO) {
         uart_putc('^');
         uart_putc('C');
         uart_putc('\n');
       }
       tty0.line_len = 0;
-      /* Wake sleeping readers so they can see the signal */
       uart_wakeup();
       return;
     }
 
     if ((uint8_t)c == tty0.termios.c_cc[VSUSP]) {
-      /* ^Z: deliver SIGTSTP, echo ^Z, discard line buffer */
-      for (struct proc *p = proc; p < &proc[64]; p++) {
-        if (p->state != UNUSED && p->state != ZOMBIE && p->pid > 1) {
-          p->sigpending |= (1UL << 20); /* SIGTSTP */
-          if (p->state == SLEEPING)
-            p->state = RUNNABLE;
-        }
-      }
+      tty_signal_fg(20); /* SIGTSTP */
       if (lflag & ECHO) {
         uart_putc('^');
         uart_putc('Z');
@@ -336,7 +328,25 @@ int tty_ioctl(unsigned long request, void *argp) {
     tty0.cooked_eof = 0;
     return 0;
 
+  case 0x540F: /* TIOCGPGRP */
+    if (argp) {
+      int *pgid_out = (int *)argp;
+      *pgid_out = tty0.fg_pgid;
+    }
+    return tty0.fg_pgid;
+
+  case 0x5410: /* TIOCSPGRP */
+    if (argp) {
+      int *pgid_in = (int *)argp;
+      tty0.fg_pgid = *pgid_in;
+    }
+    return 0;
+
   default:
     return -25; /* -ENOTTY */
   }
+}
+
+int tty_fg_pgid(void) {
+    return tty0.fg_pgid;
 }

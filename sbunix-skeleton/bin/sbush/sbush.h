@@ -77,16 +77,42 @@ struct job *job_find_pid(pid_t pid);
 void        job_list(void);
 void        job_reap(void);
 
+/* is_name_char: check if char is valid in a variable/function name */
+static inline int is_name_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Recursion depth limit for execute_line */
+#define MAX_EXEC_DEPTH 4
+
+#define MAX_ALIASES 32
+struct alias_entry { char name[64]; char value[256]; };
+char *alias_get(const char *name);
+void  alias_set(const char *name, const char *value);
+void  alias_unset(const char *name);
+void  alias_list(void);
+
 /* vars.c */
 void  env_init(char **envp);
 char *var_get(const char *name);
 void  var_set(const char *name, const char *value);
+void  var_unset(const char *name);
 void  var_export(const char *name);
 char **build_environ(void);
+
+/* Positional parameters (vars.c) */
+#define MAX_POSITIONAL 64
+extern int positional_count;
+char *positional_get(int idx);    /* 0=$0, 1=$1, etc. */
+void  positional_set_args(int argc, char **argv);
+void  positional_shift(int n);
+void  positional_set_zero(const char *name);
 
 /* parse.c */
 int parse_line(char *line, struct cmdlist *cl);
 int expand_and_parse_pipeline(char *seg, struct pipeline *pl);
+int glob_match(const char *pat, const char *name);
 
 /* path.c */
 char *resolve_path(const char *cmd);
@@ -104,8 +130,30 @@ extern pid_t last_bg_pid;
 /* script.c */
 int run_script(const char *path);
 
+/* control.c */
+#define CF_MAX_DEPTH    8
+#define CF_BODY_SIZE    4096
+int  cf_handle_line(char *line);
+void cf_reset(void);
+int  cf_active(void);
+extern int cf_break_count;
+extern int cf_continue_flag;
+
+/* func.c */
+int  func_handle_line(char *line);
+int  func_def_active(void);
+int  func_call(const char *name, int argc, char **argv);
+void func_reset_depth(void);
+struct shell_func *func_find(const char *name);
+extern int func_return_flag;
+
 /* sbush.c */
 void execute_line(char *line);
+int  heredoc_active(void);
+void exec_reset_depth(void);
+
+/* trap.c (or inline trap support) */
+void trap_set(int sig, const char *action);
 
 /* signal globals (sbush.c) */
 extern volatile sig_atomic_t fg_pid;

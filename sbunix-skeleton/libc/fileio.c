@@ -2,7 +2,7 @@
  * fileio.c — FILE* stream implementation for SBUnix libc.
  *
  * Provides fprintf, perror, fopen, fclose, fread, fwrite, etc.
- * All streams are unbuffered — operations go directly to read/write syscalls.
+ * Streams support buffered writes (_IOFBF, _IOLBF, _IONBF).
  */
 
 #include <stdio.h>
@@ -13,9 +13,9 @@
 #include <stdarg.h>
 
 /* Static FILE objects for stdin, stdout, stderr */
-static FILE __stdin  = { 0, 0, 0 };
-static FILE __stdout = { 1, 0, 0 };
-static FILE __stderr = { 2, 0, 0 };
+static FILE __stdin  = { .fd = 0, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0 };
+static FILE __stdout = { .fd = 1, .eof = 0, .error = 0, .buf_mode = _IOLBF, .wpos = 0 };
+static FILE __stderr = { .fd = 2, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0 };
 
 FILE *stdin  = &__stdin;
 FILE *stdout = &__stdout;
@@ -26,43 +26,121 @@ FILE *stderr = &__stderr;
 static FILE __file_pool[FILE_POOL_SIZE];
 static int  __file_pool_used[FILE_POOL_SIZE];
 
+/* -----------------------------------------------------------------------
+ * Stream registry — tracks all open FILE* for fflush(NULL)
+ * ---------------------------------------------------------------------- */
+#define STREAM_REG_SIZE (3 + FILE_POOL_SIZE)
+static FILE *__open_streams[STREAM_REG_SIZE];
+static int   __streams_init;
+
+static void __stream_register(FILE *stream) {
+    if (!__streams_init) {
+        __open_streams[0] = stdin;
+        __open_streams[1] = stdout;
+        __open_streams[2] = stderr;
+        __streams_init = 1;
+    }
+    for (int i = 0; i < STREAM_REG_SIZE; i++) {
+        if (__open_streams[i] == stream) return; /* already registered */
+    }
+    for (int i = 0; i < STREAM_REG_SIZE; i++) {
+        if (!__open_streams[i]) {
+            __open_streams[i] = stream;
+            return;
+        }
+    }
+}
+
+static void __stream_unregister(FILE *stream) {
+    for (int i = 0; i < STREAM_REG_SIZE; i++) {
+        if (__open_streams[i] == stream) {
+            __open_streams[i] = (void *)0;
+            return;
+        }
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * Internal flush helper — writes pending buffer contents via write()
+ * ---------------------------------------------------------------------- */
+static int __fflush_stream(FILE *stream) {
+    if (!stream || stream->wpos == 0) return 0;
+    ssize_t r = write(stream->fd, stream->wbuf, stream->wpos);
+    stream->wpos = 0;
+    if (r < 0) {
+        stream->error = 1;
+        return EOF;
+    }
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Buffered character output
+ * ---------------------------------------------------------------------- */
+int fputc(int c, FILE *stream) {
+    unsigned char ch = (unsigned char)c;
+
+    if (stream->buf_mode == _IONBF) {
+        /* Unbuffered: write immediately */
+        ssize_t r = write(stream->fd, &ch, 1);
+        if (r < 0) { stream->error = 1; return EOF; }
+        return ch;
+    }
+
+    /* Buffer the character */
+    stream->wbuf[stream->wpos++] = (char)ch;
+
+    if (stream->buf_mode == _IOLBF) {
+        /* Line-buffered: flush on newline or when full */
+        if (ch == '\n' || stream->wpos >= FILE_BUF_SIZE)
+            if (__fflush_stream(stream) == EOF) return EOF;
+    } else {
+        /* Fully buffered: flush when full */
+        if (stream->wpos >= FILE_BUF_SIZE)
+            if (__fflush_stream(stream) == EOF) return EOF;
+    }
+
+    return ch;
+}
+
+int fputs(const char *s, FILE *stream) {
+    while (*s) {
+        if (fputc((unsigned char)*s++, stream) == EOF)
+            return EOF;
+    }
+    return 0;
+}
+
 int fprintf(FILE *stream, const char *fmt, ...) {
+    char tmp[1024];
     va_list ap;
     va_start(ap, fmt);
-    int ret = vdprintf(stream->fd, fmt, ap);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
-    return ret;
+    int w = n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1;
+    for (int i = 0; i < w; i++) {
+        if (fputc((unsigned char)tmp[i], stream) == EOF)
+            return EOF;
+    }
+    return n;
 }
 
 int vfprintf(FILE *stream, const char *fmt, va_list ap) {
-    return vdprintf(stream->fd, fmt, ap);
+    char tmp[1024];
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    int w = n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1;
+    for (int i = 0; i < w; i++) {
+        if (fputc((unsigned char)tmp[i], stream) == EOF)
+            return EOF;
+    }
+    return n;
 }
 
 void perror(const char *s) {
     if (s && *s)
-        dprintf(2, "%s: %s\n", s, strerror(errno));
+        fprintf(stderr, "%s: %s\n", s, strerror(errno));
     else
-        dprintf(2, "%s\n", strerror(errno));
-}
-
-int fputs(const char *s, FILE *stream) {
-    size_t len = strlen(s);
-    ssize_t r = write(stream->fd, s, len);
-    if (r < 0) {
-        stream->error = 1;
-        return EOF;
-    }
-    return (int)r;
-}
-
-int fputc(int c, FILE *stream) {
-    unsigned char ch = (unsigned char)c;
-    ssize_t r = write(stream->fd, &ch, 1);
-    if (r < 0) {
-        stream->error = 1;
-        return EOF;
-    }
-    return ch;
+        fprintf(stderr, "%s\n", strerror(errno));
 }
 
 char *fgets(char *s, int size, FILE *stream) {
@@ -104,12 +182,12 @@ int fgetc(FILE *stream) {
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t total = size * nmemb;
     if (total == 0) return 0;
-    ssize_t r = write(stream->fd, ptr, total);
-    if (r < 0) {
-        stream->error = 1;
-        return 0;
+    const unsigned char *p = (const unsigned char *)ptr;
+    for (size_t i = 0; i < total; i++) {
+        if (fputc(p[i], stream) == EOF)
+            return i / size;
     }
-    return (size_t)r / size;
+    return nmemb;
 }
 
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
@@ -152,6 +230,9 @@ FILE *fopen(const char *path, const char *mode) {
             __file_pool[i].fd = fd;
             __file_pool[i].eof = 0;
             __file_pool[i].error = 0;
+            __file_pool[i].buf_mode = _IOFBF;
+            __file_pool[i].wpos = 0;
+            __stream_register(&__file_pool[i]);
             return &__file_pool[i];
         }
     }
@@ -164,6 +245,8 @@ FILE *fopen(const char *path, const char *mode) {
 
 int fclose(FILE *stream) {
     if (!stream) return EOF;
+    __fflush_stream(stream);
+    __stream_unregister(stream);
     int ret = close(stream->fd);
     /* Return slot to pool if it's from the pool */
     for (int i = 0; i < FILE_POOL_SIZE; i++) {
@@ -176,8 +259,23 @@ int fclose(FILE *stream) {
 }
 
 int fflush(FILE *stream) {
-    (void)stream;
-    return 0; /* unbuffered — nothing to flush */
+    if (stream)
+        return __fflush_stream(stream);
+    /* fflush(NULL): flush all registered streams */
+    if (!__streams_init) {
+        __open_streams[0] = stdin;
+        __open_streams[1] = stdout;
+        __open_streams[2] = stderr;
+        __streams_init = 1;
+    }
+    int ret = 0;
+    for (int i = 0; i < STREAM_REG_SIZE; i++) {
+        if (__open_streams[i]) {
+            if (__fflush_stream(__open_streams[i]) == EOF)
+                ret = EOF;
+        }
+    }
+    return ret;
 }
 
 int fileno(FILE *stream) {
@@ -220,8 +318,12 @@ int sscanf(const char *str, const char *fmt, ...) {
 }
 
 int setvbuf(FILE *stream, char *buf, int mode, size_t size) {
-    (void)stream; (void)buf; (void)mode; (void)size;
-    return 0; /* unbuffered — always succeeds */
+    (void)buf; (void)size;
+    if (mode != _IONBF && mode != _IOLBF && mode != _IOFBF)
+        return -1;
+    __fflush_stream(stream);
+    stream->buf_mode = mode;
+    return 0;
 }
 
 void setbuf(FILE *stream, char *buf) {

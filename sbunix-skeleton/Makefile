@@ -56,6 +56,7 @@ build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
 
 build/tarfs.o: $(USER_BIN)
 	cp -a rootfs/. build/rootfs/
+	cp build/rootfs/bin/sbush build/rootfs/bin/sh
 	tar cf build/rootfs.tar -C build/rootfs .
 	cd build && $(OBJCOPY) -I binary -O elf64-littleriscv -B riscv \
 		--rename-section .data=.tarfs \
@@ -88,6 +89,9 @@ qemu: build/kernel.elf $(DISK_IMG)
 		-netdev user,id=net0 \
 		-nographic
 
+test: build/kernel.elf $(DISK_IMG)
+	bash tools/run_tests.sh
+
 clean:
 	rm -rf build zig-out .zig-cache
 
@@ -99,7 +103,7 @@ submit:
 	rsync -a \
 		--exclude='.git' --exclude='build/' --exclude='zig-out/' \
 		--exclude='.zig-cache/' --exclude='.claude/' --exclude='thirdparty/' \
-		--max-size=100K \
+		--max-size=120K \
 		. "$$STMP/"; \
 	cd "$$STMP"; \
 	git init -q; \
@@ -113,4 +117,4 @@ submit:
 	echo "Submitted to $(SUBMIT_DIR)/sbunix"
 
 .PRECIOUS: build/%.S.o build/%.c.o
-.PHONY: all qemu clean thirdparty submit
+.PHONY: all qemu clean thirdparty submit test

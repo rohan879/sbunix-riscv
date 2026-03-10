@@ -27,6 +27,15 @@ static unsigned long ticks;
 static uint64_t boot_epoch_ns;  /* RTC nanoseconds at boot */
 static unsigned char last_key = 0;
 
+static uint64_t ns_to_time_ticks(uint64_t ns) {
+    return (ns + 99) / 100;
+}
+
+static uint64_t timespec_rel_deadline(uint64_t sec, uint64_t nsec) {
+    uint64_t delta = sec * TIMER_FREQ + ns_to_time_ticks(nsec);
+    return r_time() + delta;
+}
+
 static void rtc_init(void) {
     volatile uint32_t *rtc = (volatile uint32_t *)GOLDFISH_RTC_BASE;
     uint32_t lo = rtc[0];  /* TIME_LOW */
@@ -248,7 +257,7 @@ static void handle_timer_interrupt(void) {
     /* Wake processes whose timed sleep has expired */
     for (struct proc *p = proc; p < &proc[64]; p++) {
         if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
-            ticks >= p->sleep_until) {
+            r_time() >= p->sleep_until) {
             p->waiting_for_uart = 0;
             p->state = RUNNABLE;
         }
@@ -258,7 +267,7 @@ static void handle_timer_interrupt(void) {
         if (p->state != UNUSED && p->state != ZOMBIE &&
             p->alarm_ticks > 0 && ticks >= p->alarm_ticks) {
             p->alarm_ticks = 0;  /* one-shot */
-            p->sigpending |= (1UL << 14);  /* SIGALRM = 14 */
+            p->sigpending |= signal_bit(14);  /* SIGALRM = 14 */
             if (p->state == SLEEPING)
                 p->state = RUNNABLE;
         }
@@ -405,6 +414,7 @@ static pid_t sys_clone(void) {
 
     /* ---- Common path (all modes) ---- */
     memcpy(p->cwd, current_proc->cwd, sizeof(p->cwd));
+    p->umask_val = current_proc->umask_val;
     memcpy(p->name, current_proc->name, sizeof(p->name));
 
     /* Copy trapframe -- child starts after the ecall just like parent */
@@ -452,8 +462,7 @@ static pid_t sys_clone(void) {
                      PTE_R | PTE_W | PTE_X) < 0) goto bad;
         if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000,
                      PTE_R | PTE_W) < 0) goto bad;
-        if (mappages(new_pt, 0x101000, PAGE_SIZE, 0x101000,
-                     PTE_R | PTE_W) < 0) goto bad;
+        /* RTC (0x101000) NOT mapped — only used during kernel boot */
         if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000,
                      PTE_R | PTE_W) < 0) goto bad;
         if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000,
@@ -543,8 +552,13 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
             if (p->state == ZOMBIE) {
                 pid_t pid = p->pid;
                 if (wstatus) {
-                    /* encode exit status as Linux wait status */
-                    *wstatus = (p->exit_status & 0xff) << 8;
+                    if (p->killed_by_signal) {
+                        /* Signal kill: low 7 bits = signal number */
+                        *wstatus = p->killed_by_signal & 0x7f;
+                    } else {
+                        /* Normal exit: exit code in upper byte, low byte = 0 */
+                        *wstatus = (p->exit_status & 0xff) << 8;
+                    }
                 }
                 /* free child resources */
                 p->state = UNUSED;
@@ -698,14 +712,14 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
 
     int signum = 0;
     for (int i = 1; i < 32; i++) {
-        if (deliverable & (1UL << i)) {
+        if (deliverable & signal_bit(i)) {
             signum = i;
             break;
         }
     }
 
     /* Clear from pending */
-    p->sigpending &= ~(1UL << signum);
+    p->sigpending &= ~signal_bit(signum);
 
     struct kern_sigaction *sa = proc_sigactions(p);
     uint64_t handler = sa[signum].handler;
@@ -717,11 +731,12 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
             return;
         /* Default: terminate process */
         p->exit_status = 128 + signum;
+        p->killed_by_signal = signum;
         cleanup_proc_resources(p);
         p->state = ZOMBIE;
         /* Notify parent via SIGCHLD and wake it */
         if (p->parent) {
-            p->parent->sigpending |= (1UL << SIGCHLD);
+            p->parent->sigpending |= signal_bit(SIGCHLD);
             if (p->parent->state == SLEEPING)
                 p->parent->state = RUNNABLE;
         }
@@ -747,12 +762,16 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         }
     }
 
-    /* Push original trapframe onto user stack */
-    sp -= sizeof(struct trapframe);
+    /* Push the saved mask and original trapframe onto user stack */
+    sp -= sizeof(struct signal_frame);
     sp &= ~15UL; /* 16-byte align */
 
-    /* Copy trapframe to user stack via copyout */
-    if (copyout(p->pagetable, sp, tf, sizeof(struct trapframe)) < 0)
+    struct signal_frame frame;
+    frame.saved_sigmask = p->sigmask;
+    memcpy(&frame.saved_tf, tf, sizeof(frame.saved_tf));
+
+    /* Copy signal frame to user stack via copyout */
+    if (copyout(p->pagetable, sp, &frame, sizeof(frame)) < 0)
         return; /* can't deliver signal -- just drop it */
 
     /* Set up trapframe to call handler(signum) with return to trampoline */
@@ -764,7 +783,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* Block this signal during handler execution */
     p->sigmask |= sa[signum].mask;
     if (!(sa[signum].flags & 0x40000000)) /* SA_NODEFER */
-        p->sigmask |= (1UL << signum);
+        p->sigmask |= signal_bit(signum);
 }
 
 /* ------------------------------------------------------------------ */
@@ -807,8 +826,18 @@ static long sys_write_handler(struct trapframe *tf) {
 
     if (f && f->is_pipe && f->pipe_write) {
         int pid = f->pipe_id;
+        /* Check for broken pipe before writing */
+        if (pipes[pid].read_open <= 0) {
+            current_proc->sigpending |= signal_bit(SIGPIPE);
+            return (long)-32; /* -EPIPE */
+        }
         size_t written = 0;
         while (written < len) {
+            /* Re-check after sleeping: reader may have closed */
+            if (pipes[pid].read_open <= 0) {
+                current_proc->sigpending |= signal_bit(SIGPIPE);
+                return (written > 0) ? (long)written : (long)-32;
+            }
             int avail = PIPE_BUF - pipe_avail(pid);
             if (avail <= 0) {
                 current_proc->state = SLEEPING;
@@ -838,6 +867,15 @@ static long sys_write_handler(struct trapframe *tf) {
         }
         return (long)written;
     } else if (f && f->ops && f->ops->write) {
+        /* O_APPEND: seek to end of file before each write */
+        if ((f->flags & 02000) && f->ops->fstat) {
+            uint8_t st[128];
+            if (f->ops->fstat(f->private, st) == 0) {
+                int64_t fsize;
+                memcpy(&fsize, st + 48, 8);
+                f->offset = fsize;
+            }
+        }
         char kbuf[512];
         int64_t total = 0;
         while ((size_t)total < len) {
@@ -866,26 +904,26 @@ static long sys_read_handler(struct trapframe *tf) {
     if (f && f->is_pipe && f->pipe_read) {
         int pid = f->pipe_id;
         size_t read_bytes = 0;
-        while (read_bytes < len) {
-            while (pipe_avail(pid) == 0) {
-                if (pipes[pid].write_open == 0) goto pipe_eof;
-                current_proc->state = SLEEPING;
-                swtch(&current_proc->context, &scheduler_context);
+        /* Block until at least one byte is available (or EOF) */
+        while (pipe_avail(pid) == 0) {
+            if (pipes[pid].write_open == 0) goto pipe_eof;
+            current_proc->state = SLEEPING;
+            swtch(&current_proc->context, &scheduler_context);
+        }
+        /* Drain all available bytes (up to len) without re-blocking */
+        while (read_bytes < len && pipe_avail(pid) > 0) {
+            char kc = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
+            pipes[pid].rpos++;
+            if (copyout(current_proc->pagetable, ubuf + read_bytes, &kc, 1) < 0) {
+                return (read_bytes > 0) ? (long)read_bytes : (long)-14;
             }
-            {
-                char kc = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
-                pipes[pid].rpos++;
-                if (copyout(current_proc->pagetable, ubuf + read_bytes, &kc, 1) < 0) {
-                    return (read_bytes > 0) ? (long)read_bytes : (long)-14;
-                }
-                read_bytes++;
-            }
-            for (struct proc *p = proc; p < &proc[64]; p++) {
-                if (p->state == SLEEPING && p != current_proc &&
-                    p->waiting_for_uart != 2)
-                    p->state = RUNNABLE;
-            }
-            break;
+            read_bytes++;
+        }
+        /* Wake any blocked pipe writers since we freed buffer space */
+        for (struct proc *p = proc; p < &proc[64]; p++) {
+            if (p->state == SLEEPING && p != current_proc &&
+                p->waiting_for_uart != 2)
+                p->state = RUNNABLE;
         }
 pipe_eof:
         return (long)read_bytes;
@@ -1154,6 +1192,82 @@ static long sys_execve_handler(struct trapframe *tf) {
     if (ret < 0) {
         ret = exec(kpath);
     }
+
+    /* Shebang (#!) handling: if exec failed, check if file is a script */
+    if (ret < 0) {
+        char first_bytes[256];
+        int got = 0;
+        struct posix_header *th = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+        if (!th) {
+            char orig_tp[256];
+            to_tarfs_path(kpath, orig_tp);
+            th = tar_find_file(_tarfs_start, _tarfs_end, orig_tp);
+        }
+        if (th) {
+            char *data = (char *)th + sizeof(struct posix_header);
+            for (int j = 0; j < 255 && data[j] != '\n' && data[j] != '\0'; j++)
+                first_bytes[got++] = data[j];
+            first_bytes[got] = '\0';
+        }
+        if (got >= 2 && first_bytes[0] == '#' && first_bytes[1] == '!') {
+            /* Parse interpreter path */
+            char interp[256];
+            int j = 2;
+            while (first_bytes[j] == ' ' || first_bytes[j] == '\t') j++;
+            int k = 0;
+            while (j < got && first_bytes[j] != '\n' && first_bytes[j] != '\r' &&
+                   first_bytes[j] != ' ' && first_bytes[j] != '\t' && k < 254)
+                interp[k++] = first_bytes[j++];
+            interp[k] = '\0';
+
+            if (k > 0) {
+                /* Rebuild argv: [interp, script_path, original_args[1:]...] */
+                int interp_len = strlen(interp) + 1;
+                int script_len = strlen(resolved) + 1;
+
+                /* Rebuild argv: [interp, script_path, old_argv[1:]...] */
+                int new_kstroff = 0;
+                char *tmpbuf = (char *)kalloc();
+                if (tmpbuf) {
+                    /* Copy interp */
+                    memcpy(tmpbuf, interp, interp_len);
+                    int new_offsets[EXECVE_MAXARGS];
+                    int new_argc = 0;
+                    new_offsets[new_argc++] = 0;
+                    new_kstroff = interp_len;
+
+                    /* Copy script path */
+                    new_offsets[new_argc++] = new_kstroff;
+                    memcpy(tmpbuf + new_kstroff, resolved, script_len);
+                    new_kstroff += script_len;
+
+                    /* Copy old_argv[1..] */
+                    for (int a = 1; a < kargc && new_argc < EXECVE_MAXARGS; a++) {
+                        int slen = strlen(kstrbuf + kstroff_arr[a]) + 1;
+                        if (new_kstroff + slen > (int)PAGE_SIZE) break;
+                        new_offsets[new_argc] = new_kstroff;
+                        memcpy(tmpbuf + new_kstroff, kstrbuf + kstroff_arr[a], slen);
+                        new_kstroff += slen;
+                        new_argc++;
+                    }
+
+                    /* Replace kstrbuf with new argv */
+                    memcpy(kstrbuf, tmpbuf, new_kstroff);
+                    kargc = new_argc;
+                    kstroff = new_kstroff;
+                    for (int a = 0; a < kargc; a++)
+                        kstroff_arr[a] = new_offsets[a];
+                    kfree(tmpbuf);
+
+                    /* Now exec the interpreter */
+                    char interp_tarpath[256];
+                    to_tarfs_path(interp, interp_tarpath);
+                    ret = exec(interp_tarpath);
+                }
+            }
+        }
+    }
+
     if (ret < 0) {
         kfree(kstrbuf);
         if (kenvbuf) kfree(kenvbuf);
@@ -1286,15 +1400,16 @@ static long sys_kill_handler(struct trapframe *tf) {
     } else {
         if (sig == 9) {
             target->exit_status = 128 + 9;
+            target->killed_by_signal = 9;
             cleanup_proc_resources(target);
             target->state = ZOMBIE;
             if (target->parent) {
-                target->parent->sigpending |= (1UL << SIGCHLD);
+                target->parent->sigpending |= signal_bit(SIGCHLD);
                 if (target->parent->state == SLEEPING)
                     target->parent->state = RUNNABLE;
             }
-        } else if (sig > 0 && sig < 32) {
-            target->sigpending |= (1UL << sig);
+        } else if (signal_is_valid(sig)) {
+            target->sigpending |= signal_bit(sig);
             if (target->state == SLEEPING)
                 target->state = RUNNABLE;
         }
@@ -1500,11 +1615,14 @@ static long sys_nanosleep_handler(struct trapframe *tf) {
     uint64_t req_uaddr = tf->a0;
     if (req_uaddr && current_proc) {
         uint64_t kreq[2];
-        if (copyin(current_proc->pagetable, kreq, req_uaddr, 16) == 0) {
-            uint64_t secs = kreq[0];
-            current_proc->sleep_until     = ticks + secs;
+        if (copyin(current_proc->pagetable, kreq, req_uaddr, 16) < 0)
+            return (long)-14;
+        if (kreq[1] >= 1000000000UL)
+            return (long)-22;
+        if (kreq[0] != 0 || kreq[1] != 0) {
+            current_proc->sleep_until = timespec_rel_deadline(kreq[0], kreq[1]);
             current_proc->waiting_for_uart = 2;
-            current_proc->state           = SLEEPING;
+            current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
         }
     }
@@ -1515,6 +1633,7 @@ static long sys_exit_handler(struct trapframe *tf) {
     int status = (int)tf->a0;
     if (current_proc) {
         current_proc->exit_status = status;
+        current_proc->killed_by_signal = 0;
         cleanup_proc_resources(current_proc);
         if (current_proc->pid == 1) {
             printk("\nSystem halted (init exited with status %d).\n", status);
@@ -1526,7 +1645,7 @@ static long sys_exit_handler(struct trapframe *tf) {
         }
         current_proc->state = ZOMBIE;
         if (current_proc->parent) {
-            current_proc->parent->sigpending |= (1UL << SIGCHLD);
+            current_proc->parent->sigpending |= signal_bit(SIGCHLD);
             if (current_proc->parent->state == SLEEPING)
                 current_proc->parent->state = RUNNABLE;
         }
@@ -1704,10 +1823,19 @@ static long sys_ioctl_handler(struct trapframe *tf) {
         } else {
             return (long)-25;
         }
-    } else if (request == 0x540F) { /* TIOCGPGRP */
-        return (long)current_proc->pid;
-    } else if (request == 0x5410) { /* TIOCSPGRP */
-        return (long)0;
+    } else if (request == 0x540F || request == 0x5410) {
+        /* TIOCGPGRP / TIOCSPGRP — delegate to tty_ioctl */
+        int kpgid = 0;
+        if (request == 0x5410 && argp) {
+            if (copyin(current_proc->pagetable, &kpgid, argp, sizeof(kpgid)) < 0)
+                return (long)-14;
+        }
+        long result = (long)tty_ioctl(request, (void *)&kpgid);
+        if (request == 0x540F && argp) {
+            if (copyout(current_proc->pagetable, argp, &kpgid, sizeof(kpgid)) < 0)
+                return (long)-14;
+        }
+        return result;
     } else if (request >= TCGETS && request <= TCSETSF) {
         if (fd >= 0 && fd <= 2) {
             char ktermios[128];
@@ -1801,13 +1929,14 @@ static long sys_rt_sigprocmask_handler(struct trapframe *tf) {
 static long sys_rt_sigreturn_handler(struct trapframe *tf) {
     uint64_t usp = tf->sp;
 
-    struct trapframe saved;
-    memset(&saved, 0, sizeof(saved));
-    if (copyin(current_proc->pagetable, &saved, usp, sizeof(saved)) < 0) {
+    struct signal_frame frame;
+    memset(&frame, 0, sizeof(frame));
+    if (copyin(current_proc->pagetable, &frame, usp, sizeof(frame)) < 0) {
         return (long)-14;
     }
 
-    memcpy(tf, &saved, sizeof(struct trapframe));
+    current_proc->sigmask = frame.saved_sigmask;
+    memcpy(tf, &frame.saved_tf, sizeof(frame.saved_tf));
     return SYSCALL_NORETURN;
 }
 
@@ -1987,8 +2116,10 @@ static long sys_mknodat_handler(struct trapframe *tf) {
 }
 
 static long sys_umask_handler(struct trapframe *tf) {
-    (void)tf;
-    return (long)0022;
+    unsigned int new_mask = (unsigned int)tf->a0 & 0777;
+    unsigned int old_mask = current_proc->umask_val;
+    current_proc->umask_val = new_mask;
+    return (long)old_mask;
 }
 
 static long sys_geteuid_handler(struct trapframe *tf) {
@@ -2076,6 +2207,11 @@ static long sys_writev_handler(struct trapframe *tf) {
             if (f->is_pipe) {
                 int pid = f->pipe_id;
                 if (pid < 0 || !f->pipe_write) { total = -9; break; }
+                if (pipes[pid].read_open <= 0) {
+                    current_proc->sigpending |= signal_bit(SIGPIPE);
+                    if (total == 0) total = -32; /* -EPIPE */
+                    goto writev_out;
+                }
                 char kchunk[512];
                 uint64_t done = 0;
                 while (done < len) {
@@ -2091,7 +2227,11 @@ static long sys_writev_handler(struct trapframe *tf) {
                             current_proc->state = SLEEPING;
                             swtch(&current_proc->context, &scheduler_context);
                         }
-                        if (!pipes[pid].read_open) break;
+                        if (!pipes[pid].read_open) {
+                            current_proc->sigpending |= signal_bit(SIGPIPE);
+                            if (total == 0) total = -32;
+                            goto writev_out;
+                        }
                         pipes[pid].buf[pipes[pid].wpos % PIPE_BUF] = kchunk[j];
                         pipes[pid].wpos++;
                     }
@@ -2099,6 +2239,15 @@ static long sys_writev_handler(struct trapframe *tf) {
                 }
                 total += (int64_t)len;
             } else if (f->ops && f->ops->write) {
+                /* O_APPEND: seek to end before each iov write */
+                if ((f->flags & 02000) && f->ops->fstat) {
+                    uint8_t st[128];
+                    if (f->ops->fstat(f->private, st) == 0) {
+                        int64_t fsize;
+                        memcpy(&fsize, st + 48, 8);
+                        f->offset = fsize;
+                    }
+                }
                 char kchunk[512];
                 uint64_t done = 0;
                 while (done < len) {
@@ -2323,11 +2472,11 @@ static long sys_tgkill_handler(struct trapframe *tf) {
     int sig = (int)tf->a2;
     if (sig == 0) {
         return (long)0;
-    } else {
+    } else if (signal_is_valid(sig)) {
         long result = (long)-3;
         for (struct proc *p = proc; p < &proc[64]; p++) {
             if (p->pid == tid && p->state != UNUSED) {
-                p->sigpending |= (1UL << sig);
+                p->sigpending |= signal_bit(sig);
                 if (p->state == SLEEPING)
                     p->state = RUNNABLE;
                 result = 0;
@@ -2335,6 +2484,8 @@ static long sys_tgkill_handler(struct trapframe *tf) {
             }
         }
         return result;
+    } else {
+        return (long)-22;
     }
 }
 
@@ -2389,7 +2540,10 @@ static long sys_clock_nanosleep_handler(struct trapframe *tf) {
     if (copyin(current_proc->pagetable, kreq, tf->a2, 16) < 0)
         return (long)-14;
 
-    uint64_t sleep_ticks = kreq[0] * (TIMER_FREQ / 10) + kreq[1] / 100;
+    if (kreq[1] >= 1000000000UL)
+        return (long)-22;
+
+    uint64_t deadline = timespec_rel_deadline(kreq[0], kreq[1]);
 
     if (flags & 1) {
         /* TIMER_ABSTIME: kreq is absolute wall time */
@@ -2400,10 +2554,10 @@ static long sys_clock_nanosleep_handler(struct trapframe *tf) {
         if (target <= now_total)
             return 0; /* already past */
         uint64_t diff_ns = target - now_total;
-        sleep_ticks = diff_ns / 100; /* 100ns per tick */
+        deadline = r_time() + ns_to_time_ticks(diff_ns);
     }
 
-    current_proc->sleep_until = ticks + sleep_ticks;
+    current_proc->sleep_until = deadline;
     current_proc->waiting_for_uart = 2;
     current_proc->state = SLEEPING;
     swtch(&current_proc->context, &scheduler_context);
@@ -2452,8 +2606,11 @@ static long sys_ppoll_handler(struct trapframe *tf) {
         if (kts[0] == 0 && kts[1] == 0) {
             /* Non-blocking poll */
         } else {
-            uint64_t ns = kts[0] * 1000000000UL + kts[1];
-            sleep_until_val = ticks + ns / 100;
+            if (kts[1] >= 1000000000UL) {
+                current_proc->sigmask = old_mask;
+                return (long)-22;
+            }
+            sleep_until_val = timespec_rel_deadline(kts[0], kts[1]);
         }
     }
 
@@ -2472,7 +2629,7 @@ static long sys_ppoll_handler(struct trapframe *tf) {
     }
 
     /* If none ready and timeout allows blocking */
-    if (ready == 0 && (!has_timeout || sleep_until_val > ticks)) {
+    if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
             current_proc->waiting_for_uart = 2;
@@ -2533,8 +2690,9 @@ static long sys_pselect6_handler(struct trapframe *tf) {
         if (kts[0] == 0 && kts[1] == 0) {
             /* Non-blocking */
         } else {
-            uint64_t ns = kts[0] * 1000000000UL + kts[1];
-            sleep_until_val = ticks + ns / 100;
+            if (kts[1] >= 1000000000UL)
+                return (long)-22;
+            sleep_until_val = timespec_rel_deadline(kts[0], kts[1]);
         }
     }
 
@@ -2572,7 +2730,7 @@ static long sys_pselect6_handler(struct trapframe *tf) {
     }
 
     /* Block if none ready and timeout allows */
-    if (ready == 0 && (!has_timeout || sleep_until_val > ticks)) {
+    if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
             current_proc->waiting_for_uart = 2;
@@ -2856,7 +3014,7 @@ void trap_handler(struct trapframe *tf) {
 
             /* --- Stack auto-grow (any page fault near current stack) --- */
             if (current_proc && current_proc->stack_top > 0 &&
-                stval >= current_proc->stack_bottom - 16 * PAGE_SIZE &&
+                stval >= current_proc->stack_bottom - 256 * PAGE_SIZE &&
                 stval < current_proc->stack_top) {
                 uint64_t va = PGROUNDDOWN(stval);
                 int grew = 0;
@@ -2903,7 +3061,7 @@ pagefault_kill:
             printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
                    current_proc ? current_proc->pid : -1, tf->epc, stval, cause);
             if (current_proc) {
-                current_proc->sigpending |= (1UL << SIGSEGV);
+                current_proc->sigpending |= signal_bit(SIGSEGV);
                 deliver_signal(tf, current_proc);
                 /* If deliver_signal returned (handler caught it), resume */
                 return;
