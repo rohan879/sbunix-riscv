@@ -56,6 +56,7 @@ build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
 
 build/tarfs.o: $(USER_BIN)
 	cp -a rootfs/. build/rootfs/
+	cp build/rootfs/bin/sbush build/rootfs/bin/sh
 	tar cf build/rootfs.tar -C build/rootfs .
 	cd build && $(OBJCOPY) -I binary -O elf64-littleriscv -B riscv \
 		--rename-section .data=.tarfs \
