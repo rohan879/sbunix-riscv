@@ -22,7 +22,7 @@ int main(void) {
         char *argv[] = {"/bin/echo", "exec_ok", NULL};
         char *envp[] = {NULL};
         execve("/bin/echo", argv, envp);
-        exit(127);
+        _exit(127);
     }
     waitpid(pid, &status, 0);
     check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "execve echo");
@@ -33,7 +33,7 @@ int main(void) {
         char *argv[] = {"/bin/nonexistent", NULL};
         char *envp[] = {NULL};
         int r = execve("/bin/nonexistent", argv, envp);
-        exit(r == -1 ? 0 : 1);
+        _exit(r == -1 ? 0 : 1);
     }
     waitpid(pid, &status, 0);
     check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "execve nonexistent fails");
@@ -44,7 +44,7 @@ int main(void) {
         char *argv[] = {"/bin/sh", "-c", "echo sh_ok", NULL};
         char *envp[] = {NULL};
         execve("/bin/sh", argv, envp);
-        exit(127);
+        _exit(127);
     }
     waitpid(pid, &status, 0);
     check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "/bin/sh -c works");
@@ -55,7 +55,7 @@ int main(void) {
         char *argv[] = {"/bin/echo", "a", "b", "c", NULL};
         char *envp[] = {NULL};
         execve("/bin/echo", argv, envp);
-        exit(127);
+        _exit(127);
     }
     waitpid(pid, &status, 0);
     check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "execve multi-arg");

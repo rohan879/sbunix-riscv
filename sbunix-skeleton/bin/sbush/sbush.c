@@ -330,6 +330,12 @@ int main(int argc, char *argv[], char *envp[]) {
     if (getcwd(cwd, sizeof(cwd)))
         var_set("PWD", cwd);
 
+    /* -c mode: execute command string */
+    if (argc >= 3 && strcmp(argv[1], "-c") == 0) {
+        execute_line(argv[2]);
+        return last_exit_status;
+    }
+
     /* script mode */
     if (argc >= 2)
         return run_script(argv[1]);

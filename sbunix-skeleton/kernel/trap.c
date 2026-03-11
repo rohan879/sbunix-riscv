@@ -432,6 +432,8 @@ static pid_t sys_clone(void) {
         p->trapframe->sp = child_sp;
 
     p->parent = current_proc;
+    p->pgid = current_proc->pgid;
+    p->sid = current_proc->sid;
     p->clone_flags = clone_flags;
 
     /* Copy stack bounds and mmap_base from parent */
