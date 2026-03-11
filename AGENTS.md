@@ -4,7 +4,7 @@ This file provides guidance for agents working on the SBUnix RISC-V operating sy
 
 ## Project Overview
 
-SBUnix is a teaching OS kernel for RISC-V architecture (RV64IMAC). The project uses a cross-compiler toolchain (`riscv64-unknown-elf-gcc`) and runs on QEMU's `virt` machine.
+SBUnix is a simple OS kernel for RISC-V architecture (RV64IMAC). The project uses a cross-compiler toolchain (`riscv64-unknown-elf-gcc`) and runs on QEMU's `virt` machine.
 
 ## Build Commands
 

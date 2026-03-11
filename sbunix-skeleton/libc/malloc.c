@@ -5,7 +5,7 @@
  * free list of blocks. Each allocated block is prefixed with a header that
  * stores the block size and a pointer to the next free block.
  *
- * This is intentionally simple: suitable for a teaching OS where programs
+ * This is intentionally simple: suitable for a simple OS where programs
  * are short-lived and heap fragmentation is not a concern.
  */
 

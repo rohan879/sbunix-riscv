@@ -3,7 +3,7 @@
  *
  * Calls SYS_reboot with the Linux magic values and CMD_POWER_OFF.
  * Must be run as init (pid 1) or as a privileged process; in our
- * single-user teaching OS any process may issue this.
+ * single-user simple OS any process may issue this.
  */
 #include <stdio.h>
 #include <syscall.h>
