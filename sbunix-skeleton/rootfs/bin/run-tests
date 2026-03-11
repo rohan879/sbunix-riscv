@@ -25,6 +25,17 @@ echo === C Binary Tests ===
 /bin/libc-test
 /bin/alarmtest
 /bin/segvtest
+/bin/fdiotest
+/bin/sigtest
+/bin/sighandtest
+/bin/dirtest
+/bin/procfstest
+/bin/cowtest
+/bin/lazytest
+/bin/pgrptest
+/bin/symlinktest
+/bin/clocktest
+/bin/exectest
 echo === C Binary Tests Done ===
 
 echo === Task345 Test ===
