@@ -855,6 +855,15 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     if (copyout(p->pagetable, sp, &frame, sizeof(frame)) < 0)
         return; /* can't deliver signal -- just drop it */
 
+    /* Verify trampoline is mapped before directing handler return there */
+    {
+        pte_t *tpte = walk(p->pagetable, SIG_TRAMPOLINE_VA, 0);
+        if (!tpte || !(*tpte & PTE_V)) {
+            /* Trampoline not mapped — re-map it now */
+            uvmmap_sigtrampoline(p->pagetable);
+        }
+    }
+
     /* Set up trapframe to call handler(signum) with return to trampoline */
     tf->epc = handler;                   /* jump to signal handler */
     tf->a0 = (uint64_t)signum;           /* first arg: signal number */
