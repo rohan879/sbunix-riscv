@@ -69,7 +69,12 @@ int exec(char *path) {
     for (i = 0; i < ehdr->e_phnum; i++) {
         phdr = (Elf64_Phdr *)(elf_data + ehdr->e_phoff + i*sizeof(Elf64_Phdr));
         if (phdr->p_type == PT_LOAD) {
-            if(uvmalloc(pagetable, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz, PTE_R|PTE_W|PTE_X) == 0) return -1;
+            /* Compute PTE flags from ELF p_flags; keep PTE_W during load for copyout */
+            int pte_flags = 0;
+            if (phdr->p_flags & 0x4) pte_flags |= PTE_R;  /* PF_R */
+            if (phdr->p_flags & 0x2) pte_flags |= PTE_W;  /* PF_W */
+            if (phdr->p_flags & 0x1) pte_flags |= PTE_X;  /* PF_X */
+            if(uvmalloc(pagetable, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz, pte_flags | PTE_W) == 0) return -1;
             if(copyout(pagetable, phdr->p_vaddr, elf_data + phdr->p_offset, phdr->p_filesz) < 0) return -1;
             uint64_t seg_end = phdr->p_vaddr + phdr->p_memsz;
             if (seg_end > sz) sz = seg_end;
