@@ -1282,6 +1282,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     char resolved[256];
     char tarpath[256];
     resolve_path(current_proc->cwd, kpath, resolved);
+    follow_symlinks(resolved, 8);
     to_tarfs_path(resolved, tarpath);
 
     int ret = exec(tarpath);
@@ -1778,6 +1779,13 @@ static long sys_exit_handler(struct trapframe *tf) {
  *   LINUX_REBOOT_CMD_RESTART   = 0x01234567
  * We accept the correct magic pair and then call SBI SRST extension.
  * If called without correct magic, return -EPERM. */
+
+static long sys_fsync_handler(struct trapframe *tf) {
+    (void)tf;
+    ext2_sync();
+    return 0;
+}
+
 #define REBOOT_MAGIC1      0xfee1deadU
 #define REBOOT_MAGIC2      0x28121969U
 #define REBOOT_CMD_HALT    0xcdef0123U
@@ -1844,12 +1852,9 @@ static long sys_mmap_handler(struct trapframe *tf) {
     if (prot & PROT_EXEC)  pte_flags |= PTE_X;
     if (pte_flags == 0) pte_flags = PTE_R; /* minimum readable */
 
-    if (uvmalloc(current_proc->pagetable, va, va + len, pte_flags) == 0) {
-        return (long)-1;
-    }
-
+    /* Register VMA only — pages allocated lazily on first access via
+     * the demand paging path in the page fault handler. */
     if (vma_add(current_proc, va, va + len, prot, flags) < 0) {
-        uvmunmap(current_proc->pagetable, va, len);
         return (long)-1;
     }
 
@@ -3091,6 +3096,7 @@ void syscall_init(void) {
     syscall_table[SYS_mount]           = sys_mount_handler;
     syscall_table[SYS_umount2]         = sys_umount2_handler;
     syscall_table[SYS_reboot]          = sys_reboot_handler;
+    syscall_table[SYS_fsync]           = sys_fsync_handler;
 }
 
 /* ------------------------------------------------------------------ */
