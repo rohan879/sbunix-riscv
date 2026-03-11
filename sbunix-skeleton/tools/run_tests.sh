@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TIMEOUT=600
+TIMEOUT=${TIMEOUT:-600}
 OUTPUT_FILE="$(mktemp /tmp/sbunix-test-output.XXXXXX)"
 QEMU_PID=""
 
@@ -26,7 +26,7 @@ source tools/sourceme.sh
 
 # Build the kernel
 echo "==> Building kernel..."
-make clean && make
+make clean && make BUILD_TESTS=1
 if [ $? -ne 0 ]; then
     echo "FATAL: Kernel build failed"
     exit 1

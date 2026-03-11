@@ -9,5 +9,7 @@ else
     echo "[BOOT] WARNING: /bin/sh not found!"
 fi
 
-# Run full test suite (output captured by host runner)
-run-tests
+# Run test suite only if test runner is present (test builds only)
+if test -f /bin/run-tests; then
+    run-tests
+fi
