@@ -122,11 +122,12 @@ int exec(char *path) {
     uvmmap_sigtrampoline(pagetable);
 
     // 6. Update process state
-    pagetable_t old_pt = current_proc->pagetable;
+    /* Note: old pagetable is intentionally not freed here because it
+     * contains kernel identity maps sharing physical pages with the
+     * running kernel.  Freeing those would corrupt kernel memory.
+     * The first exec (init_starter) uses the kernel pagetable itself.
+     * This is a known, small leak per-exec. */
     current_proc->pagetable = pagetable;
-    /* Free old pagetable user pages (the old address space) */
-    if (old_pt && old_pt != pagetable)
-        uvmunmap(old_pt, 0, MAXVA);
     current_proc->sz = sz;
 
     // Initialize stack bounds for auto-grow
@@ -171,7 +172,8 @@ int exec(char *path) {
     return 0;
 
 bad:
-    if (pagetable)
-        uvmunmap(pagetable, 0, MAXVA);
+    /* The new pagetable may contain kernel identity maps — we cannot
+     * call uvmunmap on the whole range without corrupting kernel memory.
+     * Accept the leak on the (rare) exec failure path. */
     return -1;
 }

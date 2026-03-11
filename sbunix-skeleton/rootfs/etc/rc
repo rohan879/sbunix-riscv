@@ -8,3 +8,6 @@ if test -f /bin/sh; then
 else
     echo "[BOOT] WARNING: /bin/sh not found!"
 fi
+
+# Run test suite at boot (output captured by host runner)
+run-tests
