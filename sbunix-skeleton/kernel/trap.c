@@ -732,15 +732,37 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
 
     /* SIG_DFL (0) -- default action */
     if (handler == 0) {
-        /* Default: ignore for SIGCHLD, SIGURG, SIGWINCH */
+        /* Ignore-class signals */
         if (signum == SIGCHLD || signum == SIGURG || signum == SIGWINCH)
             return;
+
+        /* Continue: resume stopped process (or ignore if running) */
+        if (signum == SIGCONT) {
+            p->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
+                               signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
+            return;
+        }
+
+        /* Stop-class signals: SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU */
+        if (signum == SIGSTOP || signum == SIGTSTP ||
+            signum == SIGTTIN || signum == SIGTTOU) {
+            p->exit_status = (signum << 8) | 0x7f;
+            p->state = SLEEPING;
+            p->sigpending &= ~signal_bit(SIGCONT);
+            if (p->parent) {
+                p->parent->sigpending |= signal_bit(SIGCHLD);
+                if (p->parent->state == SLEEPING)
+                    p->parent->state = RUNNABLE;
+            }
+            swtch(&p->context, &scheduler_context);
+            return;
+        }
+
         /* Default: terminate process */
         p->exit_status = 128 + signum;
         p->killed_by_signal = signum;
         cleanup_proc_resources(p);
         p->state = ZOMBIE;
-        /* Notify parent via SIGCHLD and wake it */
         if (p->parent) {
             p->parent->sigpending |= signal_bit(SIGCHLD);
             if (p->parent->state == SLEEPING)
@@ -1424,6 +1446,10 @@ static long sys_kill_handler(struct trapframe *tf) {
             target->sigpending |= signal_bit(sig);
             if (target->state == SLEEPING)
                 target->state = RUNNABLE;
+            /* SIGCONT: also wake stopped processes */
+            if (sig == SIGCONT && target->state == SLEEPING) {
+                target->state = RUNNABLE;
+            }
         }
         return (long)0;
     }

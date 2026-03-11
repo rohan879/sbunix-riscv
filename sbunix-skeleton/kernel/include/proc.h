@@ -102,9 +102,17 @@ struct shared_sigactions {
 #define SIG_TRAMPOLINE_VA  0x3FFFFFF000UL  /* just below top of Sv39 user space */
 
 /* Signal constants */
+#define SIGINT     2
+#define SIGQUIT    3
+#define SIGKILL    9
 #define SIGSEGV   11
 #define SIGPIPE   13
 #define SIGCHLD   17
+#define SIGCONT   18
+#define SIGSTOP   19
+#define SIGTSTP   20
+#define SIGTTIN   21
+#define SIGTTOU   22
 #define SIGURG    23
 #define SIGWINCH  28
 
