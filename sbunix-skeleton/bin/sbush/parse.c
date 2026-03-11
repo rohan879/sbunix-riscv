@@ -632,16 +632,29 @@ static int tokenize(char *str, struct command *cmd) {
 
     int j = 0;
     for (int i = 0; i < cmd->argc; i++) {
-        if (strcmp(cmd->argv[i], "<") == 0 && i + 1 < cmd->argc) {
+        char *tok = cmd->argv[i];
+        if (strcmp(tok, "<") == 0 && i + 1 < cmd->argc) {
             cmd->redir_in = cmd->argv[++i];
-        } else if (strcmp(cmd->argv[i], ">>") == 0 && i + 1 < cmd->argc) {
+        } else if (tok[0] == '<' && tok[1] != '<' && tok[1] != '\0') {
+            /* <file (no space after <) */
+            cmd->redir_in = tok + 1;
+        } else if (strcmp(tok, ">>") == 0 && i + 1 < cmd->argc) {
             cmd->redir_append = cmd->argv[++i];
-        } else if (strcmp(cmd->argv[i], ">") == 0 && i + 1 < cmd->argc) {
+        } else if (tok[0] == '>' && tok[1] == '>' && tok[2] != '\0') {
+            /* >>file (no space after >>) */
+            cmd->redir_append = tok + 2;
+        } else if (strcmp(tok, ">") == 0 && i + 1 < cmd->argc) {
             cmd->redir_out = cmd->argv[++i];
-        } else if (strcmp(cmd->argv[i], "2>&1") == 0) {
+        } else if (tok[0] == '>' && tok[1] != '>' && tok[1] != '\0') {
+            /* >file (no space after >) */
+            cmd->redir_out = tok + 1;
+        } else if (strcmp(tok, "2>&1") == 0) {
             cmd->redir_err_to_out = 1;
-        } else if (strcmp(cmd->argv[i], "2>") == 0 && i + 1 < cmd->argc) {
+        } else if (strcmp(tok, "2>") == 0 && i + 1 < cmd->argc) {
             cmd->redir_err = cmd->argv[++i];
+        } else if (tok[0] == '2' && tok[1] == '>' && tok[2] != '\0' && tok[2] != '&') {
+            /* 2>file (no space after 2>) */
+            cmd->redir_err = tok + 2;
         } else {
             cmd->argv[j++] = cmd->argv[i];
         }
