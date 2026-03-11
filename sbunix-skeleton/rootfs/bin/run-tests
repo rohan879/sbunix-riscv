@@ -7,10 +7,10 @@ FAIL=0
 
 check() {
     if test "$1" = "$2"; then
-        echo "  PASS  $3"
+        echo "[PASS] $3"
         set PASS $(($PASS + 1))
     else
-        echo "  FAIL  $3  (got: $1  want: $2)"
+        echo "[FAIL] $3  (got: $1  want: $2)"
         set FAIL $(($FAIL + 1))
     fi
 }
@@ -157,3 +157,12 @@ set msg "hello world"
 echo INT4_${#msg}
 echo INT5_${msg%% *}
 echo === Integration Done ===
+
+echo ""
+echo "=== Summary ==="
+echo "Passed: $PASS"
+echo "Failed: $FAIL"
+if test $FAIL -gt 0; then
+    exit 1
+fi
+exit 0
