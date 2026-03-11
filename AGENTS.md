@@ -4,7 +4,7 @@ This file provides guidance for agents working on the SBUnix RISC-V operating sy
 
 ## Project Overview
 
-SBUnix is a teaching OS kernel for RISC-V architecture (RV64IMAC). The project uses a cross-compiler toolchain (`riscv64-unknown-elf-gcc`) and runs on QEMU's `virt` machine.
+SBUnix is a simple OS kernel for RISC-V architecture (RV64IMAC). The project uses a cross-compiler toolchain (`riscv64-unknown-elf-gcc`) and runs on QEMU's `virt` machine.
 
 ## Build Commands
 
@@ -242,19 +242,18 @@ Example: `BF: Fix null pointer in allocproc`
 
 ### QEMU Testing — Critical Notes
 
+**`make qemu` is the primary way to run QEMU.** It builds the kernel, creates `build/disk.img`, mounts ext2 on `/mnt`, and launches QEMU with the correct flags automatically. Always prefer `make qemu` over running `qemu-system-riscv64` directly.
+
 **`make qemu` requires a real interactive terminal** — it cannot be piped. Use `tmux`:
 
 ```bash
-# Start a tmux session and boot QEMU inside it
+# Start a tmux session and run make qemu inside it
 tmux new-session -d -s sbunix_test -x 220 -y 50
 tmux send-keys -t sbunix_test \
-  "export PATH=/home/steven/College/Graduate_Spring_2026/CSE506/riscv-toolchain/bin:/home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin:$PATH" Enter
-sleep 0.5
-tmux send-keys -t sbunix_test \
-  "qemu-system-riscv64 -machine virt -bios default -kernel /path/to/build/kernel.elf -nographic 2>/tmp/qemu_err.txt" Enter
+  "cd /home/steven/College/Graduate_Spring_2026/CSE506/CSE506/sbunix-skeleton && export PATH=/home/steven/College/Graduate_Spring_2026/CSE506/riscv-toolchain/bin:/home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin:$PATH && make qemu 2>/tmp/qemu_err.txt" Enter
 
-# Wait for boot (~8s), then capture screen
-sleep 8
+# Wait for boot (~10s including build), then capture screen
+sleep 10
 tmux capture-pane -t sbunix_test -p | tail -5
 # Should show: "sbush$"
 
@@ -269,16 +268,29 @@ sleep 2
 tmux kill-session -t sbunix_test
 ```
 
-**Key QEMU flags**:
-- Must use `-bios default` (not `-bios none`) — without SBI/OpenSBI the kernel produces no output
-- `-nographic` maps serial to stdio
+**Key notes about `make qemu`**:
+- Uses `make qemu` in `sbunix-skeleton/` — do NOT invoke `qemu-system-riscv64` directly unless debugging a specific flag
+- Automatically adds `-drive file=build/disk.img,...` so `/mnt` (ext2) is available
+- Must use `-bios default` (not `-bios none`) — without SBI/OpenSBI the kernel produces no output (the Makefile handles this)
+- `-nographic` maps serial to stdio (the Makefile handles this)
 - QEMU binary: `/home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin/qemu-system-riscv64`
 - Kernel ELF: `build/kernel.elf` (entry point `0x80200000`)
 - Do NOT pipe stdin/stdout to QEMU without a real tty; use tmux
 
 ### Testing Notes
 
-All regression tests pass (128/128):
+Boot is now fast — `/etc/rc` only prints `SBUnix booting...` and returns to the interactive shell. No tests run automatically at boot.
+
+To run the full test suite from the shell prompt:
+```
+run-tests
+```
+
+`/bin/run-tests` is a shell script (in `rootfs/bin/run-tests`) that runs:
+1. All C test binaries: `proctest`, `schedtest`, `sigpipetest`, `fstest`, `swaptest`
+2. All shell-level regression tests: Task345, Task6–Task11_14, and integration tests
+
+Other useful commands to verify manually:
 ```
 echo hello                          # Simple command
 echo hello | cat                    # Single pipe
@@ -287,10 +299,9 @@ sleep 2                             # Waits ~2 seconds (scheduler-based, not bus
 sleep 10 (then Ctrl-C)             # Kills sleep, returns to prompt with "^C\n"
 Ctrl-C at idle prompt              # Prints "^C\n", reprints prompt on new line
 ls                                  # Lists: etc bin
-ls /bin                             # Lists all 6 binaries
+ls /bin                             # Lists all binaries
 cd /bin                             # Changes to /bin directory
 cd ..                               # Returns to / (normalize_path handles ..)
-test                                # Runs test suite: 128 passed, 0 failed
 exit                                # Cleanly halts the system
 ```
 

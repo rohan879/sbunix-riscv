@@ -177,6 +177,12 @@ void timer_init(void) {
     sbi_set_timer(r_time() + TIMER_FREQ);
 }
 
+/* Return seconds elapsed since boot (for /proc/uptime) */
+unsigned long get_uptime_secs(void) {
+    uint64_t elapsed = r_time() - boot_time;
+    return (unsigned long)(elapsed / TIMER_FREQ);
+}
+
 static void timer_set_next(void) {
     sbi_set_timer(r_time() + TIMER_FREQ);
 }
@@ -970,6 +976,12 @@ static long sys_openat_handler(struct trapframe *tf) {
     if (ret < 0) {
         return (long)ret;
     } else {
+        /* Reject opening a directory without O_DIRECTORY (EISDIR = -21) */
+#define O_DIRECTORY 0200000
+        if (!(flags & O_DIRECTORY) && vfs_is_dir(resolved)) {
+            if (ops->close) ops->close(priv);
+            return (long)-21;
+        }
         struct open_file *f = vfs_alloc_file();
         if (!f) {
             if (ops->close) ops->close(priv);
@@ -1657,6 +1669,52 @@ static long sys_exit_handler(struct trapframe *tf) {
         swtch(&current_proc->context, &scheduler_context);
     }
     while(1) {}
+    return SYSCALL_NORETURN;
+}
+
+/* SYS_reboot — magic values from Linux ABI:
+ *   LINUX_REBOOT_MAGIC1  = 0xfee1dead
+ *   LINUX_REBOOT_MAGIC2  = 0x28121969
+ *   LINUX_REBOOT_CMD_POWER_OFF = 0x4321fedc
+ *   LINUX_REBOOT_CMD_RESTART   = 0x01234567
+ * We accept the correct magic pair and then call SBI SRST extension.
+ * If called without correct magic, return -EPERM. */
+#define REBOOT_MAGIC1      0xfee1deadU
+#define REBOOT_MAGIC2      0x28121969U
+#define REBOOT_CMD_HALT    0xcdef0123U
+#define REBOOT_CMD_POWEROFF 0x4321fedcU
+#define REBOOT_CMD_RESTART 0x01234567U
+
+static long sys_reboot_handler(struct trapframe *tf) {
+    uint32_t magic1 = (uint32_t)tf->a0;
+    uint32_t magic2 = (uint32_t)tf->a1;
+    uint32_t cmd    = (uint32_t)tf->a2;
+
+    if (magic1 != REBOOT_MAGIC1 || magic2 != REBOOT_MAGIC2)
+        return (long)-1; /* -EPERM */
+
+    if (cmd == REBOOT_CMD_RESTART) {
+        printk("\nSystem rebooting...\n");
+        /* SBI SRST extension (EID=0x53525354, FID=0): cold reboot (reset_type=1) */
+        register unsigned long a0 asm("a0") = 1; /* reset_type: cold reboot */
+        register unsigned long a1 asm("a1") = 0; /* reset_reason: none */
+        register unsigned long a6 asm("a6") = 0; /* function ID */
+        register unsigned long a7 asm("a7") = 0x53525354; /* EID: SRST */
+        asm volatile("ecall" : : "r"(a0), "r"(a1), "r"(a6), "r"(a7));
+    } else {
+        /* POWEROFF or HALT */
+        printk("\nSystem shutting down...\n");
+        /* SBI SRST extension (EID=0x53525354, FID=0): shutdown (reset_type=0) */
+        register unsigned long a0 asm("a0") = 0; /* reset_type: shutdown */
+        register unsigned long a1 asm("a1") = 0; /* reset_reason: none */
+        register unsigned long a6 asm("a6") = 0; /* function ID */
+        register unsigned long a7 asm("a7") = 0x53525354; /* EID: SRST */
+        asm volatile("ecall" : : "r"(a0), "r"(a1), "r"(a6), "r"(a7));
+        /* Fallback: SBI v0.1 legacy shutdown (EID=8) */
+        register unsigned long fa7 asm("a7") = 8;
+        asm volatile("ecall" : : "r"(fa7));
+    }
+    while (1) {}
     return SYSCALL_NORETURN;
 }
 
@@ -2933,6 +2991,7 @@ void syscall_init(void) {
     syscall_table[SYS_pselect6]        = sys_pselect6_handler;
     syscall_table[SYS_mount]           = sys_mount_handler;
     syscall_table[SYS_umount2]         = sys_umount2_handler;
+    syscall_table[SYS_reboot]          = sys_reboot_handler;
 }
 
 /* ------------------------------------------------------------------ */

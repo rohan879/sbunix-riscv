@@ -480,6 +480,7 @@ int run_builtin(struct command *cmd) {
             /* Also accept signal names */
             if (strcmp(cmd->argv[i], "INT") == 0) sig = SIGINT;
             else if (strcmp(cmd->argv[i], "TERM") == 0) sig = SIGTERM;
+            else if (strcmp(cmd->argv[i], "QUIT") == 0) sig = SIGQUIT;
             else if (strcmp(cmd->argv[i], "EXIT") == 0) sig = 0;
             else if (strcmp(cmd->argv[i], "HUP") == 0) sig = SIGHUP;
 

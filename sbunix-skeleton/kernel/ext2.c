@@ -812,6 +812,9 @@ static int ext2_open(const char *path, int flags, void **private_out) {
       return ret;
     }
 
+    /* Flush all dirty bcache blocks so the new dir entry is visible on disk */
+    bcache_sync();
+
     ip = icache_get((uint32_t)new_ino);
     if (!ip) return -1;
   }
@@ -844,6 +847,9 @@ static int64_t ext2_read(void *private, char *buf, uint64_t count,
                          int64_t *offset) {
   struct ext2_open_private *priv = (struct ext2_open_private *)private;
   if (!priv) return -1;
+
+  /* Reading a directory fd is not allowed */
+  if (priv->is_dir) return -21; /* -EISDIR */
 
   struct ext2_inode_mem *ip = icache_get(priv->ino);
   if (!ip) return -1;
@@ -937,6 +943,8 @@ static int64_t ext2_write(void *private, const char *buf, uint64_t count,
   *offset += (int64_t)total;
   icache_writeback(ip);
   icache_release(ip);
+  /* Flush all dirty blocks (data + inode) to disk so contents survive reboot */
+  bcache_sync();
   return (int64_t)total;
 }
 
@@ -956,6 +964,8 @@ static int ext2_close(void *private) {
       ext2_free_inode(ip->ino);
     } else {
       icache_writeback(ip);
+      /* Flush inode writeback to disk */
+      bcache_sync();
     }
   }
 

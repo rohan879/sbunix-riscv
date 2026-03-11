@@ -96,9 +96,10 @@
 #define SYS_madvise     233
 #define SYS_uname       160
 
-/* Custom / teaching-OS extensions */
+/* Custom / simple-OS extensions */
 #define SYS_alarm       200   /* alarm(seconds) — one-shot SIGALRM */
 #define SYS_ps          500   /* snapshot process table */
+#define SYS_reboot      142   /* reboot/poweroff (Linux RISC-V ABI) */
 
 /* mmap flags (must match libc/include/sys/mman.h) */
 #define MAP_FIXED     0x10
