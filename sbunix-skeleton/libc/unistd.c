@@ -196,6 +196,10 @@ int ftruncate(int fd, off_t length) {
     return (int)__syscall_ret(syscall(SYS_ftruncate, fd, length));
 }
 
+int fsync(int fd) {
+    return (int)__syscall_ret(syscall(SYS_fsync, fd));
+}
+
 uid_t geteuid(void) {
     return (uid_t)syscall(SYS_geteuid);
 }

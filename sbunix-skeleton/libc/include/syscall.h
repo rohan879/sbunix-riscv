@@ -96,6 +96,7 @@
 #define SYS_getrandom   278
 
 /* Additional syscalls */
+#define SYS_fsync       82
 #define SYS_ftruncate   46
 #define SYS_tgkill      131
 #define SYS_rt_sigreturn 139

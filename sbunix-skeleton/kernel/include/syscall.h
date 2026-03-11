@@ -92,6 +92,7 @@
 
 /* Additional syscalls */
 #define SYS_ftruncate   46
+#define SYS_fsync       82
 #define SYS_tgkill      131
 #define SYS_madvise     233
 #define SYS_uname       160
