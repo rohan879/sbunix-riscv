@@ -706,6 +706,53 @@ static int vfs_is_dir(const char *path) {
     return 0;
 }
 
+/* Follow symlinks in a resolved path (up to 8 levels to prevent loops) */
+static int follow_symlinks(char *resolved, int maxdepth) {
+    if (maxdepth <= 0) return -40; /* ELOOP */
+
+    const char *relpath;
+    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    if (!ops || !ops->readlink) return 0; /* no readlink = not a symlink-capable fs */
+
+    char target[256];
+    int ret = ops->readlink(relpath, target, sizeof(target) - 1);
+    if (ret < 0) return 0; /* not a symlink, path is final */
+    target[ret] = '\0';
+
+    /* Resolve the symlink target */
+    char new_resolved[256];
+    if (target[0] == '/') {
+        resolve_path("/", target, new_resolved);
+    } else {
+        /* Relative: resolve from symlink's parent directory */
+        char dir[256];
+        strncpy(dir, resolved, sizeof(dir));
+        dir[255] = '\0';
+        char *last_slash = dir;
+        for (char *p = dir; *p; p++)
+            if (*p == '/') last_slash = p;
+        if (last_slash != dir)
+            *(last_slash + 1) = '\0';
+        else
+            dir[1] = '\0';
+
+        char combined[512];
+        int dlen = strlen(dir);
+        int tlen = strlen(target);
+        if (dlen + tlen >= 510) return -36; /* ENAMETOOLONG */
+        memcpy(combined, dir, dlen);
+        memcpy(combined + dlen, target, tlen + 1);
+
+        resolve_path("/", combined, new_resolved);
+    }
+
+    strncpy(resolved, new_resolved, 256);
+    resolved[255] = '\0';
+
+    /* Recursively follow in case target is also a symlink */
+    return follow_symlinks(resolved, maxdepth - 1);
+}
+
 /* ------------------------------------------------------------------ */
 /* Signal delivery                                                      */
 /* ------------------------------------------------------------------ */
@@ -986,6 +1033,11 @@ static long sys_openat_handler(struct trapframe *tf) {
 
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
+
+    /* Follow symlinks unless O_NOFOLLOW */
+    if (!(flags & 0400000)) { /* O_NOFOLLOW = 0400000 */
+        follow_symlinks(resolved, 8);
+    }
 
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
@@ -1568,6 +1620,12 @@ static long sys_newfstatat_handler(struct trapframe *tf) {
     }
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
+
+    /* Follow symlinks unless AT_SYMLINK_NOFOLLOW */
+    int at_flags = (int)tf->a3;
+    if (!(at_flags & 0x100)) { /* AT_SYMLINK_NOFOLLOW = 0x100 */
+        follow_symlinks(resolved, 8);
+    }
 
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
