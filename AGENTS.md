@@ -252,8 +252,8 @@ tmux new-session -d -s sbunix_test -x 220 -y 50
 tmux send-keys -t sbunix_test \
   "cd /home/steven/College/Graduate_Spring_2026/CSE506/CSE506/sbunix-skeleton && export PATH=/home/steven/College/Graduate_Spring_2026/CSE506/riscv-toolchain/bin:/home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin:$PATH && make qemu 2>/tmp/qemu_err.txt" Enter
 
-# Wait for boot (~15s including build), then capture screen
-sleep 15
+# Wait for boot (~10s including build), then capture screen
+sleep 10
 tmux capture-pane -t sbunix_test -p | tail -5
 # Should show: "sbush$"
 
@@ -279,7 +279,18 @@ tmux kill-session -t sbunix_test
 
 ### Testing Notes
 
-All regression tests pass (128/128):
+Boot is now fast — `/etc/rc` only prints `SBUnix booting...` and returns to the interactive shell. No tests run automatically at boot.
+
+To run the full test suite from the shell prompt:
+```
+run-tests
+```
+
+`/bin/run-tests` is a shell script (in `rootfs/bin/run-tests`) that runs:
+1. All C test binaries: `proctest`, `schedtest`, `sigpipetest`, `fstest`, `swaptest`
+2. All shell-level regression tests: Task345, Task6–Task11_14, and integration tests
+
+Other useful commands to verify manually:
 ```
 echo hello                          # Simple command
 echo hello | cat                    # Single pipe
@@ -288,10 +299,9 @@ sleep 2                             # Waits ~2 seconds (scheduler-based, not bus
 sleep 10 (then Ctrl-C)             # Kills sleep, returns to prompt with "^C\n"
 Ctrl-C at idle prompt              # Prints "^C\n", reprints prompt on new line
 ls                                  # Lists: etc bin
-ls /bin                             # Lists all 6 binaries
+ls /bin                             # Lists all binaries
 cd /bin                             # Changes to /bin directory
 cd ..                               # Returns to / (normalize_path handles ..)
-test                                # Runs test suite: 128 passed, 0 failed
 exit                                # Cleanly halts the system
 ```
 
