@@ -726,8 +726,10 @@ static int follow_symlinks(char *resolved, int maxdepth) {
     } else {
         /* Relative: resolve from symlink's parent directory */
         char dir[256];
-        strncpy(dir, resolved, sizeof(dir));
-        dir[255] = '\0';
+        int rlen = strlen(resolved);
+        if (rlen > 255) rlen = 255;
+        memcpy(dir, resolved, rlen);
+        dir[rlen] = '\0';
         char *last_slash = dir;
         for (char *p = dir; *p; p++)
             if (*p == '/') last_slash = p;
@@ -746,8 +748,10 @@ static int follow_symlinks(char *resolved, int maxdepth) {
         resolve_path("/", combined, new_resolved);
     }
 
-    strncpy(resolved, new_resolved, 256);
-    resolved[255] = '\0';
+    int nlen = strlen(new_resolved);
+    if (nlen > 255) nlen = 255;
+    memcpy(resolved, new_resolved, nlen);
+    resolved[nlen] = '\0';
 
     /* Recursively follow in case target is also a symlink */
     return follow_symlinks(resolved, maxdepth - 1);
