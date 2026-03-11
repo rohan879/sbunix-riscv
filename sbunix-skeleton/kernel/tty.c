@@ -30,6 +30,10 @@ struct tty {
 
   /* Foreground process group — signals go here on ^C / ^Z */
   int    fg_pgid;
+
+  /* Escape sequence state for cooked mode:
+   *   0 = normal, 1 = saw ESC, 2 = saw ESC [ */
+  int    esc_state;
 };
 
 static struct tty tty0;
@@ -170,6 +174,20 @@ void tty_input(char c) {
         uart_putc('\n');
       }
       tty0.line_len = 0;
+      tty0.esc_state = 0;
+      uart_wakeup();
+      return;
+    }
+
+    if ((uint8_t)c == tty0.termios.c_cc[VQUIT]) {
+      tty_signal_fg(3); /* SIGQUIT */
+      if (lflag & ECHO) {
+        uart_putc('^');
+        uart_putc('\\');
+        uart_putc('\n');
+      }
+      tty0.line_len = 0;
+      tty0.esc_state = 0;
       uart_wakeup();
       return;
     }
@@ -181,9 +199,44 @@ void tty_input(char c) {
         uart_putc('Z');
       }
       tty0.line_len = 0;
+      tty0.esc_state = 0;
       uart_wakeup();
       return;
     }
+  }
+
+  /* ---- Escape sequence filtering (cooked mode) ----
+   * Discard VT100 cursor/function key sequences (\033[...X) so that
+   * pressing arrow keys doesn't insert garbage into the line buffer.
+   * We do NOT do history recall — that would require storing history.
+   * State machine:
+   *   esc_state 0: normal
+   *   esc_state 1: saw ESC (0x1B)
+   *   esc_state 2: saw ESC [ — accumulating CSI sequence
+   */
+  if (c == 0x1B) {
+    tty0.esc_state = 1;
+    return; /* swallow ESC — don't add to line buffer */
+  }
+  if (tty0.esc_state == 1) {
+    if (c == '[' || c == 'O') {
+      /* CSI or SS3 — wait for the final byte */
+      tty0.esc_state = 2;
+    } else {
+      /* Not a recognised sequence — discard ESC and this byte */
+      tty0.esc_state = 0;
+    }
+    return;
+  }
+  if (tty0.esc_state == 2) {
+    /* Final byte of a CSI/SS3 sequence is an ASCII letter (0x40–0x7E)
+     * or a digit / semicolon for multi-parameter sequences.
+     * We simply swallow everything until we see the final alpha byte. */
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '~') {
+      tty0.esc_state = 0; /* sequence complete, still swallowed */
+    }
+    /* digits and ';' are intermediate — stay in state 2 */
+    return;
   }
 
   /* Backspace / DEL */

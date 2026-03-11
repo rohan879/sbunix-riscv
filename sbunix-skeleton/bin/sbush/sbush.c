@@ -193,7 +193,18 @@ static void sigint_handler(int sig) {
     pid_t p = fg_pid;
     if (p > 0)
         kill(p, SIGINT);
-    /* If no foreground child, do nothing — read_line handles ^C via 0x03 */
+    /* If no foreground child, do nothing — tty already echoed ^C\n, reprint prompt */
+}
+
+/* SIGQUIT handler: forward Ctrl-\ to the foreground child if one exists.
+ * At the idle prompt the TTY echoes "^\n" and read() returns -EINTR,
+ * so the shell's restart: label already reprints the prompt. */
+static void sigquit_handler(int sig) {
+    (void)sig;
+    pid_t p = fg_pid;
+    if (p > 0)
+        kill(p, SIGQUIT);
+    /* If no foreground child, do nothing — tty already echoed ^\\n */
 }
 
 /* SIGTSTP handler: forward Ctrl-Z to the foreground child if one exists */
@@ -230,6 +241,13 @@ static void install_signal_handlers(void) {
     sa.sa_flags = SA_RESTART;
     sa.sa_restorer = NULL;
     sigaction(SIGINT, &sa, NULL);
+
+    /* SIGQUIT */
+    sa.sa_handler = sigquit_handler;
+    sa.sa_mask = 0;
+    sa.sa_flags = SA_RESTART;
+    sa.sa_restorer = NULL;
+    sigaction(SIGQUIT, &sa, NULL);
 
     /* SIGTSTP */
     sa.sa_handler = sigtstp_handler;

@@ -600,8 +600,11 @@ static int tokenize(char *str, struct command *cmd) {
                     *w++ = *p++;
                 }
             }
-            *w = '\0';
+            /* p still points at the closing " (or \0 if unterminated).
+             * Advance past it before null-terminating so we don't lose
+             * whatever follows (e.g. " > file" after a quoted arg). */
             if (*p == '"') p++;
+            *w = '\0';
             cmd->argv[cmd->argc++] = start;
         } else if (*p == '\'') {
             p++;

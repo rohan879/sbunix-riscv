@@ -125,7 +125,9 @@ static int tarfs_open(const char *path, int flags, void **private) {
 /* ------------------------------------------------------------------ */
 static int64_t tarfs_read(void *private, char *buf, uint64_t count, int64_t *offset) {
   struct tarfs_private *priv = (struct tarfs_private *)private;
-  if (!priv || !priv->data)
+  if (!priv) return -1;
+  if (priv->is_dir) return -21; /* -EISDIR */
+  if (!priv->data)
     return 0;
 
   uint64_t off = (uint64_t)*offset;

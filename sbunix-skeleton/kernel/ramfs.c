@@ -290,8 +290,9 @@ static int ramfs_open(const char *path, int flags, void **private) {
 
 static int64_t ramfs_read(void *private, char *buf, uint64_t count, int64_t *offset) {
   struct ramfs_private *priv = (struct ramfs_private *)private;
-  if (!priv || !priv->inode || priv->inode->type != RAMFS_FILE)
-    return 0;
+  if (!priv || !priv->inode) return -1;
+  if (priv->inode->type != RAMFS_FILE)
+    return -21; /* -EISDIR (or other non-file) */
 
   struct ramfs_inode *ino = priv->inode;
   uint64_t off = (uint64_t)*offset;
