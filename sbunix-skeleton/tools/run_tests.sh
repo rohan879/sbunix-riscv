@@ -90,8 +90,10 @@ fi
 
 if [ "$total" -eq 0 ]; then
     echo ""
-    echo "WARNING: No test results found in output."
+    echo "FATAL: No test results found in output."
+    echo "Ensure the OS boots and runs test binaries that emit [PASS]/[FAIL]."
     echo ""
+    exit 1
 fi
 
 exit 0
