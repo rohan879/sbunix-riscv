@@ -143,6 +143,10 @@ void tty_input(char c) {
         tty_signal_fg(2); /* SIGINT */
         return;
       }
+      if ((uint8_t)c == tty0.termios.c_cc[VQUIT]) {
+        tty_signal_fg(3); /* SIGQUIT */
+        return;
+      }
       if ((uint8_t)c == tty0.termios.c_cc[VSUSP]) {
         tty_signal_fg(20); /* SIGTSTP */
         return;
