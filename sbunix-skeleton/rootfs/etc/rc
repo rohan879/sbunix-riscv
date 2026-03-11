@@ -9,15 +9,5 @@ else
     echo "[BOOT] WARNING: /bin/sh not found!"
 fi
 
-# Run new test binaries for verification
-/bin/fdiotest
-/bin/sigtest
-/bin/sighandtest
-/bin/dirtest
-/bin/procfstest
-/bin/cowtest
-/bin/lazytest
-/bin/pgrptest
-/bin/symlinktest
-/bin/clocktest
-/bin/exectest
+# Run full test suite (output captured by host runner)
+run-tests
