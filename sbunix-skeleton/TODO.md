@@ -298,6 +298,7 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Super pages — Sv39 2MB megapages for kernel identity maps; `walk()` detects level-1 leaf PTEs; COW fork splits to 4KB
 - [x] On-disk read/write file system — ext2-lite over virtio-blk (`kernel/ext2.c`); mounted at `/mnt`; open/read/write/mkdir/unlink/rmdir
 - [x] On-disk swap and paging — clock eviction in `kernel/swap.c`; 1024 swap slots at end of disk; swap-in on page fault
+- [ ] Kernel `panic()` function — halt the system with a diagnostic message on unrecoverable errors (currently no C-side panic; only Rust `#[panic_handler]` exists)
 - [ ] TCP/IP networking via lwIP (see detailed plan below)
 - [ ] Multi-core support
 
