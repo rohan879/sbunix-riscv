@@ -20,8 +20,7 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
  * via SYS_clock_gettime (113).  Returns 0 on success, -1 on error.
  */
 int clock_gettime(int clk_id, struct timespec *tp) {
-    long ret = syscall(SYS_clock_gettime, clk_id, tp);
-    return (ret < 0) ? -1 : 0;
+    return (int)__syscall_ret(syscall(SYS_clock_gettime, clk_id, tp));
 }
 
 /*
