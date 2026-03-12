@@ -425,6 +425,62 @@ void vma_free_all(struct proc *p) {
   p->vma_list = NULL;
 }
 
+/* ------------------------------------------------------------------ */
+/* Free a user-process page table, releasing only user pages (PTE_U). */
+/* Kernel identity-mapped leaf PTEs are left alone.                    */
+/* ------------------------------------------------------------------ */
+/* Returns 1 if pa is within kalloc-managed RAM, 0 otherwise. */
+static int is_ram_pa(uint64_t pa) {
+    return pa >= 0x80000000UL && pa < PHYSTOP;
+}
+
+static void _freewalk_user(pagetable_t pt, int level) {
+    for (int i = 0; i < 512; i++) {
+        pte_t pte = pt[i];
+        if (pte == 0)
+            continue;
+        if (!(pte & PTE_V)) {
+            /* Not valid — may be a swapped page */
+            if (PTE_IS_SWAPPED(pte))
+                swap_free(PTE_SWAP_SLOT(pte));
+            pt[i] = 0;
+            continue;
+        }
+        uint64_t pa = PTE2PA(pte);
+        if (PTE_IS_LEAF(pte)) {
+            /* Only free physical pages belonging to userspace in RAM */
+            if ((pte & PTE_U) && is_ram_pa(pa)) {
+                if (level == 1)
+                    kfree_super((void *)pa);
+                else
+                    kfree((void *)pa);
+            }
+        } else if (level > 0) {
+            if (is_ram_pa(pa)) {
+                _freewalk_user((pagetable_t)pa, level - 1);
+                kfree((void *)pa);
+            }
+        }
+        pt[i] = 0;
+    }
+}
+
+void freewalk_user(pagetable_t pagetable) {
+    _freewalk_user(pagetable, 2);
+    kfree((void *)pagetable);
+}
+
+/* Update PTE permissions for a range. Only affects valid mapped PTEs. */
+void uvmprotect(pagetable_t pagetable, uint64_t va, uint64_t len, int perm) {
+    uint64_t a = PGROUNDDOWN(va);
+    uint64_t end = PGROUNDUP(va + len);
+    for (; a < end; a += PAGE_SIZE) {
+        pte_t *pte = walk(pagetable, a, 0);
+        if (pte && (*pte & PTE_V))
+            *pte = PA2PTE(PTE2PA(*pte)) | perm | PTE_V;
+    }
+}
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.

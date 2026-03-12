@@ -21,6 +21,7 @@ int exec(char *path) {
     char *elf_data;
     unsigned int i;
     pagetable_t pagetable;
+    pagetable_t old_pt = current_proc->pagetable;
     uint64_t sz = 0;
     struct trapframe *tf = current_proc->trapframe;
     
@@ -90,6 +91,18 @@ int exec(char *path) {
         }
     }
 
+    // 3b. Tighten PTE permissions — remove PTE_W added for copyout
+    for (i = 0; i < ehdr->e_phnum; i++) {
+        phdr = (Elf64_Phdr *)(elf_data + ehdr->e_phoff + i*sizeof(Elf64_Phdr));
+        if (phdr->p_type == PT_LOAD) {
+            int pte_flags = PTE_U;
+            if (phdr->p_flags & 0x4) pte_flags |= PTE_R;
+            if (phdr->p_flags & 0x2) pte_flags |= PTE_W;
+            if (phdr->p_flags & 0x1) pte_flags |= PTE_X;
+            uvmprotect(pagetable, phdr->p_vaddr, phdr->p_memsz, pte_flags);
+        }
+    }
+
     // 4. User Stack — allocate 8 pages (32 KB) to accommodate deep call stacks
     #define USER_STACK_PAGES 8
     uint64_t stack_va = MAXVA - (USER_STACK_PAGES * PAGE_SIZE);
@@ -122,11 +135,6 @@ int exec(char *path) {
     uvmmap_sigtrampoline(pagetable);
 
     // 6. Update process state
-    /* Note: old pagetable is intentionally not freed here because it
-     * contains kernel identity maps sharing physical pages with the
-     * running kernel.  Freeing those would corrupt kernel memory.
-     * The first exec (init_starter) uses the kernel pagetable itself.
-     * This is a known, small leak per-exec. */
     current_proc->pagetable = pagetable;
     current_proc->sz = sz;
 
@@ -156,6 +164,10 @@ int exec(char *path) {
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
 
+    // Free old page table and its user pages (skip if first exec from kernel PT)
+    if (old_pt != kernel_pagetable)
+        freewalk_user(old_pt);
+
     // 7. Initialize trapframe
     memset(tf, 0, sizeof(*tf));
     tf->epc = ehdr->e_entry;
@@ -172,8 +184,9 @@ int exec(char *path) {
     return 0;
 
 bad:
-    /* The new pagetable may contain kernel identity maps — we cannot
-     * call uvmunmap on the whole range without corrupting kernel memory.
-     * Accept the leak on the (rare) exec failure path. */
+    /* Free user pages from the partially constructed new pagetable.
+     * freewalk_user only frees PTE_U pages, leaving kernel identity
+     * maps intact (their physical pages are shared with the kernel). */
+    freewalk_user(pagetable);
     return -1;
 }
