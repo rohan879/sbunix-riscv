@@ -549,6 +549,10 @@ bad:
 /* ------------------------------------------------------------------ */
 /* sys_wait4: wait for a child to exit                                  */
 /* ------------------------------------------------------------------ */
+/* WUNTRACED=2, WNOHANG=1, WCONTINUED=8 */
+#define W_UNTRACED 2
+#define W_CONTINUED 8
+
 static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
     for (;;) {
         int found_child = 0;
@@ -556,7 +560,20 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
             if (p->state == UNUSED) continue;
             if (p->parent != current_proc) continue;
             if (wpid > 0 && p->pid != wpid) continue;
+            if (wpid == 0 && p->pgid != current_proc->pgid) continue;
+            if (wpid < -1 && p->pgid != -wpid) continue;
             found_child = 1;
+
+            /* Report stopped children if WUNTRACED */
+            if ((options & W_UNTRACED) && p->stopped) {
+                pid_t pid = p->pid;
+                if (wstatus) {
+                    *wstatus = (p->stopped << 8) | 0x7f;
+                }
+                p->stopped = 0; /* reported — don't report again */
+                return pid;
+            }
+
             if (p->state == ZOMBIE) {
                 pid_t pid = p->pid;
                 if (wstatus) {
@@ -575,7 +592,7 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
                 return pid;
             }
         }
-        if (!found_child) return -1;
+        if (!found_child) return -10; /* -ECHILD */
         /* WNOHANG: don't block */
         if (options & 1) return 0;
         /* Otherwise sleep until a child exits */
@@ -793,6 +810,10 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         if (signum == SIGCONT) {
             p->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
                                signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
+            if (p->stopped) {
+                p->stopped = 0;
+                p->state = RUNNABLE;
+            }
             return;
         }
 
@@ -800,6 +821,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         if (signum == SIGSTOP || signum == SIGTSTP ||
             signum == SIGTTIN || signum == SIGTTOU) {
             p->exit_status = (signum << 8) | 0x7f;
+            p->stopped = signum;
             p->state = SLEEPING;
             p->sigpending &= ~signal_bit(SIGCONT);
             if (p->parent) {
@@ -981,7 +1003,7 @@ static long sys_write_handler(struct trapframe *tf) {
         }
         return (long)total;
     } else {
-        return (long)-1;
+        return (long)-9; /* -EBADF */
     }
 }
 
@@ -1034,7 +1056,7 @@ pipe_eof:
         }
         return (long)total;
     } else {
-        return (long)0;
+        return (long)-9; /* -EBADF */
     }
 }
 
@@ -1057,7 +1079,7 @@ static long sys_openat_handler(struct trapframe *tf) {
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
     if (!ops) {
-        return (long)-1;
+        return (long)-2; /* -ENOENT */
     }
 
     void *priv = NULL;
@@ -1080,7 +1102,7 @@ static long sys_openat_handler(struct trapframe *tf) {
         if (fd < 0) {
             if (ops->close) ops->close(priv);
             vfs_free_file(f);
-            return (long)-1;
+            return (long)-24; /* -EMFILE */
         }
         f->ops = ops;
         f->private = priv;
@@ -1104,7 +1126,7 @@ static long sys_close_handler(struct trapframe *tf) {
         close_ofile(current_proc, fd);
         return (long)0;
     } else {
-        return (long)-1;
+        return (long)-9; /* -EBADF */
     }
 }
 
@@ -1114,9 +1136,9 @@ static long sys_dup3_handler(struct trapframe *tf) {
     struct open_file **ftab = proc_ofile(current_proc);
     if (oldfd < 0 || oldfd >= NOFILE || !ftab[oldfd] ||
         newfd < 0 || newfd >= NOFILE) {
-        return (long)-1;
+        return (long)-9; /* -EBADF */
     } else if (oldfd == newfd) {
-        return (long)newfd;
+        return (long)-22; /* -EINVAL (dup3 requires oldfd != newfd) */
     } else {
         if (ftab[newfd])
             close_ofile(current_proc, newfd);
@@ -1487,61 +1509,127 @@ static long sys_getgid_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+/* Helper: deliver a signal to a single process */
+static void deliver_signal_to_proc(struct proc *target, int sig) {
+    if (sig == 9) {
+        target->exit_status = 128 + 9;
+        target->killed_by_signal = 9;
+        cleanup_proc_resources(target);
+        target->state = ZOMBIE;
+        if (target->parent) {
+            target->parent->sigpending |= signal_bit(SIGCHLD);
+            if (target->parent->state == SLEEPING)
+                target->parent->state = RUNNABLE;
+        }
+    } else {
+        target->sigpending |= signal_bit(sig);
+        if (target->state == SLEEPING)
+            target->state = RUNNABLE;
+        /* SIGCONT: also wake stopped processes */
+        if (sig == SIGCONT && target->stopped) {
+            target->stopped = 0;
+            target->state = RUNNABLE;
+        }
+    }
+}
+
 static long sys_kill_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
-    if (target_pid <= 0) {
-        return (long)-1;
+
+    /* Validate signal number */
+    if (sig < 0 || sig >= 64) {
+        return (long)-22; /* -EINVAL */
     }
-    struct proc *target = NULL;
-    for (int i = 0; i < 64; i++) {
-        if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
-            target = &proc[i];
-            break;
-        }
-    }
-    if (!target) {
-        return (long)-3; /* -ESRCH */
-    } else {
-        if (sig == 9) {
-            target->exit_status = 128 + 9;
-            target->killed_by_signal = 9;
-            cleanup_proc_resources(target);
-            target->state = ZOMBIE;
-            if (target->parent) {
-                target->parent->sigpending |= signal_bit(SIGCHLD);
-                if (target->parent->state == SLEEPING)
-                    target->parent->state = RUNNABLE;
-            }
-        } else if (signal_is_valid(sig)) {
-            target->sigpending |= signal_bit(sig);
-            if (target->state == SLEEPING)
-                target->state = RUNNABLE;
-            /* SIGCONT: also wake stopped processes */
-            if (sig == SIGCONT && target->state == SLEEPING) {
-                target->state = RUNNABLE;
+
+    if (target_pid > 0) {
+        /* Send to specific process */
+        struct proc *target = NULL;
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
+                target = &proc[i];
+                break;
             }
         }
+        if (!target) {
+            return (long)-3; /* -ESRCH */
+        }
+        if (sig == 0) {
+            return (long)0; /* probe: process exists */
+        }
+        if (!signal_is_valid(sig)) {
+            return (long)-22; /* -EINVAL */
+        }
+        deliver_signal_to_proc(target, sig);
         return (long)0;
+    } else if (target_pid == 0) {
+        /* Send to all processes in caller's process group */
+        if (sig == 0) return (long)0;
+        if (!signal_is_valid(sig)) return (long)-22;
+        pid_t pgid = current_proc->pgid;
+        int sent = 0;
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].pgid == pgid) {
+                deliver_signal_to_proc(&proc[i], sig);
+                sent++;
+            }
+        }
+        return sent > 0 ? (long)0 : (long)-3;
+    } else if (target_pid == -1) {
+        /* Send to all processes except init */
+        if (sig == 0) return (long)0;
+        if (!signal_is_valid(sig)) return (long)-22;
+        int sent = 0;
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].pid != 1 &&
+                &proc[i] != current_proc) {
+                deliver_signal_to_proc(&proc[i], sig);
+                sent++;
+            }
+        }
+        return sent > 0 ? (long)0 : (long)-3;
+    } else {
+        /* target_pid < -1: send to process group |target_pid| */
+        if (sig == 0) return (long)0;
+        if (!signal_is_valid(sig)) return (long)-22;
+        pid_t pgid = -target_pid;
+        int sent = 0;
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].pgid == pgid) {
+                deliver_signal_to_proc(&proc[i], sig);
+                sent++;
+            }
+        }
+        return sent > 0 ? (long)0 : (long)-3;
     }
 }
 
 static long sys_clock_gettime_handler(struct trapframe *tf) {
+    int clk_id = (int)tf->a0;
     uint64_t ts_uaddr = tf->a1;
-    if (ts_uaddr) {
+    if (!ts_uaddr) {
+        return (long)-14; /* -EFAULT */
+    }
+    struct { int64_t tv_sec; int64_t tv_nsec; } kts;
+    if (clk_id == 0) {
+        /* CLOCK_REALTIME */
         int64_t sec, nsec;
         get_wall_time(&sec, &nsec);
-        struct { int64_t tv_sec; int64_t tv_nsec; } kts;
         kts.tv_sec = sec;
         kts.tv_nsec = nsec;
-        if (copyout(current_proc->pagetable, ts_uaddr, &kts, 16) < 0) {
-            return (long)-14;
-        } else {
-            return (long)0;
-        }
+    } else if (clk_id == 1) {
+        /* CLOCK_MONOTONIC — time since boot */
+        uint64_t elapsed_ticks = r_time() - boot_time;
+        uint64_t elapsed_ns = elapsed_ticks * 100; /* 10MHz -> ns */
+        kts.tv_sec = (int64_t)(elapsed_ns / 1000000000ULL);
+        kts.tv_nsec = (int64_t)(elapsed_ns % 1000000000ULL);
     } else {
+        return (long)-22; /* -EINVAL */
+    }
+    if (copyout(current_proc->pagetable, ts_uaddr, &kts, 16) < 0) {
         return (long)-14;
     }
+    return (long)0;
 }
 
 static long sys_lseek_handler(struct trapframe *tf) {
@@ -1549,34 +1637,39 @@ static long sys_lseek_handler(struct trapframe *tf) {
     long offset = (long)tf->a1;
     int whence  = (int)tf->a2;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
-    if (!f || f->is_pipe) {
-        return (long)-1;
-    } else {
-        int64_t cur = f->offset;
-        int64_t new_off;
-        if (whence == 0)       /* SEEK_SET */ new_off = (int64_t)offset;
-        else if (whence == 1)  /* SEEK_CUR */ new_off = cur + (int64_t)offset;
-        else if (whence == 2)  /* SEEK_END */ {
-            int64_t file_size = 0;
-            if (f->ops && f->ops->fstat) {
-                uint8_t stbuf[128];
-                if (f->ops->fstat(f->private, stbuf) == 0)
-                    memcpy(&file_size, stbuf + 48, 8);
-            }
-            new_off = file_size + (int64_t)offset;
-        }
-        else { return (long)-1; }
-        if (new_off < 0) new_off = 0;
-        f->offset = new_off;
-        return (long)new_off;
+    if (!f) {
+        return (long)-9; /* -EBADF */
     }
+    if (f->is_pipe) {
+        return (long)-29; /* -ESPIPE */
+    }
+    int64_t cur = f->offset;
+    int64_t new_off;
+    if (whence == 0)       /* SEEK_SET */ new_off = (int64_t)offset;
+    else if (whence == 1)  /* SEEK_CUR */ new_off = cur + (int64_t)offset;
+    else if (whence == 2)  /* SEEK_END */ {
+        int64_t file_size = 0;
+        if (f->ops && f->ops->fstat) {
+            uint8_t stbuf[128];
+            if (f->ops->fstat(f->private, stbuf) == 0)
+                memcpy(&file_size, stbuf + 48, 8);
+        }
+        new_off = file_size + (int64_t)offset;
+    }
+    else { return (long)-22; /* -EINVAL */ }
+    if (new_off < 0) new_off = 0;
+    f->offset = new_off;
+    return (long)new_off;
 }
 
 static long sys_fstat_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
-    if (!tf->a1 || !f) {
-        return (long)-1;
+    if (!f) {
+        return (long)-9; /* -EBADF */
+    }
+    if (!tf->a1) {
+        return (long)-14; /* -EFAULT */
     } else if (f->is_pipe) {
         uint8_t kstat[128];
         memset(kstat, 0, 128);
@@ -1668,8 +1761,11 @@ static long sys_getdents64_handler(struct trapframe *tf) {
     unsigned int count = (unsigned int)tf->a2;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
-    if (!f || f->is_pipe) {
-        return (long)-1;
+    if (!f) {
+        return (long)-9; /* -EBADF */
+    }
+    if (f->is_pipe) {
+        return (long)-20; /* -ENOTDIR */
     }
 
     if (f->ops && f->ops->readdir) {
@@ -1722,7 +1818,7 @@ static long sys_getdents64_handler(struct trapframe *tf) {
             return (long)written;
         }
     } else {
-        return (long)-1;
+        return (long)-20; /* -ENOTDIR */
     }
 }
 
@@ -1784,7 +1880,11 @@ static long sys_exit_handler(struct trapframe *tf) {
  * If called without correct magic, return -EPERM. */
 
 static long sys_fsync_handler(struct trapframe *tf) {
-    (void)tf;
+    int fd = (int)tf->a0;
+    struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+    if (!f) {
+        return (long)-9; /* -EBADF */
+    }
     ext2_sync();
     return 0;
 }
@@ -2081,12 +2181,14 @@ static long sys_rt_sigprocmask_handler(struct trapframe *tf) {
         if (copyin(current_proc->pagetable, &newset, set_uaddr, sizeof(newset)) < 0) {
             return (long)-14;
         }
-        if (how == 0)
+        if (how == 0)      /* SIG_BLOCK */
             current_proc->sigmask |= newset;
-        else if (how == 1)
+        else if (how == 1) /* SIG_UNBLOCK */
             current_proc->sigmask &= ~newset;
-        else if (how == 2)
+        else if (how == 2) /* SIG_SETMASK */
             current_proc->sigmask = newset;
+        else
+            return (long)-22; /* -EINVAL */
     }
     return (long)0;
 }
@@ -2560,19 +2662,35 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     pid_t pgid = (pid_t)tf->a1;
     if (target == 0) target = current_proc->pid;
     if (pgid == 0) pgid = target;
-    long result = (long)-3;
-    for (struct proc *p = proc; p < &proc[64]; p++) {
-        if (p->pid == target && p->state != UNUSED) {
-            p->pgid = pgid;
-            result = 0;
+
+    /* Find the target process */
+    struct proc *p = NULL;
+    for (int i = 0; i < 64; i++) {
+        if (proc[i].pid == target && proc[i].state != UNUSED) {
+            p = &proc[i];
             break;
         }
     }
-    return result;
+    if (!p) return (long)-3; /* -ESRCH */
+
+    /* Can only setpgid for self or a child */
+    if (p != current_proc && p->parent != current_proc)
+        return (long)-3; /* -ESRCH */
+
+    /* Must be in the same session */
+    if (p->sid != current_proc->sid)
+        return (long)-1; /* -EPERM */
+
+    p->pgid = pgid;
+    return (long)0;
 }
 
 static long sys_setsid_handler(struct trapframe *tf) {
     (void)tf;
+    /* EPERM if already a process group leader */
+    if (current_proc->pgid == current_proc->pid) {
+        return (long)-1; /* -EPERM */
+    }
     current_proc->sid = current_proc->pid;
     current_proc->pgid = current_proc->pid;
     return (long)current_proc->pid;
@@ -2628,8 +2746,16 @@ static long sys_madvise_handler(struct trapframe *tf) {
 }
 
 static long sys_ftruncate_handler(struct trapframe *tf) {
-    (void)tf;
-    return (long)-30;
+    int fd = (int)tf->a0;
+    int64_t length = (int64_t)tf->a1;
+    struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+    if (!f) {
+        return (long)-9; /* -EBADF */
+    }
+    if (length < 0) {
+        return (long)-22; /* -EINVAL */
+    }
+    return (long)-30; /* -EROFS (not supported) */
 }
 
 static long sys_tgkill_handler(struct trapframe *tf) {
