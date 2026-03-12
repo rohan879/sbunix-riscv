@@ -69,8 +69,13 @@ int exec(char *path) {
     for (i = 0; i < ehdr->e_phnum; i++) {
         phdr = (Elf64_Phdr *)(elf_data + ehdr->e_phoff + i*sizeof(Elf64_Phdr));
         if (phdr->p_type == PT_LOAD) {
-            if(uvmalloc(pagetable, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz, PTE_R|PTE_W|PTE_X) == 0) return -1;
-            if(copyout(pagetable, phdr->p_vaddr, elf_data + phdr->p_offset, phdr->p_filesz) < 0) return -1;
+            /* Compute PTE flags from ELF p_flags; keep PTE_W during load for copyout */
+            int pte_flags = 0;
+            if (phdr->p_flags & 0x4) pte_flags |= PTE_R;  /* PF_R */
+            if (phdr->p_flags & 0x2) pte_flags |= PTE_W;  /* PF_W */
+            if (phdr->p_flags & 0x1) pte_flags |= PTE_X;  /* PF_X */
+            if(uvmalloc(pagetable, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz, pte_flags | PTE_W) == 0) goto bad;
+            if(copyout(pagetable, phdr->p_vaddr, elf_data + phdr->p_offset, phdr->p_filesz) < 0) goto bad;
             uint64_t seg_end = phdr->p_vaddr + phdr->p_memsz;
             if (seg_end > sz) sz = seg_end;
 
@@ -91,9 +96,9 @@ int exec(char *path) {
     char *top_page_mem = NULL;
     for (int pg = 0; pg < USER_STACK_PAGES; pg++) {
         char *sp_mem = kalloc();
-        if (!sp_mem) return -1;
+        if (!sp_mem) goto bad;
         uint64_t vaddr = stack_va + pg * PAGE_SIZE;
-        if (uvmmap(pagetable, vaddr, (uint64_t)sp_mem, PAGE_SIZE, PTE_R | PTE_W | PTE_U) < 0) return -1;
+        if (uvmmap(pagetable, vaddr, (uint64_t)sp_mem, PAGE_SIZE, PTE_R | PTE_W | PTE_U) < 0) goto bad;
         if (pg == USER_STACK_PAGES - 1)
             top_page_mem = sp_mem;  /* remember physical addr of topmost page */
     }
@@ -104,20 +109,24 @@ int exec(char *path) {
     // 5. Identity map kernel and ALL RAM (No PTE_U)
     // This ensures kernel code, data, AND dynamically allocated pages (like kstack)
     // are accessible after switching satp.
-    if(mappages_super(pagetable, 0x80000000, PHYSTOP - 0x80000000, 0x80000000, PTE_R | PTE_W | PTE_X) < 0) return -1;
+    if(mappages_super(pagetable, 0x80000000, PHYSTOP - 0x80000000, 0x80000000, PTE_R | PTE_W | PTE_X) < 0) goto bad;
     // Map I/O registers needed for interrupt handling and device I/O
-    if(mappages(pagetable, 0x10000000, PAGE_SIZE, 0x10000000, PTE_R | PTE_W) < 0) return -1;  // UART
+    if(mappages(pagetable, 0x10000000, PAGE_SIZE, 0x10000000, PTE_R | PTE_W) < 0) goto bad;  // UART
     /* RTC (0x101000) NOT mapped here — only accessed during kernel boot via kvmmap */
-    if(mappages(pagetable, 0x2000000, 0x10000, 0x2000000, PTE_R | PTE_W) < 0) return -1;      // CLINT
-    if(mappages_super(pagetable, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) return -1; // PLIC
-    if(mappages_super(pagetable, 0x30000000, 0x200000, 0x30000000, PTE_R | PTE_W) < 0) return -1; // PCIe ECAM (first 2MB)
-    if(mappages_super(pagetable, 0x40000000, 0x40000000, 0x40000000, PTE_R | PTE_W) < 0) return -1; // PCIe MMIO BAR
+    if(mappages(pagetable, 0x2000000, 0x10000, 0x2000000, PTE_R | PTE_W) < 0) goto bad;      // CLINT
+    if(mappages_super(pagetable, 0x0c000000, 0x400000, 0x0c000000, PTE_R | PTE_W) < 0) goto bad; // PLIC
+    if(mappages_super(pagetable, 0x30000000, 0x200000, 0x30000000, PTE_R | PTE_W) < 0) goto bad; // PCIe ECAM (first 2MB)
+    if(mappages_super(pagetable, 0x40000000, 0x40000000, 0x40000000, PTE_R | PTE_W) < 0) goto bad; // PCIe MMIO BAR
 
     // Map signal trampoline page
     uvmmap_sigtrampoline(pagetable);
 
     // 6. Update process state
-    // TODO: cleanup old pagetable
+    /* Note: old pagetable is intentionally not freed here because it
+     * contains kernel identity maps sharing physical pages with the
+     * running kernel.  Freeing those would corrupt kernel memory.
+     * The first exec (init_starter) uses the kernel pagetable itself.
+     * This is a known, small leak per-exec. */
     current_proc->pagetable = pagetable;
     current_proc->sz = sz;
 
@@ -160,5 +169,11 @@ int exec(char *path) {
     stack_top[-4] = 0;  // argc = 0
     tf->sp = MAXVA - 32;
 
-    return 0; 
+    return 0;
+
+bad:
+    /* The new pagetable may contain kernel identity maps — we cannot
+     * call uvmunmap on the whole range without corrupting kernel memory.
+     * Accept the leak on the (rare) exec failure path. */
+    return -1;
 }

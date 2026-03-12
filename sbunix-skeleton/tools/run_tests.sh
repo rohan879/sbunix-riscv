@@ -6,10 +6,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TIMEOUT=120
+TIMEOUT=${TIMEOUT:-600}
 OUTPUT_FILE="$(mktemp /tmp/sbunix-test-output.XXXXXX)"
+QEMU_PID=""
 
 cleanup() {
+    if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
+        kill "$QEMU_PID" 2>/dev/null || true
+        wait "$QEMU_PID" 2>/dev/null || true
+    fi
     rm -f "$OUTPUT_FILE"
 }
 trap cleanup EXIT
@@ -21,7 +26,7 @@ source tools/sourceme.sh
 
 # Build the kernel
 echo "==> Building kernel..."
-make clean && make
+make clean && make BUILD_TESTS=1
 if [ $? -ne 0 ]; then
     echo "FATAL: Kernel build failed"
     exit 1
@@ -35,17 +40,42 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Launch QEMU with a timeout, capturing serial output
+# Launch QEMU in background, capturing serial output
 echo "==> Launching QEMU (timeout: ${TIMEOUT}s)..."
-timeout "$TIMEOUT" \
-    qemu-system-riscv64 -machine virt -bios default -kernel build/kernel.elf \
-        -drive file=build/disk.img,format=raw,if=none,id=hd0 \
-        -device virtio-blk-pci-non-transitional,drive=hd0 \
-        -device virtio-gpu-pci \
-        -device virtio-net-pci-non-transitional,netdev=net0 \
-        -netdev user,id=net0 \
-        -nographic \
-    > "$OUTPUT_FILE" 2>&1 || true
+qemu-system-riscv64 -machine virt -bios default -kernel build/kernel.elf \
+    -drive file=build/disk.img,format=raw,if=none,id=hd0 \
+    -device virtio-blk-pci-non-transitional,drive=hd0 \
+    -device virtio-gpu-pci \
+    -device virtio-net-pci-non-transitional,netdev=net0 \
+    -netdev user,id=net0 \
+    -nographic \
+    > "$OUTPUT_FILE" 2>&1 &
+QEMU_PID=$!
+
+# Monitor output: kill QEMU early when the shell prompt appears after tests
+# (the "sbush$ " prompt means rc script finished and shell is idle)
+ELAPSED=0
+while kill -0 "$QEMU_PID" 2>/dev/null; do
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+    # Check for test completion markers
+    if grep -q 'sbush\$' "$OUTPUT_FILE" 2>/dev/null; then
+        # Tests finished, shell prompt appeared — give 5s for final output
+        sleep 5
+        echo "==> Tests completed, stopping QEMU..."
+        kill "$QEMU_PID" 2>/dev/null || true
+        wait "$QEMU_PID" 2>/dev/null || true
+        QEMU_PID=""
+        break
+    fi
+    if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+        echo "==> Timeout reached (${TIMEOUT}s), stopping QEMU..."
+        kill "$QEMU_PID" 2>/dev/null || true
+        wait "$QEMU_PID" 2>/dev/null || true
+        QEMU_PID=""
+        break
+    fi
+done
 
 echo "==> QEMU exited, parsing results..."
 echo ""
@@ -90,8 +120,10 @@ fi
 
 if [ "$total" -eq 0 ]; then
     echo ""
-    echo "WARNING: No test results found in output."
+    echo "FATAL: No test results found in output."
+    echo "Ensure the OS boots and runs test binaries that emit [PASS]/[FAIL]."
     echo ""
+    exit 1
 fi
 
 exit 0

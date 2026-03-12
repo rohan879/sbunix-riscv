@@ -177,8 +177,13 @@ static int tarfs_fstat(void *private, uint8_t *st) {
   } else {
     hdr_mode = priv->is_dir ? 0755 : 0644;
   }
-  uint32_t mode = priv->is_dir ? (uint32_t)(0x4000 | (hdr_mode & 0777))
-                                : (uint32_t)(0x8000 | (hdr_mode & 0777));
+  uint32_t mode;
+  if (priv->is_dir)
+    mode = (uint32_t)(0x4000 | (hdr_mode & 0777)); /* S_IFDIR */
+  else if (priv->hdr && priv->hdr->typeflag == '2')
+    mode = (uint32_t)(0xA000 | (hdr_mode & 0777)); /* S_IFLNK */
+  else
+    mode = (uint32_t)(0x8000 | (hdr_mode & 0777)); /* S_IFREG */
   uint32_t nlink = 1;
   int64_t size = (int64_t)priv->size;
   int32_t blksz = 512;
@@ -241,8 +246,13 @@ static int tarfs_stat(const char *path, uint8_t *st) {
   uint32_t hdr_mode = 0;
   for (int mi = 0; mi < 8 && hdr->mode[mi] >= '0' && hdr->mode[mi] <= '7'; mi++)
     hdr_mode = (hdr_mode << 3) | (uint32_t)(hdr->mode[mi] - '0');
-  uint32_t mode = (hdr->typeflag == '5') ? (uint32_t)(0x4000 | (hdr_mode & 0777))
-                                          : (uint32_t)(0x8000 | (hdr_mode & 0777));
+  uint32_t mode;
+  if (hdr->typeflag == '5')
+    mode = (uint32_t)(0x4000 | (hdr_mode & 0777)); /* S_IFDIR */
+  else if (hdr->typeflag == '2')
+    mode = (uint32_t)(0xA000 | (hdr_mode & 0777)); /* S_IFLNK */
+  else
+    mode = (uint32_t)(0x8000 | (hdr_mode & 0777)); /* S_IFREG */
   uint32_t nlink = 1;
   int64_t size = (int64_t)fsz;
   int32_t blksz = 512;
@@ -376,6 +386,27 @@ done:
 }
 
 /* ------------------------------------------------------------------ */
+/* tarfs_readlink                                                       */
+/* ------------------------------------------------------------------ */
+static int tarfs_readlink(const char *path, char *buf, int bufsiz) {
+  char tarpath[256];
+  to_tarfs_path(path, tarpath);
+
+  struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+  if (!hdr)
+    return -2; /* ENOENT */
+
+  if (hdr->typeflag != '2')
+    return -22; /* EINVAL — not a symlink */
+
+  int len = strlen(hdr->linkname);
+  if (len > bufsiz)
+    len = bufsiz;
+  memcpy(buf, hdr->linkname, len);
+  return len;
+}
+
+/* ------------------------------------------------------------------ */
 /* tarfs_mkdir / tarfs_unlink                                           */
 /* ------------------------------------------------------------------ */
 static int tarfs_mkdir(const char *path, int mode) {
@@ -402,4 +433,5 @@ struct vfs_ops tarfs_ops = {
   .mkdir   = tarfs_mkdir,
   .unlink  = tarfs_unlink,
   .rmdir   = NULL,
+  .readlink = tarfs_readlink,
 };

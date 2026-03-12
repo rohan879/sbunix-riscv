@@ -74,6 +74,7 @@ pid_t   getsid(pid_t pid);
 
 /* File operations */
 int     ftruncate(int fd, off_t length);
+int     fsync(int fd);
 
 /* Wait (convenience wrapper) */
 pid_t   wait(int *status);

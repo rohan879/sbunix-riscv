@@ -10,7 +10,16 @@ CFLAGS  := -Wall -Werror -Os -ffreestanding -fno-builtin -nostdlib -nostdinc -is
 
 KERN_ASM := $(patsubst %,build/%.o,$(wildcard kernel/*.S))
 LIBC_OBJ := $(patsubst %,build/%.o,$(filter-out libc/crt.S,$(wildcard libc/*.c libc/*.S)))
-USER_BIN := $(patsubst bin/%,build/rootfs/bin/%,$(wildcard bin/*))
+# Split user binaries: test binaries only included in test builds
+ALL_BIN_DIRS := $(wildcard bin/*)
+TEST_BIN_DIRS := $(filter %test,$(ALL_BIN_DIRS))
+UTIL_BIN_DIRS := $(filter-out %test,$(ALL_BIN_DIRS))
+USER_BIN := $(patsubst bin/%,build/rootfs/bin/%,$(UTIL_BIN_DIRS))
+ifdef BUILD_TESTS
+USER_BIN += $(patsubst bin/%,build/rootfs/bin/%,$(TEST_BIN_DIRS))
+endif
+
+TIMEOUT ?= 600
 
 # Language-specific kernel object/library
 ifeq ($(KLANG),c)
@@ -56,7 +65,10 @@ build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
 
 build/tarfs.o: $(USER_BIN)
 	cp -a rootfs/. build/rootfs/
-	cp build/rootfs/bin/sbush build/rootfs/bin/sh
+	ln -sf sbush build/rootfs/bin/sh
+ifdef BUILD_TESTS
+	cp tools/guest-run-tests build/rootfs/bin/run-tests
+endif
 	tar cf build/rootfs.tar -C build/rootfs .
 	cd build && $(OBJCOPY) -I binary -O elf64-littleriscv -B riscv \
 		--rename-section .data=.tarfs \
@@ -89,8 +101,8 @@ qemu: build/kernel.elf $(DISK_IMG)
 		-netdev user,id=net0 \
 		-nographic
 
-test: build/kernel.elf $(DISK_IMG)
-	bash tools/run_tests.sh
+test: $(DISK_IMG)
+	TIMEOUT=$(TIMEOUT) bash tools/run_tests.sh
 
 clean:
 	rm -rf build zig-out .zig-cache

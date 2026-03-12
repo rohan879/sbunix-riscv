@@ -11,55 +11,90 @@ int execute_pipeline(struct pipeline *pl) {
     if (pl->ncmds == 0)
         return 0;
 
-    /* single builtin — run in-process (unless it's in a pipe or has redirections) */
+    /* single builtin — run in-process (with save/restore for redirections) */
     if (pl->ncmds == 1 && !pl->background && is_builtin(pl->cmds[0].argv[0])) {
         struct command *c = &pl->cmds[0];
         int has_redir = c->redir_in || c->redir_out ||
-                        c->redir_append || c->redir_err;
-        if (strcmp(c->argv[0], "exec") == 0 && has_redir) {
-            /* exec with redirections: apply redirections to the shell itself */
-            if (c->redir_in) {
-                int fd = open(c->redir_in, O_RDONLY);
-                if (fd < 0) {
-                    dprintf(2, "sbush: %s: No such file or directory\n", c->redir_in);
-                    return 1;
-                }
+                        c->redir_append || c->redir_err ||
+                        c->redir_err_to_out;
+        int is_exec = (strcmp(c->argv[0], "exec") == 0);
+
+        if (!has_redir)
+            return run_builtin(c);
+
+        /* Save file descriptors that we're about to redirect.
+         * For 'exec' builtin, redirections are permanent (no restore). */
+        int saved_in = -1, saved_out = -1, saved_err = -1;
+        if (!is_exec) {
+            if (c->redir_in)
+                saved_in = dup(STDIN_FILENO);
+            if (c->redir_out || c->redir_append)
+                saved_out = dup(STDOUT_FILENO);
+            if (c->redir_err || c->redir_err_to_out)
+                saved_err = dup(STDERR_FILENO);
+        }
+
+        /* Apply redirections */
+        int redir_ok = 1;
+        if (c->redir_in) {
+            int fd = open(c->redir_in, O_RDONLY);
+            if (fd < 0) {
+                dprintf(2, "sbush: %s: No such file or directory\n", c->redir_in);
+                redir_ok = 0;
+            } else {
                 dup2(fd, STDIN_FILENO);
                 close(fd);
             }
-            if (c->redir_out) {
-                int fd = open(c->redir_out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                if (fd < 0) {
-                    dprintf(2, "sbush: %s: Cannot create file\n", c->redir_out);
-                    return 1;
-                }
+        }
+        if (redir_ok && c->redir_out) {
+            int fd = open(c->redir_out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0) {
+                dprintf(2, "sbush: %s: Cannot create file\n", c->redir_out);
+                redir_ok = 0;
+            } else {
                 dup2(fd, STDOUT_FILENO);
                 close(fd);
             }
-            if (c->redir_append) {
-                int fd = open(c->redir_append, O_WRONLY | O_CREAT | O_APPEND, 0644);
-                if (fd < 0) {
-                    dprintf(2, "sbush: %s: Cannot open file\n", c->redir_append);
-                    return 1;
-                }
+        }
+        if (redir_ok && c->redir_append) {
+            int fd = open(c->redir_append, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (fd < 0) {
+                dprintf(2, "sbush: %s: Cannot open file\n", c->redir_append);
+                redir_ok = 0;
+            } else {
                 dup2(fd, STDOUT_FILENO);
                 close(fd);
             }
-            if (c->redir_err) {
-                int fd = open(c->redir_err, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                if (fd < 0) {
-                    dprintf(2, "sbush: %s: Cannot create file\n", c->redir_err);
-                    return 1;
-                }
+        }
+        if (redir_ok && c->redir_err) {
+            int fd = open(c->redir_err, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0) {
+                dprintf(2, "sbush: %s: Cannot create file\n", c->redir_err);
+                redir_ok = 0;
+            } else {
                 dup2(fd, STDERR_FILENO);
                 close(fd);
             }
-            if (c->redir_err_to_out)
-                dup2(STDOUT_FILENO, STDERR_FILENO);
-            return run_builtin(c);
         }
-        if (!has_redir)
-            return run_builtin(c);
+        if (redir_ok && c->redir_err_to_out)
+            dup2(STDOUT_FILENO, STDERR_FILENO);
+
+        int ret = redir_ok ? run_builtin(c) : 1;
+
+        /* Restore saved file descriptors (non-exec builtins only) */
+        if (saved_in >= 0) {
+            dup2(saved_in, STDIN_FILENO);
+            close(saved_in);
+        }
+        if (saved_out >= 0) {
+            dup2(saved_out, STDOUT_FILENO);
+            close(saved_out);
+        }
+        if (saved_err >= 0) {
+            dup2(saved_err, STDERR_FILENO);
+            close(saved_err);
+        }
+        return ret;
     }
 
     /* single shell function — run in-process (unless it has redirections) */

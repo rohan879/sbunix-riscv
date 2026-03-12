@@ -432,6 +432,8 @@ static pid_t sys_clone(void) {
         p->trapframe->sp = child_sp;
 
     p->parent = current_proc;
+    p->pgid = current_proc->pgid;
+    p->sid = current_proc->sid;
     p->clone_flags = clone_flags;
 
     /* Copy stack bounds and mmap_base from parent */
@@ -706,6 +708,57 @@ static int vfs_is_dir(const char *path) {
     return 0;
 }
 
+/* Follow symlinks in a resolved path (up to 8 levels to prevent loops) */
+static int follow_symlinks(char *resolved, int maxdepth) {
+    if (maxdepth <= 0) return -40; /* ELOOP */
+
+    const char *relpath;
+    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    if (!ops || !ops->readlink) return 0; /* no readlink = not a symlink-capable fs */
+
+    char target[256];
+    int ret = ops->readlink(relpath, target, sizeof(target) - 1);
+    if (ret < 0) return 0; /* not a symlink, path is final */
+    target[ret] = '\0';
+
+    /* Resolve the symlink target */
+    char new_resolved[256];
+    if (target[0] == '/') {
+        resolve_path("/", target, new_resolved);
+    } else {
+        /* Relative: resolve from symlink's parent directory */
+        char dir[256];
+        int rlen = strlen(resolved);
+        if (rlen > 255) rlen = 255;
+        memcpy(dir, resolved, rlen);
+        dir[rlen] = '\0';
+        char *last_slash = dir;
+        for (char *p = dir; *p; p++)
+            if (*p == '/') last_slash = p;
+        if (last_slash != dir)
+            *(last_slash + 1) = '\0';
+        else
+            dir[1] = '\0';
+
+        char combined[512];
+        int dlen = strlen(dir);
+        int tlen = strlen(target);
+        if (dlen + tlen >= 510) return -36; /* ENAMETOOLONG */
+        memcpy(combined, dir, dlen);
+        memcpy(combined + dlen, target, tlen + 1);
+
+        resolve_path("/", combined, new_resolved);
+    }
+
+    int nlen = strlen(new_resolved);
+    if (nlen > 255) nlen = 255;
+    memcpy(resolved, new_resolved, nlen);
+    resolved[nlen] = '\0';
+
+    /* Recursively follow in case target is also a symlink */
+    return follow_symlinks(resolved, maxdepth - 1);
+}
+
 /* ------------------------------------------------------------------ */
 /* Signal delivery                                                      */
 /* ------------------------------------------------------------------ */
@@ -732,15 +785,37 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
 
     /* SIG_DFL (0) -- default action */
     if (handler == 0) {
-        /* Default: ignore for SIGCHLD, SIGURG, SIGWINCH */
+        /* Ignore-class signals */
         if (signum == SIGCHLD || signum == SIGURG || signum == SIGWINCH)
             return;
+
+        /* Continue: resume stopped process (or ignore if running) */
+        if (signum == SIGCONT) {
+            p->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
+                               signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
+            return;
+        }
+
+        /* Stop-class signals: SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU */
+        if (signum == SIGSTOP || signum == SIGTSTP ||
+            signum == SIGTTIN || signum == SIGTTOU) {
+            p->exit_status = (signum << 8) | 0x7f;
+            p->state = SLEEPING;
+            p->sigpending &= ~signal_bit(SIGCONT);
+            if (p->parent) {
+                p->parent->sigpending |= signal_bit(SIGCHLD);
+                if (p->parent->state == SLEEPING)
+                    p->parent->state = RUNNABLE;
+            }
+            swtch(&p->context, &scheduler_context);
+            return;
+        }
+
         /* Default: terminate process */
         p->exit_status = 128 + signum;
         p->killed_by_signal = signum;
         cleanup_proc_resources(p);
         p->state = ZOMBIE;
-        /* Notify parent via SIGCHLD and wake it */
         if (p->parent) {
             p->parent->sigpending |= signal_bit(SIGCHLD);
             if (p->parent->state == SLEEPING)
@@ -779,6 +854,15 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* Copy signal frame to user stack via copyout */
     if (copyout(p->pagetable, sp, &frame, sizeof(frame)) < 0)
         return; /* can't deliver signal -- just drop it */
+
+    /* Verify trampoline is mapped before directing handler return there */
+    {
+        pte_t *tpte = walk(p->pagetable, SIG_TRAMPOLINE_VA, 0);
+        if (!tpte || !(*tpte & PTE_V)) {
+            /* Trampoline not mapped — re-map it now */
+            uvmmap_sigtrampoline(p->pagetable);
+        }
+    }
 
     /* Set up trapframe to call handler(signum) with return to trampoline */
     tf->epc = handler;                   /* jump to signal handler */
@@ -964,6 +1048,11 @@ static long sys_openat_handler(struct trapframe *tf) {
 
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
+
+    /* Follow symlinks unless O_NOFOLLOW */
+    if (!(flags & 0400000)) { /* O_NOFOLLOW = 0400000 */
+        follow_symlinks(resolved, 8);
+    }
 
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
@@ -1193,6 +1282,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     char resolved[256];
     char tarpath[256];
     resolve_path(current_proc->cwd, kpath, resolved);
+    follow_symlinks(resolved, 8);
     to_tarfs_path(resolved, tarpath);
 
     int ret = exec(tarpath);
@@ -1271,9 +1361,12 @@ static long sys_execve_handler(struct trapframe *tf) {
                         kstroff_arr[a] = new_offsets[a];
                     kfree(tmpbuf);
 
-                    /* Now exec the interpreter */
+                    /* Now exec the interpreter (follow symlinks) */
+                    char interp_resolved[256];
+                    resolve_path("/", interp, interp_resolved);
+                    follow_symlinks(interp_resolved, 8);
                     char interp_tarpath[256];
-                    to_tarfs_path(interp, interp_tarpath);
+                    to_tarfs_path(interp_resolved, interp_tarpath);
                     ret = exec(interp_tarpath);
                 }
             }
@@ -1424,6 +1517,10 @@ static long sys_kill_handler(struct trapframe *tf) {
             target->sigpending |= signal_bit(sig);
             if (target->state == SLEEPING)
                 target->state = RUNNABLE;
+            /* SIGCONT: also wake stopped processes */
+            if (sig == SIGCONT && target->state == SLEEPING) {
+                target->state = RUNNABLE;
+            }
         }
         return (long)0;
     }
@@ -1542,6 +1639,12 @@ static long sys_newfstatat_handler(struct trapframe *tf) {
     }
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
+
+    /* Follow symlinks unless AT_SYMLINK_NOFOLLOW */
+    int at_flags = (int)tf->a3;
+    if (!(at_flags & 0x100)) { /* AT_SYMLINK_NOFOLLOW = 0x100 */
+        follow_symlinks(resolved, 8);
+    }
 
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
@@ -1679,6 +1782,13 @@ static long sys_exit_handler(struct trapframe *tf) {
  *   LINUX_REBOOT_CMD_RESTART   = 0x01234567
  * We accept the correct magic pair and then call SBI SRST extension.
  * If called without correct magic, return -EPERM. */
+
+static long sys_fsync_handler(struct trapframe *tf) {
+    (void)tf;
+    ext2_sync();
+    return 0;
+}
+
 #define REBOOT_MAGIC1      0xfee1deadU
 #define REBOOT_MAGIC2      0x28121969U
 #define REBOOT_CMD_HALT    0xcdef0123U
@@ -1745,12 +1855,9 @@ static long sys_mmap_handler(struct trapframe *tf) {
     if (prot & PROT_EXEC)  pte_flags |= PTE_X;
     if (pte_flags == 0) pte_flags = PTE_R; /* minimum readable */
 
-    if (uvmalloc(current_proc->pagetable, va, va + len, pte_flags) == 0) {
-        return (long)-1;
-    }
-
+    /* Register VMA only — pages allocated lazily on first access via
+     * the demand paging path in the page fault handler. */
     if (vma_add(current_proc, va, va + len, prot, flags) < 0) {
-        uvmunmap(current_proc->pagetable, va, len);
         return (long)-1;
     }
 
@@ -2992,6 +3099,7 @@ void syscall_init(void) {
     syscall_table[SYS_mount]           = sys_mount_handler;
     syscall_table[SYS_umount2]         = sys_umount2_handler;
     syscall_table[SYS_reboot]          = sys_reboot_handler;
+    syscall_table[SYS_fsync]           = sys_fsync_handler;
 }
 
 /* ------------------------------------------------------------------ */

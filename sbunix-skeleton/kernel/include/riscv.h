@@ -110,6 +110,12 @@ static inline unsigned long r_stval() {
     return x;
 }
 
+static inline unsigned long r_sepc() {
+    unsigned long x;
+    asm volatile("csrr %0, sepc" : "=r" (x) );
+    return x;
+}
+
 static inline unsigned long r_sstatus() {
     unsigned long x;
     asm volatile("csrr %0, sstatus" : "=r" (x) );

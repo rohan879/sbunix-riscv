@@ -1,3 +1,15 @@
 #!/bin/sh
 
 echo SBUnix booting...
+
+# Verify /bin/sh exists (POSIX compliance)
+if test -f /bin/sh; then
+    echo "[BOOT] /bin/sh found"
+else
+    echo "[BOOT] WARNING: /bin/sh not found!"
+fi
+
+# Run test suite only if test runner is present (test builds only)
+if test -f /bin/run-tests; then
+    run-tests
+fi

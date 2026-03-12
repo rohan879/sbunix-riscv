@@ -2,15 +2,15 @@
 # run-tests: SBUnix full test suite
 # Run this from the shell prompt: run-tests
 
-PASS=0
-FAIL=0
+set PASS 0
+set FAIL 0
 
 check() {
     if test "$1" = "$2"; then
-        echo "  PASS  $3"
+        echo "[PASS] $3"
         set PASS $(($PASS + 1))
     else
-        echo "  FAIL  $3  (got: $1  want: $2)"
+        echo "[FAIL] $3  (got: $1  want: $2)"
         set FAIL $(($FAIL + 1))
     fi
 }
@@ -21,6 +21,21 @@ echo === C Binary Tests ===
 /bin/sigpipetest
 /bin/fstest
 /bin/swaptest
+/bin/mmaptest
+/bin/libc-test
+/bin/alarmtest
+/bin/segvtest
+/bin/fdiotest
+/bin/sigtest
+/bin/sighandtest
+/bin/dirtest
+/bin/procfstest
+/bin/cowtest
+/bin/lazytest
+/bin/pgrptest
+/bin/symlinktest
+/bin/clocktest
+/bin/exectest
 echo === C Binary Tests Done ===
 
 echo === Task345 Test ===
@@ -157,3 +172,12 @@ set msg "hello world"
 echo INT4_${#msg}
 echo INT5_${msg%% *}
 echo === Integration Done ===
+
+echo ""
+echo "=== Summary ==="
+echo "Passed: $PASS"
+echo "Failed: $FAIL"
+if test $FAIL -gt 0; then
+    exit 1
+fi
+exit 0
