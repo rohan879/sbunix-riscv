@@ -284,7 +284,7 @@ int execute_pipeline(struct pipeline *pl) {
             if (i == pl->ncmds - 1)
                 last_status = 128 + WSTOPSIG(status);
         } else if (i == pl->ncmds - 1) {
-            last_status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+            last_status = WIFEXITED(status) ? WEXITSTATUS(status) : (128 + WTERMSIG(status));
         }
     }
 

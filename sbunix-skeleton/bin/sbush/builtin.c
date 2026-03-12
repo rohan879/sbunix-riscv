@@ -387,9 +387,10 @@ int run_builtin(struct command *cmd) {
     }
 
     if (strcmp(cmd->argv[0], "exit") == 0) {
-        int code = 0;
+        int code = last_exit_status;
         if (cmd->argc > 1) {
             /* simple atoi */
+            code = 0;
             const char *s = cmd->argv[1];
             int neg = 0;
             if (*s == '-') { neg = 1; s++; }
