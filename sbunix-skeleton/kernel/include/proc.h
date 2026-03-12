@@ -152,6 +152,7 @@ struct proc {
   unsigned long alarm_ticks;   // tick count when alarm fires (0 = no alarm)
   int exit_status;             // exit status (for wait4)
   int killed_by_signal;        // signal number if killed by signal, 0 otherwise
+  int stopped;                 // non-zero signal number when stopped (SIGTSTP etc)
   char cwd[256];               // current working directory
   unsigned int umask_val;       // file creation mask
   struct open_file *ofile[NOFILE]; // open file descriptors (VFS)
