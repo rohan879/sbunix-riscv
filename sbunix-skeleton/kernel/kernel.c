@@ -51,5 +51,5 @@ void boot(uint64_t hartid, void *dtb) {
   scheduler();
 
   // Should never reach here
-  while(1);
+  panic("scheduler returned");
 }

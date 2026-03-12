@@ -1771,7 +1771,7 @@ static long sys_exit_handler(struct trapframe *tf) {
         }
         swtch(&current_proc->context, &scheduler_context);
     }
-    while(1) {}
+    panic("exit called without current process");
     return SYSCALL_NORETURN;
 }
 
@@ -3233,11 +3233,11 @@ pagefault_kill:
                 /* If deliver_signal returned (handler caught it), resume */
                 return;
             }
-            while(1) {}
+            panic("kernel page fault with no current process");
         }
         printk("UNEXPECTED TRAP! scause: 0x%lx, epc: 0x%lx, tval: 0x%lx\n",
                cause, tf->epc, stval);
-        while(1) {}
+        panic("unhandled trap");
     }
 
     /* ---- ecall from user ---- */
