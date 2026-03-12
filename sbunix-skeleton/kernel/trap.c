@@ -1361,9 +1361,12 @@ static long sys_execve_handler(struct trapframe *tf) {
                         kstroff_arr[a] = new_offsets[a];
                     kfree(tmpbuf);
 
-                    /* Now exec the interpreter */
+                    /* Now exec the interpreter (follow symlinks) */
+                    char interp_resolved[256];
+                    resolve_path("/", interp, interp_resolved);
+                    follow_symlinks(interp_resolved, 8);
                     char interp_tarpath[256];
-                    to_tarfs_path(interp, interp_tarpath);
+                    to_tarfs_path(interp_resolved, interp_tarpath);
                     ret = exec(interp_tarpath);
                 }
             }

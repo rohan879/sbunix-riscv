@@ -682,10 +682,12 @@ static const char *path_parent(const char *path, char *parent_out,
   return basename;
 }
 
-/* Resolve path relative to ext2 root.
+/* Resolve path relative to ext2 root (with symlink following).
  * Returns inode with refcount++ on success.
  * The path is relative to the /mnt mount point (VFS strips prefix). */
-static struct ext2_inode_mem *ext2_namei(const char *path) {
+static struct ext2_inode_mem *ext2_namei_r(const char *path, int symdepth) {
+  if (symdepth <= 0) return NULL; /* ELOOP */
+
   /* Start from root inode */
   struct ext2_inode_mem *ip = icache_get(EXT2_ROOT_INO);
   if (!ip) return NULL;
@@ -732,9 +734,49 @@ static struct ext2_inode_mem *ext2_namei(const char *path) {
 
     /* Skip trailing slashes */
     while (*p == '/') p++;
+
+    /* Follow symlinks in intermediate path components */
+    if (ip->type == EXT2_TYPE_SYMLINK && *p != '\0') {
+      char target[256];
+      int tlen = (int)ip->size;
+      if (tlen > 255) tlen = 255;
+      uint32_t blk = ext2_bmap(ip, 0);
+      if (blk == 0) { icache_release(ip); return NULL; }
+      struct bcache_entry *be = bcache_get(blk);
+      memcpy(target, be->data, (uint32_t)tlen);
+      bcache_release(be);
+      target[tlen] = '\0';
+      icache_release(ip);
+
+      /* Build new path: prefix + target + "/" + remaining */
+      char newpath[512];
+      int prefix_len = (int)(start - path);
+      int remaining_len = (int)strlen(p);
+      if (prefix_len + tlen + 1 + remaining_len >= 510)
+        return NULL;
+      int npos = 0;
+      if (prefix_len > 0) {
+        memcpy(newpath, path, prefix_len);
+        npos = prefix_len;
+      }
+      memcpy(newpath + npos, target, tlen);
+      npos += tlen;
+      if (remaining_len > 0) {
+        newpath[npos] = '/';
+        memcpy(newpath + npos + 1, p, remaining_len + 1);
+      } else {
+        newpath[npos] = '\0';
+      }
+
+      return ext2_namei_r(newpath, symdepth - 1);
+    }
   }
 
   return ip;
+}
+
+static struct ext2_inode_mem *ext2_namei(const char *path) {
+  return ext2_namei_r(path, 8);
 }
 
 /* ================================================================== */
