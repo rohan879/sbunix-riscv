@@ -20,6 +20,7 @@ USER_BIN += $(patsubst bin/%,build/rootfs/bin/%,$(TEST_BIN_DIRS))
 endif
 
 TIMEOUT ?= 600
+RC_SCRIPT ?= rootfs/etc/rc
 
 # Language-specific kernel object/library
 ifeq ($(KLANG),c)
@@ -65,6 +66,7 @@ build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
 
 build/tarfs.o: $(USER_BIN)
 	cp -a rootfs/. build/rootfs/
+	cp $(RC_SCRIPT) build/rootfs/etc/rc
 	ln -sf sbush build/rootfs/bin/sh
 ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests
