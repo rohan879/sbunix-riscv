@@ -64,16 +64,19 @@ int main(void) {
     p[0] = 42;
 
     pid_t pid = fork();
+    check(pid >= 0, "fork for mmap");
     if (pid == 0) {
         /* child: read inherited page, write new page */
         if (p[0] != 42) _exit(1);
         p[4096] = 99; /* trigger COW or lazy fault in child */
         _exit(0);
     }
-    int status;
-    waitpid(pid, &status, 0);
-    check(WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "fork+mmap child ok");
+    if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+        check(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+              "fork+mmap child ok");
+    }
     /* parent's page should be unchanged (COW) */
     check(p[4096] == 0, "fork COW isolation");
     munmap(p, sz);
