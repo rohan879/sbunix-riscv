@@ -70,6 +70,59 @@ int main(void) {
     close(pfd[0]);
     close(pfd[1]);
 
+    /* ---- dirfd-aware *at syscalls ---- */
+    r = mkdir("/mnt/at_base", 0755);
+    check(r == 0, "mkdir at_base");
+
+    fd = open("/mnt/at_base", O_RDONLY | O_DIRECTORY);
+    check(fd >= 0, "open directory fd");
+
+    if (fd >= 0) {
+        int dirfd = fd;
+        check(chdir("/") == 0, "chdir away from base dir");
+
+        fd2 = openat(dirfd, "child", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        check(fd2 >= 0, "openat relative to dirfd");
+        if (fd2 >= 0) {
+            n = write(fd2, "dirfd", 5);
+            check(n == 5, "openat write");
+            close(fd2);
+        }
+
+        fd2 = open("/mnt/at_base/child", O_RDONLY);
+        check(fd2 >= 0, "open created child");
+        if (fd2 >= 0) {
+            memset(buf, 0, sizeof(buf));
+            n = read(fd2, buf, sizeof(buf));
+            check(n == 5 && strcmp(buf, "dirfd") == 0, "openat created correct file");
+            close(fd2);
+        }
+
+        {
+            struct stat st;
+            errno = 0;
+            r = fstatat(dirfd, "child", &st, 0);
+            check(r == 0, "fstatat relative to dirfd");
+        }
+
+        errno = 0;
+        r = faccessat(dirfd, "child", F_OK, 0);
+        check(r == 0, "faccessat relative to dirfd");
+
+        r = symlink("/mnt/at_base/child", "/mnt/at_base/child_link");
+        check(r == 0, "create symlink for readlinkat");
+        memset(buf, 0, sizeof(buf));
+        n = readlinkat(dirfd, "child_link", buf, sizeof(buf));
+        check(n > 0 && strcmp(buf, "/mnt/at_base/child") == 0,
+              "readlinkat relative to dirfd");
+
+        errno = 0;
+        fd2 = openat(-1, "child", O_RDONLY);
+        check(fd2 == -1 && errno == EBADF, "openat bad dirfd returns EBADF");
+
+        close(dirfd);
+    }
+
     /* ---- Invalid fd error returns ---- */
 
     /* read with bad fd */
@@ -138,6 +191,9 @@ int main(void) {
     check(r == -1 && errno == EBADF, "fsync(-1) returns EBADF");
 
     /* cleanup */
+    unlink("/mnt/at_base/child_link");
+    unlink("/mnt/at_base/child");
+    rmdir("/mnt/at_base");
     unlink("/mnt/fdio_test");
     unlink("/mnt/fdio_dup");
 

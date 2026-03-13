@@ -710,6 +710,32 @@ static void resolve_path(const char *cwd, const char *path, char *out) {
     normalize_path(raw, out);
 }
 
+static int vfs_is_dir(const char *path);
+
+static long resolve_at_path(int dirfd, const char *path, char *resolved) {
+    if (!path || !resolved)
+        return (long)-14; /* -EFAULT */
+
+    if (path[0] == '/' || dirfd == AT_FDCWD) {
+        resolve_path(current_proc->cwd, path, resolved);
+        return 0;
+    }
+
+    if (dirfd < 0 || dirfd >= NOFILE)
+        return (long)-9; /* -EBADF */
+
+    struct open_file *base = proc_ofile(current_proc)[dirfd];
+    if (!base)
+        return (long)-9; /* -EBADF */
+    if (base->is_pipe)
+        return (long)-20; /* -ENOTDIR */
+    if (!vfs_is_dir(base->path))
+        return (long)-20; /* -ENOTDIR */
+
+    resolve_path(base->path, path, resolved);
+    return 0;
+}
+
 /* Check if a resolved path exists as a directory by trying to open it */
 static int vfs_is_dir(const char *path) {
     const char *relpath;
@@ -877,7 +903,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     if (copyout(p->pagetable, sp, &frame, sizeof(frame)) < 0)
         return; /* can't deliver signal -- just drop it */
 
-    /* Verify trampoline is mapped before directing handler return there */
+    /* Verify trampoline is mapped */
     {
         pte_t *tpte = walk(p->pagetable, SIG_TRAMPOLINE_VA, 0);
         if (!tpte || !(*tpte & PTE_V)) {
@@ -1061,6 +1087,7 @@ pipe_eof:
 }
 
 static long sys_openat_handler(struct trapframe *tf) {
+    int dirfd = (int)tf->a0;
     int flags = (int)tf->a2;
 
     char kpath[256];
@@ -1069,7 +1096,9 @@ static long sys_openat_handler(struct trapframe *tf) {
     }
 
     char resolved[256];
-    resolve_path(current_proc->cwd, kpath, resolved);
+    long path_ret = resolve_at_path(dirfd, kpath, resolved);
+    if (path_ret < 0)
+        return path_ret;
 
     /* Follow symlinks unless O_NOFOLLOW */
     if (!(flags & 0400000)) { /* O_NOFOLLOW = 0400000 */
@@ -1726,12 +1755,15 @@ static long sys_newfstatat_handler(struct trapframe *tf) {
     if (!tf->a1 || !tf->a2) {
         return (long)-1;
     }
+    int dirfd = (int)tf->a0;
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
     char resolved[256];
-    resolve_path(current_proc->cwd, kpath, resolved);
+    long path_ret = resolve_at_path(dirfd, kpath, resolved);
+    if (path_ret < 0)
+        return path_ret;
 
     /* Follow symlinks unless AT_SYMLINK_NOFOLLOW */
     int at_flags = (int)tf->a3;
@@ -2265,13 +2297,16 @@ static long sys_fcntl_handler(struct trapframe *tf) {
 }
 
 static long sys_faccessat_handler(struct trapframe *tf) {
+    int dirfd = (int)tf->a0;
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
 
     char resolved[256];
-    resolve_path(current_proc->cwd, kpath, resolved);
+    long path_ret = resolve_at_path(dirfd, kpath, resolved);
+    if (path_ret < 0)
+        return path_ret;
 
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
@@ -2405,6 +2440,7 @@ static long sys_set_tid_address_handler(struct trapframe *tf) {
 }
 
 static long sys_readlinkat_handler(struct trapframe *tf) {
+    int dirfd = (int)tf->a0;
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
         return (long)-14;
@@ -2414,7 +2450,9 @@ static long sys_readlinkat_handler(struct trapframe *tf) {
         return (long)-22;
 
     char resolved[256];
-    resolve_path(current_proc->cwd, kpath, resolved);
+    long path_ret = resolve_at_path(dirfd, kpath, resolved);
+    if (path_ret < 0)
+        return path_ret;
 
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
