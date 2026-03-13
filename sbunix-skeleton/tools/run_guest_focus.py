@@ -65,23 +65,22 @@ def main():
             "-nographic",
         ]
 
-        with output_path.open("w") as output_file:
+        with output_path.open("wb") as output_file:
             proc = subprocess.Popen(
                 qemu_cmd,
                 cwd=project_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+                bufsize=0,
             )
 
             def stream_output():
                 assert proc.stdout is not None
-                for line in proc.stdout:
-                    output_file.write(line)
+                for chunk in iter(lambda: proc.stdout.read(4096), b""):
+                    output_file.write(chunk)
                     output_file.flush()
                     if args.live:
-                        sys.stdout.write(line)
+                        sys.stdout.write(chunk.decode("utf-8", errors="replace"))
                         sys.stdout.flush()
 
             stream_thread = Thread(target=stream_output, daemon=True)
@@ -98,7 +97,7 @@ def main():
                 return 1
             stream_thread.join(timeout=1)
 
-        text = output_path.read_text()
+        text = output_path.read_text(errors="replace")
         missing = [pattern for pattern in args.require if pattern not in text]
         forbidden = [pattern for pattern in args.forbid if pattern in text]
 

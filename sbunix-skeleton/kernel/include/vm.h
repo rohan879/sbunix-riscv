@@ -24,10 +24,13 @@ struct vm_area {
 struct proc; /* forward declaration */
 
 int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags);
+int vma_add_list(struct vm_area **head, uint64_t start, uint64_t end, int prot,
+                 int flags);
 struct vm_area *vma_find(struct proc *p, uint64_t addr);
 int vma_remove(struct proc *p, uint64_t start, uint64_t end);
 int vma_dup(struct proc *src, struct proc *dst);
 void vma_free_all(struct proc *p);
+void vma_free_list(struct vm_area **head);
 
 extern pagetable_t kernel_pagetable;
 

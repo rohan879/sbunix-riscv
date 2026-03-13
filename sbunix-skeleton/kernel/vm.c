@@ -285,11 +285,12 @@ void uvmmap_sigtrampoline(pagetable_t pagetable) {
 /* Add a VMA covering [start, end) with given prot/flags.
  * Inserts into the sorted linked list, merging with adjacent VMAs
  * that have matching prot and flags. Returns 0 on success, -1 on error. */
-int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
+int vma_add_list(struct vm_area **head, uint64_t start, uint64_t end, int prot,
+                 int flags) {
   if (start >= end) return -1;
 
   struct vm_area *prev = NULL;
-  struct vm_area **pp = &p->vma_list;
+  struct vm_area **pp = head;
   while (*pp && (*pp)->start < start) {
     prev = *pp;
     pp = &(*pp)->next;
@@ -353,6 +354,10 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   }
 
   return 0;
+}
+
+int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
+  return vma_add_list(&p->vma_list, start, end, prot, flags);
 }
 
 /* Find the VMA containing addr (start <= addr < end), or NULL. */
@@ -438,14 +443,18 @@ int vma_dup(struct proc *src, struct proc *dst) {
 }
 
 /* Free entire VMA list. Used by exec and exit. */
-void vma_free_all(struct proc *p) {
-  struct vm_area *v = p->vma_list;
+void vma_free_list(struct vm_area **head) {
+  struct vm_area *v = *head;
   while (v) {
     struct vm_area *nxt = v->next;
     kmfree(v, sizeof(struct vm_area));
     v = nxt;
   }
-  p->vma_list = NULL;
+  *head = NULL;
+}
+
+void vma_free_all(struct proc *p) {
+  vma_free_list(&p->vma_list);
 }
 
 /* ------------------------------------------------------------------ */

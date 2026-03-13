@@ -20,8 +20,13 @@ int exec(char *path) {
     Elf64_Phdr *phdr;
     char *elf_data;
     unsigned int i;
-    pagetable_t pagetable;
+    pagetable_t pagetable = 0;
     pagetable_t old_pt = current_proc->pagetable;
+    struct shared_pagetable *old_shared_pt = current_proc->shared_pt;
+    struct shared_sigactions *old_shared_sa = current_proc->shared_sa;
+    int old_clone_flags = current_proc->clone_flags;
+    struct vm_area *old_vmas = current_proc->vma_list;
+    struct vm_area *new_vmas = NULL;
     uint64_t sz = 0;
     struct trapframe *tf = current_proc->trapframe;
     
@@ -35,33 +40,6 @@ int exec(char *path) {
     // 2. Validate
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
         ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3) return -1;
-
-    /* Detach from shared pagetable if this is a CLONE_VM thread */
-    if (current_proc->shared_pt) {
-        current_proc->shared_pt->refcount--;
-        if (current_proc->shared_pt->refcount == 0) {
-            /* We were the last user -- free old shared pagetable wrapper.
-             * The actual pagetable pages leak (pre-existing issue). */
-            kmfree(current_proc->shared_pt, sizeof(struct shared_pagetable));
-        }
-        current_proc->shared_pt = NULL;
-        current_proc->clone_flags &= ~CLONE_VM;
-        /* exec will create a brand new pagetable below */
-    }
-
-    /* Detach from shared signal handlers (exec resets all to SIG_DFL) */
-    if (current_proc->shared_sa) {
-        current_proc->shared_sa->refcount--;
-        if (current_proc->shared_sa->refcount == 0)
-            kmfree(current_proc->shared_sa, sizeof(struct shared_sigactions));
-        current_proc->shared_sa = NULL;
-        current_proc->clone_flags &= ~CLONE_SIGHAND;
-    }
-    /* Reset all sigactions to default */
-    memset(current_proc->sigactions, 0, sizeof(current_proc->sigactions));
-
-    /* Clear old VMAs before loading new binary */
-    vma_free_all(current_proc);
 
     pagetable = uvmcreate();
     if(pagetable == 0) return -1;
@@ -87,7 +65,8 @@ int exec(char *path) {
             if (phdr->p_flags & 0x1) vprot |= PROT_EXEC;   /* PF_X */
             uint64_t vma_start = PGROUNDDOWN(phdr->p_vaddr);
             uint64_t vma_end   = PGROUNDUP(phdr->p_vaddr + phdr->p_memsz);
-            vma_add(current_proc, vma_start, vma_end, vprot, MAP_PRIVATE);
+            if (vma_add_list(&new_vmas, vma_start, vma_end, vprot, MAP_PRIVATE) < 0)
+                goto bad;
         }
     }
 
@@ -111,13 +90,18 @@ int exec(char *path) {
         char *sp_mem = kalloc();
         if (!sp_mem) goto bad;
         uint64_t vaddr = stack_va + pg * PAGE_SIZE;
-        if (uvmmap(pagetable, vaddr, (uint64_t)sp_mem, PAGE_SIZE, PTE_R | PTE_W | PTE_U) < 0) goto bad;
+        if (uvmmap(pagetable, vaddr, (uint64_t)sp_mem, PAGE_SIZE, PTE_R | PTE_W | PTE_U) < 0) {
+            kfree(sp_mem);
+            goto bad;
+        }
         if (pg == USER_STACK_PAGES - 1)
             top_page_mem = sp_mem;  /* remember physical addr of topmost page */
     }
     
     /* Add a VMA for the user stack region */
-    vma_add(current_proc, stack_va, MAXVA, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+    if (vma_add_list(&new_vmas, stack_va, MAXVA, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON) < 0)
+        goto bad;
 
     // 5. Identity map kernel and ALL RAM (No PTE_U)
     // This ensures kernel code, data, AND dynamically allocated pages (like kstack)
@@ -136,6 +120,11 @@ int exec(char *path) {
 
     // 6. Update process state
     current_proc->pagetable = pagetable;
+    current_proc->vma_list = new_vmas;
+    new_vmas = NULL;
+    current_proc->shared_pt = NULL;
+    current_proc->shared_sa = NULL;
+    current_proc->clone_flags = old_clone_flags & ~(CLONE_VM | CLONE_SIGHAND);
     current_proc->sz = sz;
 
     // Initialize stack bounds for auto-grow
@@ -159,14 +148,32 @@ int exec(char *path) {
         current_proc->name[ni] = '\0';
     }
 
+    /* Reset all sigactions to default in the now-private table. */
+    memset(current_proc->sigactions, 0, sizeof(current_proc->sigactions));
+
     // Switch satp to the new page table immediately so that trap_restore's
     // sret enters user mode with the correct address space.
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
 
-    // Free old page table and its user pages (skip if first exec from kernel PT)
-    if (old_pt != kernel_pagetable)
+    /* Release the old address-space resources only after the new image is live. */
+    if (old_shared_pt) {
+        old_shared_pt->refcount--;
+        if (old_shared_pt->refcount == 0) {
+            if (old_pt != kernel_pagetable)
+                freewalk_user(old_pt);
+            kmfree(old_shared_pt, sizeof(struct shared_pagetable));
+        }
+    } else if (old_pt != kernel_pagetable) {
         freewalk_user(old_pt);
+    }
+    if (old_shared_sa) {
+        old_shared_sa->refcount--;
+        if (old_shared_sa->refcount == 0)
+            kmfree(old_shared_sa, sizeof(struct shared_sigactions));
+    }
+    if (old_vmas)
+        vma_free_list(&old_vmas);
 
     // 7. Initialize trapframe
     memset(tf, 0, sizeof(*tf));
@@ -187,6 +194,9 @@ bad:
     /* Free user pages from the partially constructed new pagetable.
      * freewalk_user only frees PTE_U pages, leaving kernel identity
      * maps intact (their physical pages are shared with the kernel). */
-    freewalk_user(pagetable);
+    if (pagetable)
+        freewalk_user(pagetable);
+    if (new_vmas)
+        vma_free_list(&new_vmas);
     return -1;
 }
