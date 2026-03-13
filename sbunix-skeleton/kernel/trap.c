@@ -1593,42 +1593,51 @@ static long sys_kill_handler(struct trapframe *tf) {
         return (long)0;
     } else if (target_pid == 0) {
         /* Send to all processes in caller's process group */
-        if (sig == 0) return (long)0;
-        if (!signal_is_valid(sig)) return (long)-22;
         pid_t pgid = current_proc->pgid;
         int sent = 0;
         for (int i = 0; i < 64; i++) {
             if (proc[i].state != UNUSED && proc[i].pgid == pgid) {
-                deliver_signal_to_proc(&proc[i], sig);
                 sent++;
+                if (sig != 0)
+                    deliver_signal_to_proc(&proc[i], sig);
             }
         }
+        if (sig == 0)
+            return sent > 0 ? (long)0 : (long)-3;
+        if (!signal_is_valid(sig))
+            return (long)-22;
         return sent > 0 ? (long)0 : (long)-3;
     } else if (target_pid == -1) {
         /* Send to all processes except init */
-        if (sig == 0) return (long)0;
-        if (!signal_is_valid(sig)) return (long)-22;
         int sent = 0;
         for (int i = 0; i < 64; i++) {
             if (proc[i].state != UNUSED && proc[i].pid != 1 &&
                 &proc[i] != current_proc) {
-                deliver_signal_to_proc(&proc[i], sig);
                 sent++;
+                if (sig != 0)
+                    deliver_signal_to_proc(&proc[i], sig);
             }
         }
+        if (sig == 0)
+            return sent > 0 ? (long)0 : (long)-3;
+        if (!signal_is_valid(sig))
+            return (long)-22;
         return sent > 0 ? (long)0 : (long)-3;
     } else {
         /* target_pid < -1: send to process group |target_pid| */
-        if (sig == 0) return (long)0;
-        if (!signal_is_valid(sig)) return (long)-22;
         pid_t pgid = -target_pid;
         int sent = 0;
         for (int i = 0; i < 64; i++) {
             if (proc[i].state != UNUSED && proc[i].pgid == pgid) {
-                deliver_signal_to_proc(&proc[i], sig);
                 sent++;
+                if (sig != 0)
+                    deliver_signal_to_proc(&proc[i], sig);
             }
         }
+        if (sig == 0)
+            return sent > 0 ? (long)0 : (long)-3;
+        if (!signal_is_valid(sig))
+            return (long)-22;
         return sent > 0 ? (long)0 : (long)-3;
     }
 }
