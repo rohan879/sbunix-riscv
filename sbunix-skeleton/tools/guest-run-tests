@@ -172,6 +172,7 @@ echo INT3_$sum
 set msg "hello world"
 echo INT4_${#msg}
 echo INT5_${msg%% *}
+/bin/sh /bin/shell-e2e-tests
 echo === Integration Done ===
 
 echo ""

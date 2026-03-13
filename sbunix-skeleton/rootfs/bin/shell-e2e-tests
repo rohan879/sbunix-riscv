@@ -1,0 +1,97 @@
+#!/bin/sh
+
+set PASS 0
+set FAIL 0
+
+pass() {
+    echo "[PASS] shell: $1"
+    set PASS $(($PASS + 1))
+}
+
+fail() {
+    echo "[FAIL] shell: $1"
+    set FAIL $(($FAIL + 1))
+}
+
+check_eq() {
+    if test "$1" = "$2"; then
+        pass "$3"
+    else
+        echo "[INFO] shell: got='$1' want='$2'"
+        fail "$3"
+    fi
+}
+
+check_nonempty() {
+    if test "x$1" != "x"; then
+        pass "$2"
+    else
+        fail "$2"
+    fi
+}
+
+check_contains() {
+    case "$1" in
+        *"$2"*) pass "$3" ;;
+        *) echo "[INFO] shell: missing '$2' in '$1'"; fail "$3" ;;
+    esac
+}
+
+rm -f /tmp/shell_e2e_out
+rm -f /tmp/shell_e2e_append
+rm -f /tmp/shell_e2e_in
+rm -f /tmp/shell_e2e_script
+rm -f /tmp/shell_e2e_args
+rm -f /tmp/shell_cleanup_tmp
+
+set out $(/bin/sbush -c 'echo hello')
+check_eq "$out" "hello" "echo output"
+
+set out $(/bin/sbush -c 'false; echo $?')
+check_eq "$out" "1" "exit code"
+
+set out $(/bin/sbush -c 'cd /bin; pwd')
+check_eq "$out" "/bin" "cd + pwd"
+
+set out $(/bin/sbush -c 'set PATH /bin; pwd')
+check_eq "$out" "/" "PATH lookup"
+
+set out $(/bin/sbush -c 'echo single_pipe | cat')
+check_eq "$out" "single_pipe" "single pipe"
+
+set out $(/bin/sbush -c 'echo filter_pipe | cat')
+check_eq "$out" "filter_pipe" "pipe with filter-like stage"
+
+/bin/sbush -c 'echo redir > /tmp/shell_e2e_out'
+set out $(cat /tmp/shell_e2e_out)
+check_eq "$out" "redir" "write redirect"
+
+set out $(/bin/sbush -c 'echo base > /tmp/shell_e2e_append; echo plus >> /tmp/shell_e2e_append; echo $?')
+check_eq "$out" "0" "append redirect"
+
+echo input_redir > /tmp/shell_e2e_in
+set out $(/bin/sbush -c 'cat < /tmp/shell_e2e_in')
+check_eq "$out" "input_redir" "input redirect"
+
+/bin/sbush -c "echo 'echo script_ok' > /tmp/shell_e2e_script"
+set out $(/bin/sbush /tmp/shell_e2e_script)
+check_eq "$out" "script_ok" "script execution"
+
+/bin/sbush -c 'echo cleanup > /tmp/shell_cleanup_tmp; rm /tmp/shell_cleanup_tmp'
+if test -f /tmp/shell_cleanup_tmp; then
+    fail "remove test files"
+else
+    pass "remove test files"
+fi
+
+rm -f /tmp/shell_e2e_out
+rm -f /tmp/shell_e2e_append
+rm -f /tmp/shell_e2e_in
+rm -f /tmp/shell_e2e_script
+rm -f /tmp/shell_e2e_args
+
+echo "shell-e2e: $PASS passed, $FAIL failed"
+if test $FAIL -gt 0; then
+    exit 1
+fi
+exit 0
