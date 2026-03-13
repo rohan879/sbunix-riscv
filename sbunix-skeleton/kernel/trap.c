@@ -914,7 +914,9 @@ static long sys_write_handler(struct trapframe *tf) {
     size_t len = (size_t)tf->a2;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
-    if (f && f->is_pipe && f->pipe_write) {
+    if (!f) return (long)-9; /* -EBADF */
+
+    if (f->is_pipe && f->pipe_write) {
         int pid = f->pipe_id;
         /* Check for broken pipe before writing */
         if (pipes[pid].read_open <= 0) {
@@ -991,7 +993,9 @@ static long sys_read_handler(struct trapframe *tf) {
     size_t len = (size_t)tf->a2;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
-    if (f && f->is_pipe && f->pipe_read) {
+    if (!f) return (long)-9; /* -EBADF */
+
+    if (f->is_pipe && f->pipe_read) {
         int pid = f->pipe_id;
         size_t read_bytes = 0;
         /* Block until at least one byte is available (or EOF) */
@@ -1114,7 +1118,7 @@ static long sys_dup3_handler(struct trapframe *tf) {
     struct open_file **ftab = proc_ofile(current_proc);
     if (oldfd < 0 || oldfd >= NOFILE || !ftab[oldfd] ||
         newfd < 0 || newfd >= NOFILE) {
-        return (long)-1;
+        return (long)-9; /* -EBADF */
     } else if (oldfd == newfd) {
         return (long)newfd;
     } else {
@@ -1686,7 +1690,7 @@ static long sys_getdents64_handler(struct trapframe *tf) {
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
     if (!f || f->is_pipe) {
-        return (long)-1;
+        return (long)-9; /* -EBADF */
     }
 
     if (f->ops && f->ops->readdir) {
@@ -1988,11 +1992,13 @@ static long sys_ioctl_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     unsigned long request = tf->a1;
     uint64_t argp = tf->a2;
+    struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+
+    if (!f) return (long)-9; /* -EBADF */
 
     if (request == 0x5413) { /* TIOCGWINSZ */
-        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
         int is_tty = 0;
-        if (f && f->ops == &devfs_ops && f->private)
+        if (f->ops == &devfs_ops && f->private)
           is_tty = devfs_is_tty(f->private);
         if (is_tty) {
             if (argp) {
