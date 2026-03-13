@@ -64,7 +64,7 @@ build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o bin/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 
-build/tarfs.o: $(USER_BIN)
+build/tarfs.o: $(USER_BIN) $(RC_SCRIPT)
 	cp -a rootfs/. build/rootfs/
 	cp $(RC_SCRIPT) build/rootfs/etc/rc
 	ln -sf sbush build/rootfs/bin/sh
