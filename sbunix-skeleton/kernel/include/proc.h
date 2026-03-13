@@ -176,7 +176,11 @@ struct proc {
   struct shared_pagetable  *shared_pt;      /* non-NULL if CLONE_VM */
   struct shared_ftable     *shared_ft;      /* non-NULL if CLONE_FILES */
   struct shared_sigactions *shared_sa;      /* non-NULL if CLONE_SIGHAND */
-};
+  pagetable_t deferred_free_pt;             /* exec-old image pending free */
+  struct vm_area *deferred_free_vmas;       /* VMA metadata for deferred free */
+  struct shared_pagetable *deferred_shared_pt; /* shared_pt wrapper pending free */
+  struct shared_sigactions *deferred_shared_sa; /* shared_sa wrapper pending free */
+ };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,
  * indirecting through shared wrappers when present. */
@@ -207,6 +211,7 @@ void            scheduler(void) __attribute__((noreturn));
 void            forkret(void);
 void            swtch(struct context*, struct context*);
 void            trap_restore(struct trapframe*);
+void            trap_return_saved(struct trapframe*) __attribute__((noreturn));
 void            uart_wakeup(void);
 
 extern struct proc *current_proc;

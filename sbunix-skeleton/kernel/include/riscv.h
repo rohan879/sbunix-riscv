@@ -132,6 +132,12 @@ static inline void w_satp(unsigned long x) {
     asm volatile("csrw satp, %0" : : "r" (x));
 }
 
+static inline unsigned long r_satp() {
+    unsigned long x;
+    asm volatile("csrr %0, satp" : "=r" (x));
+    return x;
+}
+
 // Flush the TLB
 static inline void sfence_vma() {
     asm volatile("sfence.vma zero, zero");

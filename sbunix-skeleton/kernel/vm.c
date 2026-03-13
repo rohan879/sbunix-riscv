@@ -225,8 +225,9 @@ void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len) {
             }
         } else if (PTE_IS_SWAPPED(*pte)) {
             /* Swapped-out page: free the swap slot */
-            swap_free(PTE_SWAP_SLOT(*pte));
-            *pte = 0;
+            int slot = pte_swap_take(pte, 0);
+            if (slot >= 0)
+                swap_free(slot);
             a += PAGE_SIZE;
         } else {
             /* Completely unmapped */
@@ -466,16 +467,26 @@ static int is_ram_pa(uint64_t pa) {
     return pa >= 0x80000000UL && pa < PHYSTOP;
 }
 
-static void _freewalk_user(pagetable_t pt, int level) {
+static void _freewalk_user(pagetable_t pt, int level, uint64_t *seen_slots) {
     for (int i = 0; i < 512; i++) {
         pte_t pte = pt[i];
         if (pte == 0)
             continue;
         if (!(pte & PTE_V)) {
             /* Not valid — may be a swapped page */
-            if (PTE_IS_SWAPPED(pte))
-                swap_free(PTE_SWAP_SLOT(pte));
-            pt[i] = 0;
+            if (level == 0 && PTE_IS_SWAPPED(pte)) {
+                int slot = pte_swap_take(&pt[i], 0);
+                if (slot >= 0) {
+                    int w = slot / 64;
+                    uint64_t bit = 1ULL << (slot % 64);
+                    if ((seen_slots[w] & bit) == 0) {
+                        seen_slots[w] |= bit;
+                        swap_free(slot);
+                    }
+                }
+            } else {
+                pt[i] = 0;
+            }
             continue;
         }
         uint64_t pa = PTE2PA(pte);
@@ -489,7 +500,7 @@ static void _freewalk_user(pagetable_t pt, int level) {
             }
         } else if (level > 0) {
             if (is_ram_pa(pa)) {
-                _freewalk_user((pagetable_t)pa, level - 1);
+                _freewalk_user((pagetable_t)pa, level - 1, seen_slots);
                 kfree((void *)pa);
             }
         }
@@ -498,7 +509,9 @@ static void _freewalk_user(pagetable_t pt, int level) {
 }
 
 void freewalk_user(pagetable_t pagetable) {
-    _freewalk_user(pagetable, 2);
+    uint64_t seen_slots[(SWAP_NSLOTS + 63) / 64];
+    memset(seen_slots, 0, sizeof(seen_slots));
+    _freewalk_user(pagetable, 2, seen_slots);
     kfree((void *)pagetable);
 }
 
@@ -522,9 +535,50 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
   while (len > 0) {
     if (dstva >= MAXVA)
       return -1;
+    uint64_t page_va = PGROUNDDOWN(dstva);
+    pte_t *wpte = walk(pagetable, page_va, 0);
+    if (!wpte)
+      return -1;
+
+    if (PTE_IS_SWAPPED(*wpte)) {
+      int sflags = 0;
+      int slot = pte_swap_take(wpte, &sflags);
+      char *newpage = kalloc();
+      if (!newpage || slot < 0) {
+        if (newpage)
+          kfree(newpage);
+        return -1;
+      }
+      swap_read(slot, newpage);
+      swap_free(slot);
+      *wpte = PA2PTE((uint64_t)newpage) | sflags | PTE_V;
+      asm volatile("sfence.vma %0, zero" : : "r"(page_va));
+    }
+
+    if ((*wpte & PTE_V) == 0 || (*wpte & PTE_U) == 0)
+      return -1;
+
+    if (*wpte & PTE_COW) {
+      uint64_t pa = PTE2PA(*wpte);
+      int flags = PTE_FLAGS(*wpte);
+
+      if (page_ref_get(pa) == 1) {
+        *wpte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
+      } else {
+        char *newpage = kalloc();
+        if (!newpage)
+          return -1;
+        memcpy(newpage, (void *)pa, PAGE_SIZE);
+        *wpte = PA2PTE((uint64_t)newpage) | ((flags & ~PTE_COW) | PTE_W);
+        kfree((void *)pa);
+      }
+      asm volatile("sfence.vma %0, zero" : : "r"(page_va));
+    }
+
     int level;
     pte_t *pte = walk_super(pagetable, dstva, &level);
-    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
+        (*pte & PTE_W) == 0)
       return -1;
 
     uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
@@ -534,7 +588,6 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
     if (n > len)
       n = len;
 
-    // Copy to physical address directly since we are in kernel 1:1 map
     memcpy((void *)pa0, s, n);
 
     len -= n;

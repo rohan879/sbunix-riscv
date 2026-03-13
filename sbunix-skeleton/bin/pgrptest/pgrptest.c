@@ -36,6 +36,7 @@ int main(void) {
     check(r == 0, "setpgid child");
     check(getpgid(pid) == pid, "child pgid changed");
     waitpid(pid, &status, 0);
+    check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "setpgid child exited cleanly");
 
     /* setsid */
     pid = fork();

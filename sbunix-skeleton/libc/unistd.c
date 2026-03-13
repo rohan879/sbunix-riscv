@@ -6,6 +6,8 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 
+void __stdio_after_fork_child(void);
+
 ssize_t read(int fd, void *buf, size_t count) {
     return __syscall_ret(syscall(SYS_read, fd, buf, count));
 }
@@ -47,7 +49,10 @@ int pipe(int fds[2]) {
 }
 
 pid_t fork(void) {
-    return (pid_t)__syscall_ret(syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0));
+    pid_t pid = (pid_t)__syscall_ret(syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0));
+    if (pid == 0)
+        __stdio_after_fork_child();
+    return pid;
 }
 
 pid_t waitpid(pid_t pid, int *status, int options) {

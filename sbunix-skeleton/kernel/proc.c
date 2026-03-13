@@ -23,6 +23,16 @@ void procinit(void) {
 
 // A fork child's very first scheduling by scheduler()
 // will swtch to forkret.
+void trap_return_saved(struct trapframe *saved) {
+  struct trapframe *ktf =
+      (struct trapframe *)((char *)current_proc->kstack + PAGE_SIZE - sizeof(*ktf));
+  memcpy(ktf, saved, sizeof(*ktf));
+  asm volatile("csrw sscratch, %0"
+               : : "r" ((char *)current_proc->kstack + PAGE_SIZE));
+  trap_restore(ktf);
+  __builtin_unreachable();
+}
+
 void forkret(void) {
   // Before jumping to user mode, we MUST set satp to the process's page table
   // and set sscratch to the kernel stack.
@@ -35,9 +45,7 @@ void forkret(void) {
   x |= SSTATUS_SPIE | SSTATUS_SUM;
   w_sstatus(x);
 
-  asm volatile("csrw sscratch, %0" : : "r" ((char *)current_proc->kstack + PAGE_SIZE));
-
-  trap_restore(current_proc->trapframe);
+  trap_return_saved(current_proc->trapframe);
 }
 
 /* Open /dev/console via VFS and assign to the next free ofile slot.
@@ -157,6 +165,10 @@ found:
   p->shared_pt = NULL;
   p->shared_ft = NULL;
   p->shared_sa = NULL;
+  p->deferred_free_pt = 0;
+  p->deferred_free_vmas = NULL;
+  p->deferred_shared_pt = NULL;
+  p->deferred_shared_sa = NULL;
 
   return p;
 }

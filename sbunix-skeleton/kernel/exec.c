@@ -28,6 +28,7 @@ int exec(char *path) {
     struct vm_area *old_vmas = current_proc->vma_list;
     struct vm_area *new_vmas = NULL;
     uint64_t sz = 0;
+    unsigned long old_satp = 0;
     struct trapframe *tf = current_proc->trapframe;
     
     // 1. Find ELF
@@ -43,6 +44,9 @@ int exec(char *path) {
 
     pagetable = uvmcreate();
     if(pagetable == 0) return -1;
+    old_satp = r_satp();
+    w_satp(MAKE_SATP(kernel_pagetable));
+    sfence_vma();
 
     // 3. Load PT_LOAD segments
     for (i = 0; i < ehdr->e_phnum; i++) {
@@ -156,24 +160,13 @@ int exec(char *path) {
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
 
-    /* Release the old address-space resources only after the new image is live. */
-    if (old_shared_pt) {
-        old_shared_pt->refcount--;
-        if (old_shared_pt->refcount == 0) {
-            if (old_pt != kernel_pagetable)
-                freewalk_user(old_pt);
-            kmfree(old_shared_pt, sizeof(struct shared_pagetable));
-        }
-    } else if (old_pt != kernel_pagetable) {
-        freewalk_user(old_pt);
-    }
-    if (old_shared_sa) {
-        old_shared_sa->refcount--;
-        if (old_shared_sa->refcount == 0)
-            kmfree(old_shared_sa, sizeof(struct shared_sigactions));
-    }
-    if (old_vmas)
-        vma_free_list(&old_vmas);
+    /* Defer old-image teardown until sys_execve_handler has rebuilt argv/envp on
+     * the new user stack. Freeing the old image inline here has been observed to
+     * corrupt post-exec user state on swap-heavy paths. */
+    current_proc->deferred_free_pt = old_pt;
+    current_proc->deferred_free_vmas = old_vmas;
+    current_proc->deferred_shared_pt = old_shared_pt;
+    current_proc->deferred_shared_sa = old_shared_sa;
 
     // 7. Initialize trapframe
     memset(tf, 0, sizeof(*tf));
@@ -191,11 +184,15 @@ int exec(char *path) {
     return 0;
 
 bad:
+    if (old_satp)
+        w_satp(old_satp);
+    sfence_vma();
     /* Free user pages from the partially constructed new pagetable.
      * freewalk_user only frees PTE_U pages, leaving kernel identity
      * maps intact (their physical pages are shared with the kernel). */
-    if (pagetable)
+    if (pagetable) {
         freewalk_user(pagetable);
+    }
     if (new_vmas)
         vma_free_list(&new_vmas);
     return -1;

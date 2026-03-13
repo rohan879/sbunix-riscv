@@ -33,6 +33,32 @@ static int  __file_pool_used[FILE_POOL_SIZE];
 static FILE *__open_streams[STREAM_REG_SIZE];
 static int   __streams_init;
 
+void __stdio_after_fork_child(void) {
+    __stdin.eof = 0;
+    __stdin.error = 0;
+    __stdin.wpos = 0;
+
+    __stdout.eof = 0;
+    __stdout.error = 0;
+    __stdout.wpos = 0;
+
+    __stderr.eof = 0;
+    __stderr.error = 0;
+    __stderr.wpos = 0;
+
+    for (int i = 0; i < FILE_POOL_SIZE; i++) {
+        __file_pool[i].eof = 0;
+        __file_pool[i].error = 0;
+        __file_pool[i].wpos = 0;
+    }
+
+    memset(__open_streams, 0, sizeof(__open_streams));
+    __open_streams[0] = stdin;
+    __open_streams[1] = stdout;
+    __open_streams[2] = stderr;
+    __streams_init = 1;
+}
+
 static void __stream_register(FILE *stream) {
     if (!__streams_init) {
         __open_streams[0] = stdin;

@@ -344,7 +344,7 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
             flags = (flags & ~PTE_W) | PTE_COW;
         }
 
-        /* Share the same physical page */
+        /* Share the same physical page in both parent and child. */
         page_ref_inc(pa);
         if (mappages(dst, va, PAGE_SIZE, pa, flags) < 0)
             return -1;
@@ -360,10 +360,52 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
 /* ------------------------------------------------------------------ */
 static void cleanup_proc_resources(struct proc *p) {
     /* ---- Pagetable / VMAs ---- */
+    if (p->deferred_shared_pt || p->deferred_free_pt ||
+        p->deferred_shared_sa || p->deferred_free_vmas) {
+        pagetable_t deferred_pt = p->deferred_free_pt;
+        struct vm_area *deferred_vmas = p->deferred_free_vmas;
+        struct shared_pagetable *deferred_shared_pt = p->deferred_shared_pt;
+        struct shared_sigactions *deferred_shared_sa = p->deferred_shared_sa;
+
+        p->deferred_free_pt = 0;
+        p->deferred_free_vmas = NULL;
+        p->deferred_shared_pt = NULL;
+        p->deferred_shared_sa = NULL;
+
+        if (deferred_shared_pt) {
+            deferred_shared_pt->refcount--;
+            if (deferred_shared_pt->refcount == 0) {
+                if (deferred_pt && deferred_pt != kernel_pagetable) {
+                    freewalk_user(deferred_pt);
+                }
+                kmfree(deferred_shared_pt, sizeof(struct shared_pagetable));
+            }
+        } else if (deferred_pt && deferred_pt != kernel_pagetable) {
+            freewalk_user(deferred_pt);
+        }
+
+        if (deferred_shared_sa) {
+            deferred_shared_sa->refcount--;
+            if (deferred_shared_sa->refcount == 0)
+                kmfree(deferred_shared_sa, sizeof(struct shared_sigactions));
+        }
+        if (deferred_vmas)
+            vma_free_list(&deferred_vmas);
+    }
+
+    pagetable_t old_pt = NULL;
+    if (p == current_proc && p->pagetable != kernel_pagetable) {
+        old_pt = p->pagetable;
+        w_satp(MAKE_SATP(kernel_pagetable));
+        sfence_vma();
+    }
     if (p->shared_pt) {
         p->shared_pt->refcount--;
         if (p->shared_pt->refcount == 0) {
-            /* Last user: free VMAs (pagetable pages leak is pre-existing) */
+            /* Last user: free the shared user image exactly once. */
+            if (p->shared_pt->pt != kernel_pagetable) {
+                freewalk_user(p->shared_pt->pt);
+            }
             vma_free_all(p);
             kmfree(p->shared_pt, sizeof(struct shared_pagetable));
         } else {
@@ -374,8 +416,14 @@ static void cleanup_proc_resources(struct proc *p) {
         /* Point to kernel pagetable so scheduler doesn't use freed pt */
         p->pagetable = kernel_pagetable;
     } else {
-        /* Traditional fork: free VMAs as before */
+        /* Traditional fork: free the private user image and VMA metadata. */
+        if (old_pt) {
+            freewalk_user(old_pt);
+        } else if (p->pagetable != kernel_pagetable) {
+            freewalk_user(p->pagetable);
+        }
         vma_free_all(p);
+        p->pagetable = kernel_pagetable;
     }
 
     /* ---- File descriptors ---- */
@@ -414,10 +462,11 @@ static void cleanup_proc_resources(struct proc *p) {
 /* a0 = flags (CLONE_VM | CLONE_FILES | CLONE_SIGHAND | SIGCHLD etc.)  */
 /* a1 = child stack pointer (0 means inherit parent sp)                 */
 /* ------------------------------------------------------------------ */
-static pid_t sys_clone(void) {
-    uint64_t flags    = current_proc->trapframe->a0;
-    uint64_t child_sp = current_proc->trapframe->a1;
+static pid_t sys_clone(struct trapframe *tf) {
+    uint64_t flags    = tf->a0;
+    uint64_t child_sp = tf->a1;
     int clone_flags   = (int)(flags & ~0xFFUL); /* mask out low-byte signal */
+    unsigned long old_satp = 0;
 
     /* CLONE_SIGHAND requires CLONE_VM (Linux semantics) */
     if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
@@ -432,7 +481,7 @@ static pid_t sys_clone(void) {
     memcpy(p->name, current_proc->name, sizeof(p->name));
 
     /* Copy trapframe -- child starts after the ecall just like parent */
-    memcpy(p->trapframe, current_proc->trapframe, sizeof(struct trapframe));
+    memcpy(p->trapframe, tf, sizeof(struct trapframe));
     p->trapframe->a0 = 0; /* child returns 0 */
 
     /* Set child stack pointer if caller provided one */
@@ -472,28 +521,33 @@ static pid_t sys_clone(void) {
         /* Traditional COW fork: build independent child page table */
         pagetable_t new_pt = uvmcreate();
         if (!new_pt) goto bad;
+        old_satp = r_satp();
+        w_satp(MAKE_SATP(kernel_pagetable));
+        sfence_vma();
 
         /* Identity map kernel RAM and I/O (same as exec) */
-        if (mappages(new_pt, 0x80000000, PHYSTOP - 0x80000000, 0x80000000,
-                     PTE_R | PTE_W | PTE_X) < 0) goto bad;
+        if (mappages_super(new_pt, 0x80000000, PHYSTOP - 0x80000000, 0x80000000,
+                     PTE_R | PTE_W | PTE_X) < 0) goto bad_restore_satp;
         if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000,
-                     PTE_R | PTE_W) < 0) goto bad;
+                     PTE_R | PTE_W) < 0) goto bad_restore_satp;
         /* RTC (0x101000) NOT mapped — only used during kernel boot */
         if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000,
-                     PTE_R | PTE_W) < 0) goto bad;
-        if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000,
-                     PTE_R | PTE_W) < 0) goto bad;
+                     PTE_R | PTE_W) < 0) goto bad_restore_satp;
+        if (mappages_super(new_pt, 0x0c000000, 0x400000, 0x0c000000,
+                     PTE_R | PTE_W) < 0) goto bad_restore_satp;
         if (mappages_super(new_pt, 0x30000000, 0x200000, 0x30000000,
-                     PTE_R | PTE_W) < 0) goto bad;
+                     PTE_R | PTE_W) < 0) goto bad_restore_satp;
         if (mappages_super(new_pt, 0x40000000, 0x40000000, 0x40000000,
-                     PTE_R | PTE_W) < 0) goto bad;
+                     PTE_R | PTE_W) < 0) goto bad_restore_satp;
 
         /* COW-share user pages */
         if (copy_pagetable_cow(new_pt, current_proc->pagetable, MAXVA) < 0)
-            goto bad;
+            goto bad_restore_satp;
 
         /* Map signal trampoline into child */
         uvmmap_sigtrampoline(new_pt);
+        w_satp(old_satp);
+        sfence_vma();
 
         p->pagetable = new_pt;
 
@@ -551,6 +605,9 @@ static pid_t sys_clone(void) {
     p->state = RUNNABLE;
     return p->pid;
 
+bad_restore_satp:
+    w_satp(old_satp);
+    sfence_vma();
 bad:
     p->state = UNUSED;
     return -1;
@@ -1280,8 +1337,7 @@ static long sys_chdir_handler(struct trapframe *tf) {
 }
 
 static long sys_clone_handler(struct trapframe *tf) {
-    (void)tf;
-    pid_t child = sys_clone();
+    pid_t child = sys_clone(tf);
     tf->a0 = (uint64_t)child;
     return SYSCALL_NORETURN;
 }
@@ -1515,7 +1571,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     kfree(kstrbuf);
     if (kenvbuf) kfree(kenvbuf);
 
-    trap_restore(current_proc->trapframe);
+    trap_return_saved(current_proc->trapframe);
     /* never reached */
     return SYSCALL_NORETURN;
 }
@@ -3378,7 +3434,11 @@ void trap_handler(struct trapframe *tf) {
                         char *newpage = kalloc();
                         if (!newpage)
                             goto pagefault_kill;
+                        w_satp(MAKE_SATP(kernel_pagetable));
+                        sfence_vma();
                         memcpy(newpage, (void *)pa, PAGE_SIZE);
+                        w_satp(MAKE_SATP(current_proc->pagetable));
+                        sfence_vma();
                         *pte = PA2PTE((uint64_t)newpage) | ((flags & ~PTE_COW) | PTE_W);
                         kfree((void *)pa); /* decrement refcount on old page */
                     }
@@ -3393,11 +3453,11 @@ void trap_handler(struct trapframe *tf) {
                 uint64_t sva = PGROUNDDOWN(stval);
                 pte_t *spte = walk(current_proc->pagetable, sva, 0);
                 if (spte && PTE_IS_SWAPPED(*spte)) {
-                    int slot = PTE_SWAP_SLOT(*spte);
-                    int sflags = PTE_SWAP_FLAGS(*spte);
+                    int sflags = 0;
+                    int slot = pte_swap_take(spte, &sflags);
 
                     char *newpage = kalloc();
-                    if (!newpage)
+                    if (!newpage || slot < 0)
                         goto pagefault_kill;
 
                     swap_read(slot, newpage);
