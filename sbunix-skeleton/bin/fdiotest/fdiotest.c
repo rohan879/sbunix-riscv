@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -16,7 +18,7 @@ int main(void) {
     char buf[64];
     int fd, n;
 
-    /* open/write/read on ext2 */
+    /* ---- Basic file I/O on ext2 ---- */
     fd = open("/mnt/fdio_test", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     check(fd >= 0, "open for write");
     n = write(fd, "hello fdio", 10);
@@ -31,7 +33,7 @@ int main(void) {
     check(strcmp(buf, "hello fdio") == 0, "content matches");
     close(fd);
 
-    /* dup */
+    /* ---- dup ---- */
     fd = open("/mnt/fdio_dup", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     check(fd >= 0, "open for dup");
     int fd2 = dup(fd);
@@ -46,7 +48,7 @@ int main(void) {
     check(strcmp(buf, "dup") == 0, "dup write visible");
     close(fd);
 
-    /* lseek */
+    /* ---- lseek ---- */
     fd = open("/mnt/fdio_test", O_RDONLY);
     check(fd >= 0, "open for lseek");
     off_t pos = lseek(fd, 6, SEEK_SET);
@@ -57,7 +59,7 @@ int main(void) {
     check(strcmp(buf, "fdio") == 0, "lseek content");
     close(fd);
 
-    /* pipe */
+    /* ---- pipe ---- */
     int pfd[2];
     int r = pipe(pfd);
     check(r == 0, "pipe");
@@ -67,6 +69,73 @@ int main(void) {
     check(strcmp(buf, "pipe") == 0, "pipe data");
     close(pfd[0]);
     close(pfd[1]);
+
+    /* ---- Invalid fd error returns ---- */
+
+    /* read with bad fd */
+    errno = 0;
+    n = read(-1, buf, 10);
+    check(n == -1 && errno == EBADF, "read(-1) returns EBADF");
+
+    errno = 0;
+    n = read(999, buf, 10);
+    check(n == -1 && errno == EBADF, "read(999) returns EBADF");
+
+    /* write with bad fd */
+    errno = 0;
+    n = write(-1, buf, 10);
+    check(n == -1 && errno == EBADF, "write(-1) returns EBADF");
+
+    errno = 0;
+    n = write(999, buf, 10);
+    check(n == -1 && errno == EBADF, "write(999) returns EBADF");
+
+    /* close with bad fd */
+    errno = 0;
+    r = close(-1);
+    check(r == -1 && errno == EBADF, "close(-1) returns EBADF");
+
+    errno = 0;
+    r = close(999);
+    check(r == -1 && errno == EBADF, "close(999) returns EBADF");
+
+    /* double close */
+    fd = open("/mnt/fdio_test", O_RDONLY);
+    close(fd);
+    errno = 0;
+    r = close(fd);
+    check(r == -1 && errno == EBADF, "double close returns EBADF");
+
+    /* lseek with bad fd */
+    errno = 0;
+    pos = lseek(-1, 0, SEEK_SET);
+    check(pos == -1 && errno == EBADF, "lseek(-1) returns EBADF");
+
+    /* lseek on pipe (ESPIPE) */
+    pipe(pfd);
+    errno = 0;
+    pos = lseek(pfd[0], 0, SEEK_SET);
+    check(pos == -1 && errno == ESPIPE, "lseek on pipe returns ESPIPE");
+    close(pfd[0]);
+    close(pfd[1]);
+
+    /* dup with bad fd */
+    errno = 0;
+    fd2 = dup(-1);
+    check(fd2 == -1 && errno == EBADF, "dup(-1) returns EBADF");
+
+    /* fstat with bad fd */
+    {
+        struct stat st;
+        errno = 0;
+        r = fstat(-1, &st);
+        check(r == -1 && errno == EBADF, "fstat(-1) returns EBADF");
+    }
+
+    /* fsync with bad fd */
+    errno = 0;
+    r = fsync(-1);
+    check(r == -1 && errno == EBADF, "fsync(-1) returns EBADF");
 
     /* cleanup */
     unlink("/mnt/fdio_test");

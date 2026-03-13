@@ -223,3 +223,31 @@ int symlink(const char *target, const char *linkpath) {
 ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
     return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, AT_FDCWD, path, buf, bufsiz));
 }
+
+ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+    return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, dirfd, path, buf, bufsiz));
+}
+
+int faccessat(int dirfd, const char *path, int mode, int flags) {
+    return (int)__syscall_ret(syscall(SYS_faccessat, dirfd, path, mode, flags));
+}
+
+int fcntl(int fd, int cmd, ...) {
+    va_list ap;
+    va_start(ap, cmd);
+    long arg = va_arg(ap, long);
+    va_end(ap);
+    return (int)__syscall_ret(syscall(SYS_fcntl, fd, cmd, arg));
+}
+
+int openat(int dirfd, const char *path, int flags, ...) {
+    va_list ap;
+    va_start(ap, flags);
+    int mode = va_arg(ap, int);
+    va_end(ap);
+    return (int)__syscall_ret(syscall(SYS_openat, dirfd, path, flags, mode));
+}
+
+int creat(const char *path, mode_t mode) {
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC, (int)mode);
+}

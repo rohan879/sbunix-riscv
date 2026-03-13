@@ -31,6 +31,10 @@ int mknod(const char *path, mode_t mode, dev_t dev) {
     return (int)__syscall_ret(syscall(33, AT_FDCWD, path, mode, dev));
 }
 
+int fstatat(int dirfd, const char *path, struct stat *buf, int flags) {
+    return (int)__syscall_ret(syscall(SYS_newfstatat, dirfd, path, buf, flags));
+}
+
 mode_t umask(mode_t mask) {
     /* SYS_umask = 166 */
     return (mode_t)syscall(166, mask);

@@ -48,8 +48,10 @@ int     rmdir(const char *path);
 int     link(const char *oldpath, const char *newpath);
 int     rename(const char *oldpath, const char *newpath);
 int     access(const char *path, int mode);
+int     faccessat(int dirfd, const char *path, int mode, int flags);
 int     symlink(const char *target, const char *linkpath);
 ssize_t readlink(const char *path, char *buf, size_t bufsiz);
+ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz);
 
 /* Time */
 unsigned int sleep(unsigned int seconds);

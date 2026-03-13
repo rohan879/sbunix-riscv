@@ -69,6 +69,10 @@ build/tarfs.o: $(USER_BIN)
 ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests
 endif
+	@mkdir -p build/rootfs/usr/lib build/rootfs/usr/include
+	cp build/libc/crt.S.o build/rootfs/usr/lib/crt1.o
+	cp build/libc.a build/rootfs/usr/lib/libc.a
+	cp -a libc/include/. build/rootfs/usr/include/
 	tar cf build/rootfs.tar -C build/rootfs .
 	cd build && $(OBJCOPY) -I binary -O elf64-littleriscv -B riscv \
 		--rename-section .data=.tarfs \
