@@ -23,8 +23,8 @@ struct kmem_cache {
     struct slab_header *full;     /* completely used slabs */
 };
 
-#define NCACHES 9
-static uint32_t cache_sizes[NCACHES] = {16, 32, 64, 128, 256, 512, 1024, 2048, 4096};
+#define NCACHES 8
+static uint32_t cache_sizes[NCACHES] = {16, 32, 64, 128, 256, 512, 1024, 2048};
 static struct kmem_cache caches[NCACHES];
 static int slub_initialized;
 
@@ -196,7 +196,6 @@ void *kmalloc(uint64_t size) {
             return slab_alloc(&caches[i]);
     }
 
-    /* Sizes > 4096: fall back to kalloc() directly */
     if (size <= PAGE_SIZE)
         return kalloc();
     return 0;
@@ -218,6 +217,5 @@ void kmfree(void *ptr, uint64_t size) {
         }
     }
 
-    /* Sizes > 4096: kfree() directly */
     kfree(ptr);
 }
