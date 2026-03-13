@@ -53,7 +53,7 @@ typedef int            pid_t;
 #define PXSHIFT(level)  (12 + (level) * 9)
 #define PX(level, va)   ((((uint64_t)(va)) >> PXSHIFT(level)) & PXMASK)
 
-// User address space boundary. 
+// User address space boundary.
 // Set to 1GB to stay safely below kernel space (0x80000000).
 #define MAXVA 0x40000000L
 
