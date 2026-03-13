@@ -25,6 +25,7 @@ echo === C Binary Tests ===
 /bin/libc-test
 /bin/alarmtest
 /bin/segvtest
+/bin/sigilltest
 /bin/fdiotest
 /bin/sigtest
 /bin/sighandtest

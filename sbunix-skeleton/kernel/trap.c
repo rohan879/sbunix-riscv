@@ -3282,6 +3282,7 @@ void syscall_init(void) {
 void trap_handler(struct trapframe *tf) {
     unsigned long cause = r_scause();
     unsigned long stval = r_stval();
+    int from_user = (r_sstatus() & SSTATUS_SPP) == 0;
 
     if (cause & SCAUSE_INTERRUPT) {
         if (cause == SCAUSE_S_TIMER_INT) {
@@ -3299,6 +3300,16 @@ void trap_handler(struct trapframe *tf) {
 
     /* Exception */
     if (cause != SCAUSE_ECALL_U) {
+        if (cause == SCAUSE_ILLEGAL_INSTRUCTION && from_user) {
+            printk("Illegal instruction pid=%d epc=0x%lx stval=0x%lx\n",
+                   current_proc ? current_proc->pid : -1, tf->epc, stval);
+            if (current_proc) {
+                current_proc->sigpending |= signal_bit(SIGILL);
+                deliver_signal(tf, current_proc);
+                return;
+            }
+            panic("kernel illegal instruction with no current process");
+        }
         if (cause == SCAUSE_LOAD_PAGE_FAULT ||
             cause == SCAUSE_STORE_PAGE_FAULT ||
             cause == SCAUSE_INST_PAGE_FAULT) {
