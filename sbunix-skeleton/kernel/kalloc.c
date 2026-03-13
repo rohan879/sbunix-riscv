@@ -4,21 +4,32 @@
 #include <string.h>
 #include <swap.h>
 
-extern char _kernel_end[]; // Symbol from linker script
+extern char _kernel_end[];
 
-struct run {
-    struct run *next;
+/* ---- Physical page metadata ---- */
+#define NPAGE       ((PHYSTOP - 0x80000000UL) / PAGE_SIZE)  /* 32768 */
+#define MAX_ORDER   10  /* orders 0..9: 4KB .. 2MB */
+
+#define PA_TO_IDX(pa)     (((uint64_t)(pa) - 0x80000000UL) >> 12)
+#define IDX_TO_PA(idx)    (0x80000000UL + ((uint64_t)(idx) << 12))
+#define BUDDY_PA(pa, ord) ((uint64_t)(pa) ^ (1UL << (12 + (ord))))
+
+static int      page_refcount[NPAGE];
+static uint8_t  page_order[NPAGE];   /* order of block (head page only) */
+static uint8_t  page_free[NPAGE];    /* 1 = head of a free buddy block */
+
+/* ---- Buddy free lists ---- */
+struct free_block {
+    struct free_block *next;
 };
 
-struct {
-    struct run *freelist;
-} kmem;
+static struct free_block *free_list[MAX_ORDER];
+static int free_count[MAX_ORDER];
 
-static int free_page_count;
+static int total_free_pages;
+static uint64_t mem_start;  /* first usable PA (page-aligned, after kernel) */
 
-/* Reference counts for physical pages */
-#define MAX_PAGES ((128 * 1024 * 1024) / PAGE_SIZE) /* 128MB / 4KB = 32768 */
-static int page_refcount[MAX_PAGES];
+/* ---- Page reference counting (API unchanged) ---- */
 
 static int pa_to_index(uint64_t pa) {
     return (int)((pa - 0x80000000UL) / PAGE_SIZE);
@@ -26,178 +37,256 @@ static int pa_to_index(uint64_t pa) {
 
 void page_ref_inc(uint64_t pa) {
     int idx = pa_to_index(pa);
-    if (idx >= 0 && idx < MAX_PAGES)
+    if (idx >= 0 && idx < (int)NPAGE)
         page_refcount[idx]++;
 }
 
 void page_ref_dec(uint64_t pa) {
     int idx = pa_to_index(pa);
-    if (idx >= 0 && idx < MAX_PAGES)
+    if (idx >= 0 && idx < (int)NPAGE)
         page_refcount[idx]--;
 }
 
 int page_ref_get(uint64_t pa) {
     int idx = pa_to_index(pa);
-    if (idx >= 0 && idx < MAX_PAGES)
+    if (idx >= 0 && idx < (int)NPAGE)
         return page_refcount[idx];
     return 0;
 }
 
 void page_ref_set(uint64_t pa, int val) {
     int idx = pa_to_index(pa);
-    if (idx >= 0 && idx < MAX_PAGES)
+    if (idx >= 0 && idx < (int)NPAGE)
         page_refcount[idx] = val;
 }
 
-// Frees a page of physical memory.
-// Only actually frees when refcount reaches 0.
-void kfree(void *pa) {
-    struct run *r;
+/* ---- Buddy allocator internals ---- */
 
+static void buddy_list_insert(uint64_t pa, int order) {
+    struct free_block *blk = (struct free_block *)pa;
+    blk->next = free_list[order];
+    free_list[order] = blk;
+    free_count[order]++;
+}
+
+static int buddy_list_remove(uint64_t pa, int order) {
+    struct free_block **pp = &free_list[order];
+    while (*pp) {
+        if ((uint64_t)*pp == pa) {
+            *pp = (*pp)->next;
+            free_count[order]--;
+            return 1;
+        }
+        pp = &(*pp)->next;
+    }
+    return 0;
+}
+
+/*
+ * Allocate a block of 2^order contiguous pages.
+ * Returns physical address or NULL.
+ */
+static void *buddy_alloc(int order) {
+    if (order >= MAX_ORDER)
+        return NULL;
+
+    /* Try this order's free list */
+    if (free_list[order]) {
+        struct free_block *blk = free_list[order];
+        free_list[order] = blk->next;
+        free_count[order]--;
+
+        uint64_t pa = (uint64_t)blk;
+        int idx = PA_TO_IDX(pa);
+        page_free[idx] = 0;
+        page_order[idx] = (uint8_t)order;
+        total_free_pages -= (1 << order);
+        return (void *)pa;
+    }
+
+    /* Split a higher-order block */
+    void *higher = buddy_alloc(order + 1);
+    if (!higher)
+        return NULL;
+
+    uint64_t pa = (uint64_t)higher;
+    uint64_t buddy = pa + ((uint64_t)PAGE_SIZE << order);
+    int buddy_idx = PA_TO_IDX(buddy);
+
+    /* Upper buddy goes to free_list[order] */
+    page_free[buddy_idx] = 1;
+    page_order[buddy_idx] = (uint8_t)order;
+    buddy_list_insert(buddy, order);
+    total_free_pages += (1 << order);
+
+    /* Lower half is the allocation */
+    int idx = PA_TO_IDX(pa);
+    page_free[idx] = 0;
+    page_order[idx] = (uint8_t)order;
+    return (void *)pa;
+}
+
+/*
+ * Free a block of 2^order pages, coalescing with buddy if possible.
+ */
+static void buddy_free(uint64_t pa, int order) {
+    while (order < MAX_ORDER - 1) {
+        uint64_t buddy = BUDDY_PA(pa, order);
+        int buddy_idx = PA_TO_IDX(buddy);
+
+        if (buddy < mem_start ||
+            buddy + ((uint64_t)PAGE_SIZE << order) > PHYSTOP ||
+            buddy_idx >= (int)NPAGE ||
+            !page_free[buddy_idx] ||
+            page_order[buddy_idx] != (uint8_t)order ||
+            page_refcount[buddy_idx] != 0)
+            break;
+
+        /* Coalesce */
+        buddy_list_remove(buddy, order);
+        page_free[buddy_idx] = 0;
+        total_free_pages -= (1 << order);
+
+        if (buddy < pa)
+            pa = buddy;
+        order++;
+    }
+
+    int idx = PA_TO_IDX(pa);
+    page_free[idx] = 1;
+    page_order[idx] = (uint8_t)order;
+    buddy_list_insert(pa, order);
+    total_free_pages += (1 << order);
+}
+
+/* ---- Order-0 magazine (fast path for single-page alloc/free) ---- */
+
+#define MAGAZINE_SIZE 16
+static void *magazine[MAGAZINE_SIZE];
+static int magazine_count;
+
+static void *magazine_alloc(void) {
+    if (magazine_count > 0)
+        return magazine[--magazine_count];
+
+    /* Refill: try to get an order-4 block (16 pages) */
+    void *blk = buddy_alloc(4);
+    if (blk) {
+        uint64_t base = (uint64_t)blk;
+        for (int i = 1; i < 16; i++) {
+            uint64_t pg = base + (uint64_t)i * PAGE_SIZE;
+            int idx = PA_TO_IDX(pg);
+            page_order[idx] = 0;
+            page_free[idx] = 0;
+            magazine[magazine_count++] = (void *)pg;
+        }
+        int idx = PA_TO_IDX(base);
+        page_order[idx] = 0;
+        page_free[idx] = 0;
+        return (void *)base;
+    }
+
+    /* Fallback: single order-0 allocation */
+    return buddy_alloc(0);
+}
+
+static void magazine_free(uint64_t pa) {
+    if (magazine_count >= MAGAZINE_SIZE) {
+        /* Drain half back to buddy */
+        for (int i = 0; i < MAGAZINE_SIZE / 2; i++)
+            buddy_free((uint64_t)magazine[--magazine_count], 0);
+    }
+    magazine[magazine_count++] = (void *)pa;
+}
+
+/* ---- Public API ---- */
+
+void kfree(void *pa) {
     int idx = pa_to_index((uint64_t)pa);
-    if (idx >= 0 && idx < MAX_PAGES) {
+    if (idx >= 0 && idx < (int)NPAGE) {
         if (page_refcount[idx] > 1) {
             page_refcount[idx]--;
-            return; /* still referenced */
+            return;
         }
         page_refcount[idx] = 0;
     }
-
-    r = (struct run*)pa;
-    r->next = kmem.freelist;
-    kmem.freelist = r;
-    free_page_count++;
+    magazine_free((uint64_t)pa);
 }
 
-// Initializes the page allocator.
-// Divides the memory from the end of the kernel to PHYSTOP into pages
-// and adds them to the free list.
 void kinit(void) {
-    char *p;
-    kmem.freelist = NULL;
+    memset(page_refcount, 0, sizeof(page_refcount));
+    memset(page_order, 0, sizeof(page_order));
+    memset(page_free, 0, sizeof(page_free));
+    memset(free_list, 0, sizeof(free_list));
+    memset(free_count, 0, sizeof(free_count));
+    total_free_pages = 0;
+    magazine_count = 0;
 
-    // Start page-aligning from the end of the kernel data.
-    p = (char*)ROUNDUP((unsigned long)_kernel_end, PAGE_SIZE);
+    mem_start = PGROUNDUP((uint64_t)_kernel_end);
 
-    printk("kinit: initializing memory from 0x%lx to 0x%lx\n", (unsigned long)p, (unsigned long)PHYSTOP);
+    printk("kinit: initializing memory from 0x%lx to 0x%lx\n",
+           (unsigned long)mem_start, (unsigned long)PHYSTOP);
 
-    for (; p + PAGE_SIZE <= (char*)PHYSTOP; p += PAGE_SIZE) {
-        kfree(p);
-    }
-
-    printk("kinit: memory initialized.\n");
-}
-
-// Allocates one 4096-byte page of physical memory.
-// Returns a pointer that the kernel can use.
-// Returns NULL if the memory cannot be allocated.
-void *kalloc(void) {
-    struct run *r;
-
-    if (free_page_count < SWAP_LOW_WATERMARK && swap_enabled())
-        swap_evict_pages(SWAP_EVICT_BATCH);
-
-    r = kmem.freelist;
-    if(r) {
-        kmem.freelist = r->next;
-        free_page_count--;
-        page_refcount[pa_to_index((uint64_t)r)] = 1;
-    }
-    return r;
-}
-
-int get_free_page_count(void) {
-    return free_page_count;
-}
-
-// Allocate 512 contiguous 4KB pages (2MB) at a 2MB-aligned physical address.
-// Returns the base address or NULL if no contiguous block is available.
-// Strategy: scan the free list, build a bitmap of free pages, then search
-// for a 2MB-aligned run of 512 consecutive free pages.
-void *kalloc_super(void) {
-    /* Build a bitmap of which pages are on the free list.
-     * MAX_PAGES = 32768, so bitmap = 4096 bytes = 1 page. */
-    uint8_t free_bitmap[MAX_PAGES / 8];
-    memset(free_bitmap, 0, sizeof(free_bitmap));
-
-    struct run *r = kmem.freelist;
-    while (r) {
-        int idx = pa_to_index((uint64_t)r);
-        if (idx >= 0 && idx < MAX_PAGES)
-            free_bitmap[idx / 8] |= (uint8_t)(1 << (idx % 8));
-        r = r->next;
-    }
-
-    /* Search for a 2MB-aligned block of 512 contiguous free pages.
-     * base must be a multiple of SUPERPAGE_NPAGES (512). */
-    for (int base = 0; base + SUPERPAGE_NPAGES <= MAX_PAGES;
-         base += SUPERPAGE_NPAGES) {
-        int all_free = 1;
-        for (int i = 0; i < SUPERPAGE_NPAGES; i++) {
-            int idx = base + i;
-            if (!(free_bitmap[idx / 8] & (1 << (idx % 8)))) {
-                all_free = 0;
+    /* Add free memory as the largest possible buddy blocks.
+     * At each position, find the highest order that is both
+     * naturally aligned and fits within remaining memory. */
+    uint64_t p = mem_start;
+    while (p + PAGE_SIZE <= PHYSTOP) {
+        int order = 0;
+        for (int o = MAX_ORDER - 1; o >= 0; o--) {
+            uint64_t block_size = (uint64_t)PAGE_SIZE << o;
+            if ((p & (block_size - 1)) == 0 && p + block_size <= PHYSTOP) {
+                order = o;
                 break;
             }
         }
-        if (!all_free)
-            continue;
 
-        /* Found a contiguous block. Remove all 512 pages from free list. */
-        uint64_t base_pa = 0x80000000UL + (uint64_t)base * PAGE_SIZE;
-
-        /* Clear all refcounts first */
-        for (int i = 0; i < SUPERPAGE_NPAGES; i++)
-            page_refcount[base + i] = 0;
-
-        /* Remove the 512 pages from the free list */
-        struct run **pp = &kmem.freelist;
-        int removed = 0;
-        while (*pp && removed < SUPERPAGE_NPAGES) {
-            uint64_t addr = (uint64_t)*pp;
-            if (addr >= base_pa && addr < base_pa + SUPERPAGE_SIZE) {
-                *pp = (*pp)->next;
-                removed++;
-            } else {
-                pp = &(*pp)->next;
-            }
-        }
-        free_page_count -= removed;
-
-        /* Set base page refcount to 1 */
-        page_refcount[base] = 1;
-        return (void *)base_pa;
+        uint64_t block_size = (uint64_t)PAGE_SIZE << order;
+        int idx = PA_TO_IDX(p);
+        page_free[idx] = 1;
+        page_order[idx] = (uint8_t)order;
+        page_refcount[idx] = 0;
+        buddy_list_insert(p, order);
+        total_free_pages += (1 << order);
+        p += block_size;
     }
 
-    return NULL; /* no contiguous 2MB block available */
+    printk("kinit: %d free pages (%d MB) in buddy allocator\n",
+           total_free_pages, total_free_pages * 4 / 1024);
 }
 
-// Free a 2MB contiguous block back to the free list.
-// pa must be 2MB-aligned.
+void *kalloc(void) {
+    if (total_free_pages + magazine_count < SWAP_LOW_WATERMARK && swap_enabled())
+        swap_evict_pages(SWAP_EVICT_BATCH);
+
+    void *pa = magazine_alloc();
+    if (pa)
+        page_refcount[PA_TO_IDX((uint64_t)pa)] = 1;
+    return pa;
+}
+
+int get_free_page_count(void) {
+    return total_free_pages + magazine_count;
+}
+
+void *kalloc_super(void) {
+    void *pa = buddy_alloc(9);
+    if (pa)
+        page_refcount[PA_TO_IDX((uint64_t)pa)] = 1;
+    return pa;
+}
+
 void kfree_super(void *pa) {
     if (!IS_SUPERPAGE_ALIGNED((uint64_t)pa))
         return;
 
-    uint64_t base_pa = (uint64_t)pa;
-    int base_idx = pa_to_index(base_pa);
-
-    /* Check base refcount -- only free when it reaches 0 */
-    if (base_idx >= 0 && base_idx < MAX_PAGES) {
-        if (page_refcount[base_idx] > 1) {
-            page_refcount[base_idx]--;
-            return; /* still referenced */
+    int idx = pa_to_index((uint64_t)pa);
+    if (idx >= 0 && idx < (int)NPAGE) {
+        if (page_refcount[idx] > 1) {
+            page_refcount[idx]--;
+            return;
         }
+        page_refcount[idx] = 0;
     }
-
-    /* Return all 512 constituent 4KB pages to the free list */
-    for (int i = 0; i < SUPERPAGE_NPAGES; i++) {
-        uint64_t sub_pa = base_pa + (uint64_t)i * PAGE_SIZE;
-        int idx = pa_to_index(sub_pa);
-        if (idx >= 0 && idx < MAX_PAGES)
-            page_refcount[idx] = 0;
-        struct run *r = (struct run *)sub_pa;
-        r->next = kmem.freelist;
-        kmem.freelist = r;
-        free_page_count++;
-    }
+    buddy_free((uint64_t)pa, 9);
 }
