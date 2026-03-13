@@ -288,6 +288,50 @@ void uvmmap_sigtrampoline(pagetable_t pagetable) {
 int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   if (start >= end) return -1;
 
+  struct vm_area *prev = NULL;
+  struct vm_area **pp = &p->vma_list;
+  while (*pp && (*pp)->start < start) {
+    prev = *pp;
+    pp = &(*pp)->next;
+  }
+
+  /* Merge directly into the previous compatible VMA when possible. */
+  if (prev && prev->end >= start &&
+      prev->prot == prot && prev->flags == flags) {
+    if (end > prev->end)
+      prev->end = end;
+
+    while (prev->next && prev->next->start <= prev->end &&
+           prev->next->prot == prot && prev->next->flags == flags) {
+      struct vm_area *nxt = prev->next;
+      if (nxt->end > prev->end)
+        prev->end = nxt->end;
+      prev->next = nxt->next;
+      kmfree(nxt, sizeof(struct vm_area));
+    }
+    return 0;
+  }
+
+  /* Likewise extend the next compatible VMA backward if it touches us. */
+  if (*pp && (*pp)->start <= end &&
+      (*pp)->prot == prot && (*pp)->flags == flags) {
+    struct vm_area *vma = *pp;
+    if (start < vma->start)
+      vma->start = start;
+    if (end > vma->end)
+      vma->end = end;
+
+    while (vma->next && vma->next->start <= vma->end &&
+           vma->next->prot == prot && vma->next->flags == flags) {
+      struct vm_area *nxt = vma->next;
+      if (nxt->end > vma->end)
+        vma->end = nxt->end;
+      vma->next = nxt->next;
+      kmfree(nxt, sizeof(struct vm_area));
+    }
+    return 0;
+  }
+
   struct vm_area *vma = (struct vm_area *)kmalloc(sizeof(struct vm_area));
   if (!vma) return -1;
 
@@ -295,13 +339,7 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   vma->end   = end;
   vma->prot  = prot;
   vma->flags = flags;
-  vma->next  = NULL;
-
-  /* Insert into sorted list by start address */
-  struct vm_area **pp = &p->vma_list;
-  while (*pp && (*pp)->start < start)
-    pp = &(*pp)->next;
-  vma->next = *pp;
+  vma->next  = *pp;
   *pp = vma;
 
   /* Merge with next if they touch and have same prot/flags */
@@ -312,21 +350,6 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
       vma->end = nxt->end;
     vma->next = nxt->next;
     kmfree(nxt, sizeof(struct vm_area));
-  }
-
-  /* Merge with previous if they touch and have same prot/flags */
-  pp = &p->vma_list;
-  while (*pp && *pp != vma) {
-    struct vm_area *prev = *pp;
-    if (prev->next == vma && prev->end >= vma->start &&
-        prev->prot == vma->prot && prev->flags == vma->flags) {
-      if (vma->end > prev->end)
-        prev->end = vma->end;
-      prev->next = vma->next;
-      kmfree(vma, sizeof(struct vm_area));
-      break;
-    }
-    pp = &(*pp)->next;
   }
 
   return 0;
