@@ -2,6 +2,8 @@
 
 echo SBUnix booting...
 
+/bin/badfd
+
 # Verify /bin/sh exists (POSIX compliance)
 if test -f /bin/sh; then
     echo "[BOOT] /bin/sh found"
