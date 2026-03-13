@@ -22,6 +22,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 
 /* -----------------------------------------------------------------------
  * Helpers
@@ -430,6 +431,77 @@ static void test_fcntl(void) {
     CHECK("O_CREAT defined",   O_CREAT   != 0);
     CHECK("O_TRUNC defined",   O_TRUNC   != 0);
     CHECK("AT_FDCWD == -100",  AT_FDCWD  == -100);
+    CHECK("F_DUPFD_CLOEXEC defined", F_DUPFD_CLOEXEC == 1030);
+
+    section("fcntl runtime");
+
+    int fd = open("/bin/echo", O_RDONLY);
+    CHECK("open /bin/echo for fcntl", fd >= 0);
+    if (fd >= 0) {
+        int flags = fcntl(fd, F_GETFL);
+        CHECK("fcntl F_GETFL works", flags >= 0);
+        CHECK("fcntl access mode preserved", (flags & O_ACCMODE) == O_RDONLY);
+        CHECK("fcntl F_GETFD default clear", fcntl(fd, F_GETFD) == 0);
+        CHECK("fcntl F_SETFD cloexec", fcntl(fd, F_SETFD, FD_CLOEXEC) == 0);
+        CHECK("fcntl F_GETFD cloexec", fcntl(fd, F_GETFD) == FD_CLOEXEC);
+        CHECK("fcntl F_SETFL nonblock", fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0);
+        int new_flags = fcntl(fd, F_GETFL);
+        CHECK("fcntl F_SETFL kept access mode", (new_flags & O_ACCMODE) == O_RDONLY);
+        CHECK("fcntl F_SETFL enabled nonblock", (new_flags & O_NONBLOCK) != 0);
+        errno = 0;
+        CHECK("fcntl invalid cmd", fcntl(fd, 9999, 0) == -1 && errno == EINVAL);
+        close(fd);
+    }
+
+    int dup_src = open("/bin/echo", O_RDONLY);
+    CHECK("open /bin/echo for dupfd_cloexec", dup_src >= 0);
+    if (dup_src >= 0) {
+        int dup_fd = fcntl(dup_src, F_DUPFD_CLOEXEC, 7);
+        CHECK("fcntl F_DUPFD_CLOEXEC works", dup_fd >= 7);
+        if (dup_fd >= 0) {
+            CHECK("fcntl dupfd cloexec flag set", fcntl(dup_fd, F_GETFD) == FD_CLOEXEC);
+            close(dup_fd);
+        }
+        close(dup_src);
+    }
+
+    section("ioctl runtime");
+
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    CHECK("ioctl TIOCGWINSZ tty", ioctl(0, TIOCGWINSZ, &ws) == 0);
+    CHECK("ioctl TIOCGWINSZ cols", ws.ws_col > 0);
+    CHECK("ioctl TIOCGWINSZ rows", ws.ws_row > 0);
+
+    struct winsize set_ws = { .ws_row = 30, .ws_col = 100, .ws_xpixel = 0, .ws_ypixel = 0 };
+    CHECK("ioctl TIOCSWINSZ tty", ioctl(0, TIOCSWINSZ, &set_ws) == 0);
+    memset(&ws, 0, sizeof(ws));
+    CHECK("ioctl TIOCGWINSZ updated", ioctl(0, TIOCGWINSZ, &ws) == 0 &&
+                                      ws.ws_row == 30 && ws.ws_col == 100);
+
+    int available = -1;
+    CHECK("ioctl FIONREAD tty", ioctl(0, FIONREAD, &available) == 0);
+    CHECK("ioctl FIONREAD tty nonnegative", available >= 0);
+
+    int pfd[2] = { -1, -1 };
+    int pipe_rc = pipe(pfd);
+    CHECK("pipe for ioctl FIONREAD", pipe_rc == 0);
+    if (pipe_rc == 0) {
+        CHECK("write pipe payload", write(pfd[1], "xyz", 3) == 3);
+        int pipe_avail = -1;
+        CHECK("ioctl FIONREAD pipe", ioctl(pfd[0], FIONREAD, &pipe_avail) == 0);
+        CHECK("ioctl FIONREAD pipe count", pipe_avail == 3);
+        close(pfd[0]);
+        close(pfd[1]);
+    }
+
+    fd = open("/bin/echo", O_RDONLY);
+    CHECK("open /bin/echo for ioctl ENOTTY", fd >= 0);
+    if (fd >= 0) {
+        errno = 0;
+        CHECK("ioctl regular file ENOTTY", ioctl(fd, TIOCGWINSZ, &ws) == -1 && errno == ENOTTY);
+        close(fd);
+    }
 }
 
 /* -----------------------------------------------------------------------

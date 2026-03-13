@@ -63,6 +63,7 @@ static int kern_open_console(void) {
   for (int i = 0; i < NOFILE; i++) {
     if (current_proc->ofile[i] == NULL) {
       current_proc->ofile[i] = f;
+      current_proc->fd_flags[i] = 0;
       return i;
     }
   }
@@ -135,8 +136,10 @@ found:
   p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
 
   // Initialize open file table
-  for (int i = 0; i < NOFILE; i++)
+  for (int i = 0; i < NOFILE; i++) {
     p->ofile[i] = NULL;
+    p->fd_flags[i] = 0;
+  }
 
   // Initialize VMA list and mmap base
   p->vma_list = NULL;

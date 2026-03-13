@@ -90,6 +90,7 @@ struct shared_pagetable {
 
 struct shared_ftable {
   struct open_file *ofile[NOFILE]; /* the fd array */
+  int               fd_flags[NOFILE];
   int               refcount;     /* number of procs sharing this table */
 };
 
@@ -156,6 +157,7 @@ struct proc {
   char cwd[256];               // current working directory
   unsigned int umask_val;       // file creation mask
   struct open_file *ofile[NOFILE]; // open file descriptors (VFS)
+  int fd_flags[NOFILE];            // per-fd flags (FD_CLOEXEC, etc.)
   /* VMA list for tracking all user memory regions */
   struct vm_area *vma_list;    // sorted linked list of virtual memory areas
   uint64_t mmap_base;          // next VA to use for non-MAP_FIXED mmap
@@ -180,6 +182,10 @@ struct proc {
  * indirecting through shared wrappers when present. */
 static inline struct open_file **proc_ofile(struct proc *p) {
   return p->shared_ft ? p->shared_ft->ofile : p->ofile;
+}
+
+static inline int *proc_fdflags(struct proc *p) {
+  return p->shared_ft ? p->shared_ft->fd_flags : p->fd_flags;
 }
 
 static inline struct kern_sigaction *proc_sigactions(struct proc *p) {

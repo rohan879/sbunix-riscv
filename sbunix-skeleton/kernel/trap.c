@@ -87,6 +87,10 @@ static int pipe_avail(int pid) {
   return pipes[pid].wpos - pipes[pid].rpos;
 }
 
+static int is_tty_file(struct open_file *f) {
+  return f && f->ops == &devfs_ops && f->private && devfs_is_tty(f->private);
+}
+
 /* ------------------------------------------------------------------ */
 /* File descriptor helpers                                              */
 /* ------------------------------------------------------------------ */
@@ -104,8 +108,10 @@ static int alloc_fd(void) {
 /* Shallow copy fd table from src to dst (for clone), incrementing refcounts */
 static void copy_ofile(struct proc *dst, struct proc *src) {
   struct open_file **srctab = proc_ofile(src);
+  int *srcflags = proc_fdflags(src);
   for (int i = 0; i < NOFILE; i++) {
     dst->ofile[i] = srctab[i];
+    dst->fd_flags[i] = srcflags[i];
     if (srctab[i]) {
       srctab[i]->refcount++;
       /* bump pipe refcounts too */
@@ -124,9 +130,11 @@ static void copy_ofile(struct proc *dst, struct proc *src) {
  * Also clears the slot in the given proc's ofile[fd] (or shared_ft). */
 static void close_ofile(struct proc *p, int fd) {
   struct open_file **ftable = proc_ofile(p);
+  int *fdflags = proc_fdflags(p);
   struct open_file *f = ftable[fd];
   if (!f) return;
   ftable[fd] = NULL;
+  fdflags[fd] = 0;
 
   if (f->is_pipe) {
     int pid = f->pipe_id;
@@ -500,8 +508,10 @@ static pid_t sys_clone(void) {
             struct shared_ftable *sft =
                 (struct shared_ftable *)kmalloc(sizeof(struct shared_ftable));
             if (!sft) goto bad;
-            for (int i = 0; i < NOFILE; i++)
+            for (int i = 0; i < NOFILE; i++) {
                 sft->ofile[i] = current_proc->ofile[i];
+                sft->fd_flags[i] = current_proc->fd_flags[i];
+            }
             sft->refcount = 1;
             current_proc->shared_ft = sft;
             current_proc->clone_flags |= CLONE_FILES;
@@ -1145,6 +1155,7 @@ static long sys_openat_handler(struct trapframe *tf) {
           f->path[plen] = '\0';
         }
         proc_ofile(current_proc)[fd] = f;
+        proc_fdflags(current_proc)[fd] = (flags & 02000000) ? 1 : 0; /* O_CLOEXEC -> FD_CLOEXEC */
         return (long)fd;
     }
 }
@@ -1163,16 +1174,21 @@ static long sys_dup3_handler(struct trapframe *tf) {
     int oldfd = (int)tf->a0;
     int newfd = (int)tf->a1;
     struct open_file **ftab = proc_ofile(current_proc);
+    int *fdflags = proc_fdflags(current_proc);
+    int flags = (int)tf->a2;
     if (oldfd < 0 || oldfd >= NOFILE || !ftab[oldfd] ||
         newfd < 0 || newfd >= NOFILE) {
         return (long)-9; /* -EBADF */
     } else if (oldfd == newfd) {
         return (long)-22; /* -EINVAL (dup3 requires oldfd != newfd) */
+    } else if (flags & ~02000000) {
+        return (long)-22; /* -EINVAL */
     } else {
         if (ftab[newfd])
             close_ofile(current_proc, newfd);
         ftab[newfd] = ftab[oldfd];
         ftab[oldfd]->refcount++;
+        fdflags[newfd] = (flags & 02000000) ? 1 : 0;
         if (ftab[oldfd]->is_pipe) {
             int pid = ftab[oldfd]->pipe_id;
             if (pid >= 0) {
@@ -1201,6 +1217,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             rf->pipe_id = pipeid;
             rf->ops = NULL;
             ftab[rfd] = rf;
+            proc_fdflags(current_proc)[rfd] = 0;
             if (wf) wfd = alloc_fd();
         }
         if (wfd < 0 || !wf) {
@@ -1220,6 +1237,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             wf->pipe_id = pipeid;
             wf->ops = NULL;
             ftab[wfd] = wf;
+            proc_fdflags(current_proc)[wfd] = 0;
             int kfds[2] = { rfd, wfd };
             if (copyout(current_proc->pagetable, tf->a0, kfds, sizeof(kfds)) < 0) {
                 close_ofile(current_proc, rfd);
@@ -2112,38 +2130,60 @@ static long sys_ioctl_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     unsigned long request = tf->a1;
     uint64_t argp = tf->a2;
+    struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
-    if (request == 0x5413) { /* TIOCGWINSZ */
-        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
-        int is_tty = 0;
-        if (f && f->ops == &devfs_ops && f->private)
-          is_tty = devfs_is_tty(f->private);
-        if (is_tty) {
-            if (argp) {
-                struct { uint16_t row, col, xpix, ypix; } ws = {24, 80, 0, 0};
-                if (copyout(current_proc->pagetable, argp, &ws, sizeof(ws)) < 0) {
-                    return (long)-14;
-                }
-            }
-            return (long)0;
-        } else {
+    if (!f)
+        return (long)-9; /* EBADF */
+
+    if (request == FIONREAD && f->is_pipe && f->pipe_read) {
+        int pid = f->pipe_id;
+        int available = (pid >= 0 && pipes[pid].used) ? pipe_avail(pid) : 0;
+        if (argp && copyout(current_proc->pagetable, argp, &available, sizeof(available)) < 0)
+            return (long)-14;
+        return (long)0;
+    } else if (request == TIOCGWINSZ || request == TIOCSWINSZ) {
+        if (!is_tty_file(f))
             return (long)-25;
+        uint16_t ws[4] = {0};
+        if (request == TIOCSWINSZ && argp) {
+            if (copyin(current_proc->pagetable, ws, argp, sizeof(ws)) < 0)
+                return (long)-14;
         }
-    } else if (request == 0x540F || request == 0x5410) {
+        long result = (long)tty_ioctl(request, (void *)ws);
+        if (result < 0)
+            return result;
+        if (request == TIOCGWINSZ && argp) {
+            if (copyout(current_proc->pagetable, argp, ws, sizeof(ws)) < 0)
+                return (long)-14;
+        }
+        return (long)0;
+    } else if (request == TIOCGPGRP || request == TIOCSPGRP) {
         /* TIOCGPGRP / TIOCSPGRP — delegate to tty_ioctl */
+        if (!is_tty_file(f))
+            return (long)-25;
         int kpgid = 0;
-        if (request == 0x5410 && argp) {
+        if (request == TIOCSPGRP && argp) {
             if (copyin(current_proc->pagetable, &kpgid, argp, sizeof(kpgid)) < 0)
                 return (long)-14;
         }
         long result = (long)tty_ioctl(request, (void *)&kpgid);
-        if (request == 0x540F && argp) {
+        if (request == TIOCGPGRP && argp) {
             if (copyout(current_proc->pagetable, argp, &kpgid, sizeof(kpgid)) < 0)
                 return (long)-14;
         }
         return result;
+    } else if (request == FIONREAD) {
+        if (!is_tty_file(f))
+            return (long)-25;
+        int available = 0;
+        long result = (long)tty_ioctl(request, (void *)&available);
+        if (result < 0)
+            return result;
+        if (argp && copyout(current_proc->pagetable, argp, &available, sizeof(available)) < 0)
+            return (long)-14;
+        return (long)0;
     } else if (request >= TCGETS && request <= TCSETSF) {
-        if (fd >= 0 && fd <= 2) {
+        if (is_tty_file(f)) {
             char ktermios[128];
             memset(ktermios, 0, sizeof(ktermios));
             if (request != TCGETS && argp) {
@@ -2267,6 +2307,8 @@ static long sys_fcntl_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     int cmd = (int)tf->a1;
     struct open_file **ftab = proc_ofile(current_proc);
+    int *fdflags = proc_fdflags(current_proc);
+    const int status_mask = 02000 | 04000; /* O_APPEND | O_NONBLOCK */
 
     if (fd < 0 || fd >= NOFILE || !ftab[fd])
         return (long)-9; /* EBADF */
@@ -2280,6 +2322,7 @@ static long sys_fcntl_handler(struct trapframe *tf) {
             if (ftab[i] == 0) {
                 ftab[i] = ftab[fd];
                 ftab[fd]->refcount++;
+                fdflags[i] = (cmd == 1030) ? 1 : 0;
                 if (ftab[fd]->is_pipe) {
                     int pid = ftab[fd]->pipe_id;
                     if (pid >= 0) {
@@ -2292,13 +2335,17 @@ static long sys_fcntl_handler(struct trapframe *tf) {
         }
         return (long)-24; /* EMFILE */
     } else if (cmd == 1) { /* F_GETFD */
-        return (long)0;
+        return (long)fdflags[fd];
     } else if (cmd == 2) { /* F_SETFD */
+        fdflags[fd] = ((int)tf->a2) & 1;
         return (long)0;
     } else if (cmd == 3) { /* F_GETFL */
         return (long)ftab[fd]->flags;
     } else if (cmd == 4) { /* F_SETFL */
-        ftab[fd]->flags = (int)tf->a2;
+        int access_mode = ftab[fd]->flags & 3;
+        int keep_other = ftab[fd]->flags & ~(3 | status_mask);
+        int new_status = ((int)tf->a2) & status_mask;
+        ftab[fd]->flags = keep_other | access_mode | new_status;
         return (long)0;
     } else {
         return (long)-22; /* EINVAL */
