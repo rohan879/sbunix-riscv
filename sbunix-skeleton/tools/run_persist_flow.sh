@@ -10,6 +10,7 @@ cd "$PROJECT_DIR"
 python3 tools/run_guest_focus.py \
   --label persist-write \
   --build-tests \
+  --live \
   --timeout "$TIMEOUT" \
   --command "/bin/persisttest write" \
   --require "[PASS] persist: open for write" \
@@ -19,6 +20,7 @@ python3 tools/run_guest_focus.py \
 python3 tools/run_guest_focus.py \
   --label persist-verify \
   --build-tests \
+  --live \
   --timeout "$TIMEOUT" \
   --command "/bin/persisttest verify" \
   --require "[PASS] persist: read persisted data" \

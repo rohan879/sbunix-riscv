@@ -9,6 +9,7 @@ cd "$PROJECT_DIR"
 python3 tools/run_guest_focus.py \
   --label fdiotest \
   --build-tests \
+  --live \
   --timeout "${TIMEOUT:-120}" \
   --command "/bin/fdiotest" \
   --require "fdiotest:" \

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from threading import Thread
 from pathlib import Path
 
 
@@ -27,6 +28,7 @@ def main():
     parser.add_argument("--disk", default="build/disk.img")
     parser.add_argument("--build-tests", action="store_true")
     parser.add_argument("--output")
+    parser.add_argument("--live", action="store_true")
     args = parser.parse_args()
 
     project_dir = Path(__file__).resolve().parent.parent
@@ -67,18 +69,34 @@ def main():
             proc = subprocess.Popen(
                 qemu_cmd,
                 cwd=project_dir,
-                stdout=output_file,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
             )
+
+            def stream_output():
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    output_file.write(line)
+                    output_file.flush()
+                    if args.live:
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
+
+            stream_thread = Thread(target=stream_output, daemon=True)
+            stream_thread.start()
+
             deadline = time.time() + args.timeout
             while proc.poll() is None and time.time() < deadline:
                 time.sleep(1)
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+                stream_thread.join(timeout=1)
                 print(f"Timed out after {args.timeout}s. Output: {output_path}", file=sys.stderr)
                 return 1
+            stream_thread.join(timeout=1)
 
         text = output_path.read_text()
         missing = [pattern for pattern in args.require if pattern not in text]
