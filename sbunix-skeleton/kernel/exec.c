@@ -38,9 +38,29 @@ int exec(char *path) {
     elf_data = (char *)elf_tar_header + sizeof(struct posix_header);
     ehdr = (Elf64_Ehdr *)elf_data;
 
-    // 2. Validate
+    // 2. Validate ELF magic
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
         ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3) return -1;
+
+    // 2b. Validate ELF header fields against tarfs entry bounds
+    {
+        size_t elf_size = tar_get_file_size(elf_tar_header);
+        if (ehdr->e_phnum > 64) return -1; /* unreasonable phnum */
+        uint64_t ph_end = (uint64_t)ehdr->e_phoff +
+                          (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr);
+        if (ph_end > elf_size) return -1; /* phdr table out of bounds */
+
+        /* Pre-validate all PT_LOAD segments */
+        for (unsigned int j = 0; j < ehdr->e_phnum; j++) {
+            Elf64_Phdr *ph = (Elf64_Phdr *)(elf_data + ehdr->e_phoff +
+                              j * sizeof(Elf64_Phdr));
+            if (ph->p_type != PT_LOAD) continue;
+            if (ph->p_offset + ph->p_filesz > elf_size) return -1;
+            if (ph->p_filesz > ph->p_memsz) return -1;
+            if (ph->p_vaddr + ph->p_memsz < ph->p_vaddr) return -1; /* overflow */
+            if (ph->p_vaddr + ph->p_memsz > MAXVA) return -1;
+        }
+    }
 
     pagetable = uvmcreate();
     if(pagetable == 0) return -1;
@@ -154,6 +174,8 @@ int exec(char *path) {
 
     /* Reset all sigactions to default in the now-private table. */
     memset(current_proc->sigactions, 0, sizeof(current_proc->sigactions));
+    /* POSIX: reset signal mask across exec */
+    current_proc->sigmask = 0;
 
     // Switch satp to the new page table immediately so that trap_restore's
     // sret enters user mode with the correct address space.

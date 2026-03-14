@@ -67,6 +67,10 @@ int mappages(pagetable_t pagetable, uint64_t va, uint64_t size, uint64_t pa, int
     if (size == 0)
         return 0;
 
+    /* Guard against integer overflow: va + size must not wrap around */
+    if (va + size < va)
+        return -1;
+
     a = PGROUNDDOWN(va);
     last = PGROUNDDOWN(va + size - 1);
     for(;;) {

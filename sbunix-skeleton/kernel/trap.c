@@ -1070,7 +1070,13 @@ static long sys_brk_handler(struct trapframe *tf) {
 
     if (new_brk == 0) {
         return (long)cur_sz;
-    } else if (new_brk < cur_sz) {
+    }
+    /* Reject brk values that would extend into kernel address space or
+     * overlap the user stack region */
+    if (new_brk >= current_proc->stack_bottom || new_brk >= MAXVA) {
+        return (long)cur_sz; /* return current brk unchanged */
+    }
+    if (new_brk < cur_sz) {
         /* Shrink: unmap freed pages between new_brk and cur_sz */
         uint64_t unmap_start = (new_brk + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
         uint64_t unmap_end   = (cur_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
@@ -1617,6 +1623,13 @@ static long sys_execve_handler(struct trapframe *tf) {
         int header       = 8;
         int total        = header + argv_ptrs_sz + envp_ptrs_sz + kstroff + kenvoff;
         total = (total + 15) & ~15;
+
+        /* Guard: total must fit in a single kernel page used as staging buffer */
+        if (total > (int)PAGE_SIZE) {
+            kfree(kstrbuf);
+            if (kenvbuf) kfree(kenvbuf);
+            return (long)-7; /* -E2BIG: argument list too long */
+        }
 
         uint64_t sp            = MAXVA - 32 - total;
         uint64_t argv_ptr_base = sp + header;
@@ -2211,6 +2224,10 @@ static long sys_mmap_handler(struct trapframe *tf) {
     uint64_t va;
     if (flags & MAP_FIXED) {
         va = addr & ~(uint64_t)(PAGE_SIZE - 1);
+        /* Reject MAP_FIXED mappings that overlap kernel address space */
+        if (va + len > MAXVA || va + len < va) {
+            return (long)-22; /* -EINVAL */
+        }
     } else {
         if (current_proc->mmap_base == 0)
             current_proc->mmap_base = 0x20000000UL;
@@ -2600,6 +2617,13 @@ static long sys_rt_sigreturn_handler(struct trapframe *tf) {
         return (long)-14;
     }
 
+    /* Validate restored trapframe: epc and sp must be in user VA range.
+     * Prevent forging kernel addresses or blocking unkillable signals. */
+    if (frame.saved_tf.epc >= MAXVA || frame.saved_tf.sp >= MAXVA) {
+        return (long)-22; /* -EINVAL: reject forged kernel addresses */
+    }
+    /* Never allow blocking SIGKILL or SIGSTOP */
+    frame.saved_sigmask &= ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
     current_proc->sigmask = frame.saved_sigmask;
     memcpy(tf, &frame.saved_tf, sizeof(frame.saved_tf));
     return SYSCALL_NORETURN;
