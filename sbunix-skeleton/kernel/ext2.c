@@ -800,6 +800,85 @@ static struct ext2_inode_mem *ext2_namei(const char *path) {
 /* Truncate -- free all data blocks of an inode                        */
 /* ================================================================== */
 
+/* ext2_truncate_to: truncate an inode to a given length.
+ * If new_size < current size: free excess data blocks.
+ * If new_size > current size: just update size (holes read as zero).
+ * Returns 0 on success, negative on error. */
+int ext2_truncate_to(uint32_t ino, uint32_t new_size) {
+  struct ext2_inode_mem *ip = icache_get(ino);
+  if (!ip) return -1;
+  if (ip->type != EXT2_TYPE_FILE) {
+    icache_release(ip);
+    return -22; /* -EINVAL: not a regular file */
+  }
+
+  if (new_size < ip->size) {
+    /* Shrink: free blocks beyond new_size */
+    uint32_t new_nblocks = (new_size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
+    uint32_t old_nblocks = (ip->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
+
+    /* Free excess direct blocks */
+    for (uint32_t i = new_nblocks; i < EXT2_NDIRECT && i < old_nblocks; i++) {
+      if (ip->direct[i]) {
+        ext2_free_block(ip->direct[i]);
+        ip->direct[i] = 0;
+      }
+    }
+
+    /* Free excess indirect blocks */
+    if (ip->indirect && old_nblocks > EXT2_NDIRECT) {
+      struct bcache_entry *e = bcache_get(ip->indirect);
+      if (e) {
+        uint32_t *ptrs = (uint32_t *)e->data;
+        uint32_t start_idx = (new_nblocks > EXT2_NDIRECT) ?
+                             (new_nblocks - EXT2_NDIRECT) : 0;
+        int modified = 0;
+        for (uint32_t i = start_idx; i < EXT2_NINDIRECT; i++) {
+          if (ptrs[i]) {
+            ext2_free_block(ptrs[i]);
+            ptrs[i] = 0;
+            modified = 1;
+          }
+        }
+        if (modified)
+          bcache_mark_dirty(e);
+        bcache_release(e);
+      }
+      /* Free the indirect block itself if no entries remain */
+      if (new_nblocks <= EXT2_NDIRECT) {
+        ext2_free_block(ip->indirect);
+        ip->indirect = 0;
+      }
+    }
+
+    /* Zero out the partial last block if new_size is not block-aligned */
+    if (new_size > 0 && (new_size % EXT2_BLOCK_SIZE) != 0) {
+      uint32_t last_block = new_nblocks - 1;
+      uint32_t disk_blk = ext2_bmap(ip, last_block);
+      if (disk_blk) {
+        struct bcache_entry *e = bcache_get(disk_blk);
+        if (e) {
+          uint32_t zero_off = new_size % EXT2_BLOCK_SIZE;
+          memset(e->data + zero_off, 0, EXT2_BLOCK_SIZE - zero_off);
+          bcache_mark_dirty(e);
+          bcache_release(e);
+        }
+      }
+    }
+  }
+  /* For extending (new_size > ip->size), just update size;
+   * reads beyond old size return zeros via ext2_bmap returning 0 (hole). */
+
+  ip->size = new_size;
+  ip->mtime = ext2_now();
+  ip->dirty = 1;
+  icache_writeback(ip);
+  icache_release(ip);
+  bcache_sync();
+  sb_flush_if_dirty();
+  return 0;
+}
+
 static void ext2_truncate(struct ext2_inode_mem *ip) {
   /* Free direct blocks */
   for (int i = 0; i < EXT2_NDIRECT; i++) {

@@ -67,8 +67,11 @@ struct signal_frame {
 
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+/* Maximum processes in system */
+#define NPROC 128
+
 /* Maximum open file descriptors per process */
-#define NOFILE 16
+#define NOFILE 64
 
 /* Forward declarations */
 struct vm_area;
@@ -220,7 +223,7 @@ void            trap_return_saved(struct trapframe*) __attribute__((noreturn));
 void            uart_wakeup(void);
 
 extern struct proc *current_proc;
-extern struct proc proc[64];
+extern struct proc proc[NPROC];
 extern struct context scheduler_context;
 
 #endif

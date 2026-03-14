@@ -146,5 +146,6 @@ struct ext2_open_private {
 int  ext2_init(void);
 void ext2_sync(void);
 int  ext2_mknod(const char *path, uint32_t mode, uint32_t rdev);
+int  ext2_truncate_to(uint32_t ino, uint32_t new_size);
 
 #endif

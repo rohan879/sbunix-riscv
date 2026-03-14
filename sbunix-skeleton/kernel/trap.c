@@ -55,7 +55,7 @@ void get_wall_time(long *sec, long *nsec) {
 /* ------------------------------------------------------------------ */
 /* Kernel pipe table                                                    */
 /* ------------------------------------------------------------------ */
-#define NPIPES 16
+#define NPIPES 32
 #define PIPE_BUF 4096
 
 struct kpipe {
@@ -143,7 +143,7 @@ static void close_ofile(struct proc *p, int fd) {
       if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
         pipes[pid].used = 0;
       /* Wake any sleeping pipe readers/writers */
-      for (struct proc *pp = proc; pp < &proc[64]; pp++) {
+      for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
         if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
           pp->state = RUNNABLE;
       }
@@ -152,7 +152,7 @@ static void close_ofile(struct proc *p, int fd) {
       pipes[pid].write_open--;
       if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
         pipes[pid].used = 0;
-      for (struct proc *pp = proc; pp < &proc[64]; pp++) {
+      for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
         if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
           pp->state = RUNNABLE;
       }
@@ -249,7 +249,7 @@ static void handle_external_interrupt(void) {
          * Only wake waitpid sleepers (waiting_for_uart==0); do NOT wake
          * timed sleeps (waiting_for_uart==2) or UART-input sleeps (==1,
          * already handled by uart_wakeup above). */
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == SLEEPING && p->waiting_for_uart == 0)
                 p->state = RUNNABLE;
         }
@@ -269,7 +269,7 @@ static void handle_timer_interrupt(void) {
     #endif
     timer_set_next();
     /* Wake processes whose timed sleep has expired */
-    for (struct proc *p = proc; p < &proc[64]; p++) {
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
             r_time() >= p->sleep_until) {
             p->waiting_for_uart = 0;
@@ -277,7 +277,7 @@ static void handle_timer_interrupt(void) {
         }
     }
     /* Check for expired alarms and deliver SIGALRM */
-    for (struct proc *p = proc; p < &proc[64]; p++) {
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state != UNUSED && p->state != ZOMBIE &&
             p->alarm_ticks > 0 && ticks >= p->alarm_ticks) {
             p->alarm_ticks = 0;  /* one-shot */
@@ -628,7 +628,7 @@ bad:
 static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
     for (;;) {
         int found_child = 0;
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == UNUSED) continue;
             if (p->parent != current_proc) continue;
             if (wpid > 0 && p->pid != wpid) continue;
@@ -905,6 +905,36 @@ static int has_actionable_signal(struct proc *p) {
     return 0;
 }
 
+/* SA_RESTART flag value (must match libc) */
+#define SA_RESTART_FLAG  0x10000000
+
+/* Check whether an actionable pending signal should NOT be restarted.
+ * Returns 1 if the blocking syscall should return -EINTR (not restartable),
+ * 0 if all actionable signals have SA_RESTART (syscall should be restarted). */
+static int has_non_restartable_signal(struct proc *p) {
+    uint64_t deliverable = p->sigpending & ~p->sigmask;
+    if (deliverable == 0) return 0;
+    struct kern_sigaction *sa = proc_sigactions(p);
+    for (int i = 1; i < 32; i++) {
+        if (!(deliverable & signal_bit(i)))
+            continue;
+        uint64_t handler = sa[i].handler;
+        if (handler == 1) /* SIG_IGN */
+            continue;
+        if (handler == 0) {
+            /* SIG_DFL: check default action */
+            if (i == SIGCHLD || i == SIGURG || i == SIGWINCH || i == SIGCONT)
+                continue;
+            /* Fatal/stop default: not restartable */
+            return 1;
+        }
+        /* User handler: check SA_RESTART flag */
+        if (!(sa[i].flags & SA_RESTART_FLAG))
+            return 1; /* handler without SA_RESTART: return EINTR */
+    }
+    return 0; /* all actionable signals are restartable */
+}
+
 static void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* Find lowest-numbered pending unblocked signal */
     uint64_t deliverable = p->sigpending & ~p->sigmask;
@@ -1088,8 +1118,11 @@ static long sys_write_handler(struct trapframe *tf) {
                 current_proc->state = SLEEPING;
                 swtch(&current_proc->context, &scheduler_context);
                 /* Check for actionable pending signals after waking */
-                if (has_actionable_signal(current_proc))
-                    return (written > 0) ? (long)written : (long)-4; /* -EINTR */
+                if (has_actionable_signal(current_proc)) {
+                    if (has_non_restartable_signal(current_proc))
+                        return (written > 0) ? (long)written : (long)-4; /* -EINTR */
+                    /* SA_RESTART: continue the loop to re-block */
+                }
                 continue;
             }
             int n = len - written;
@@ -1107,7 +1140,7 @@ static long sys_write_handler(struct trapframe *tf) {
                 written += chunk;
                 n -= chunk;
             }
-            for (struct proc *p = proc; p < &proc[64]; p++) {
+            for (struct proc *p = proc; p < &proc[NPROC]; p++) {
                 if (p->state == SLEEPING && p != current_proc &&
                     p->waiting_for_uart != 2)
                     p->state = RUNNABLE;
@@ -1158,8 +1191,11 @@ static long sys_read_handler(struct trapframe *tf) {
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
             /* Check for actionable pending signals after waking */
-            if (has_actionable_signal(current_proc))
-                return (long)-4; /* -EINTR */
+            if (has_actionable_signal(current_proc)) {
+                if (has_non_restartable_signal(current_proc))
+                    return (long)-4; /* -EINTR */
+                /* SA_RESTART: continue the loop to re-block */
+            }
         }
         /* Drain all available bytes (up to len) without re-blocking */
         while (read_bytes < len && pipe_avail(pid) > 0) {
@@ -1171,7 +1207,7 @@ static long sys_read_handler(struct trapframe *tf) {
             read_bytes++;
         }
         /* Wake any blocked pipe writers since we freed buffer space */
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == SLEEPING && p != current_proc &&
                 p->waiting_for_uart != 2)
                 p->state = RUNNABLE;
@@ -1701,7 +1737,7 @@ static void deliver_signal_to_proc(struct proc *target, int sig) {
         target->killed_by_signal = 9;
         cleanup_proc_resources(target);
         /* Reparent children to init (proc[0]) */
-        for (struct proc *child = proc; child < &proc[64]; child++) {
+        for (struct proc *child = proc; child < &proc[NPROC]; child++) {
             if (child->parent == target) {
                 child->parent = &proc[0];
                 if (child->state == ZOMBIE) {
@@ -1741,7 +1777,7 @@ static long sys_kill_handler(struct trapframe *tf) {
     if (target_pid > 0) {
         /* Send to specific process */
         struct proc *target = NULL;
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
                 target = &proc[i];
                 break;
@@ -1762,7 +1798,7 @@ static long sys_kill_handler(struct trapframe *tf) {
         /* Send to all processes in caller's process group */
         pid_t pgid = current_proc->pgid;
         int sent = 0;
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].pgid == pgid) {
                 sent++;
                 if (sig != 0)
@@ -1777,7 +1813,7 @@ static long sys_kill_handler(struct trapframe *tf) {
     } else if (target_pid == -1) {
         /* Send to all processes except init */
         int sent = 0;
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].pid != 1 &&
                 &proc[i] != current_proc) {
                 sent++;
@@ -1794,7 +1830,7 @@ static long sys_kill_handler(struct trapframe *tf) {
         /* target_pid < -1: send to process group |target_pid| */
         pid_t pgid = -target_pid;
         int sent = 0;
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].pgid == pgid) {
                 sent++;
                 if (sig != 0)
@@ -2063,7 +2099,7 @@ static long sys_exit_handler(struct trapframe *tf) {
             while (1) {}
         }
         /* Reparent children to init (proc[0]) */
-        for (struct proc *child = proc; child < &proc[64]; child++) {
+        for (struct proc *child = proc; child < &proc[NPROC]; child++) {
             if (child->parent == current_proc) {
                 child->parent = &proc[0];
                 if (child->state == ZOMBIE) {
@@ -2079,7 +2115,7 @@ static long sys_exit_handler(struct trapframe *tf) {
             if (current_proc->parent->state == SLEEPING)
                 current_proc->parent->state = RUNNABLE;
         }
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == SLEEPING && p != current_proc &&
                 p->waiting_for_uart == 0)
                 p->state = RUNNABLE;
@@ -2294,8 +2330,8 @@ static long sys_ps_handler(struct trapframe *tf) {
     int      maxn     = (int)tf->a1;
     int      written  = 0;
     if (tf->a0 && maxn > 0) {
-        uint8_t kps[64 * 24];
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        uint8_t kps[NPROC * 24];
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == UNUSED) continue;
             if (written >= maxn) break;
             char st;
@@ -2929,8 +2965,8 @@ static long sys_prlimit64_handler(struct trapframe *tf) {
             rlim[0] = 8 * 1024 * 1024;
             rlim[1] = 0xFFFFFFFFFFFFFFFFULL;
         } else if (resource == 7) {
-            rlim[0] = 16;
-            rlim[1] = 16;
+            rlim[0] = NOFILE;
+            rlim[1] = NOFILE;
         } else {
             rlim[0] = 0xFFFFFFFFFFFFFFFFULL;
             rlim[1] = 0xFFFFFFFFFFFFFFFFULL;
@@ -2972,7 +3008,7 @@ static long sys_setpgid_handler(struct trapframe *tf) {
 
     /* Find the target process */
     struct proc *p = NULL;
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < NPROC; i++) {
         if (proc[i].pid == target && proc[i].state != UNUSED) {
             p = &proc[i];
             break;
@@ -3009,7 +3045,7 @@ static long sys_getpgid_handler(struct trapframe *tf) {
         return (long)current_proc->pgid;
     } else {
         long result = (long)-3;
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->pid == target && p->state != UNUSED) {
                 result = (long)p->pgid;
                 break;
@@ -3025,7 +3061,7 @@ static long sys_getsid_handler(struct trapframe *tf) {
         return (long)current_proc->sid;
     } else {
         long result = (long)-3;
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->pid == target && p->state != UNUSED) {
                 result = (long)p->sid;
                 break;
@@ -3062,7 +3098,12 @@ static long sys_ftruncate_handler(struct trapframe *tf) {
     if (length < 0) {
         return (long)-22; /* -EINVAL */
     }
-    return (long)-30; /* -EROFS (not supported) */
+    /* Check if this is an ext2 file */
+    if (f->ops == &ext2_ops && f->private) {
+        struct ext2_open_private *priv = (struct ext2_open_private *)f->private;
+        return (long)ext2_truncate_to(priv->ino, (uint32_t)length);
+    }
+    return (long)-30; /* -EROFS (not supported for non-ext2) */
 }
 
 static long sys_tgkill_handler(struct trapframe *tf) {
@@ -3072,7 +3113,7 @@ static long sys_tgkill_handler(struct trapframe *tf) {
         return (long)0;
     } else if (signal_is_valid(sig)) {
         long result = (long)-3;
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->pid == tid && p->state != UNUSED) {
                 p->sigpending |= signal_bit(sig);
                 if (p->state == SLEEPING)

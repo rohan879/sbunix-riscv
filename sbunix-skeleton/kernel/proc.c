@@ -7,7 +7,7 @@
 #include <printk.h>
 #include <exec.h>
 
-struct proc proc[64];
+struct proc proc[NPROC];
 struct proc *current_proc = NULL;
 struct context scheduler_context;
 
@@ -15,7 +15,7 @@ int nextpid = 1;
 
 void procinit(void) {
   struct proc *p;
-  for(p = proc; p < &proc[64]; p++) {
+  for(p = proc; p < &proc[NPROC]; p++) {
       p->state = UNUSED;
       p->kstack = NULL;
   }
@@ -107,7 +107,7 @@ void init_starter(void) {
 struct proc* allocproc(void) {
   struct proc *p;
 
-  for(p = proc; p < &proc[64]; p++) {
+  for(p = proc; p < &proc[NPROC]; p++) {
     if(p->state == UNUSED) {
       goto found;
     }
@@ -122,7 +122,7 @@ found:
     int attempts = 0;
     while (attempts < 32768) {
       int in_use = 0;
-      for (struct proc *q = proc; q < &proc[64]; q++) {
+      for (struct proc *q = proc; q < &proc[NPROC]; q++) {
         if (q != p && q->state != UNUSED && q->pid == nextpid) {
           in_use = 1;
           break;
@@ -219,7 +219,7 @@ void userinit(void) {
 // Do NOT wake timed-sleep processes (waiting_for_uart==2).
 void uart_wakeup(void) {
   struct proc *p;
-  for (p = proc; p < &proc[64]; p++) {
+  for (p = proc; p < &proc[NPROC]; p++) {
     if (p->state == SLEEPING && p->waiting_for_uart == 1) {
       p->waiting_for_uart = 0;
       p->state = RUNNABLE;
@@ -242,7 +242,7 @@ void scheduler(void) {
     w_sstatus(r_sstatus() | SSTATUS_SIE);
 
     int found = 0;
-    for(p = proc; p < &proc[64]; p++) {
+    for(p = proc; p < &proc[NPROC]; p++) {
       if(p->state == RUNNABLE) {
         found = 1;
         p->state = RUNNING;

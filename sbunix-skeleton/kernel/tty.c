@@ -118,7 +118,7 @@ void tty_init(void) {
  * If fg_pgid is 0 (not yet set), fall back to all processes pid > 1. */
 static void tty_signal_fg(int sig) {
     int target_pgid = tty0.fg_pgid;
-    for (struct proc *p = proc; p < &proc[64]; p++) {
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state == UNUSED || p->state == ZOMBIE)
             continue;
         if (p->pid <= 1)
