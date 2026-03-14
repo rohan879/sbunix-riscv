@@ -460,6 +460,43 @@ void trap_run(int sig) {
     }
 }
 
+static const char *sig_name(int sig) {
+    switch (sig) {
+        case 0:       return "EXIT";
+        case SIGHUP:  return "HUP";
+        case SIGINT:  return "INT";
+        case SIGQUIT: return "QUIT";
+        case SIGILL:  return "ILL";
+        case SIGTRAP: return "TRAP";
+        case SIGABRT: return "ABRT";
+        case SIGBUS:  return "BUS";
+        case SIGFPE:  return "FPE";
+        case SIGKILL: return "KILL";
+        case SIGUSR1: return "USR1";
+        case SIGSEGV: return "SEGV";
+        case SIGUSR2: return "USR2";
+        case SIGPIPE: return "PIPE";
+        case SIGALRM: return "ALRM";
+        case SIGTERM: return "TERM";
+        case SIGCHLD: return "CHLD";
+        case SIGCONT: return "CONT";
+        case SIGSTOP: return "STOP";
+        case SIGTSTP: return "TSTP";
+        default:      return NULL;
+    }
+}
+
+void trap_list(void) {
+    for (int i = 0; i < MAX_TRAPS; i++) {
+        if (!trap_set_flag[i]) continue;
+        const char *name = sig_name(i);
+        if (name)
+            printf("trap -- '%s' %s\n", trap_cmds[i], name);
+        else
+            printf("trap -- '%s' %d\n", trap_cmds[i], i);
+    }
+}
+
 /* -----------------------------------------------------------------------
  * Signal handlers
  * ---------------------------------------------------------------------- */

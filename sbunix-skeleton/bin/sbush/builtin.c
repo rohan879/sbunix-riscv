@@ -238,6 +238,8 @@ int is_builtin(const char *cmd) {
             strcmp(cmd, "wait") == 0 ||
             strcmp(cmd, "readonly") == 0 ||
             strcmp(cmd, "local") == 0 ||
+            strcmp(cmd, "printf") == 0 ||
+            strcmp(cmd, "command") == 0 ||
             strcmp(cmd, ":") == 0);
 }
 
@@ -357,6 +359,10 @@ int run_builtin(struct command *cmd) {
     }
 
     if (strcmp(cmd->argv[0], "export") == 0) {
+        if (cmd->argc == 1) {
+            var_list_exported();
+            return 0;
+        }
         for (int i = 1; i < cmd->argc; i++) {
             char *eq = strchr(cmd->argv[i], '=');
             if (eq) {
@@ -373,7 +379,8 @@ int run_builtin(struct command *cmd) {
 
     if (strcmp(cmd->argv[0], "set") == 0) {
         if (cmd->argc == 1) {
-            /* set with no args: return 0 */
+            /* set with no args: list all shell variables */
+            var_list_all();
             return 0;
         }
         for (int i = 1; i < cmd->argc; i++) {
@@ -484,8 +491,13 @@ int run_builtin(struct command *cmd) {
     }
 
     if (strcmp(cmd->argv[0], "fg") == 0) {
-        int id = cmd->argc > 1 ? atoi(cmd->argv[1]) : -1;
-        struct job *j = (id > 0) ? job_find(id) : NULL;
+        struct job *j;
+        if (cmd->argc > 1) {
+            int id = atoi(cmd->argv[1]);
+            j = (id > 0) ? job_find(id) : NULL;
+        } else {
+            j = job_find_last();
+        }
         if (!j) {
             printf("fg: no such job\n");
             return 1;
@@ -548,9 +560,14 @@ int run_builtin(struct command *cmd) {
 
     if (strcmp(cmd->argv[0], "trap") == 0) {
         /* trap 'cmd' SIGNAL or trap '' SIGNAL (reset) or trap - SIGNAL */
-        if (cmd->argc < 3) {
-            /* List traps or usage — just return OK for now */
+        if (cmd->argc == 1) {
+            /* List all active traps */
+            trap_list();
             return 0;
+        }
+        if (cmd->argc < 3) {
+            dprintf(2, "sbush: trap: usage: trap 'command' SIGNAL\n");
+            return 1;
         }
         const char *action = cmd->argv[1];
         for (int i = 2; i < cmd->argc; i++) {
@@ -646,8 +663,13 @@ int run_builtin(struct command *cmd) {
     }
 
     if (strcmp(cmd->argv[0], "bg") == 0) {
-        int id = cmd->argc > 1 ? atoi(cmd->argv[1]) : -1;
-        struct job *j = (id > 0) ? job_find(id) : NULL;
+        struct job *j;
+        if (cmd->argc > 1) {
+            int id = atoi(cmd->argv[1]);
+            j = (id > 0) ? job_find(id) : NULL;
+        } else {
+            j = job_find_last();
+        }
         if (!j) {
             printf("bg: no such job\n");
             return 1;
@@ -900,6 +922,169 @@ int run_builtin(struct command *cmd) {
             }
         }
         return ret;
+    }
+
+    if (strcmp(cmd->argv[0], "printf") == 0) {
+        if (cmd->argc < 2) {
+            dprintf(2, "sbush: printf: usage: printf format [args...]\n");
+            return 1;
+        }
+        const char *fmt = cmd->argv[1];
+        int ai = 2; /* index into cmd->argv for format arguments */
+        const char *p = fmt;
+        while (*p) {
+            if (*p == '\\') {
+                p++;
+                switch (*p) {
+                    case 'n':  write(STDOUT_FILENO, "\n", 1); break;
+                    case 't':  write(STDOUT_FILENO, "\t", 1); break;
+                    case '\\': write(STDOUT_FILENO, "\\", 1); break;
+                    case '0':  write(STDOUT_FILENO, "\0", 1); break;
+                    default:
+                        write(STDOUT_FILENO, "\\", 1);
+                        if (*p) write(STDOUT_FILENO, p, 1);
+                        break;
+                }
+                if (*p) p++;
+            } else if (*p == '%') {
+                p++;
+                if (*p == '%') {
+                    write(STDOUT_FILENO, "%", 1);
+                    p++;
+                } else if (*p == 's') {
+                    const char *arg = (ai < cmd->argc) ? cmd->argv[ai++] : "";
+                    write(STDOUT_FILENO, arg, strlen(arg));
+                    p++;
+                } else if (*p == 'd') {
+                    const char *arg = (ai < cmd->argc) ? cmd->argv[ai++] : "0";
+                    long val = 0;
+                    const char *s = arg;
+                    int neg = 0;
+                    if (*s == '-') { neg = 1; s++; }
+                    else if (*s == '+') s++;
+                    while (*s >= '0' && *s <= '9')
+                        val = val * 10 + (*s++ - '0');
+                    if (neg) val = -val;
+                    char nbuf[24];
+                    int ni = 0;
+                    unsigned long uv;
+                    if (val < 0) {
+                        write(STDOUT_FILENO, "-", 1);
+                        uv = (unsigned long)(-(val + 1)) + 1;
+                    } else {
+                        uv = (unsigned long)val;
+                    }
+                    if (uv == 0) {
+                        nbuf[ni++] = '0';
+                    } else {
+                        while (uv > 0) {
+                            nbuf[ni++] = '0' + (uv % 10);
+                            uv /= 10;
+                        }
+                    }
+                    for (int k = ni - 1; k >= 0; k--)
+                        write(STDOUT_FILENO, &nbuf[k], 1);
+                    p++;
+                } else if (*p == 'x') {
+                    const char *arg = (ai < cmd->argc) ? cmd->argv[ai++] : "0";
+                    unsigned long val = 0;
+                    const char *s = arg;
+                    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+                    while ((*s >= '0' && *s <= '9') ||
+                           (*s >= 'a' && *s <= 'f') ||
+                           (*s >= 'A' && *s <= 'F')) {
+                        val *= 16;
+                        if (*s >= '0' && *s <= '9') val += *s - '0';
+                        else if (*s >= 'a' && *s <= 'f') val += *s - 'a' + 10;
+                        else val += *s - 'A' + 10;
+                        s++;
+                    }
+                    char xbuf[20];
+                    int xi = 0;
+                    if (val == 0) {
+                        xbuf[xi++] = '0';
+                    } else {
+                        while (val > 0) {
+                            int d = val % 16;
+                            xbuf[xi++] = (d < 10) ? ('0' + d) : ('a' + d - 10);
+                            val /= 16;
+                        }
+                    }
+                    for (int k = xi - 1; k >= 0; k--)
+                        write(STDOUT_FILENO, &xbuf[k], 1);
+                    p++;
+                } else {
+                    /* Unknown format specifier, print literally */
+                    write(STDOUT_FILENO, "%", 1);
+                    /* don't advance p, let it be re-examined */
+                }
+            } else {
+                write(STDOUT_FILENO, p, 1);
+                p++;
+            }
+        }
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "command") == 0) {
+        if (cmd->argc < 2) {
+            dprintf(2, "sbush: command: usage: command [-v] name [args...]\n");
+            return 1;
+        }
+        /* command -v name: print path of command */
+        if (strcmp(cmd->argv[1], "-v") == 0) {
+            if (cmd->argc < 3) {
+                dprintf(2, "sbush: command: -v: argument required\n");
+                return 1;
+            }
+            const char *name = cmd->argv[2];
+            if (is_builtin(name)) {
+                printf("%s\n", name);
+                return 0;
+            }
+            char *path = resolve_path(name);
+            if (path) {
+                printf("%s\n", path);
+                return 0;
+            }
+            return 1;
+        }
+        /* command name [args...]: execute bypassing functions/aliases */
+        if (is_builtin(cmd->argv[1])) {
+            /* Build a sub-command structure for the builtin */
+            struct command sub;
+            memset(&sub, 0, sizeof(sub));
+            sub.argc = cmd->argc - 1;
+            for (int i = 0; i < sub.argc; i++)
+                sub.argv[i] = cmd->argv[i + 1];
+            sub.argv[sub.argc] = NULL;
+            sub.redir_in = cmd->redir_in;
+            sub.redir_out = cmd->redir_out;
+            sub.redir_append = cmd->redir_append;
+            sub.redir_err = cmd->redir_err;
+            sub.redir_err_to_out = cmd->redir_err_to_out;
+            return run_builtin(&sub);
+        }
+        char *path = resolve_path(cmd->argv[1]);
+        if (!path) {
+            dprintf(2, "sbush: command: %s: not found\n", cmd->argv[1]);
+            return 127;
+        }
+        /* Fork and exec the command directly */
+        pid_t pid = fork();
+        if (pid == 0) {
+            char **envp = build_environ();
+            execve(path, cmd->argv + 1, envp);
+            dprintf(2, "sbush: command: %s: exec failed\n", cmd->argv[1]);
+            _exit(126);
+        }
+        if (pid < 0) {
+            dprintf(2, "sbush: command: fork failed\n");
+            return 1;
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        return WIFEXITED(status) ? WEXITSTATUS(status) : (128 + WTERMSIG(status));
     }
 
     return 1;

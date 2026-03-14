@@ -50,6 +50,16 @@ struct job *job_find_pid(pid_t pid) {
     return NULL;
 }
 
+struct job *job_find_last(void) {
+    struct job *last = NULL;
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (jobs[i].pid == 0) continue;
+        if (!last || jobs[i].id > last->id)
+            last = &jobs[i];
+    }
+    return last;
+}
+
 void job_list(void) {
     for (int i = 0; i < MAX_JOBS; i++) {
         if (jobs[i].pid == 0) continue;
