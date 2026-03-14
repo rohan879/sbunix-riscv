@@ -161,6 +161,10 @@ struct proc {
   /* VMA list for tracking all user memory regions */
   struct vm_area *vma_list;    // sorted linked list of virtual memory areas
   uint64_t mmap_base;          // next VA to use for non-MAP_FIXED mmap
+  /* Small free-list for reclaiming munmap'd mmap ranges */
+#define MMAP_FREELIST_SIZE 8
+  struct { uint64_t addr; uint64_t len; } mmap_freelist[MMAP_FREELIST_SIZE];
+  int mmap_freelist_count;
   /* signal handling */
   struct kern_sigaction sigactions[32]; /* one per signal (indices 0-31) */
   uint64_t sigmask;             /* blocked signal mask */

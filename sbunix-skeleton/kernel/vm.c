@@ -405,8 +405,12 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
         tail->next  = v->next;
         v->end = start;
         v->next = tail;
+        pp = &tail->next;
+      } else {
+        /* kmalloc failed: can't split, just trim the front portion */
+        v->end = start;
+        pp = &v->next;
       }
-      pp = &tail->next;
     } else if (v->start < start) {
       /* VMA starts before range: trim end */
       v->end = start;

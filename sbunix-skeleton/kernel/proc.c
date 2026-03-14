@@ -115,6 +115,30 @@ struct proc* allocproc(void) {
   return 0;
 
 found:
+  /* Wrap PID at 32768 and skip PIDs already in use */
+  if (nextpid >= 32768)
+    nextpid = 1;
+  {
+    int attempts = 0;
+    while (attempts < 32768) {
+      int in_use = 0;
+      for (struct proc *q = proc; q < &proc[64]; q++) {
+        if (q != p && q->state != UNUSED && q->pid == nextpid) {
+          in_use = 1;
+          break;
+        }
+      }
+      if (!in_use) break;
+      nextpid++;
+      if (nextpid >= 32768) nextpid = 1;
+      attempts++;
+    }
+    if (attempts >= 32768) {
+      /* All PIDs taken */
+      p->state = UNUSED;
+      return 0;
+    }
+  }
   p->pid = nextpid++;
   p->pgid = p->pid;
   p->sid = p->pid;
@@ -152,6 +176,7 @@ found:
   // Initialize VMA list and mmap base
   p->vma_list = NULL;
   p->mmap_base = 0; /* lazily set on first mmap call */
+  p->mmap_freelist_count = 0;
 
   // Initialize signal handling fields
   memset(p->sigactions, 0, sizeof(p->sigactions));

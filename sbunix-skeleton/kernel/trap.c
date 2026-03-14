@@ -44,12 +44,12 @@ static void rtc_init(void) {
 }
 
 /* Get current wall-clock time as {sec, nsec} */
-static void get_wall_time(int64_t *sec, int64_t *nsec) {
+void get_wall_time(long *sec, long *nsec) {
     uint64_t elapsed_ticks = r_time() - boot_time;
     uint64_t elapsed_ns = elapsed_ticks * 100; /* 10MHz -> ns */
     uint64_t now_ns = boot_epoch_ns + elapsed_ns;
-    *sec  = (int64_t)(now_ns / 1000000000ULL);
-    *nsec = (int64_t)(now_ns % 1000000000ULL);
+    *sec  = (long)(now_ns / 1000000000ULL);
+    *nsec = (long)(now_ns % 1000000000ULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -467,6 +467,7 @@ static pid_t sys_clone(struct trapframe *tf) {
     uint64_t child_sp = tf->a1;
     int clone_flags   = (int)(flags & ~0xFFUL); /* mask out low-byte signal */
     unsigned long old_satp = 0;
+    pagetable_t new_pt = 0; /* hoisted for cleanup in error path */
 
     /* CLONE_SIGHAND requires CLONE_VM (Linux semantics) */
     if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
@@ -519,7 +520,7 @@ static pid_t sys_clone(struct trapframe *tf) {
         vma_dup(current_proc, p);
     } else {
         /* Traditional COW fork: build independent child page table */
-        pagetable_t new_pt = uvmcreate();
+        new_pt = uvmcreate();
         if (!new_pt) goto bad;
         old_satp = r_satp();
         w_satp(MAKE_SATP(kernel_pagetable));
@@ -608,6 +609,8 @@ static pid_t sys_clone(struct trapframe *tf) {
 bad_restore_satp:
     w_satp(old_satp);
     sfence_vma();
+    /* Free the partially-built child page table to prevent leaks */
+    if (new_pt) { freewalk_user(new_pt); new_pt = 0; }
 bad:
     if (p->kstack) { kfree(p->kstack); p->kstack = NULL; }
     if (p->trapframe) { kfree(p->trapframe); p->trapframe = NULL; }
@@ -877,6 +880,31 @@ static int follow_symlinks(char *resolved, int maxdepth) {
 /* Signal delivery                                                      */
 /* ------------------------------------------------------------------ */
 
+/* Check whether any pending unblocked signal would actually interrupt
+ * a blocking syscall.  Signals with SIG_DFL whose default action is
+ * "ignore" (SIGCHLD, SIGURG, SIGWINCH) should NOT cause EINTR.
+ * SIGCONT's default (resume) also should not interrupt reads/writes. */
+static int has_actionable_signal(struct proc *p) {
+    uint64_t deliverable = p->sigpending & ~p->sigmask;
+    if (deliverable == 0) return 0;
+    struct kern_sigaction *sa = proc_sigactions(p);
+    for (int i = 1; i < 32; i++) {
+        if (!(deliverable & signal_bit(i)))
+            continue;
+        uint64_t handler = sa[i].handler;
+        if (handler == 1) /* SIG_IGN */
+            continue;
+        if (handler == 0) {
+            /* SIG_DFL: check default action */
+            if (i == SIGCHLD || i == SIGURG || i == SIGWINCH || i == SIGCONT)
+                continue; /* default is ignore/continue -- not EINTR-worthy */
+        }
+        /* Either a user handler or a fatal/stop default -- actionable */
+        return 1;
+    }
+    return 0;
+}
+
 static void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* Find lowest-numbered pending unblocked signal */
     uint64_t deliverable = p->sigpending & ~p->sigmask;
@@ -1013,7 +1041,15 @@ static long sys_brk_handler(struct trapframe *tf) {
     if (new_brk == 0) {
         return (long)cur_sz;
     } else if (new_brk < cur_sz) {
-        return (long)cur_sz;
+        /* Shrink: unmap freed pages between new_brk and cur_sz */
+        uint64_t unmap_start = (new_brk + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t unmap_end   = (cur_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        if (unmap_start < unmap_end) {
+            uvmunmap(current_proc->pagetable, unmap_start, unmap_end - unmap_start);
+            sfence_vma();
+        }
+        current_proc->sz = new_brk;
+        return (long)new_brk;
     } else {
         uint64_t heap_start = (cur_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
         uint64_t rounded    = (new_brk + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
@@ -1051,6 +1087,9 @@ static long sys_write_handler(struct trapframe *tf) {
             if (avail <= 0) {
                 current_proc->state = SLEEPING;
                 swtch(&current_proc->context, &scheduler_context);
+                /* Check for actionable pending signals after waking */
+                if (has_actionable_signal(current_proc))
+                    return (written > 0) ? (long)written : (long)-4; /* -EINTR */
                 continue;
             }
             int n = len - written;
@@ -1118,6 +1157,9 @@ static long sys_read_handler(struct trapframe *tf) {
             if (pipes[pid].write_open == 0) goto pipe_eof;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* Check for actionable pending signals after waking */
+            if (has_actionable_signal(current_proc))
+                return (long)-4; /* -EINTR */
         }
         /* Drain all available bytes (up to len) without re-blocking */
         while (read_bytes < len && pipe_avail(pid) > 0) {
@@ -1329,7 +1371,7 @@ static long sys_getcwd_handler(struct trapframe *tf) {
         }
         return (long)tf->a0; /* return buf pointer */
     } else {
-        return (long)0;
+        return (long)-34; /* -ERANGE */
     }
 }
 
@@ -1340,12 +1382,23 @@ static long sys_chdir_handler(struct trapframe *tf) {
     }
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
-    if (vfs_is_dir(resolved)) {
-        memcpy(current_proc->cwd, resolved, sizeof(current_proc->cwd));
-        return (long)0;
-    } else {
-        return (long)-1;
+    /* Check if path exists and is a directory */
+    const char *relpath;
+    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    if (!ops || !ops->stat) {
+        return (long)-2; /* -ENOENT */
     }
+    uint8_t st[128];
+    if (ops->stat(relpath, st) != 0) {
+        return (long)-2; /* -ENOENT */
+    }
+    uint32_t mode;
+    memcpy(&mode, st + 16, 4);
+    if ((mode & 0xF000) != 0x4000) {
+        return (long)-20; /* -ENOTDIR */
+    }
+    memcpy(current_proc->cwd, resolved, sizeof(current_proc->cwd));
+    return (long)0;
 }
 
 static long sys_clone_handler(struct trapframe *tf) {
@@ -1637,6 +1690,13 @@ static long sys_getgid_handler(struct trapframe *tf) {
 /* Helper: deliver a signal to a single process */
 static void deliver_signal_to_proc(struct proc *target, int sig) {
     if (sig == 9) {
+        if (target == current_proc) {
+            /* Self-SIGKILL: don't cleanup here -- set pending and let the
+             * normal signal delivery path handle it after we return to
+             * the trap handler, which correctly calls swtch after cleanup. */
+            target->sigpending |= signal_bit(9);
+            return;
+        }
         target->exit_status = 128 + 9;
         target->killed_by_signal = 9;
         cleanup_proc_resources(target);
@@ -1802,7 +1862,7 @@ static long sys_lseek_handler(struct trapframe *tf) {
         new_off = file_size + (int64_t)offset;
     }
     else { return (long)-22; /* -EINVAL */ }
-    if (new_off < 0) new_off = 0;
+    if (new_off < 0) return (long)-22; /* -EINVAL */
     f->offset = new_off;
     return (long)new_off;
 }
@@ -2115,8 +2175,31 @@ static long sys_mmap_handler(struct trapframe *tf) {
     } else {
         if (current_proc->mmap_base == 0)
             current_proc->mmap_base = 0x20000000UL;
-        va = current_proc->mmap_base;
-        current_proc->mmap_base += len;
+        /* Check free list for a suitable previously-freed range */
+        int found_free = -1;
+        for (int i = 0; i < current_proc->mmap_freelist_count; i++) {
+            if (current_proc->mmap_freelist[i].len >= len) {
+                found_free = i;
+                break;
+            }
+        }
+        if (found_free >= 0) {
+            va = current_proc->mmap_freelist[found_free].addr;
+            uint64_t remaining = current_proc->mmap_freelist[found_free].len - len;
+            if (remaining > 0) {
+                /* Shrink the free entry */
+                current_proc->mmap_freelist[found_free].addr += len;
+                current_proc->mmap_freelist[found_free].len = remaining;
+            } else {
+                /* Remove the entry by shifting */
+                current_proc->mmap_freelist_count--;
+                for (int j = found_free; j < current_proc->mmap_freelist_count; j++)
+                    current_proc->mmap_freelist[j] = current_proc->mmap_freelist[j + 1];
+            }
+        } else {
+            va = current_proc->mmap_base;
+            current_proc->mmap_base += len;
+        }
     }
 
     int pte_flags = 0;
@@ -2148,6 +2231,13 @@ static long sys_munmap_handler(struct trapframe *tf) {
 
     /* Remove VMA tracking (handles splits automatically) */
     vma_remove(current_proc, addr, addr + len);
+
+    /* Track freed range for reuse by future mmap calls */
+    if (current_proc->mmap_freelist_count < MMAP_FREELIST_SIZE) {
+        int idx = current_proc->mmap_freelist_count++;
+        current_proc->mmap_freelist[idx].addr = addr;
+        current_proc->mmap_freelist[idx].len  = len;
+    }
 
     return 0;
 }
@@ -2490,6 +2580,7 @@ static long sys_faccessat_handler(struct trapframe *tf) {
 }
 
 static long sys_unlinkat_handler(struct trapframe *tf) {
+    int dirfd = (int)tf->a0;
     int flags = (int)tf->a2;
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
@@ -2497,7 +2588,9 @@ static long sys_unlinkat_handler(struct trapframe *tf) {
     }
     {
         char resolved[256];
-        resolve_path(current_proc->cwd, kpath, resolved);
+        long path_ret = resolve_at_path(dirfd, kpath, resolved);
+        if (path_ret < 0)
+            return path_ret;
         const char *relpath;
         struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
         if (flags & 0x200) {
@@ -2547,6 +2640,7 @@ static long sys_renameat2_handler(struct trapframe *tf) {
 }
 
 static long sys_mkdirat_handler(struct trapframe *tf) {
+    int dirfd = (int)tf->a0;
     int mode = (int)tf->a2;
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
@@ -2554,7 +2648,9 @@ static long sys_mkdirat_handler(struct trapframe *tf) {
     }
     {
         char resolved[256];
-        resolve_path(current_proc->cwd, kpath, resolved);
+        long path_ret = resolve_at_path(dirfd, kpath, resolved);
+        if (path_ret < 0)
+            return path_ret;
         const char *relpath;
         struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
         if (ops && ops->mkdir) {
@@ -2567,6 +2663,7 @@ static long sys_mkdirat_handler(struct trapframe *tf) {
 }
 
 static long sys_mknodat_handler(struct trapframe *tf) {
+    int dirfd = (int)tf->a0;
     uint32_t mode = (uint32_t)tf->a2;
     uint32_t rdev = (uint32_t)tf->a3;
     char kpath[256];
@@ -2575,7 +2672,9 @@ static long sys_mknodat_handler(struct trapframe *tf) {
     }
     {
         char resolved[256];
-        resolve_path(current_proc->cwd, kpath, resolved);
+        long path_ret = resolve_at_path(dirfd, kpath, resolved);
+        if (path_ret < 0)
+            return path_ret;
         const char *relpath;
         struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
         if (ops == &ext2_ops) {
