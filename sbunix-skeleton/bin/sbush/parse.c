@@ -457,6 +457,14 @@ static void expand_vars(char *line) {
         if (*src == '\'' ) {
             in_sq = !in_sq;
             *dst++ = *src++;
+        } else if (*src == '\\' && !in_sq) {
+            char next = *(src + 1);
+            if (next == '$' || next == '`' || next == '\\') {
+                src++;           /* skip backslash */
+                *dst++ = *src++; /* copy escaped char literally */
+            } else {
+                *dst++ = *src++; /* copy backslash literally */
+            }
         } else if (*src == '$' && !in_sq) {
             src++;
             if (*src == '?') {
