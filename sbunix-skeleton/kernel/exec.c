@@ -86,8 +86,8 @@ int exec(char *path) {
         }
     }
 
-    // 4. User Stack — allocate 8 pages (32 KB) to accommodate deep call stacks
-    #define USER_STACK_PAGES 8
+    // 4. User Stack — allocate 16 pages (64 KB) to accommodate deep call stacks
+    #define USER_STACK_PAGES 16
     uint64_t stack_va = MAXVA - (USER_STACK_PAGES * PAGE_SIZE);
     char *top_page_mem = NULL;
     for (int pg = 0; pg < USER_STACK_PAGES; pg++) {
