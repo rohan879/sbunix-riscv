@@ -306,6 +306,121 @@ void execute_line(char *line) {
         }
     }
 
+    /* Check for VAR=value prefix assignments before a command.
+     * Pattern: one or more NAME=VALUE tokens followed by a non-assignment token.
+     * The assignments are set temporarily, scoped only for this command. */
+    {
+        char *p2 = line;
+        while (*p2 == ' ' || *p2 == '\t') p2++;
+        if (*p2 && *p2 != '#') {
+            /* Count leading assignment tokens */
+            static char assign_tmp[MAX_LINE];
+            strncpy(assign_tmp, p2, MAX_LINE - 1);
+            assign_tmp[MAX_LINE - 1] = '\0';
+            char *at = assign_tmp;
+            int nassign = 0;
+            static char anames[MAX_ARGS][64];
+            static char avalues[MAX_ARGS][256];
+            static char saved_vals[MAX_ARGS][256];
+            static int  saved_existed[MAX_ARGS];
+
+            while (*at) {
+                while (*at == ' ' || *at == '\t') at++;
+                if (!*at) break;
+                char *tok_start = at;
+                while (*at && *at != ' ' && *at != '\t') at++;
+                char saved_ch = *at;
+                if (*at) *at = '\0';
+                /* Check if tok_start is NAME=VALUE */
+                char *eq = strchr(tok_start, '=');
+                if (!eq || eq == tok_start) {
+                    *at = saved_ch;
+                    break; /* not an assignment; this is the command */
+                }
+                /* Validate NAME */
+                char *nc2 = tok_start;
+                int valid_name = ((*nc2 >= 'A' && *nc2 <= 'Z') ||
+                                  (*nc2 >= 'a' && *nc2 <= 'z') || *nc2 == '_');
+                nc2++;
+                while (nc2 < eq && valid_name) {
+                    if (!((*nc2 >= 'A' && *nc2 <= 'Z') || (*nc2 >= 'a' && *nc2 <= 'z') ||
+                          (*nc2 >= '0' && *nc2 <= '9') || *nc2 == '_'))
+                        valid_name = 0;
+                    nc2++;
+                }
+                if (!valid_name) {
+                    *at = saved_ch;
+                    break;
+                }
+                /* Record this assignment */
+                if (nassign < MAX_ARGS) {
+                    int nlen = eq - tok_start;
+                    if (nlen > 63) nlen = 63;
+                    memcpy(anames[nassign], tok_start, nlen);
+                    anames[nassign][nlen] = '\0';
+                    strncpy(avalues[nassign], eq + 1, 255);
+                    avalues[nassign][255] = '\0';
+                    nassign++;
+                }
+                if (saved_ch) {
+                    *at = saved_ch;
+                    at++;
+                }
+            }
+            /* If we found assignments AND there is a remaining command */
+            while (*at == ' ' || *at == '\t') at++;
+            if (nassign > 0 && *at) {
+                /* Find the command portion in the original line */
+                char *orig_cmd = p2;
+                int skip_count = nassign;
+                while (skip_count > 0 && *orig_cmd) {
+                    while (*orig_cmd == ' ' || *orig_cmd == '\t') orig_cmd++;
+                    while (*orig_cmd && *orig_cmd != ' ' && *orig_cmd != '\t') orig_cmd++;
+                    skip_count--;
+                }
+                while (*orig_cmd == ' ' || *orig_cmd == '\t') orig_cmd++;
+
+                if (*orig_cmd) {
+                    /* Save old values, set new ones */
+                    for (int ai = 0; ai < nassign; ai++) {
+                        char *old = var_get(anames[ai]);
+                        if (old) {
+                            saved_existed[ai] = 1;
+                            strncpy(saved_vals[ai], old, 255);
+                            saved_vals[ai][255] = '\0';
+                        } else {
+                            saved_existed[ai] = 0;
+                        }
+                        var_set(anames[ai], avalues[ai]);
+                        var_export(anames[ai]);
+                    }
+                    /* Execute the command portion */
+                    static char cmd_portion[MAX_LINE];
+                    strncpy(cmd_portion, orig_cmd, MAX_LINE - 1);
+                    cmd_portion[MAX_LINE - 1] = '\0';
+
+                    if (exec_depth >= MAX_EXEC_DEPTH) {
+                        dprintf(2, "sbush: execution recursion limit reached\n");
+                    } else {
+                        struct cmdlist *cl2 = &cl_stack[exec_depth++];
+                        if (parse_line(cmd_portion, cl2) > 0)
+                            execute_cmdlist(cl2);
+                        exec_depth--;
+                    }
+
+                    /* Restore old values */
+                    for (int ai = 0; ai < nassign; ai++) {
+                        if (saved_existed[ai])
+                            var_set(anames[ai], saved_vals[ai]);
+                        else
+                            var_unset(anames[ai]);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
     if (exec_depth >= MAX_EXEC_DEPTH) {
         dprintf(2, "sbush: execution recursion limit reached\n");
         return;

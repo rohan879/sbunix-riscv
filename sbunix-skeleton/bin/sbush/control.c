@@ -342,6 +342,11 @@ static int cf_process_segment(const char *seg) {
                 strncpy(words_buf, f->for_words, MAX_LINE - 1);
                 words_buf[MAX_LINE - 1] = '\0';
 
+                /* Expand variables and command substitution in word list
+                 * (POSIX requires tilde, parameter, command, and arithmetic
+                 * expansion plus field splitting on for-in words). */
+                expand_vars(words_buf);
+
                 /* Iterate over space-separated words */
                 char *wp = words_buf;
                 while (*wp) {

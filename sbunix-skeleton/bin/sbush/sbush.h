@@ -125,6 +125,7 @@ void  positional_set_zero(const char *name);
 int parse_line(char *line, struct cmdlist *cl);
 int expand_and_parse_pipeline(char *seg, struct pipeline *pl);
 int glob_match(const char *pat, const char *name);
+void expand_vars(char *line);
 
 /* path.c */
 char *resolve_path(const char *cmd);

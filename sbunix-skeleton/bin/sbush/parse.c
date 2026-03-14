@@ -45,9 +45,9 @@ static char *run_cmdsub(const char *cmd, char *dst, char *end) {
         sigaction(SIGTSTP, &sa, NULL);
         sigaction(SIGCHLD, &sa, NULL);
         /* Execute via the shell itself */
-        static char cmdbuf[256];
-        strncpy(cmdbuf, cmd, 255);
-        cmdbuf[255] = '\0';
+        static char cmdbuf[MAX_LINE];
+        strncpy(cmdbuf, cmd, MAX_LINE - 1);
+        cmdbuf[MAX_LINE - 1] = '\0';
         execute_line(cmdbuf);
         _exit(last_exit_status);
     }
@@ -71,9 +71,9 @@ static char *run_cmdsub(const char *cmd, char *dst, char *end) {
 /* $(cmd): src points past '('. Find matching ')' and run. */
 static char *expand_cmdsub(char **srcp, char *dst, char *end) {
     char *src = *srcp;
-    static char cs_buf[512];
+    static char cs_buf[MAX_LINE];
     int ci = 0, depth = 1;
-    while (*src && depth > 0 && ci < 511) {
+    while (*src && depth > 0 && ci < MAX_LINE - 1) {
         if (*src == '(') depth++;
         else if (*src == ')') { depth--; if (depth == 0) { src++; break; } }
         cs_buf[ci++] = *src++;
@@ -494,7 +494,7 @@ static char *expand_braces(char **srcp, char *dst, char *end) {
     return dst;
 }
 
-static void expand_vars(char *line) {
+void expand_vars(char *line) {
     char *src = line;
     char *dst = expand_buf;
     char *end = expand_buf + MAX_LINE - 1;
@@ -606,9 +606,9 @@ static void expand_vars(char *line) {
             /* `cmd` — backtick command substitution */
             src++; /* skip opening backtick */
             /* Find closing backtick and extract command */
-            static char bt_cmd[256];
+            static char bt_cmd[MAX_LINE];
             int bi = 0;
-            while (*src && *src != '`' && bi < 255)
+            while (*src && *src != '`' && bi < MAX_LINE - 1)
                 bt_cmd[bi++] = *src++;
             bt_cmd[bi] = '\0';
             if (*src == '`') src++;
