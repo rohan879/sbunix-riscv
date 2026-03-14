@@ -5,6 +5,14 @@
 #include <kmalloc.h>
 #include <string.h>
 #include <printk.h>
+#include <trap.h>
+
+/* Return current wall-clock epoch time in seconds */
+static uint64_t ext2_now(void) {
+  long sec, nsec;
+  get_wall_time(&sec, &nsec);
+  return (uint64_t)sec;
+}
 
 /* ================================================================== */
 /* Globals                                                             */
@@ -287,6 +295,8 @@ static void icache_writeback(struct ext2_inode_mem *ip) {
   di.indirect = ip->indirect;
   di.mode = ip->mode;
   di.rdev = ip->rdev;
+  di.ctime = ip->ctime;
+  di.mtime = ip->mtime;
   ext2_write_dinode(ip->ino, &di);
   ip->dirty = 0;
 }
@@ -549,6 +559,8 @@ static int ext2_dir_add(struct ext2_inode_mem *dir, const char *name,
         memcpy(de->name, name, name_len);
         bcache_mark_dirty(e);
         bcache_release(e);
+        dir->mtime = ext2_now();
+        dir->dirty = 1;
         return 0;
       }
 
@@ -568,6 +580,8 @@ static int ext2_dir_add(struct ext2_inode_mem *dir, const char *name,
         memcpy(new_de->name, name, name_len);
         bcache_mark_dirty(e);
         bcache_release(e);
+        dir->mtime = ext2_now();
+        dir->dirty = 1;
         return 0;
       }
 
@@ -595,6 +609,7 @@ static int ext2_dir_add(struct ext2_inode_mem *dir, const char *name,
   bcache_release(e);
 
   dir->size += EXT2_BLOCK_SIZE;
+  dir->mtime = ext2_now();
   dir->dirty = 1;
   return 0;
 }
@@ -627,6 +642,8 @@ static int ext2_dir_remove(struct ext2_inode_mem *dir, const char *name) {
         de->inode_number = 0;
         bcache_mark_dirty(e);
         bcache_release(e);
+        dir->mtime = ext2_now();
+        dir->dirty = 1;
         return 0;
       }
       prev = de;
@@ -806,6 +823,7 @@ static void ext2_truncate(struct ext2_inode_mem *ip) {
     ip->indirect = 0;
   }
   ip->size = 0;
+  ip->mtime = ext2_now();
   ip->dirty = 1;
 }
 
@@ -979,6 +997,12 @@ static int64_t ext2_write(void *private, const char *buf, uint64_t count,
   /* Update size if we extended the file */
   if (off + total > ip->size) {
     ip->size = (uint32_t)(off + total);
+    ip->dirty = 1;
+  }
+
+  /* Update modification time */
+  if (total > 0) {
+    ip->mtime = ext2_now();
     ip->dirty = 1;
   }
 
@@ -1582,10 +1606,22 @@ static int ext2_rename(const char *oldpath, const char *newpath) {
         return -2;
     }
 
-    /* If new name exists, remove it */
+    /* If new name exists, remove it and free target inode if link_count drops to 0 */
     uint32_t existing;
     if (ext2_dir_lookup(new_parent, new_basename, &existing) == 0) {
         ext2_dir_remove(new_parent, new_basename);
+        struct ext2_inode_mem *target = icache_get(existing);
+        if (target) {
+            target->link_count--;
+            target->dirty = 1;
+            if (target->link_count == 0 && target->refcount <= 1) {
+                icache_release(target);
+                ext2_free_inode(existing);
+            } else {
+                icache_writeback(target);
+                icache_release(target);
+            }
+        }
     }
 
     /* Add new entry, remove old */
