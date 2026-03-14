@@ -123,7 +123,7 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
         while (*fmt >= '0' && *fmt <= '9')
             width = width * 10 + (*fmt++ - '0');
 
-        /* Precision (consume but mostly ignore for now) */
+        /* Precision */
         int prec = -1;
         if (*fmt == '.') {
             fmt++;
@@ -131,7 +131,6 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
             while (*fmt >= '0' && *fmt <= '9')
                 prec = prec * 10 + (*fmt++ - '0');
         }
-        (void)prec;
 
         /* Length modifier */
         int is_long = 0, is_longlong = 0, is_short = 0, is_size = 0;
@@ -201,7 +200,21 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
         case 's': {
             const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
-            snp_emit_str_padded(ctx, s, width, left_align);
+            /* If precision is set, limit string to at most prec chars */
+            if (prec >= 0) {
+                int slen = 0;
+                while (slen < prec && s[slen])
+                    slen++;
+                int pad = width - slen;
+                if (!left_align && pad > 0)
+                    snp_pad(ctx, pad, ' ');
+                for (int i = 0; i < slen; i++)
+                    snp_emit(ctx, s[i]);
+                if (left_align && pad > 0)
+                    snp_pad(ctx, pad, ' ');
+            } else {
+                snp_emit_str_padded(ctx, s, width, left_align);
+            }
             break;
         }
         case 'c': {

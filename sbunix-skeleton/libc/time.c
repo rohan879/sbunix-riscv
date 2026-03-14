@@ -94,28 +94,44 @@ struct tm *gmtime(const time_t *timer) {
     static struct tm result;
     time_t t = *timer;
 
-    result.tm_sec  = (int)(t % 60);
-    t /= 60;
-    result.tm_min  = (int)(t % 60);
-    t /= 60;
-    result.tm_hour = (int)(t % 24);
+    /*
+     * Floor-divide time into days + remainder-of-day.
+     * C99 truncates toward zero, so for negative t we must adjust
+     * to get a non-negative remainder for hh:mm:ss.
+     */
+    long days = (long)(t / SECS_PER_DAY);
+    long rem  = (long)(t % SECS_PER_DAY);
+    if (rem < 0) {
+        rem += SECS_PER_DAY;
+        days--;
+    }
 
-    /* Days since epoch (Jan 1, 1970) */
-    long days = (long)((*timer) / SECS_PER_DAY);
+    result.tm_sec  = (int)(rem % 60);
+    rem /= 60;
+    result.tm_min  = (int)(rem % 60);
+    rem /= 60;
+    result.tm_hour = (int)rem;
 
     /* Day of week: Jan 1, 1970 was a Thursday (4) */
     result.tm_wday = (int)((days + 4) % 7);
     if (result.tm_wday < 0)
         result.tm_wday += 7;
 
-    /* Compute year, month, day */
+    /* Compute year, month, day — handle dates before epoch */
     int year = 1970;
-    while (1) {
-        int yday_max = is_leap_year(year) ? 366 : 365;
-        if (days < yday_max)
-            break;
-        days -= yday_max;
-        year++;
+    if (days >= 0) {
+        while (1) {
+            int yday_max = is_leap_year(year) ? 366 : 365;
+            if (days < yday_max)
+                break;
+            days -= yday_max;
+            year++;
+        }
+    } else {
+        while (days < 0) {
+            year--;
+            days += is_leap_year(year) ? 366 : 365;
+        }
     }
 
     result.tm_year = year - 1900;
