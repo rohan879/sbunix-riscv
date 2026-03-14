@@ -231,7 +231,8 @@ int is_builtin(const char *cmd) {
             strcmp(cmd, "alias") == 0 ||
             strcmp(cmd, "unalias") == 0 ||
             strcmp(cmd, "exec") == 0 ||
-            strcmp(cmd, "umask") == 0);
+            strcmp(cmd, "umask") == 0 ||
+            strcmp(cmd, ":") == 0);
 }
 
 /* -----------------------------------------------------------------------
@@ -315,6 +316,9 @@ static int builtin_which(struct command *cmd) {
 }
 
 int run_builtin(struct command *cmd) {
+    if (strcmp(cmd->argv[0], ":") == 0)
+        return 0;
+
     if (strcmp(cmd->argv[0], "cd") == 0) {
         const char *dir = cmd->argc > 1 ? cmd->argv[1] : var_get("HOME");
         if (!dir)

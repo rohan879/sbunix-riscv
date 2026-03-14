@@ -7,7 +7,7 @@ int run_script(const char *path) {
         return 1;
     }
 
-    char file_buf[4096];
+    char file_buf[65536];
     int total = 0;
     ssize_t n;
     while ((n = read(fd, file_buf + total, sizeof(file_buf) - total - 1)) > 0)
@@ -33,6 +33,16 @@ int run_script(const char *path) {
         line[i] = '\0';
         if (*p == '\n')
             p++;
+        /* Backslash-newline continuation */
+        while (i > 0 && line[i - 1] == '\\' && *p) {
+            line[i - 1] = '\0';
+            i--;
+            while (*p && *p != '\n' && i < MAX_LINE - 1)
+                line[i++] = *p++;
+            line[i] = '\0';
+            if (*p == '\n')
+                p++;
+        }
         if (i > 0)
             execute_line(line);
     }

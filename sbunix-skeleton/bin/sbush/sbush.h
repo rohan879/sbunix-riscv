@@ -19,7 +19,7 @@
 #define WSTOPSIG(s)     (((s) >> 8) & 0xff)
 #endif
 
-#define MAX_LINE  1024
+#define MAX_LINE  2048
 #define MAX_ARGS  64
 #define MAX_PIPES 16
 #define MAX_VARS  128

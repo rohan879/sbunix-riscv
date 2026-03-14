@@ -144,6 +144,69 @@ void execute_line(char *line) {
     if (check_heredoc(line))
         return;
 
+    /* Check for standalone VAR=value assignments.
+     * If ALL whitespace-separated tokens are NAME=VALUE, set them and return.
+     * Skip leading whitespace, then examine each token. */
+    {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p && *p != '#') {
+            /* Check if this line is purely assignments */
+            char tmp[MAX_LINE];
+            strncpy(tmp, p, MAX_LINE - 1);
+            tmp[MAX_LINE - 1] = '\0';
+            char *t = tmp;
+            int all_assign = 1;
+            int any_token = 0;
+            while (*t) {
+                while (*t == ' ' || *t == '\t') t++;
+                if (!*t) break;
+                /* Extract token start */
+                char *tok = t;
+                while (*t && *t != ' ' && *t != '\t') t++;
+                if (*t) *t++ = '\0';
+                any_token = 1;
+                /* Check if tok matches NAME=VALUE */
+                char *eq = strchr(tok, '=');
+                if (!eq || eq == tok) { all_assign = 0; break; }
+                /* Validate NAME: [A-Za-z_][A-Za-z0-9_]* */
+                char *nc = tok;
+                if (!((*nc >= 'A' && *nc <= 'Z') || (*nc >= 'a' && *nc <= 'z') || *nc == '_')) {
+                    all_assign = 0; break;
+                }
+                nc++;
+                while (nc < eq) {
+                    if (!((*nc >= 'A' && *nc <= 'Z') || (*nc >= 'a' && *nc <= 'z') ||
+                          (*nc >= '0' && *nc <= '9') || *nc == '_')) {
+                        all_assign = 0; break;
+                    }
+                    nc++;
+                }
+                if (!all_assign) break;
+            }
+            if (any_token && all_assign) {
+                /* Re-parse the original line and set variables */
+                char tmp2[MAX_LINE];
+                strncpy(tmp2, p, MAX_LINE - 1);
+                tmp2[MAX_LINE - 1] = '\0';
+                char *t2 = tmp2;
+                while (*t2) {
+                    while (*t2 == ' ' || *t2 == '\t') t2++;
+                    if (!*t2) break;
+                    char *tok2 = t2;
+                    while (*t2 && *t2 != ' ' && *t2 != '\t') t2++;
+                    if (*t2) *t2++ = '\0';
+                    char *eq2 = strchr(tok2, '=');
+                    if (eq2) {
+                        *eq2 = '\0';
+                        var_set(tok2, eq2 + 1);
+                    }
+                }
+                return;
+            }
+        }
+    }
+
     if (exec_depth >= MAX_EXEC_DEPTH) {
         dprintf(2, "sbush: execution recursion limit reached\n");
         return;
@@ -337,8 +400,12 @@ int main(int argc, char *argv[], char *envp[]) {
     }
 
     /* script mode */
-    if (argc >= 2)
+    if (argc >= 2) {
+        positional_set_zero(argv[1]);
+        if (argc > 2)
+            positional_set_args(argc - 2, argv + 2);
         return run_script(argv[1]);
+    }
 
     /* interactive REPL */
     static char line[MAX_LINE];
@@ -354,6 +421,16 @@ int main(int argc, char *argv[], char *envp[]) {
         int r = read_line(line, sizeof(line), ps1);
         if (r == -1)
             break;       /* EOF */
+        /* Backslash-newline continuation: if line ends with '\', read more */
+        while (r > 0 && line[r - 1] == '\\') {
+            line[r - 1] = '\0';  /* strip trailing backslash */
+            r--;
+            int space = sizeof(line) - r;
+            if (space <= 1) break;
+            int r2 = read_line(line + r, space, "> ");
+            if (r2 == -1) break;
+            r += r2;
+        }
         execute_line(line);
     }
 
