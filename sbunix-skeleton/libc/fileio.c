@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 /* Static FILE objects for stdin, stdout, stderr */
 static FILE __stdin  = { .fd = 0, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0, .ungot = -1 };
@@ -621,4 +622,54 @@ int getc(FILE *stream) {
 
 int putc(int c, FILE *stream) {
     return fputc(c, stream);
+}
+
+/*
+ * fdopen() — associate a FILE stream with an existing file descriptor.
+ */
+FILE *fdopen(int fd, const char *mode) {
+    (void)mode; /* mode is advisory; fd is already open with its flags */
+    if (fd < 0) {
+        errno = EBADF;
+        return (void *)0;
+    }
+
+    /* Find a free slot in the pool */
+    for (int i = 0; i < FILE_POOL_SIZE; i++) {
+        if (!__file_pool_used[i]) {
+            __file_pool_used[i] = 1;
+            __file_pool[i].fd = fd;
+            __file_pool[i].eof = 0;
+            __file_pool[i].error = 0;
+            __file_pool[i].buf_mode = _IOFBF;
+            __file_pool[i].wpos = 0;
+            __file_pool[i].ungot = -1;
+            __stream_register(&__file_pool[i]);
+            return &__file_pool[i];
+        }
+    }
+
+    errno = EMFILE;
+    return (void *)0;
+}
+
+/*
+ * tmpfile() — create and open a temporary file.
+ * The file is unlinked immediately so it vanishes when closed.
+ */
+FILE *tmpfile(void) {
+    char tmpl[] = "/tmp/tmpXXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0)
+        return (void *)0;
+
+    /* Unlink immediately so the file disappears when closed */
+    unlink(tmpl);
+
+    FILE *fp = fdopen(fd, "w+");
+    if (!fp) {
+        close(fd);
+        return (void *)0;
+    }
+    return fp;
 }

@@ -640,6 +640,18 @@ char *mktemp(char *tmpl) {
     return tmpl;
 }
 
+/*
+ * remove() — delete a file or directory.
+ * Try unlink first; if that fails with EISDIR, try rmdir.
+ */
+int remove(const char *pathname) {
+    if (unlink(pathname) == 0)
+        return 0;
+    if (errno == EISDIR)
+        return rmdir(pathname);
+    return -1;
+}
+
 int putenv(char *string) {
     if (!string) return -1;
     env_ensure_init();

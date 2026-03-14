@@ -75,6 +75,19 @@ int ungetc(int c, FILE *stream);
 int getc(FILE *stream);
 int putc(int c, FILE *stream);
 
+/* fdopen — associate a FILE with an existing fd */
+FILE *fdopen(int fd, const char *mode);
+
+/* tmpfile — create a temporary file (unlinked immediately) */
+FILE *tmpfile(void);
+
+/* popen/pclose — pipe to/from a shell command */
+FILE *popen(const char *command, const char *type);
+int pclose(FILE *stream);
+
+/* remove — delete a file or directory */
+int remove(const char *pathname);
+
 /* Basic I/O */
 int puts(const char *s);
 int putchar(int c);
