@@ -491,6 +491,102 @@ int unsetenv(const char *name) {
     return 0;
 }
 
+/* -----------------------------------------------------------------------
+ * Temporary file creation: mkstemp / mktemp
+ * ---------------------------------------------------------------------- */
+
+#include <fcntl.h>
+#include <errno.h>
+
+/* Forward declarations to avoid pulling in all of syscall.h (which
+ * conflicts with sys/wait.h macros included later in this file). */
+#ifndef SYS_getrandom
+#define SYS_getrandom 278
+#endif
+long syscall(long num, ...);
+
+/*
+ * _mktemp_fill() — fill trailing XXXXXX in template with pseudo-random
+ * characters.  Uses SYS_getrandom if available, falls back to a mix of
+ * getpid() and a counter.
+ */
+static int _mktemp_fill(char *tmpl) {
+    static const char chars[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    int len = strlen(tmpl);
+    if (len < 6) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* Verify trailing XXXXXX */
+    for (int i = len - 6; i < len; i++) {
+        if (tmpl[i] != 'X') {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+
+    /* Try to get randomness from the kernel */
+    unsigned char randbuf[6];
+    long ret = syscall(SYS_getrandom, randbuf, 6, 0);
+    if (ret == 6) {
+        for (int i = 0; i < 6; i++)
+            tmpl[len - 6 + i] = chars[randbuf[i] % 62];
+    } else {
+        /* Fallback: mix pid and a counter */
+        static unsigned int counter = 0;
+        unsigned int seed = (unsigned int)getpid() * 31u + counter++;
+        for (int i = 0; i < 6; i++) {
+            seed = seed * 1103515245u + 12345u;
+            tmpl[len - 6 + i] = chars[(seed >> 16) % 62];
+        }
+    }
+    return 0;
+}
+
+/*
+ * mkstemp() — create and open a unique temporary file.
+ * template must end with "XXXXXX".  Returns an open fd or -1.
+ */
+int mkstemp(char *tmpl) {
+    for (int attempts = 0; attempts < 100; attempts++) {
+        /* Save the template suffix in case we need to retry */
+        char saved[7];
+        int len = strlen(tmpl);
+        if (len < 6) { errno = EINVAL; return -1; }
+        memcpy(saved, tmpl + len - 6, 6);
+        saved[6] = '\0';
+
+        if (_mktemp_fill(tmpl) < 0)
+            return -1;
+
+        int fd = open(tmpl, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0)
+            return fd;
+
+        if (errno != EEXIST)
+            return -1;
+
+        /* Restore XXXXXX for next attempt */
+        memcpy(tmpl + len - 6, saved, 6);
+    }
+
+    errno = EEXIST;
+    return -1;
+}
+
+/*
+ * mktemp() — generate a unique temporary filename without opening it.
+ * template must end with "XXXXXX".  Returns template or empty string on error.
+ */
+char *mktemp(char *tmpl) {
+    if (_mktemp_fill(tmpl) < 0) {
+        tmpl[0] = '\0';
+        return tmpl;
+    }
+    return tmpl;
+}
+
 int putenv(char *string) {
     if (!string) return -1;
     env_ensure_init();

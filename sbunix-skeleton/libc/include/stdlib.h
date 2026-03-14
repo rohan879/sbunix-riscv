@@ -53,6 +53,10 @@ void  qsort(void *base, size_t nmemb, size_t size,
 void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
               int (*compar)(const void *, const void *));
 
+/* Temporary files */
+int   mkstemp(char *tmpl);
+char *mktemp(char *tmpl);
+
 /* Exit status codes */
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1

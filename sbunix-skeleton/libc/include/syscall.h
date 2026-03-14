@@ -109,11 +109,19 @@
 #define O_RDWR    2
 #define AT_FDCWD  (-100)
 #define SIGCHLD   17
+#ifndef WNOHANG
 #define WNOHANG   1
+#endif
 
 /* Wait macros (kept here for backward compatibility; also in <sys/wait.h>) */
+#ifndef WEXITSTATUS
 #define WEXITSTATUS(s)  (((s) >> 8) & 0xff)
+#endif
+#ifndef WTERMSIG
 #define WTERMSIG(s)     ((s) & 0x7f)
+#endif
+#ifndef WIFEXITED
 #define WIFEXITED(s)    (WTERMSIG(s) == 0)
+#endif
 
 long syscall(long num, ...);
