@@ -81,13 +81,17 @@ int sigaction(int signum, const struct sigaction *act,
 /*
  * signal() — simplified BSD-style signal() using sigaction() underneath.
  * Returns the previous handler, or SIG_ERR on failure.
+ *
+ * NOTE: SA_RESTART is set unconditionally.  This is the desired BSD
+ * behavior for our simple OS — interrupted syscalls are automatically
+ * restarted, which is what most programs expect.
  */
 void (*signal(int signum, void (*handler)(int)))(int) {
     struct sigaction sa, old;
 
     sigemptyset(&sa.sa_mask);
     sa.sa_handler = handler;
-    sa.sa_flags   = SA_RESTART;
+    sa.sa_flags   = SA_RESTART;  /* BSD behavior: always restart syscalls */
     sa.sa_restorer = (void *)0;
 
     if (sigaction(signum, &sa, &old) < 0)

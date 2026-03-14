@@ -126,7 +126,7 @@ void swap_evict_pages(int n) {
   /* Limit scan iterations to avoid infinite loops.
    * We scan at most 2 full passes over all 64 process slots with
    * a reasonable per-process VA step limit. */
-  int max_iterations = 64 * 2 * 256;
+  int max_iterations = NPROC * 2 * 256;
   int iterations = 0;
 
   while (evicted < n && iterations < max_iterations) {
@@ -137,14 +137,14 @@ void swap_evict_pages(int n) {
     /* Skip unused processes and processes without user page tables */
     if (p->state == UNUSED || p->pagetable == 0 ||
         p->pagetable == kernel_pagetable) {
-      clock_proc_idx = (clock_proc_idx + 1) % 64;
+      clock_proc_idx = (clock_proc_idx + 1) % NPROC;
       clock_va = 0;
       continue;
     }
 
     /* Skip the currently running process (optimization) */
     if (p == current_proc) {
-      clock_proc_idx = (clock_proc_idx + 1) % 64;
+      clock_proc_idx = (clock_proc_idx + 1) % NPROC;
       clock_va = 0;
       continue;
     }
@@ -201,7 +201,7 @@ void swap_evict_pages(int n) {
 advance:
     clock_va += PAGE_SIZE;
     if (clock_va >= MAXVA) {
-      clock_proc_idx = (clock_proc_idx + 1) % 64;
+      clock_proc_idx = (clock_proc_idx + 1) % NPROC;
       clock_va = 0;
     }
   }

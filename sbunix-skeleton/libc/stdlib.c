@@ -7,6 +7,8 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <errno.h>
+#include <limits.h>
 
 /* -----------------------------------------------------------------------
  * String-to-number conversions
@@ -18,15 +20,21 @@
  */
 unsigned long strtoul(const char *s, char **endptr, int base) {
     unsigned long result = 0;
+    int neg = 0;
+    int overflow = 0;
 
     /* Skip leading whitespace */
     while (*s == ' ' || *s == '\t' || *s == '\n' ||
            *s == '\r' || *s == '\f' || *s == '\v')
         s++;
 
-    /* Optional sign (unsigned: '+' only) */
-    if (*s == '+')
+    /* Optional sign */
+    if (*s == '-') {
+        neg = 1;
         s++;
+    } else if (*s == '+') {
+        s++;
+    }
 
     /* Auto-detect base */
     if (base == 0) {
@@ -43,6 +51,9 @@ unsigned long strtoul(const char *s, char **endptr, int base) {
         s += 2;
     }
 
+    unsigned long cutoff = ULONG_MAX / (unsigned long)base;
+    int cutlim = (int)(ULONG_MAX % (unsigned long)base);
+
     const char *start = s;
     while (*s) {
         int digit;
@@ -58,6 +69,9 @@ unsigned long strtoul(const char *s, char **endptr, int base) {
         if (digit >= base)
             break;
 
+        if (result > cutoff || (result == cutoff && digit > cutlim)) {
+            overflow = 1;
+        }
         result = result * base + digit;
         s++;
     }
@@ -65,7 +79,12 @@ unsigned long strtoul(const char *s, char **endptr, int base) {
     if (endptr)
         *endptr = (char *)(s == start ? start : s);
 
-    return result;
+    if (overflow) {
+        errno = ERANGE;
+        return ULONG_MAX;
+    }
+
+    return neg ? (unsigned long)(-(long)result) : result;
 }
 
 long strtol(const char *s, char **endptr, int base) {
@@ -82,8 +101,30 @@ long strtol(const char *s, char **endptr, int base) {
         s++;
     }
 
+    /* Use strtoul for digit parsing but suppress its errno so we can
+     * apply signed range checks ourselves */
+    int saved_errno = errno;
+    errno = 0;
     unsigned long val = strtoul(s, endptr, base);
-    return neg ? -(long)val : (long)val;
+    if (errno == ERANGE) {
+        /* strtoul already overflowed unsigned range */
+        return neg ? LONG_MIN : LONG_MAX;
+    }
+    errno = saved_errno;
+
+    if (neg) {
+        if (val > (unsigned long)LONG_MAX + 1UL) {
+            errno = ERANGE;
+            return LONG_MIN;
+        }
+        return -(long)val;
+    } else {
+        if (val > (unsigned long)LONG_MAX) {
+            errno = ERANGE;
+            return LONG_MAX;
+        }
+        return (long)val;
+    }
 }
 
 /* On LP64 (rv64), long and long long are both 64-bit. */
@@ -170,11 +211,11 @@ void srand(unsigned int seed) {
  * ---------------------------------------------------------------------- */
 
 int abs(int x) {
-    return x < 0 ? -x : x;
+    return (int)(x < 0 ? -(unsigned int)x : (unsigned int)x);
 }
 
 long labs(long x) {
-    return x < 0 ? -x : x;
+    return (long)(x < 0 ? -(unsigned long)x : (unsigned long)x);
 }
 
 /* -----------------------------------------------------------------------
@@ -334,17 +375,25 @@ char *realpath(const char *path, char *resolved_path) {
         }
     }
 
-    /* Rebuild path */
+    /* Rebuild path with length tracking to prevent overflow */
     out[0] = '/';
     out[1] = '\0';
+    size_t outlen = 1;
     for (int i = 0; i < ncomp; i++) {
-        if (i > 0) strcat(out, "/");
-        else out[1] = '\0'; /* overwrite the initial NUL after / */
-        if (i == 0)
-            strcpy(out + 1, components[i]);
-        else {
-            strcat(out, components[i]);
+        size_t clen = strlen(components[i]);
+        size_t need = (i > 0 ? 1 : 0) + clen; /* separator + component */
+        if (outlen + need >= PATH_MAX) {
+            errno = 36; /* ENAMETOOLONG */
+            return (void *)0;
         }
+        if (i > 0) {
+            out[outlen++] = '/';
+        } else {
+            outlen = 1; /* overwrite NUL after initial / */
+        }
+        memcpy(out + outlen, components[i], clen);
+        outlen += clen;
+        out[outlen] = '\0';
     }
 
     /* Verify the path exists */
@@ -457,7 +506,11 @@ int setenv(const char *name, const char *value, int overwrite) {
                 free(entry);
                 return 0;
             }
+            /* Free the old malloc'd entry to avoid a leak.
+             * Only free if it points into heap (not the original envp). */
+            char *old = environ[i];
             environ[i] = entry;
+            free(old);
             return 0;
         }
     }
@@ -585,6 +638,18 @@ char *mktemp(char *tmpl) {
         return tmpl;
     }
     return tmpl;
+}
+
+/*
+ * remove() — delete a file or directory.
+ * Try unlink first; if that fails with EISDIR, try rmdir.
+ */
+int remove(const char *pathname) {
+    if (unlink(pathname) == 0)
+        return 0;
+    if (errno == EISDIR)
+        return rmdir(pathname);
+    return -1;
 }
 
 int putenv(char *string) {

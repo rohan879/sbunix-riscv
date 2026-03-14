@@ -56,10 +56,26 @@ size_t strlen(const char *s) {
 }
 
 char *strchr(const char *s, int c) {
-    while (*s) {
-        if (*s == (char)c)
+    char ch = (char)c;
+    for (;; s++) {
+        if (*s == ch)
             return (char *)s;
-        s++;
+        if (*s == '\0')
+            return (char *)0;
     }
-    return (char *)0;
+}
+
+void *memmove(void *dst, const void *src, size_t n) {
+    char *d = dst;
+    const char *s = src;
+    if (d < s) {
+        while (n--)
+            *d++ = *s++;
+    } else {
+        d += n;
+        s += n;
+        while (n--)
+            *--d = *--s;
+    }
+    return dst;
 }

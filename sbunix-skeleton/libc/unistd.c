@@ -20,10 +20,13 @@ ssize_t write(int fd, const void *buf, size_t count) {
 }
 
 int open(const char *path, int flags, ...) {
-    va_list ap;
-    va_start(ap, flags);
-    int mode = va_arg(ap, int);
-    va_end(ap);
+    int mode = 0;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = va_arg(ap, int);
+        va_end(ap);
+    }
     long ret = syscall(SYS_openat, AT_FDCWD, path, flags, mode);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -114,7 +117,8 @@ gid_t getgid(void) {
 }
 
 int usleep(unsigned int usecs) {
-    unsigned long req[2] = { 0, (unsigned long)usecs * 1000UL };
+    unsigned long ns = (unsigned long)usecs * 1000UL;
+    unsigned long req[2] = { ns / 1000000000UL, ns % 1000000000UL };
     syscall(SYS_nanosleep, req, 0);
     return 0;
 }

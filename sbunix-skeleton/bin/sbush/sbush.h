@@ -33,6 +33,7 @@
 struct command {
     char *argv[MAX_ARGS];
     int   argc;
+    int   quoted[MAX_ARGS]; /* 1 if token was originally quoted (suppress glob) */
     char *redir_in;         /* < file */
     char *redir_out;        /* > file */
     char *redir_append;     /* >> file */
@@ -76,6 +77,7 @@ struct job *job_find(int id);
 struct job *job_find_pid(pid_t pid);
 void        job_list(void);
 void        job_reap(void);
+struct job *job_find_last(void);
 
 /* is_name_char: check if char is valid in a variable/function name */
 static inline int is_name_char(char c) {
@@ -104,6 +106,8 @@ void  var_export(const char *name);
 void  var_set_readonly(const char *name);
 int   var_is_readonly(const char *name);
 void  var_list_readonly(void);
+void  var_list_exported(void);
+void  var_list_all(void);
 char **build_environ(void);
 
 /* Local variable scoping for functions (vars.c) */
@@ -124,6 +128,7 @@ void  positional_set_zero(const char *name);
 int parse_line(char *line, struct cmdlist *cl);
 int expand_and_parse_pipeline(char *seg, struct pipeline *pl);
 int glob_match(const char *pat, const char *name);
+void expand_vars(char *line);
 
 /* path.c */
 char *resolve_path(const char *cmd);
@@ -172,7 +177,9 @@ void exec_reset_depth(void);
 /* trap.c (or inline trap support) */
 void trap_set(int sig, const char *action);
 void trap_run(int sig);
+void trap_list(void);
 
 /* signal globals (sbush.c) */
 extern volatile sig_atomic_t fg_pid;
 extern volatile sig_atomic_t g_sigchld_flag;
+extern int shell_interactive;  /* 1 when running interactively (REPL) */

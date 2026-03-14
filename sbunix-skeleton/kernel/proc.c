@@ -107,11 +107,18 @@ void init_starter(void) {
 struct proc* allocproc(void) {
   struct proc *p;
 
+  /* Disable interrupts to prevent TOCTOU race: timer preemption between
+   * finding an UNUSED slot and claiming it could let two processes claim
+   * the same slot or PID. */
+  unsigned long saved_sstatus = r_sstatus();
+  w_sstatus(saved_sstatus & ~SSTATUS_SIE);
+
   for(p = proc; p < &proc[NPROC]; p++) {
     if(p->state == UNUSED) {
       goto found;
     }
   }
+  w_sstatus(saved_sstatus); /* restore interrupts */
   return 0;
 
 found:
@@ -136,6 +143,7 @@ found:
     if (attempts >= 32768) {
       /* All PIDs taken */
       p->state = UNUSED;
+      w_sstatus(saved_sstatus); /* restore interrupts */
       return 0;
     }
   }
@@ -147,13 +155,16 @@ found:
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     p->state = UNUSED;
+    w_sstatus(saved_sstatus); /* restore interrupts */
     return 0;
   }
+  memset(p->trapframe, 0, PAGE_SIZE); /* zero trapframe page to prevent info leak */
 
   // Allocate a kernel stack page.
   if((p->kstack = kalloc()) == 0){
     kfree(p->trapframe);
     p->state = UNUSED;
+    w_sstatus(saved_sstatus); /* restore interrupts */
     return 0;
   }
 
@@ -195,6 +206,7 @@ found:
   p->deferred_shared_pt = NULL;
   p->deferred_shared_sa = NULL;
 
+  w_sstatus(saved_sstatus); /* restore interrupts */
   return p;
 }
 

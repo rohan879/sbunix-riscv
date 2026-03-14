@@ -271,6 +271,7 @@ static void handle_timer_interrupt(void) {
     /* Wake processes whose timed sleep has expired */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
+            p->sleep_until != (uint64_t)-1 &&
             r_time() >= p->sleep_until) {
             p->waiting_for_uart = 0;
             p->state = RUNNABLE;
@@ -718,7 +719,8 @@ static void normalize_path(const char *in, char *out) {
 
     tmp[tlen++] = '/';
     /* Stack of segment-end positions in tmp (indices of the '/' before each segment) */
-    int stack[64];
+    #define NORMALIZE_MAX_DEPTH 128
+    int stack[NORMALIZE_MAX_DEPTH];
     int depth = 0;
 
     while (*p) {
@@ -735,7 +737,9 @@ static void normalize_path(const char *in, char *out) {
                 tlen = stack[--depth];
             }
         } else {
-            /* Normal component — push */
+            /* Normal component — push (guard against overflow) */
+            if (depth >= NORMALIZE_MAX_DEPTH)
+                break;
             stack[depth++] = tlen; /* save position before adding '/' + component */
             if (tlen > 1) tmp[tlen++] = '/'; /* add separator (root already has '/') */
             if (tlen + clen < 255) {
@@ -825,55 +829,54 @@ static int vfs_is_dir(const char *path) {
     return 0;
 }
 
-/* Follow symlinks in a resolved path (up to 8 levels to prevent loops) */
+/* Follow symlinks in a resolved path (iterative, up to maxdepth levels) */
 static int follow_symlinks(char *resolved, int maxdepth) {
-    if (maxdepth <= 0) return -40; /* ELOOP */
+    for (int depth = 0; depth < maxdepth; depth++) {
+        const char *relpath;
+        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+        if (!ops || !ops->readlink) return 0; /* not a symlink-capable fs */
 
-    const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
-    if (!ops || !ops->readlink) return 0; /* no readlink = not a symlink-capable fs */
+        char target[256];
+        int ret = ops->readlink(relpath, target, sizeof(target) - 1);
+        if (ret < 0) return 0; /* not a symlink, path is final */
+        target[ret] = '\0';
 
-    char target[256];
-    int ret = ops->readlink(relpath, target, sizeof(target) - 1);
-    if (ret < 0) return 0; /* not a symlink, path is final */
-    target[ret] = '\0';
+        /* Resolve the symlink target */
+        char new_resolved[256];
+        if (target[0] == '/') {
+            resolve_path("/", target, new_resolved);
+        } else {
+            /* Relative: resolve from symlink's parent directory */
+            char dir[256];
+            int rlen = strlen(resolved);
+            if (rlen > 255) rlen = 255;
+            memcpy(dir, resolved, rlen);
+            dir[rlen] = '\0';
+            char *last_slash = dir;
+            for (char *p = dir; *p; p++)
+                if (*p == '/') last_slash = p;
+            if (last_slash != dir)
+                *(last_slash + 1) = '\0';
+            else
+                dir[1] = '\0';
 
-    /* Resolve the symlink target */
-    char new_resolved[256];
-    if (target[0] == '/') {
-        resolve_path("/", target, new_resolved);
-    } else {
-        /* Relative: resolve from symlink's parent directory */
-        char dir[256];
-        int rlen = strlen(resolved);
-        if (rlen > 255) rlen = 255;
-        memcpy(dir, resolved, rlen);
-        dir[rlen] = '\0';
-        char *last_slash = dir;
-        for (char *p = dir; *p; p++)
-            if (*p == '/') last_slash = p;
-        if (last_slash != dir)
-            *(last_slash + 1) = '\0';
-        else
-            dir[1] = '\0';
+            char combined[512];
+            int dlen = strlen(dir);
+            int tlen = strlen(target);
+            if (dlen + tlen >= 510) return -36; /* ENAMETOOLONG */
+            memcpy(combined, dir, dlen);
+            memcpy(combined + dlen, target, tlen + 1);
 
-        char combined[512];
-        int dlen = strlen(dir);
-        int tlen = strlen(target);
-        if (dlen + tlen >= 510) return -36; /* ENAMETOOLONG */
-        memcpy(combined, dir, dlen);
-        memcpy(combined + dlen, target, tlen + 1);
+            resolve_path("/", combined, new_resolved);
+        }
 
-        resolve_path("/", combined, new_resolved);
+        int nlen = strlen(new_resolved);
+        if (nlen > 255) nlen = 255;
+        memcpy(resolved, new_resolved, nlen);
+        resolved[nlen] = '\0';
     }
-
-    int nlen = strlen(new_resolved);
-    if (nlen > 255) nlen = 255;
-    memcpy(resolved, new_resolved, nlen);
-    resolved[nlen] = '\0';
-
-    /* Recursively follow in case target is also a symlink */
-    return follow_symlinks(resolved, maxdepth - 1);
+    /* Exhausted maxdepth without resolving to a non-symlink */
+    return -40; /* ELOOP */
 }
 
 /* ------------------------------------------------------------------ */
@@ -985,6 +988,10 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
                     p->parent->state = RUNNABLE;
             }
             swtch(&p->context, &scheduler_context);
+            while (p->stopped) {
+                p->state = SLEEPING;
+                swtch(&p->context, &scheduler_context);
+            }
             return;
         }
 
@@ -992,6 +999,17 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         p->exit_status = 128 + signum;
         p->killed_by_signal = signum;
         cleanup_proc_resources(p);
+        /* Reparent children to init (proc[0]) */
+        for (struct proc *child = proc; child < &proc[NPROC]; child++) {
+            if (child->parent == p) {
+                child->parent = &proc[0];
+                if (child->state == ZOMBIE) {
+                    proc[0].sigpending |= signal_bit(SIGCHLD);
+                    if (proc[0].state == SLEEPING)
+                        proc[0].state = RUNNABLE;
+                }
+            }
+        }
         p->state = ZOMBIE;
         if (p->parent) {
             p->parent->sigpending |= signal_bit(SIGCHLD);
@@ -1070,7 +1088,13 @@ static long sys_brk_handler(struct trapframe *tf) {
 
     if (new_brk == 0) {
         return (long)cur_sz;
-    } else if (new_brk < cur_sz) {
+    }
+    /* Reject brk values that would extend into kernel address space or
+     * overlap the user stack region */
+    if (new_brk >= current_proc->stack_bottom || new_brk >= MAXVA) {
+        return (long)cur_sz; /* return current brk unchanged */
+    }
+    if (new_brk < cur_sz) {
         /* Shrink: unmap freed pages between new_brk and cur_sz */
         uint64_t unmap_start = (new_brk + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
         uint64_t unmap_end   = (cur_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
@@ -1201,14 +1225,24 @@ static long sys_read_handler(struct trapframe *tf) {
                 /* SA_RESTART: continue the loop to re-block */
             }
         }
-        /* Drain all available bytes (up to len) without re-blocking */
-        while (read_bytes < len && pipe_avail(pid) > 0) {
-            char kc = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
-            pipes[pid].rpos++;
-            if (copyout(current_proc->pagetable, ubuf + read_bytes, &kc, 1) < 0) {
-                return (read_bytes > 0) ? (long)read_bytes : (long)-14;
+        /* Drain all available bytes (up to len) without re-blocking.
+         * Batch into a local buffer to avoid per-byte copyout overhead. */
+        {
+            char kchunk[512];
+            while (read_bytes < len && pipe_avail(pid) > 0) {
+                size_t want = len - read_bytes;
+                if (want > sizeof(kchunk)) want = sizeof(kchunk);
+                size_t k;
+                for (k = 0; k < want && pipe_avail(pid) > 0; k++) {
+                    kchunk[k] = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
+                    pipes[pid].rpos++;
+                }
+                if (k > 0 && copyout(current_proc->pagetable,
+                                     ubuf + read_bytes, kchunk, k) < 0) {
+                    return (read_bytes > 0) ? (long)read_bytes : (long)-14;
+                }
+                read_bytes += k;
             }
-            read_bytes++;
         }
         /* Wake blocked pipe writers on this pipe since we freed buffer space */
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
@@ -1618,6 +1652,13 @@ static long sys_execve_handler(struct trapframe *tf) {
         int total        = header + argv_ptrs_sz + envp_ptrs_sz + kstroff + kenvoff;
         total = (total + 15) & ~15;
 
+        /* Guard: total must fit in a single kernel page used as staging buffer */
+        if (total > (int)PAGE_SIZE) {
+            kfree(kstrbuf);
+            if (kenvbuf) kfree(kenvbuf);
+            return (long)-7; /* -E2BIG: argument list too long */
+        }
+
         uint64_t sp            = MAXVA - 32 - total;
         uint64_t argv_ptr_base = sp + header;
         uint64_t envp_ptr_base = sp + header + argv_ptrs_sz;
@@ -1772,8 +1813,12 @@ static long sys_kill_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
 
-    /* Validate signal number */
+    /* Validate signal number: 0 is allowed (permission probe) */
     if (sig < 0 || sig >= 32) {
+        return (long)-22; /* -EINVAL */
+    }
+    /* For non-zero signals, validate before any delivery */
+    if (sig != 0 && !signal_is_valid(sig)) {
         return (long)-22; /* -EINVAL */
     }
 
@@ -1792,9 +1837,6 @@ static long sys_kill_handler(struct trapframe *tf) {
         if (sig == 0) {
             return (long)0; /* probe: process exists */
         }
-        if (!signal_is_valid(sig)) {
-            return (long)-22; /* -EINVAL */
-        }
         deliver_signal_to_proc(target, sig);
         return (long)0;
     } else if (target_pid == 0) {
@@ -1808,26 +1850,21 @@ static long sys_kill_handler(struct trapframe *tf) {
                     deliver_signal_to_proc(&proc[i], sig);
             }
         }
-        if (sig == 0)
-            return sent > 0 ? (long)0 : (long)-3;
-        if (!signal_is_valid(sig))
-            return (long)-22;
         return sent > 0 ? (long)0 : (long)-3;
     } else if (target_pid == -1) {
-        /* Send to all processes except init */
+        /* Send to all processes except init and sender.
+         * Also protect init (pid 1) from SIGKILL/SIGSTOP. */
         int sent = 0;
         for (int i = 0; i < NPROC; i++) {
-            if (proc[i].state != UNUSED && proc[i].pid != 1 &&
-                &proc[i] != current_proc) {
-                sent++;
-                if (sig != 0)
-                    deliver_signal_to_proc(&proc[i], sig);
-            }
+            if (proc[i].state == UNUSED)
+                continue;
+            /* Always skip init (pid 1) and the sender itself */
+            if (proc[i].pid == 1 || &proc[i] == current_proc)
+                continue;
+            sent++;
+            if (sig != 0)
+                deliver_signal_to_proc(&proc[i], sig);
         }
-        if (sig == 0)
-            return sent > 0 ? (long)0 : (long)-3;
-        if (!signal_is_valid(sig))
-            return (long)-22;
         return sent > 0 ? (long)0 : (long)-3;
     } else {
         /* target_pid < -1: send to process group |target_pid| */
@@ -1840,10 +1877,6 @@ static long sys_kill_handler(struct trapframe *tf) {
                     deliver_signal_to_proc(&proc[i], sig);
             }
         }
-        if (sig == 0)
-            return sent > 0 ? (long)0 : (long)-3;
-        if (!signal_is_valid(sig))
-            return (long)-22;
         return sent > 0 ? (long)0 : (long)-3;
     }
 }
@@ -2211,6 +2244,10 @@ static long sys_mmap_handler(struct trapframe *tf) {
     uint64_t va;
     if (flags & MAP_FIXED) {
         va = addr & ~(uint64_t)(PAGE_SIZE - 1);
+        /* Reject MAP_FIXED mappings that overlap kernel address space */
+        if (va + len > MAXVA || va + len < va) {
+            return (long)-22; /* -EINVAL */
+        }
     } else {
         if (current_proc->mmap_base == 0)
             current_proc->mmap_base = 0x20000000UL;
@@ -2600,6 +2637,13 @@ static long sys_rt_sigreturn_handler(struct trapframe *tf) {
         return (long)-14;
     }
 
+    /* Validate restored trapframe: epc and sp must be in user VA range.
+     * Prevent forging kernel addresses or blocking unkillable signals. */
+    if (frame.saved_tf.epc >= MAXVA || frame.saved_tf.sp >= MAXVA) {
+        return (long)-22; /* -EINVAL: reject forged kernel addresses */
+    }
+    /* Never allow blocking SIGKILL or SIGSTOP */
+    frame.saved_sigmask &= ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
     current_proc->sigmask = frame.saved_sigmask;
     memcpy(tf, &frame.saved_tf, sizeof(frame.saved_tf));
     return SYSCALL_NORETURN;
@@ -2675,6 +2719,7 @@ static long sys_faccessat_handler(struct trapframe *tf) {
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
+    int amode = (int)tf->a2; /* F_OK=0, R_OK=4, W_OK=2, X_OK=1 */
 
     char resolved[256];
     long path_ret = resolve_at_path(dirfd, kpath, resolved);
@@ -2686,7 +2731,29 @@ static long sys_faccessat_handler(struct trapframe *tf) {
     if (ops && ops->stat) {
         uint8_t st[128];
         int ret = ops->stat(relpath, st);
-        return (ret == 0) ? (long)0 : (long)-2;
+        if (ret != 0)
+            return (long)-2; /* -ENOENT */
+        /* F_OK: just check existence */
+        if (amode == 0)
+            return (long)0;
+        /* Extract st_mode from the stat buffer (offset 16, 4 bytes) */
+        uint32_t file_mode = 0;
+        memcpy(&file_mode, st + 16, 4);
+        /* For a single-user OS, check owner permission bits.
+         * tarfs (and other read-only filesystems) reject W_OK since
+         * they are read-only media. */
+        if ((amode & 4) && !(file_mode & 0400)) /* R_OK vs S_IRUSR */
+            return (long)-13; /* -EACCES */
+        if ((amode & 2)) {
+            /* Write check: reject for read-only filesystems (tarfs) */
+            if (ops == &tarfs_ops)
+                return (long)-30; /* -EROFS */
+            if (!(file_mode & 0200)) /* W_OK vs S_IWUSR */
+                return (long)-13; /* -EACCES */
+        }
+        if ((amode & 1) && !(file_mode & 0100)) /* X_OK vs S_IXUSR */
+            return (long)-13; /* -EACCES */
+        return (long)0;
     } else {
         return (long)-2;
     }
@@ -3350,8 +3417,8 @@ static long sys_ppoll_handler(struct trapframe *tf) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
         } else {
-            /* Infinite timeout: sleep without deadline */
-            current_proc->sleep_until = 0;
+            /* Infinite timeout: use sentinel so timer won't spuriously wake us */
+            current_proc->sleep_until = (uint64_t)-1;
         }
         current_proc->waiting_for_uart = 2;
         current_proc->state = SLEEPING;
@@ -3454,8 +3521,8 @@ static long sys_pselect6_handler(struct trapframe *tf) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
         } else {
-            /* Infinite timeout: sleep without deadline */
-            current_proc->sleep_until = 0;
+            /* Infinite timeout: use sentinel so timer won't spuriously wake us */
+            current_proc->sleep_until = (uint64_t)-1;
         }
         current_proc->waiting_for_uart = 2;
         current_proc->state = SLEEPING;
@@ -3758,9 +3825,25 @@ void trap_handler(struct trapframe *tf) {
                 stval >= current_proc->stack_bottom - 256 * PAGE_SIZE &&
                 stval < current_proc->stack_top) {
                 uint64_t va = PGROUNDDOWN(stval);
+                /* Compute the lowest address the stack may reach.
+                 * Leave a 1-page guard gap above the heap (sz) and
+                 * also above the mmap region to prevent silent overlap. */
+                uint64_t heap_limit = current_proc->sz;
+                if (current_proc->mmap_base > heap_limit)
+                    heap_limit = current_proc->mmap_base;
+                /* Guard page: stack must stay at least 1 page above the
+                 * heap/mmap area to prevent silent overlap. */
+                uint64_t stack_floor = heap_limit + PAGE_SIZE;
+                /* Don't even attempt if the faulting address is below
+                 * the floor (would overlap heap/mmap + guard). */
+                if (va < stack_floor)
+                    goto pagefault_kill;
                 int grew = 0;
                 while (current_proc->stack_bottom > va) {
                     uint64_t new_bottom = current_proc->stack_bottom - PAGE_SIZE;
+                    /* Enforce stack floor (heap/mmap + guard page gap) */
+                    if (new_bottom < stack_floor)
+                        break;
                     char *pg = kalloc();
                     if (!pg) break;
                     memset(pg, 0, PAGE_SIZE);

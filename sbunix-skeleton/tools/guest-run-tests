@@ -48,6 +48,9 @@ echo === C Binary Tests ===
 /bin/polltest
 /bin/unametest
 /bin/mathtest
+/bin/sectest
+/bin/libctest
+/bin/pipetest
 echo === C Binary Tests Done ===
 
 echo === Task345 Test ===

@@ -132,6 +132,18 @@ void var_export(const char *name) {
         var_exported[i] = 1;
 }
 
+void var_list_exported(void) {
+    for (int i = 0; i < nvar; i++) {
+        if (var_exported[i])
+            dprintf(STDOUT_FILENO, "export %s=\"%s\"\n", var_names[i], var_values[i]);
+    }
+}
+
+void var_list_all(void) {
+    for (int i = 0; i < nvar; i++)
+        dprintf(STDOUT_FILENO, "%s=%s\n", var_names[i], var_values[i]);
+}
+
 char **build_environ(void) {
     int j = 0;
     for (int i = 0; i < nvar && j < MAX_VARS; i++) {

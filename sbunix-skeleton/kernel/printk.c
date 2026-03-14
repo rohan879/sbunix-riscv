@@ -9,9 +9,9 @@
 #define DMESG_BUFSZ 16384
 static char dmesg_buf[DMESG_BUFSZ];
 static int dmesg_head;   /* next write position */
-static int dmesg_count;  /* total bytes written (may exceed DMESG_BUFSZ) */
+static unsigned int dmesg_count;  /* total bytes written (may exceed DMESG_BUFSZ) */
 
-int dmesg_total(void) {
+unsigned int dmesg_total(void) {
   return dmesg_count;
 }
 

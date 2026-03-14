@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 /* Static FILE objects for stdin, stdout, stderr */
 static FILE __stdin  = { .fd = 0, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0, .ungot = -1 };
@@ -142,7 +144,7 @@ int fputs(const char *s, FILE *stream) {
 }
 
 int fprintf(FILE *stream, const char *fmt, ...) {
-    char tmp[1024];
+    char tmp[4096];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
@@ -156,7 +158,7 @@ int fprintf(FILE *stream, const char *fmt, ...) {
 }
 
 int vfprintf(FILE *stream, const char *fmt, va_list ap) {
-    char tmp[1024];
+    char tmp[4096];
     int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     int w = n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1;
     for (int i = 0; i < w; i++) {
@@ -210,8 +212,10 @@ int fgetc(FILE *stream) {
 }
 
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
+    if (size == 0 || nmemb == 0) return 0;
+    /* Guard against multiplication overflow */
+    if (nmemb > SIZE_MAX / size) return 0;
     size_t total = size * nmemb;
-    if (total == 0) return 0;
     const unsigned char *p = (const unsigned char *)ptr;
     for (size_t i = 0; i < total; i++) {
         if (fputc(p[i], stream) == EOF)
@@ -618,4 +622,54 @@ int getc(FILE *stream) {
 
 int putc(int c, FILE *stream) {
     return fputc(c, stream);
+}
+
+/*
+ * fdopen() — associate a FILE stream with an existing file descriptor.
+ */
+FILE *fdopen(int fd, const char *mode) {
+    (void)mode; /* mode is advisory; fd is already open with its flags */
+    if (fd < 0) {
+        errno = EBADF;
+        return (void *)0;
+    }
+
+    /* Find a free slot in the pool */
+    for (int i = 0; i < FILE_POOL_SIZE; i++) {
+        if (!__file_pool_used[i]) {
+            __file_pool_used[i] = 1;
+            __file_pool[i].fd = fd;
+            __file_pool[i].eof = 0;
+            __file_pool[i].error = 0;
+            __file_pool[i].buf_mode = _IOFBF;
+            __file_pool[i].wpos = 0;
+            __file_pool[i].ungot = -1;
+            __stream_register(&__file_pool[i]);
+            return &__file_pool[i];
+        }
+    }
+
+    errno = EMFILE;
+    return (void *)0;
+}
+
+/*
+ * tmpfile() — create and open a temporary file.
+ * The file is unlinked immediately so it vanishes when closed.
+ */
+FILE *tmpfile(void) {
+    char tmpl[] = "/tmp/tmpXXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0)
+        return (void *)0;
+
+    /* Unlink immediately so the file disappears when closed */
+    unlink(tmpl);
+
+    FILE *fp = fdopen(fd, "w+");
+    if (!fp) {
+        close(fd);
+        return (void *)0;
+    }
+    return fp;
 }

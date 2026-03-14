@@ -132,7 +132,32 @@ void free(void *ptr) {
         return;
 
     block_hdr_t *hdr = (block_hdr_t *)((char *)ptr - HDR_SIZE);
+    /* Guard against double-free: if already free, do nothing */
+    if (hdr->free)
+        return;
     hdr->free = 1;
+
+    /* Forward coalescing: merge with adjacent next block if it is free */
+    block_hdr_t *next_blk = (block_hdr_t *)((char *)hdr + HDR_SIZE + hdr->size);
+    if ((char *)next_blk < (char *)heap_end && next_blk->free) {
+        /* Remove next_blk from the free list */
+        block_hdr_t *prev = (void *)0;
+        block_hdr_t *cur  = free_list;
+        while (cur) {
+            if (cur == next_blk) {
+                if (prev)
+                    prev->next = cur->next;
+                else
+                    free_list = cur->next;
+                break;
+            }
+            prev = cur;
+            cur  = cur->next;
+        }
+        /* Absorb next_blk into hdr */
+        hdr->size += HDR_SIZE + next_blk->size;
+    }
+
     /* Prepend to free list */
     hdr->next = free_list;
     free_list = hdr;
