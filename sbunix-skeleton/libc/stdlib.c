@@ -211,11 +211,11 @@ void srand(unsigned int seed) {
  * ---------------------------------------------------------------------- */
 
 int abs(int x) {
-    return x < 0 ? -x : x;
+    return (int)(x < 0 ? -(unsigned int)x : (unsigned int)x);
 }
 
 long labs(long x) {
-    return x < 0 ? -x : x;
+    return (long)(x < 0 ? -(unsigned long)x : (unsigned long)x);
 }
 
 /* -----------------------------------------------------------------------
@@ -506,7 +506,11 @@ int setenv(const char *name, const char *value, int overwrite) {
                 free(entry);
                 return 0;
             }
+            /* Free the old malloc'd entry to avoid a leak.
+             * Only free if it points into heap (not the original envp). */
+            char *old = environ[i];
             environ[i] = entry;
+            free(old);
             return 0;
         }
     }

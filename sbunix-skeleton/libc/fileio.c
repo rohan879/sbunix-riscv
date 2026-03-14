@@ -143,7 +143,7 @@ int fputs(const char *s, FILE *stream) {
 }
 
 int fprintf(FILE *stream, const char *fmt, ...) {
-    char tmp[1024];
+    char tmp[4096];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
@@ -157,7 +157,7 @@ int fprintf(FILE *stream, const char *fmt, ...) {
 }
 
 int vfprintf(FILE *stream, const char *fmt, va_list ap) {
-    char tmp[1024];
+    char tmp[4096];
     int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     int w = n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1;
     for (int i = 0; i < w; i++) {

@@ -114,7 +114,8 @@ gid_t getgid(void) {
 }
 
 int usleep(unsigned int usecs) {
-    unsigned long req[2] = { 0, (unsigned long)usecs * 1000UL };
+    unsigned long ns = (unsigned long)usecs * 1000UL;
+    unsigned long req[2] = { ns / 1000000000UL, ns % 1000000000UL };
     syscall(SYS_nanosleep, req, 0);
     return 0;
 }

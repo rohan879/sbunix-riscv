@@ -275,7 +275,7 @@ int printf(const char *fmt, ...) {
  * ---------------------------------------------------------------------- */
 
 int vdprintf(int fd, const char *fmt, va_list ap) {
-    char tmp[1024];
+    char tmp[4096];
     int  n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     int  w = n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1;
     write(fd, tmp, w);
