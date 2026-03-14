@@ -154,6 +154,7 @@ void exec_reset_depth(void);
 
 /* trap.c (or inline trap support) */
 void trap_set(int sig, const char *action);
+void trap_run(int sig);
 
 /* signal globals (sbush.c) */
 extern volatile sig_atomic_t fg_pid;

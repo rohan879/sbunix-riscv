@@ -256,7 +256,8 @@ static void sigint_handler(int sig) {
     pid_t p = fg_pid;
     if (p > 0)
         kill(p, SIGINT);
-    /* If no foreground child, do nothing — tty already echoed ^C\n, reprint prompt */
+    /* Run trap command for SIGINT if set */
+    trap_run(SIGINT);
 }
 
 /* SIGQUIT handler: forward Ctrl-\ to the foreground child if one exists.
@@ -267,7 +268,8 @@ static void sigquit_handler(int sig) {
     pid_t p = fg_pid;
     if (p > 0)
         kill(p, SIGQUIT);
-    /* If no foreground child, do nothing — tty already echoed ^\\n */
+    /* Run trap command for SIGQUIT if set */
+    trap_run(SIGQUIT);
 }
 
 /* SIGTSTP handler: forward Ctrl-Z to the foreground child if one exists */
@@ -276,7 +278,8 @@ static void sigtstp_handler(int sig) {
     pid_t p = fg_pid;
     if (p > 0)
         kill(p, SIGTSTP);
-    /* Shell itself must NOT stop */
+    /* Run trap command for SIGTSTP if set */
+    trap_run(SIGTSTP);
 }
 
 /* SIGCHLD handler: reap children and set flag for main-loop notification */
@@ -396,6 +399,7 @@ int main(int argc, char *argv[], char *envp[]) {
     /* -c mode: execute command string */
     if (argc >= 3 && strcmp(argv[1], "-c") == 0) {
         execute_line(argv[2]);
+        trap_run(0);
         return last_exit_status;
     }
 
@@ -404,7 +408,9 @@ int main(int argc, char *argv[], char *envp[]) {
         positional_set_zero(argv[1]);
         if (argc > 2)
             positional_set_args(argc - 2, argv + 2);
-        return run_script(argv[1]);
+        int ret = run_script(argv[1]);
+        trap_run(0);
+        return ret;
     }
 
     /* interactive REPL */
@@ -434,5 +440,7 @@ int main(int argc, char *argv[], char *envp[]) {
         execute_line(line);
     }
 
+    /* Run EXIT trap before exiting */
+    trap_run(0);
     return 0;
 }

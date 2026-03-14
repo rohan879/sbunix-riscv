@@ -311,6 +311,20 @@ void execute_cmdlist(struct cmdlist *cl) {
             /* CONN_SEQ always runs */
         }
 
+        /* Check for ! pipeline negation prefix */
+        int negate = 0;
+        {
+            char *rp = pl->raw;
+            while (*rp == ' ' || *rp == '\t') rp++;
+            if (*rp == '!' && (rp[1] == ' ' || rp[1] == '\t' || rp[1] == '\0')) {
+                negate = 1;
+                /* Remove the ! prefix from raw text */
+                rp++;
+                while (*rp == ' ' || *rp == '\t') rp++;
+                memmove(pl->raw, rp, strlen(rp) + 1);
+            }
+        }
+
         /* Expand variables and parse now (deferred from parse_line).
          * Use pl->raw directly — it's not needed after expansion. */
         int saved_conn = pl->connector;
@@ -321,6 +335,8 @@ void execute_cmdlist(struct cmdlist *cl) {
         pl->connector = saved_conn;
 
         status = execute_pipeline(pl);
+        if (negate)
+            status = (status == 0) ? 1 : 0;
         last_exit_status = status;
     }
 }
