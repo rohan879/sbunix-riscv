@@ -263,6 +263,121 @@ void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
     return (void *)0;
 }
 
+/* -----------------------------------------------------------------------
+ * realpath() — resolve a pathname to an absolute path.
+ * Handles . and .. components.  Does not follow symlinks beyond what
+ * the kernel already resolves on stat().
+ * ---------------------------------------------------------------------- */
+
+#include <sys/stat.h>
+#include <limits.h>
+#include <errno.h>
+
+char *realpath(const char *path, char *resolved_path) {
+    if (!path || !*path) {
+        errno = 22; /* EINVAL */
+        return (void *)0;
+    }
+
+    static char buf[PATH_MAX];
+    char *out = resolved_path ? resolved_path : buf;
+    char work[PATH_MAX];
+
+    /* Start with absolute path */
+    if (path[0] != '/') {
+        if (!getcwd(out, PATH_MAX))
+            return (void *)0;
+        size_t cwdlen = strlen(out);
+        if (cwdlen + 1 + strlen(path) >= PATH_MAX) {
+            errno = 36; /* ENAMETOOLONG */
+            return (void *)0;
+        }
+        out[cwdlen] = '/';
+        strcpy(out + cwdlen + 1, path);
+    } else {
+        if (strlen(path) >= PATH_MAX) {
+            errno = 36;
+            return (void *)0;
+        }
+        strcpy(out, path);
+    }
+
+    /* Normalize: resolve . and .. */
+    strcpy(work, out);
+    char *components[256];
+    int ncomp = 0;
+
+    char *p = work;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        char *start = p;
+        while (*p && *p != '/') p++;
+        if (*p) *p++ = '\0';
+
+        if (strcmp(start, ".") == 0) {
+            continue;
+        } else if (strcmp(start, "..") == 0) {
+            if (ncomp > 0) ncomp--;
+        } else {
+            if (ncomp < 256)
+                components[ncomp++] = start;
+        }
+    }
+
+    /* Rebuild path */
+    out[0] = '/';
+    out[1] = '\0';
+    for (int i = 0; i < ncomp; i++) {
+        if (i > 0) strcat(out, "/");
+        else out[1] = '\0'; /* overwrite the initial NUL after / */
+        if (i == 0)
+            strcpy(out + 1, components[i]);
+        else {
+            strcat(out, components[i]);
+        }
+    }
+
+    /* Verify the path exists */
+    struct stat st;
+    if (stat(out, &st) < 0)
+        return (void *)0;
+
+    return out;
+}
+
+/* -----------------------------------------------------------------------
+ * system() — execute a command via the shell.
+ * ---------------------------------------------------------------------- */
+
+#include <sys/wait.h>
+
+int system(const char *command) {
+    if (!command)
+        return 1; /* shell is available */
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+
+    if (pid == 0) {
+        /* child */
+        char *argv[4];
+        argv[0] = "sh";
+        argv[1] = "-c";
+        argv[2] = (char *)command;
+        argv[3] = (void *)0;
+        execve("/bin/sh", argv, environ);
+        _exit(127);
+    }
+
+    /* parent */
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0)
+        return -1;
+    return status;
+}
+
 /*
  * abort() — terminate the process abnormally.
  */

@@ -39,3 +39,56 @@ mode_t umask(mode_t mask) {
     /* SYS_umask = 166 */
     return (mode_t)syscall(166, mask);
 }
+
+/*
+ * statvfs / fstatvfs — filesystem statistics.
+ * Stub: returns reasonable defaults since kernel lacks a statfs syscall.
+ */
+#include <sys/statvfs.h>
+#include <string.h>
+
+int statvfs(const char *path, struct statvfs *buf) {
+    if (!path || !buf) {
+        errno = 22; /* EINVAL */
+        return -1;
+    }
+    /* Verify path exists */
+    struct stat st;
+    if (stat(path, &st) < 0)
+        return -1;
+
+    memset(buf, 0, sizeof(*buf));
+    buf->f_bsize   = 4096;
+    buf->f_frsize  = 4096;
+    buf->f_blocks  = 4096;
+    buf->f_bfree   = 2048;
+    buf->f_bavail  = 2048;
+    buf->f_files   = 1024;
+    buf->f_ffree   = 512;
+    buf->f_favail  = 512;
+    buf->f_namemax = 255;
+    return 0;
+}
+
+int fstatvfs(int fd, struct statvfs *buf) {
+    if (!buf) {
+        errno = 22;
+        return -1;
+    }
+    /* Verify fd is valid via fstat */
+    struct stat st;
+    if (fstat(fd, &st) < 0)
+        return -1;
+
+    memset(buf, 0, sizeof(*buf));
+    buf->f_bsize   = 4096;
+    buf->f_frsize  = 4096;
+    buf->f_blocks  = 4096;
+    buf->f_bfree   = 2048;
+    buf->f_bavail  = 2048;
+    buf->f_files   = 1024;
+    buf->f_ffree   = 512;
+    buf->f_favail  = 512;
+    buf->f_namemax = 255;
+    return 0;
+}

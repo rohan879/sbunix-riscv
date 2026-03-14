@@ -38,6 +38,12 @@ int    setenv(const char *name, const char *value, int overwrite);
 int    unsetenv(const char *name);
 int    putenv(char *string);
 
+/* Path resolution */
+char *realpath(const char *path, char *resolved_path);
+
+/* Command execution */
+int system(const char *command);
+
 /* Sorting and searching */
 void  qsort(void *base, size_t nmemb, size_t size,
             int (*compar)(const void *, const void *));
