@@ -674,6 +674,102 @@ static void test_stdio_streams(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 18. realpath — path resolution
+ * ---------------------------------------------------------------------- */
+
+static void test_realpath(void) {
+    section("realpath");
+
+    /* Absolute path that exists */
+    char resolved[PATH_MAX];
+    char *r = realpath("/bin/echo", resolved);
+    CHECK("realpath /bin/echo", r != NULL && strcmp(resolved, "/bin/echo") == 0);
+
+    /* Path with . component */
+    r = realpath("/bin/./echo", resolved);
+    CHECK("realpath /bin/./echo", r != NULL && strcmp(resolved, "/bin/echo") == 0);
+
+    /* Path with .. component */
+    r = realpath("/bin/../bin/echo", resolved);
+    CHECK("realpath /bin/../bin/echo", r != NULL && strcmp(resolved, "/bin/echo") == 0);
+
+    /* Root path */
+    r = realpath("/", resolved);
+    CHECK("realpath /", r != NULL && strcmp(resolved, "/") == 0);
+
+    /* Nonexistent path returns NULL */
+    r = realpath("/no/such/path", resolved);
+    CHECK("realpath nonexistent NULL", r == NULL);
+
+    /* NULL path returns NULL with EINVAL */
+    errno = 0;
+    r = realpath(NULL, resolved);
+    CHECK("realpath NULL EINVAL", r == NULL && errno == EINVAL);
+}
+
+/* -----------------------------------------------------------------------
+ * 19. system — command execution via shell
+ * ---------------------------------------------------------------------- */
+
+static void test_system(void) {
+    section("system");
+
+    /* NULL command: returns nonzero (shell available) */
+    int r = system(NULL);
+    CHECK("system(NULL) nonzero", r != 0);
+
+    /* Run a command that succeeds */
+    r = system("true");
+    CHECK("system true exit 0", WIFEXITED(r) && WEXITSTATUS(r) == 0);
+
+    /* Run a command that fails */
+    r = system("false");
+    CHECK("system false exit 1", WIFEXITED(r) && WEXITSTATUS(r) == 1);
+
+    /* Run echo and verify process completes */
+    r = system("echo system_test > /dev/null");
+    CHECK("system echo exit 0", WIFEXITED(r) && WEXITSTATUS(r) == 0);
+}
+
+/* -----------------------------------------------------------------------
+ * 20. statvfs / fstatvfs — filesystem statistics
+ * ---------------------------------------------------------------------- */
+
+#include <sys/statvfs.h>
+
+static void test_statvfs(void) {
+    section("statvfs");
+
+    struct statvfs vfs;
+
+    /* statvfs on root */
+    int r = statvfs("/", &vfs);
+    CHECK("statvfs / ret 0", r == 0);
+    CHECK("statvfs f_bsize > 0", vfs.f_bsize > 0);
+    CHECK("statvfs f_blocks > 0", vfs.f_blocks > 0);
+    CHECK("statvfs f_namemax > 0", vfs.f_namemax > 0);
+
+    /* statvfs on nonexistent path */
+    r = statvfs("/no/such/path", &vfs);
+    CHECK("statvfs bad path -1", r == -1);
+
+    /* fstatvfs on a valid fd */
+    int fd = open("/bin/echo", O_RDONLY);
+    CHECK("open for fstatvfs", fd >= 0);
+    if (fd >= 0) {
+        struct statvfs vfs2;
+        r = fstatvfs(fd, &vfs2);
+        CHECK("fstatvfs ret 0", r == 0);
+        CHECK("fstatvfs f_bsize > 0", vfs2.f_bsize > 0);
+        close(fd);
+    }
+
+    /* fstatvfs on invalid fd */
+    r = fstatvfs(-1, &vfs);
+    CHECK("fstatvfs bad fd -1", r == -1);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -697,6 +793,9 @@ int main(void) {
     test_mman();
     test_stdint();
     test_stdio_streams();
+    test_realpath();
+    test_system();
+    test_statvfs();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
