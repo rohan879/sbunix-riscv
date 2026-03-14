@@ -271,6 +271,7 @@ static void handle_timer_interrupt(void) {
     /* Wake processes whose timed sleep has expired */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
+            p->sleep_until != (uint64_t)-1 &&
             r_time() >= p->sleep_until) {
             p->waiting_for_uart = 0;
             p->state = RUNNABLE;
@@ -985,6 +986,10 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
                     p->parent->state = RUNNABLE;
             }
             swtch(&p->context, &scheduler_context);
+            while (p->stopped) {
+                p->state = SLEEPING;
+                swtch(&p->context, &scheduler_context);
+            }
             return;
         }
 
@@ -992,6 +997,17 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         p->exit_status = 128 + signum;
         p->killed_by_signal = signum;
         cleanup_proc_resources(p);
+        /* Reparent children to init (proc[0]) */
+        for (struct proc *child = proc; child < &proc[NPROC]; child++) {
+            if (child->parent == p) {
+                child->parent = &proc[0];
+                if (child->state == ZOMBIE) {
+                    proc[0].sigpending |= signal_bit(SIGCHLD);
+                    if (proc[0].state == SLEEPING)
+                        proc[0].state = RUNNABLE;
+                }
+            }
+        }
         p->state = ZOMBIE;
         if (p->parent) {
             p->parent->sigpending |= signal_bit(SIGCHLD);
@@ -3374,8 +3390,8 @@ static long sys_ppoll_handler(struct trapframe *tf) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
         } else {
-            /* Infinite timeout: sleep without deadline */
-            current_proc->sleep_until = 0;
+            /* Infinite timeout: use sentinel so timer won't spuriously wake us */
+            current_proc->sleep_until = (uint64_t)-1;
         }
         current_proc->waiting_for_uart = 2;
         current_proc->state = SLEEPING;
@@ -3478,8 +3494,8 @@ static long sys_pselect6_handler(struct trapframe *tf) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
         } else {
-            /* Infinite timeout: sleep without deadline */
-            current_proc->sleep_until = 0;
+            /* Infinite timeout: use sentinel so timer won't spuriously wake us */
+            current_proc->sleep_until = (uint64_t)-1;
         }
         current_proc->waiting_for_uart = 2;
         current_proc->state = SLEEPING;

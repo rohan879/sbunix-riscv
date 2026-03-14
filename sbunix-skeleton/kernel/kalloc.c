@@ -37,8 +37,10 @@ static int pa_to_index(uint64_t pa) {
 
 void page_ref_inc(uint64_t pa) {
     int idx = pa_to_index(pa);
-    if (idx >= 0 && idx < (int)NPAGE)
-        page_refcount[idx]++;
+    if (idx >= 0 && idx < (int)NPAGE) {
+        if (page_refcount[idx] < 30000)
+            page_refcount[idx]++;
+    }
 }
 
 void page_ref_dec(uint64_t pa) {
@@ -203,7 +205,13 @@ static void magazine_free(uint64_t pa) {
 
 void kfree(void *pa) {
     if (!pa) return;
-    int idx = pa_to_index((uint64_t)pa);
+
+    /* Reject addresses outside physical RAM or not page-aligned */
+    uint64_t addr = (uint64_t)pa;
+    if (addr < 0x80000000UL || addr >= PHYSTOP || (addr & (PAGE_SIZE - 1)) != 0)
+        return;
+
+    int idx = pa_to_index(addr);
     if (idx >= 0 && idx < (int)NPAGE) {
         if (page_refcount[idx] > 1) {
             page_refcount[idx]--;
@@ -211,7 +219,7 @@ void kfree(void *pa) {
         }
         page_refcount[idx] = 0;
     }
-    magazine_free((uint64_t)pa);
+    magazine_free(addr);
 }
 
 void kinit(void) {

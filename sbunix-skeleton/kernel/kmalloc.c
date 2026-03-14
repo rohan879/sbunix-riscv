@@ -12,7 +12,8 @@ struct slab_header {
     uint16_t free_count;         /* free objects in this slab */
     uint16_t total_objects;      /* total objects capacity */
     uint16_t next_free;          /* index of first free object */
-    uint16_t _pad;
+    uint8_t  cache_idx;          /* index into caches[] that owns this slab */
+    uint8_t  _pad;
 };
 
 struct kmem_cache {
@@ -57,6 +58,7 @@ static struct slab_header *slab_create(struct kmem_cache *cache) {
     slab->total_objects = (uint16_t)cache->objects_per_slab;
     slab->free_count = slab->total_objects;
     slab->next_free = 0;
+    slab->cache_idx = (uint8_t)(cache - caches);
 
     /* Build embedded freelist: each free object points to the next */
     for (uint32_t i = 0; i < cache->objects_per_slab; i++) {
@@ -210,12 +212,17 @@ void kmfree(void *ptr, uint64_t size) {
         return;
     }
 
-    for (int i = 0; i < NCACHES; i++) {
-        if (caches[i].object_size >= size) {
-            slab_free(&caches[i], ptr);
-            return;
-        }
+    /* Derive the owning cache from the slab header, not caller-provided size.
+     * This prevents freeing into the wrong cache when caller passes a
+     * different size than what was used for allocation. */
+    struct slab_header *slab = (struct slab_header *)PGROUNDDOWN((uint64_t)ptr);
+    uint8_t idx = slab->cache_idx;
+    if (idx < NCACHES) {
+        slab_free(&caches[idx], ptr);
+        return;
     }
 
+    /* Not from a slab cache (e.g. full-page allocation) */
+    (void)size;
     kfree(ptr);
 }
