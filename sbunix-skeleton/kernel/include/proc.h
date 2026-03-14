@@ -197,6 +197,7 @@ static inline struct kern_sigaction *proc_sigactions(struct proc *p) {
 }
 
 static inline uint64_t signal_bit(int signum) {
+  if (signum <= 0) return 0;
   return 1UL << (signum - 1);
 }
 

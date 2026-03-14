@@ -609,6 +609,8 @@ bad_restore_satp:
     w_satp(old_satp);
     sfence_vma();
 bad:
+    if (p->kstack) { kfree(p->kstack); p->kstack = NULL; }
+    if (p->trapframe) { kfree(p->trapframe); p->trapframe = NULL; }
     p->state = UNUSED;
     return -1;
 }
@@ -1191,11 +1193,11 @@ static long sys_openat_handler(struct trapframe *tf) {
     if (ret < 0) {
         return (long)ret;
     } else {
-        /* Reject opening a directory without O_DIRECTORY (EISDIR = -21) */
+        /* O_DIRECTORY: error if set and path is NOT a directory (ENOTDIR = -20) */
 #define O_DIRECTORY 0200000
-        if (!(flags & O_DIRECTORY) && vfs_is_dir(resolved)) {
+        if ((flags & O_DIRECTORY) && !vfs_is_dir(resolved)) {
             if (ops->close) ops->close(priv);
-            return (long)-21;
+            return (long)-20;
         }
         struct open_file *f = vfs_alloc_file();
         if (!f) {
@@ -1266,6 +1268,7 @@ static long sys_dup3_handler(struct trapframe *tf) {
 }
 
 static long sys_pipe2_handler(struct trapframe *tf) {
+    int pipe_flags = (int)tf->a1;
     int pipeid = alloc_pipe();
     if (pipeid < 0) {
         return (long)-24; /* -EMFILE */
@@ -1274,6 +1277,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
         struct open_file *rf = vfs_alloc_file();
         struct open_file *wf = vfs_alloc_file();
         int rfd = -1, wfd = -1;
+        int cloexec = (pipe_flags & 02000000) ? 1 : 0; /* O_CLOEXEC */
         if (rf) rfd = alloc_fd();
         if (rfd >= 0 && rf) {
             rf->is_pipe = 1;
@@ -1282,7 +1286,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             rf->pipe_id = pipeid;
             rf->ops = NULL;
             ftab[rfd] = rf;
-            proc_fdflags(current_proc)[rfd] = 0;
+            proc_fdflags(current_proc)[rfd] = cloexec;
             if (wf) wfd = alloc_fd();
         }
         if (wfd < 0 || !wf) {
@@ -1302,7 +1306,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             wf->pipe_id = pipeid;
             wf->ops = NULL;
             ftab[wfd] = wf;
-            proc_fdflags(current_proc)[wfd] = 0;
+            proc_fdflags(current_proc)[wfd] = cloexec;
             int kfds[2] = { rfd, wfd };
             if (copyout(current_proc->pagetable, tf->a0, kfds, sizeof(kfds)) < 0) {
                 close_ofile(current_proc, rfd);
@@ -3075,8 +3079,9 @@ static long sys_ppoll_handler(struct trapframe *tf) {
         return (long)-22;
 
     /* Copyin pollfd array: each entry is {int fd; short events; short revents} = 8 bytes */
-    uint8_t kfds[NOFILE * 8];
-    int fds_size = nfds * 8;
+    struct kern_pollfd { int fd; short events; short revents; };
+    struct kern_pollfd kfds[NOFILE];
+    int fds_size = nfds * (int)sizeof(struct kern_pollfd);
     if (fds_size > 0 && copyin(current_proc->pagetable, kfds, fds_uaddr, (uint64_t)fds_size) < 0)
         return (long)-14;
 
@@ -3114,32 +3119,35 @@ static long sys_ppoll_handler(struct trapframe *tf) {
     /* Check readiness */
     int ready = 0;
     for (int i = 0; i < nfds; i++) {
-        int fd = *(int *)(kfds + i * 8);
-        short events = *(short *)(kfds + i * 8 + 4);
+        int fd = kfds[i].fd;
+        short events = kfds[i].events;
         struct open_file *f = (fd >= 0 && fd < NOFILE) ? ftab[fd] : 0;
         short rev = check_fd_ready(f, events);
-        *(short *)(kfds + i * 8 + 6) = rev;
+        kfds[i].revents = rev;
         if (rev)
             ready++;
     }
 
     /* If none ready and timeout allows blocking */
-    if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
+    while (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
-            current_proc->waiting_for_uart = 2;
-            current_proc->state = SLEEPING;
-            swtch(&current_proc->context, &scheduler_context);
+        } else {
+            /* Infinite timeout: sleep without deadline */
+            current_proc->sleep_until = 0;
         }
+        current_proc->waiting_for_uart = 2;
+        current_proc->state = SLEEPING;
+        swtch(&current_proc->context, &scheduler_context);
 
         /* Re-check after wakeup */
         ready = 0;
         for (int i = 0; i < nfds; i++) {
-            int fd = *(int *)(kfds + i * 8);
-            short events = *(short *)(kfds + i * 8 + 4);
+            int fd = kfds[i].fd;
+            short events = kfds[i].events;
             struct open_file *f = (fd >= 0 && fd < NOFILE) ? ftab[fd] : 0;
             short rev = check_fd_ready(f, events);
-            *(short *)(kfds + i * 8 + 6) = rev;
+            kfds[i].revents = rev;
             if (rev)
                 ready++;
         }
@@ -3225,13 +3233,16 @@ static long sys_pselect6_handler(struct trapframe *tf) {
     }
 
     /* Block if none ready and timeout allows */
-    if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
+    while (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
-            current_proc->waiting_for_uart = 2;
-            current_proc->state = SLEEPING;
-            swtch(&current_proc->context, &scheduler_context);
+        } else {
+            /* Infinite timeout: sleep without deadline */
+            current_proc->sleep_until = 0;
         }
+        current_proc->waiting_for_uart = 2;
+        current_proc->state = SLEEPING;
+        swtch(&current_proc->context, &scheduler_context);
 
         /* Re-check */
         out_rfds = out_wfds = out_efds = 0;
@@ -3269,14 +3280,15 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
     uint64_t new_addr = tf->a0;
     uint64_t old_addr = tf->a1;
 
-    /* stack_t layout: { uint64_t ss_sp; int32_t ss_flags; int32_t _pad; uint64_t ss_size; } = 24 bytes */
+    /* stack_t layout: { uint64_t ss_sp; int32_t ss_flags; uint32_t _pad; uint64_t ss_size; } = 24 bytes */
+    struct kern_stack_t { uint64_t ss_sp; int32_t ss_flags; uint32_t _pad; uint64_t ss_size; };
     if (old_addr != 0) {
-        uint8_t kold[24];
-        memset(kold, 0, sizeof(kold));
-        *(uint64_t *)(kold + 0) = current_proc->ss_sp;
-        *(int32_t *)(kold + 8) = (int32_t)current_proc->ss_flags;
-        *(uint64_t *)(kold + 16) = current_proc->ss_size;
-        if (copyout(current_proc->pagetable, old_addr, kold, 24) < 0)
+        struct kern_stack_t kold;
+        memset(&kold, 0, sizeof(kold));
+        kold.ss_sp = current_proc->ss_sp;
+        kold.ss_flags = (int32_t)current_proc->ss_flags;
+        kold.ss_size = current_proc->ss_size;
+        if (copyout(current_proc->pagetable, old_addr, &kold, sizeof(kold)) < 0)
             return (long)-14;
     }
 
@@ -3285,13 +3297,13 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
         if (current_proc->ss_flags & 1) /* SS_ONSTACK */
             return (long)-1; /* EPERM */
 
-        uint8_t knew[24];
-        if (copyin(current_proc->pagetable, knew, new_addr, 24) < 0)
+        struct kern_stack_t knew;
+        if (copyin(current_proc->pagetable, &knew, new_addr, sizeof(knew)) < 0)
             return (long)-14;
 
-        current_proc->ss_sp = *(uint64_t *)(knew + 0);
-        current_proc->ss_flags = (int)(*(int32_t *)(knew + 8));
-        current_proc->ss_size = *(uint64_t *)(knew + 16);
+        current_proc->ss_sp = knew.ss_sp;
+        current_proc->ss_flags = (int)knew.ss_flags;
+        current_proc->ss_size = knew.ss_size;
     }
 
     return 0;
@@ -3531,12 +3543,16 @@ void trap_handler(struct trapframe *tf) {
                 uint64_t va = PGROUNDDOWN(stval);
                 int grew = 0;
                 while (current_proc->stack_bottom > va) {
-                    current_proc->stack_bottom -= PAGE_SIZE;
+                    uint64_t new_bottom = current_proc->stack_bottom - PAGE_SIZE;
                     char *pg = kalloc();
                     if (!pg) break;
                     memset(pg, 0, PAGE_SIZE);
-                    mappages(current_proc->pagetable, current_proc->stack_bottom,
-                             PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U);
+                    if (mappages(current_proc->pagetable, new_bottom,
+                             PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U) != 0) {
+                        kfree(pg);
+                        break;
+                    }
+                    current_proc->stack_bottom = new_bottom;
                     grew = 1;
                 }
                 if (grew && current_proc->stack_bottom <= va) {

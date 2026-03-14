@@ -177,14 +177,19 @@ uint64_t uvmalloc(pagetable_t pagetable, uint64_t start_va, uint64_t end_va, int
     return start_va;
 
   start_va = PGROUNDDOWN(start_va);
+  uint64_t first_va = start_va;
   for(a = start_va; a < end_va; a += PAGE_SIZE){
     mem = kalloc();
     if(mem == 0){
+      if(a > first_va)
+        uvmunmap(pagetable, first_va, a - first_va);
       return 0;
     }
     memset(mem, 0, PAGE_SIZE);
     if(mappages(pagetable, a, PAGE_SIZE, (uint64_t)mem, perm|PTE_U|PTE_V) != 0){
       kfree(mem);
+      if(a > first_va)
+        uvmunmap(pagetable, first_va, a - first_va);
       return 0;
     }
   }
