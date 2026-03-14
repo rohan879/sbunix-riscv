@@ -346,26 +346,26 @@ void trap_run(int sig) {
  * Signal handlers
  * ---------------------------------------------------------------------- */
 
+/* Pending trap flags — set by signal handlers, run from main loop.
+ * This avoids calling async-signal-unsafe execute_line() from handlers. */
+static volatile sig_atomic_t trap_pending[MAX_TRAPS];
+
 /* SIGINT handler: forward Ctrl-C to the foreground child if one exists */
 static void sigint_handler(int sig) {
     (void)sig;
     pid_t p = fg_pid;
     if (p > 0)
         kill(p, SIGINT);
-    /* Run trap command for SIGINT if set */
-    trap_run(SIGINT);
+    trap_pending[SIGINT] = 1;
 }
 
-/* SIGQUIT handler: forward Ctrl-\ to the foreground child if one exists.
- * At the idle prompt the TTY echoes "^\n" and read() returns -EINTR,
- * so the shell's restart: label already reprints the prompt. */
+/* SIGQUIT handler: forward Ctrl-\ to the foreground child if one exists */
 static void sigquit_handler(int sig) {
     (void)sig;
     pid_t p = fg_pid;
     if (p > 0)
         kill(p, SIGQUIT);
-    /* Run trap command for SIGQUIT if set */
-    trap_run(SIGQUIT);
+    trap_pending[SIGQUIT] = 1;
 }
 
 /* SIGTSTP handler: forward Ctrl-Z to the foreground child if one exists */
@@ -374,8 +374,7 @@ static void sigtstp_handler(int sig) {
     pid_t p = fg_pid;
     if (p > 0)
         kill(p, SIGTSTP);
-    /* Run trap command for SIGTSTP if set */
-    trap_run(SIGTSTP);
+    trap_pending[SIGTSTP] = 1;
 }
 
 /* SIGCHLD handler: reap children and set flag for main-loop notification */
@@ -447,6 +446,17 @@ restart:
     return (int)n;
 }
 
+/* Process any deferred trap commands from signal handlers.
+ * Called from the main loop, not from signal context. */
+static void process_pending_traps(void) {
+    for (int i = 0; i < MAX_TRAPS; i++) {
+        if (trap_pending[i]) {
+            trap_pending[i] = 0;
+            trap_run(i);
+        }
+    }
+}
+
 /* Print notifications for completed/stopped background jobs */
 static void notify_jobs(void) {
     if (!g_sigchld_flag)
@@ -513,6 +523,7 @@ int main(int argc, char *argv[], char *envp[]) {
     static char line[MAX_LINE];
     while (1) {
         reap_zombies();
+        process_pending_traps();
         char *ps1;
         if (cf_active() || heredoc_active() || func_def_active())
             ps1 = "> ";

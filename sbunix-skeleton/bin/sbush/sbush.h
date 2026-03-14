@@ -33,6 +33,7 @@
 struct command {
     char *argv[MAX_ARGS];
     int   argc;
+    int   quoted[MAX_ARGS]; /* 1 if token was originally quoted (suppress glob) */
     char *redir_in;         /* < file */
     char *redir_out;        /* > file */
     char *redir_append;     /* >> file */

@@ -636,6 +636,7 @@ static void expand_vars(char *line) {
 
 static int tokenize(char *str, struct command *cmd) {
     cmd->argc = 0;
+    memset(cmd->quoted, 0, sizeof(cmd->quoted));
     char *p = str;
 
     while (*p) {
@@ -653,12 +654,13 @@ static int tokenize(char *str, struct command *cmd) {
             while (*p && *p != '"') {
                 if (*p == '\\' && *(p + 1)) {
                     p++;
+                    /* POSIX: only \\, \$, \`, \", and \<newline> are special
+                     * inside double quotes. All other backslashes are literal. */
                     switch (*p) {
-                        case 'n':  *w++ = '\n'; break;
-                        case 't':  *w++ = '\t'; break;
                         case '\\': *w++ = '\\'; break;
                         case '"':  *w++ = '"';  break;
                         case '$':  *w++ = '$';  break;
+                        case '`':  *w++ = '`';  break;
                         default:   *w++ = '\\'; *w++ = *p; break;
                     }
                     p++;
@@ -666,20 +668,20 @@ static int tokenize(char *str, struct command *cmd) {
                     *w++ = *p++;
                 }
             }
-            /* p still points at the closing " (or \0 if unterminated).
-             * Advance past it before null-terminating so we don't lose
-             * whatever follows (e.g. " > file" after a quoted arg). */
             if (*p == '"') p++;
             *w = '\0';
+            cmd->quoted[cmd->argc] = 1; /* mark as quoted — suppress glob */
             cmd->argv[cmd->argc++] = start;
         } else if (*p == '\'') {
             p++;
+            cmd->quoted[cmd->argc] = 1; /* mark as quoted — suppress glob */
             cmd->argv[cmd->argc++] = p;
             while (*p && *p != '\'')
                 p++;
             if (*p == '\'')
                 *p++ = '\0';
         } else {
+            cmd->quoted[cmd->argc] = 0; /* unquoted — allow glob */
             cmd->argv[cmd->argc++] = p;
             while (*p && *p != ' ' && *p != '\t')
                 p++;
@@ -873,7 +875,9 @@ static void glob_expand_token(const char *token, struct command *cmd) {
 static void glob_expand_cmd(struct command *cmd) {
     int has_glob = 0;
     for (int i = 0; i < cmd->argc; i++) {
-        if (strchr(cmd->argv[i], '*') || strchr(cmd->argv[i], '?') || strchr(cmd->argv[i], '[')) {
+        /* POSIX 2.6.6: only expand globs on unquoted tokens */
+        if (!cmd->quoted[i] &&
+            (strchr(cmd->argv[i], '*') || strchr(cmd->argv[i], '?') || strchr(cmd->argv[i], '['))) {
             has_glob = 1;
             break;
         }
@@ -883,13 +887,25 @@ static void glob_expand_cmd(struct command *cmd) {
     glob_strbuf_pos = 0;
 
     static char *orig[MAX_ARGS];
+    static int  orig_quoted[MAX_ARGS];
     int norig = cmd->argc;
-    for (int i = 0; i < norig; i++)
+    for (int i = 0; i < norig; i++) {
         orig[i] = cmd->argv[i];
+        orig_quoted[i] = cmd->quoted[i];
+    }
 
     cmd->argc = 0;
-    for (int i = 0; i < norig; i++)
-        glob_expand_token(orig[i], cmd);
+    for (int i = 0; i < norig; i++) {
+        if (orig_quoted[i]) {
+            /* Quoted token: add as-is without glob expansion */
+            if (cmd->argc < MAX_ARGS - 1) {
+                cmd->quoted[cmd->argc] = 1;
+                cmd->argv[cmd->argc++] = orig[i];
+            }
+        } else {
+            glob_expand_token(orig[i], cmd);
+        }
+    }
 
     cmd->argv[cmd->argc] = NULL;
 }

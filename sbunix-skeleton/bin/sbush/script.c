@@ -24,7 +24,7 @@ int run_script(const char *path) {
             p++;
     }
 
-    /* execute each line */
+    /* execute each line, tracking exit status */
     while (*p) {
         char line[MAX_LINE];
         int i = 0;
@@ -47,5 +47,6 @@ int run_script(const char *path) {
             execute_line(line);
     }
 
-    return 0;
+    /* Return the last command's exit status per POSIX */
+    return last_exit_status;
 }
