@@ -39,6 +39,15 @@ echo === C Binary Tests ===
 /bin/persisttest write
 /bin/persisttest verify
 /bin/exectest
+/bin/sigpipetest2
+/bin/ftrunctest
+/bin/renametest
+/bin/wnohangtest
+/bin/sigmasktest
+/bin/iovectest
+/bin/polltest
+/bin/unametest
+/bin/mathtest
 echo === C Binary Tests Done ===
 
 echo === Task345 Test ===
