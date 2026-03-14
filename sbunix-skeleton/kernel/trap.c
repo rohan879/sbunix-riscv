@@ -1801,8 +1801,12 @@ static long sys_kill_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
 
-    /* Validate signal number */
+    /* Validate signal number: 0 is allowed (permission probe) */
     if (sig < 0 || sig >= 32) {
+        return (long)-22; /* -EINVAL */
+    }
+    /* For non-zero signals, validate before any delivery */
+    if (sig != 0 && !signal_is_valid(sig)) {
         return (long)-22; /* -EINVAL */
     }
 
@@ -1821,9 +1825,6 @@ static long sys_kill_handler(struct trapframe *tf) {
         if (sig == 0) {
             return (long)0; /* probe: process exists */
         }
-        if (!signal_is_valid(sig)) {
-            return (long)-22; /* -EINVAL */
-        }
         deliver_signal_to_proc(target, sig);
         return (long)0;
     } else if (target_pid == 0) {
@@ -1837,26 +1838,21 @@ static long sys_kill_handler(struct trapframe *tf) {
                     deliver_signal_to_proc(&proc[i], sig);
             }
         }
-        if (sig == 0)
-            return sent > 0 ? (long)0 : (long)-3;
-        if (!signal_is_valid(sig))
-            return (long)-22;
         return sent > 0 ? (long)0 : (long)-3;
     } else if (target_pid == -1) {
-        /* Send to all processes except init */
+        /* Send to all processes except init and sender.
+         * Also protect init (pid 1) from SIGKILL/SIGSTOP. */
         int sent = 0;
         for (int i = 0; i < NPROC; i++) {
-            if (proc[i].state != UNUSED && proc[i].pid != 1 &&
-                &proc[i] != current_proc) {
-                sent++;
-                if (sig != 0)
-                    deliver_signal_to_proc(&proc[i], sig);
-            }
+            if (proc[i].state == UNUSED)
+                continue;
+            /* Always skip init (pid 1) and the sender itself */
+            if (proc[i].pid == 1 || &proc[i] == current_proc)
+                continue;
+            sent++;
+            if (sig != 0)
+                deliver_signal_to_proc(&proc[i], sig);
         }
-        if (sig == 0)
-            return sent > 0 ? (long)0 : (long)-3;
-        if (!signal_is_valid(sig))
-            return (long)-22;
         return sent > 0 ? (long)0 : (long)-3;
     } else {
         /* target_pid < -1: send to process group |target_pid| */
@@ -1869,10 +1865,6 @@ static long sys_kill_handler(struct trapframe *tf) {
                     deliver_signal_to_proc(&proc[i], sig);
             }
         }
-        if (sig == 0)
-            return sent > 0 ? (long)0 : (long)-3;
-        if (!signal_is_valid(sig))
-            return (long)-22;
         return sent > 0 ? (long)0 : (long)-3;
     }
 }
@@ -2715,6 +2707,7 @@ static long sys_faccessat_handler(struct trapframe *tf) {
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
+    int amode = (int)tf->a2; /* F_OK=0, R_OK=4, W_OK=2, X_OK=1 */
 
     char resolved[256];
     long path_ret = resolve_at_path(dirfd, kpath, resolved);
@@ -2726,7 +2719,29 @@ static long sys_faccessat_handler(struct trapframe *tf) {
     if (ops && ops->stat) {
         uint8_t st[128];
         int ret = ops->stat(relpath, st);
-        return (ret == 0) ? (long)0 : (long)-2;
+        if (ret != 0)
+            return (long)-2; /* -ENOENT */
+        /* F_OK: just check existence */
+        if (amode == 0)
+            return (long)0;
+        /* Extract st_mode from the stat buffer (offset 16, 4 bytes) */
+        uint32_t file_mode = 0;
+        memcpy(&file_mode, st + 16, 4);
+        /* For a single-user OS, check owner permission bits.
+         * tarfs (and other read-only filesystems) reject W_OK since
+         * they are read-only media. */
+        if ((amode & 4) && !(file_mode & 0400)) /* R_OK vs S_IRUSR */
+            return (long)-13; /* -EACCES */
+        if ((amode & 2)) {
+            /* Write check: reject for read-only filesystems (tarfs) */
+            if (ops == &tarfs_ops)
+                return (long)-30; /* -EROFS */
+            if (!(file_mode & 0200)) /* W_OK vs S_IWUSR */
+                return (long)-13; /* -EACCES */
+        }
+        if ((amode & 1) && !(file_mode & 0100)) /* X_OK vs S_IXUSR */
+            return (long)-13; /* -EACCES */
+        return (long)0;
     } else {
         return (long)-2;
     }
@@ -3798,9 +3813,25 @@ void trap_handler(struct trapframe *tf) {
                 stval >= current_proc->stack_bottom - 256 * PAGE_SIZE &&
                 stval < current_proc->stack_top) {
                 uint64_t va = PGROUNDDOWN(stval);
+                /* Compute the lowest address the stack may reach.
+                 * Leave a 1-page guard gap above the heap (sz) and
+                 * also above the mmap region to prevent silent overlap. */
+                uint64_t heap_limit = current_proc->sz;
+                if (current_proc->mmap_base > heap_limit)
+                    heap_limit = current_proc->mmap_base;
+                /* Guard page: stack must stay at least 1 page above the
+                 * heap/mmap area to prevent silent overlap. */
+                uint64_t stack_floor = heap_limit + PAGE_SIZE;
+                /* Don't even attempt if the faulting address is below
+                 * the floor (would overlap heap/mmap + guard). */
+                if (va < stack_floor)
+                    goto pagefault_kill;
                 int grew = 0;
                 while (current_proc->stack_bottom > va) {
                     uint64_t new_bottom = current_proc->stack_bottom - PAGE_SIZE;
+                    /* Enforce stack floor (heap/mmap + guard page gap) */
+                    if (new_bottom < stack_floor)
+                        break;
                     char *pg = kalloc();
                     if (!pg) break;
                     memset(pg, 0, PAGE_SIZE);
