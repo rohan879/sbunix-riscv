@@ -132,6 +132,9 @@ void free(void *ptr) {
         return;
 
     block_hdr_t *hdr = (block_hdr_t *)((char *)ptr - HDR_SIZE);
+    /* Guard against double-free: if already free, do nothing */
+    if (hdr->free)
+        return;
     hdr->free = 1;
     /* Prepend to free list */
     hdr->next = free_list;

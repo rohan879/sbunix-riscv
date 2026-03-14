@@ -154,7 +154,7 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
             else if (is_short)   sv = (long long)(short)va_arg(ap, int);
             else                 sv = (long long)va_arg(ap, int);
             int neg = (sv < 0);
-            unsigned long long uv = neg ? (unsigned long long)(-sv)
+            unsigned long long uv = neg ? -(unsigned long long)sv
                                         : (unsigned long long)sv;
             snp_emit_num(ctx, uv, neg, 10, 0, width, zero_pad, left_align, 0);
             break;

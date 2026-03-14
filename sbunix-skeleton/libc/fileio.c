@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <stdint.h>
 
 /* Static FILE objects for stdin, stdout, stderr */
 static FILE __stdin  = { .fd = 0, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0, .ungot = -1 };
@@ -210,8 +211,10 @@ int fgetc(FILE *stream) {
 }
 
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
+    if (size == 0 || nmemb == 0) return 0;
+    /* Guard against multiplication overflow */
+    if (nmemb > SIZE_MAX / size) return 0;
     size_t total = size * nmemb;
-    if (total == 0) return 0;
     const unsigned char *p = (const unsigned char *)ptr;
     for (size_t i = 0; i < total; i++) {
         if (fputc(p[i], stream) == EOF)
