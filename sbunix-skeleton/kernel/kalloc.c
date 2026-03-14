@@ -202,6 +202,7 @@ static void magazine_free(uint64_t pa) {
 /* ---- Public API ---- */
 
 void kfree(void *pa) {
+    if (!pa) return;
     int idx = pa_to_index((uint64_t)pa);
     if (idx >= 0 && idx < (int)NPAGE) {
         if (page_refcount[idx] > 1) {

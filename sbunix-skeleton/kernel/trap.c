@@ -61,8 +61,8 @@ static void get_wall_time(int64_t *sec, int64_t *nsec) {
 struct kpipe {
   int used;
   char buf[PIPE_BUF];
-  int rpos;        // next read position
-  int wpos;        // next write position
+  unsigned int rpos;        // next read position
+  unsigned int wpos;        // next write position
   int write_open;  // number of writers still open
   int read_open;   // number of readers still open
 };
@@ -84,7 +84,7 @@ static int alloc_pipe(void) {
 }
 
 static int pipe_avail(int pid) {
-  return pipes[pid].wpos - pipes[pid].rpos;
+  return (int)(pipes[pid].wpos - pipes[pid].rpos);
 }
 
 static int is_tty_file(struct open_file *f) {
@@ -653,6 +653,8 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
                     }
                 }
                 /* free child resources */
+                if (p->kstack) { kfree(p->kstack); p->kstack = NULL; }
+                if (p->trapframe) { kfree(p->trapframe); p->trapframe = NULL; }
                 p->state = UNUSED;
                 p->pid = 0;
                 p->parent = NULL;
@@ -1624,6 +1626,17 @@ static void deliver_signal_to_proc(struct proc *target, int sig) {
         target->exit_status = 128 + 9;
         target->killed_by_signal = 9;
         cleanup_proc_resources(target);
+        /* Reparent children to init (proc[0]) */
+        for (struct proc *child = proc; child < &proc[64]; child++) {
+            if (child->parent == target) {
+                child->parent = &proc[0];
+                if (child->state == ZOMBIE) {
+                    proc[0].sigpending |= signal_bit(SIGCHLD);
+                    if (proc[0].state == SLEEPING)
+                        proc[0].state = RUNNABLE;
+                }
+            }
+        }
         target->state = ZOMBIE;
         if (target->parent) {
             target->parent->sigpending |= signal_bit(SIGCHLD);
@@ -1974,6 +1987,17 @@ static long sys_exit_handler(struct trapframe *tf) {
             register unsigned long a7 asm("a7") = 0x53525354;
             asm volatile("ecall" : : "r"(a0), "r"(a1), "r"(a7));
             while (1) {}
+        }
+        /* Reparent children to init (proc[0]) */
+        for (struct proc *child = proc; child < &proc[64]; child++) {
+            if (child->parent == current_proc) {
+                child->parent = &proc[0];
+                if (child->state == ZOMBIE) {
+                    proc[0].sigpending |= signal_bit(SIGCHLD);
+                    if (proc[0].state == SLEEPING)
+                        proc[0].state = RUNNABLE;
+                }
+            }
         }
         current_proc->state = ZOMBIE;
         if (current_proc->parent) {
@@ -3552,10 +3576,8 @@ pagefault_kill:
     }
 
     /* ---- ecall from user ---- */
-    /* Advance past the ecall instruction */
-    uint16_t *instr = (uint16_t *)tf->epc;
-    int size = ((*instr & 0x3) == 0x3) ? 4 : 2;
-    tf->epc += size;
+    /* Advance past the ecall instruction (always 4 bytes in RISC-V) */
+    tf->epc += 4;
 
     long sysnum = (long)tf->a7;
 
