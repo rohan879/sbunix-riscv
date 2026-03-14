@@ -5,6 +5,9 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <errno.h>
+#include <string.h>
+#include <stdlib.h>
+#include <limits.h>
 
 void __stdio_after_fork_child(void);
 
@@ -142,8 +145,55 @@ int execv(const char *path, char *const argv[]) {
 }
 
 int execvp(const char *file, char *const argv[]) {
-    /* Simple implementation: only searches absolute/relative paths */
-    return execve(file, argv, environ);
+    if (!file || !*file) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    /* If the filename contains a slash, use it directly */
+    if (strchr(file, '/'))
+        return execve(file, argv, environ);
+
+    /* Search PATH for the executable */
+    const char *path = getenv("PATH");
+    if (!path)
+        path = "/bin:/usr/bin";
+
+    size_t flen = strlen(file);
+    char buf[PATH_MAX];
+
+    while (*path) {
+        /* Find end of this PATH component */
+        const char *sep = strchr(path, ':');
+        size_t dlen = sep ? (size_t)(sep - path) : strlen(path);
+
+        if (dlen == 0) {
+            /* Empty component means current directory */
+            if (flen < PATH_MAX) {
+                memcpy(buf, file, flen);
+                buf[flen] = '\0';
+                execve(buf, argv, environ);
+            }
+        } else if (dlen + 1 + flen < PATH_MAX) {
+            memcpy(buf, path, dlen);
+            buf[dlen] = '/';
+            memcpy(buf + dlen + 1, file, flen);
+            buf[dlen + 1 + flen] = '\0';
+            execve(buf, argv, environ);
+        }
+
+        /* If execve returned, it failed -- try next component
+         * unless the error is not "not found" related */
+        if (errno != ENOENT && errno != EACCES && errno != ENOTDIR)
+            return -1;
+
+        if (!sep)
+            break;
+        path = sep + 1;
+    }
+
+    errno = ENOENT;
+    return -1;
 }
 
 int ioctl(int fd, unsigned long request, ...) {

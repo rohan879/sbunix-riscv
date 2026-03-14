@@ -86,6 +86,15 @@ long strtol(const char *s, char **endptr, int base) {
     return neg ? -(long)val : (long)val;
 }
 
+/* On LP64 (rv64), long and long long are both 64-bit. */
+long long strtoll(const char *s, char **endptr, int base) {
+    return (long long)strtol(s, endptr, base);
+}
+
+unsigned long long strtoull(const char *s, char **endptr, int base) {
+    return (unsigned long long)strtoul(s, endptr, base);
+}
+
 int atoi(const char *s) {
     return (int)strtol(s, (char **)0, 10);
 }
@@ -430,28 +439,36 @@ int setenv(const char *name, const char *value, int overwrite) {
         return -1;
     env_ensure_init();
     size_t nlen = strlen(name);
+    size_t vlen = strlen(value);
+
+    /* Allocate a new "NAME=VALUE" string */
+    char *entry = (char *)malloc(nlen + 1 + vlen + 1);
+    if (!entry)
+        return -1;
+    memcpy(entry, name, nlen);
+    entry[nlen] = '=';
+    memcpy(entry + nlen + 1, value, vlen);
+    entry[nlen + 1 + vlen] = '\0';
+
     /* find existing */
     for (int i = 0; environ[i]; i++) {
         if (strncmp(environ[i], name, nlen) == 0 && environ[i][nlen] == '=') {
-            if (!overwrite) return 0;
-            /* build new entry */
-            static char buf[320];
-            strcpy(buf, name);
-            strcat(buf, "=");
-            strcat(buf, value);
-            environ[i] = buf;
+            if (!overwrite) {
+                free(entry);
+                return 0;
+            }
+            environ[i] = entry;
             return 0;
         }
     }
     /* add new */
     int count = 0;
     while (environ[count]) count++;
-    if (count >= MAX_ENV) return -1;
-    static char newbuf[320];
-    strcpy(newbuf, name);
-    strcat(newbuf, "=");
-    strcat(newbuf, value);
-    environ[count] = newbuf;
+    if (count >= MAX_ENV) {
+        free(entry);
+        return -1;
+    }
+    environ[count] = entry;
     environ[count + 1] = (void *)0;
     return 0;
 }
