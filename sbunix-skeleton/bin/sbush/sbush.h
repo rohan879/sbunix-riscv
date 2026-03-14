@@ -177,3 +177,4 @@ void trap_run(int sig);
 /* signal globals (sbush.c) */
 extern volatile sig_atomic_t fg_pid;
 extern volatile sig_atomic_t g_sigchld_flag;
+extern int shell_interactive;  /* 1 when running interactively (REPL) */

@@ -215,7 +215,9 @@ static int cf_process_segment(const char *seg) {
                 /* Evaluate previous cond/body pair */
                 if (!f->if_matched) {
                     f->evaluating = 1;
+                    in_condition = 1;
                     cf_run_lines(f->if_cond, f->if_cond_len);
+                    in_condition = 0;
                     if (last_exit_status == 0) {
                         f->if_matched = 1;
                         cf_run_lines(f->if_body, f->if_body_len);
@@ -236,7 +238,9 @@ static int cf_process_segment(const char *seg) {
                 /* Evaluate previous cond/body pair */
                 if (!f->if_matched) {
                     f->evaluating = 1;
+                    in_condition = 1;
                     cf_run_lines(f->if_cond, f->if_cond_len);
+                    in_condition = 0;
                     if (last_exit_status == 0) {
                         f->if_matched = 1;
                         cf_run_lines(f->if_body, f->if_body_len);
@@ -266,7 +270,9 @@ static int cf_process_segment(const char *seg) {
                     /* Evaluate condition and run body if true */
                     if (!f->if_matched) {
                         f->evaluating = 1;
+                        in_condition = 1;
                         cf_run_lines(f->if_cond, f->if_cond_len);
+                        in_condition = 0;
                         if (last_exit_status == 0) {
                             cf_run_lines(f->if_body, f->if_body_len);
                         }
@@ -298,7 +304,9 @@ static int cf_process_segment(const char *seg) {
             if (strcmp(word, "done") == 0 && f->nested_loop == 0) {
                 f->evaluating = 1;
                 while (1) {
+                    in_condition = 1;
                     cf_run_lines(f->lp_cond, f->lp_cond_len);
+                    in_condition = 0;
                     int cond_true = (last_exit_status == 0);
                     if (f->type == CF_UNTIL) cond_true = !cond_true;
                     if (!cond_true) break;

@@ -8,6 +8,9 @@ volatile sig_atomic_t fg_pid = 0;
 /* Flag set by SIGCHLD handler; main loop checks and prints notifications */
 volatile sig_atomic_t g_sigchld_flag = 0;
 
+/* 1 when running interactively (REPL), 0 in script/-c mode */
+int shell_interactive = 0;
+
 static int exec_depth = 0;
 static struct cmdlist cl_stack[MAX_EXEC_DEPTH];
 
@@ -520,6 +523,7 @@ int main(int argc, char *argv[], char *envp[]) {
     }
 
     /* interactive REPL */
+    shell_interactive = 1;
     static char line[MAX_LINE];
     while (1) {
         reap_zombies();

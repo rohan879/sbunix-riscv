@@ -411,11 +411,14 @@ static char *expand_braces(char **srcp, char *dst, char *end) {
                 dst = emit_str(dst, end, operand);
             return dst;
         } else if (op2 == '?') {
-            /* ${VAR:?message} */
-            if (is_empty)
+            /* ${VAR:?message} — POSIX: exit non-interactive shell */
+            if (is_empty) {
                 dprintf(2, "sbush: %s: %s\n", name,
                         oi ? operand : "parameter null or not set");
-            else
+                last_exit_status = 1;
+                if (!shell_interactive)
+                    _exit(1);
+            } else
                 dst = emit_str(dst, end, val);
             return dst;
         }
