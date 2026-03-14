@@ -5,6 +5,14 @@
 #include <kmalloc.h>
 #include <string.h>
 #include <printk.h>
+#include <trap.h>
+
+/* Return current wall-clock epoch time in seconds */
+static uint64_t ext2_now(void) {
+  long sec, nsec;
+  get_wall_time(&sec, &nsec);
+  return (uint64_t)sec;
+}
 
 /* ================================================================== */
 /* Globals                                                             */
@@ -287,6 +295,8 @@ static void icache_writeback(struct ext2_inode_mem *ip) {
   di.indirect = ip->indirect;
   di.mode = ip->mode;
   di.rdev = ip->rdev;
+  di.ctime = ip->ctime;
+  di.mtime = ip->mtime;
   ext2_write_dinode(ip->ino, &di);
   ip->dirty = 0;
 }
@@ -549,6 +559,8 @@ static int ext2_dir_add(struct ext2_inode_mem *dir, const char *name,
         memcpy(de->name, name, name_len);
         bcache_mark_dirty(e);
         bcache_release(e);
+        dir->mtime = ext2_now();
+        dir->dirty = 1;
         return 0;
       }
 
@@ -568,6 +580,8 @@ static int ext2_dir_add(struct ext2_inode_mem *dir, const char *name,
         memcpy(new_de->name, name, name_len);
         bcache_mark_dirty(e);
         bcache_release(e);
+        dir->mtime = ext2_now();
+        dir->dirty = 1;
         return 0;
       }
 
@@ -595,6 +609,7 @@ static int ext2_dir_add(struct ext2_inode_mem *dir, const char *name,
   bcache_release(e);
 
   dir->size += EXT2_BLOCK_SIZE;
+  dir->mtime = ext2_now();
   dir->dirty = 1;
   return 0;
 }
@@ -627,6 +642,8 @@ static int ext2_dir_remove(struct ext2_inode_mem *dir, const char *name) {
         de->inode_number = 0;
         bcache_mark_dirty(e);
         bcache_release(e);
+        dir->mtime = ext2_now();
+        dir->dirty = 1;
         return 0;
       }
       prev = de;
@@ -783,6 +800,85 @@ static struct ext2_inode_mem *ext2_namei(const char *path) {
 /* Truncate -- free all data blocks of an inode                        */
 /* ================================================================== */
 
+/* ext2_truncate_to: truncate an inode to a given length.
+ * If new_size < current size: free excess data blocks.
+ * If new_size > current size: just update size (holes read as zero).
+ * Returns 0 on success, negative on error. */
+int ext2_truncate_to(uint32_t ino, uint32_t new_size) {
+  struct ext2_inode_mem *ip = icache_get(ino);
+  if (!ip) return -1;
+  if (ip->type != EXT2_TYPE_FILE) {
+    icache_release(ip);
+    return -22; /* -EINVAL: not a regular file */
+  }
+
+  if (new_size < ip->size) {
+    /* Shrink: free blocks beyond new_size */
+    uint32_t new_nblocks = (new_size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
+    uint32_t old_nblocks = (ip->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
+
+    /* Free excess direct blocks */
+    for (uint32_t i = new_nblocks; i < EXT2_NDIRECT && i < old_nblocks; i++) {
+      if (ip->direct[i]) {
+        ext2_free_block(ip->direct[i]);
+        ip->direct[i] = 0;
+      }
+    }
+
+    /* Free excess indirect blocks */
+    if (ip->indirect && old_nblocks > EXT2_NDIRECT) {
+      struct bcache_entry *e = bcache_get(ip->indirect);
+      if (e) {
+        uint32_t *ptrs = (uint32_t *)e->data;
+        uint32_t start_idx = (new_nblocks > EXT2_NDIRECT) ?
+                             (new_nblocks - EXT2_NDIRECT) : 0;
+        int modified = 0;
+        for (uint32_t i = start_idx; i < EXT2_NINDIRECT; i++) {
+          if (ptrs[i]) {
+            ext2_free_block(ptrs[i]);
+            ptrs[i] = 0;
+            modified = 1;
+          }
+        }
+        if (modified)
+          bcache_mark_dirty(e);
+        bcache_release(e);
+      }
+      /* Free the indirect block itself if no entries remain */
+      if (new_nblocks <= EXT2_NDIRECT) {
+        ext2_free_block(ip->indirect);
+        ip->indirect = 0;
+      }
+    }
+
+    /* Zero out the partial last block if new_size is not block-aligned */
+    if (new_size > 0 && (new_size % EXT2_BLOCK_SIZE) != 0) {
+      uint32_t last_block = new_nblocks - 1;
+      uint32_t disk_blk = ext2_bmap(ip, last_block);
+      if (disk_blk) {
+        struct bcache_entry *e = bcache_get(disk_blk);
+        if (e) {
+          uint32_t zero_off = new_size % EXT2_BLOCK_SIZE;
+          memset(e->data + zero_off, 0, EXT2_BLOCK_SIZE - zero_off);
+          bcache_mark_dirty(e);
+          bcache_release(e);
+        }
+      }
+    }
+  }
+  /* For extending (new_size > ip->size), just update size;
+   * reads beyond old size return zeros via ext2_bmap returning 0 (hole). */
+
+  ip->size = new_size;
+  ip->mtime = ext2_now();
+  ip->dirty = 1;
+  icache_writeback(ip);
+  icache_release(ip);
+  bcache_sync();
+  sb_flush_if_dirty();
+  return 0;
+}
+
 static void ext2_truncate(struct ext2_inode_mem *ip) {
   /* Free direct blocks */
   for (int i = 0; i < EXT2_NDIRECT; i++) {
@@ -806,6 +902,7 @@ static void ext2_truncate(struct ext2_inode_mem *ip) {
     ip->indirect = 0;
   }
   ip->size = 0;
+  ip->mtime = ext2_now();
   ip->dirty = 1;
 }
 
@@ -979,6 +1076,12 @@ static int64_t ext2_write(void *private, const char *buf, uint64_t count,
   /* Update size if we extended the file */
   if (off + total > ip->size) {
     ip->size = (uint32_t)(off + total);
+    ip->dirty = 1;
+  }
+
+  /* Update modification time */
+  if (total > 0) {
+    ip->mtime = ext2_now();
     ip->dirty = 1;
   }
 
@@ -1582,10 +1685,22 @@ static int ext2_rename(const char *oldpath, const char *newpath) {
         return -2;
     }
 
-    /* If new name exists, remove it */
+    /* If new name exists, remove it and free target inode if link_count drops to 0 */
     uint32_t existing;
     if (ext2_dir_lookup(new_parent, new_basename, &existing) == 0) {
         ext2_dir_remove(new_parent, new_basename);
+        struct ext2_inode_mem *target = icache_get(existing);
+        if (target) {
+            target->link_count--;
+            target->dirty = 1;
+            if (target->link_count == 0 && target->refcount <= 1) {
+                icache_release(target);
+                ext2_free_inode(existing);
+            } else {
+                icache_writeback(target);
+                icache_release(target);
+            }
+        }
     }
 
     /* Add new entry, remove old */

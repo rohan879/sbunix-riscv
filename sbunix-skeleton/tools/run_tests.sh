@@ -7,10 +7,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TIMEOUT=${TIMEOUT:-600}
+LIVE=${LIVE:-1}
 OUTPUT_FILE="$(mktemp /tmp/sbunix-test-output.XXXXXX)"
 QEMU_PID=""
+TAIL_PID=""
 
 cleanup() {
+    if [ -n "$TAIL_PID" ] && kill -0 "$TAIL_PID" 2>/dev/null; then
+        kill "$TAIL_PID" 2>/dev/null || true
+        wait "$TAIL_PID" 2>/dev/null || true
+    fi
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
         kill "$QEMU_PID" 2>/dev/null || true
         wait "$QEMU_PID" 2>/dev/null || true
@@ -52,6 +58,11 @@ qemu-system-riscv64 -machine virt -bios default -kernel build/kernel.elf \
     > "$OUTPUT_FILE" 2>&1 &
 QEMU_PID=$!
 
+if [ "$LIVE" = "1" ]; then
+    tail -n +1 -f "$OUTPUT_FILE" &
+    TAIL_PID=$!
+fi
+
 # Monitor output: kill QEMU early when the shell prompt appears after tests
 # (the "sbush$ " prompt means rc script finished and shell is idle)
 ELAPSED=0
@@ -76,6 +87,12 @@ while kill -0 "$QEMU_PID" 2>/dev/null; do
         break
     fi
 done
+
+if [ -n "$TAIL_PID" ] && kill -0 "$TAIL_PID" 2>/dev/null; then
+    kill "$TAIL_PID" 2>/dev/null || true
+    wait "$TAIL_PID" 2>/dev/null || true
+    TAIL_PID=""
+fi
 
 echo "==> QEMU exited, parsing results..."
 echo ""

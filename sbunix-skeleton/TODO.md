@@ -158,8 +158,6 @@ Shell basics (cd, PATH, pipes, background, scripts) are done. These remain for P
 
 ## Libc Header Completeness (Feedback-Driven) — DONE
 
-Originally scored 13/49 tests (20/100 points). All missing headers, declarations, and implementations have been added.
-
 ### `libc/include/sys/` Directory — Complete
 
 All 10 sys/ headers exist with full content.
@@ -238,8 +236,8 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] `SYS_alarm` (200) — custom syscall; sets `proc->alarm_ticks`, returns remaining seconds from previous alarm
 - [x] `SYS_geteuid` (175), `SYS_getegid` (177) — return 0 (root)
 - [x] `SYS_set_tid_address` (96) — returns current pid
-- [x] `SYS_readlinkat` (78) — returns -ENOENT (no symlinks)
-- [ ] tarfs/exec symlink resolution — update tarfs and `execve` path handling so tar symlink entries can resolve executable targets such as `/bin/sh -> /bin/sbush`
+- [x] `SYS_readlinkat` (78) — implemented with `dirfd`-aware path resolution and symlink targets
+- [x] tarfs/exec symlink resolution — tar symlinks resolve through `follow_symlinks()` in `execve` and related path handlers
 - [x] `SYS_getrandom` (278) — LCG PRNG seeded from r_time()
 - [x] `SYS_writev` (66), `SYS_readv` (65) — basic iovec iteration (partial, see Remaining Fixes)
 - [x] `SYS_prlimit64` (261) — returns -ENOSYS stub
@@ -291,16 +289,9 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 
 ### Still Open
 
-- [x] Kernel SIGCHLD generation — `SYS_exit`, SIGKILL, and `deliver_signal` SIG_DFL all set `parent->sigpending |= (1 << SIGCHLD)` on child death
-- [x] devfs integration for stdin/stdout/stderr — fd 0/1/2 opened via `/dev/console` VFS ops in `init_starter()`; UART special-case removed from trap.c
-- [x] Input discipline (termios) — `kernel/tty.c` line discipline; cooked mode with echo/backspace/^C/^D; raw mode; ioctl TCGETS/TCSETS
-- [x] User-level threads — `sys_clone` extended with CLONE_VM/CLONE_FILES/CLONE_SIGHAND; refcounted shared resources
-- [x] Super pages — Sv39 2MB megapages for kernel identity maps; `walk()` detects level-1 leaf PTEs; COW fork splits to 4KB
-- [x] On-disk read/write file system — ext2-lite over virtio-blk (`kernel/ext2.c`); mounted at `/mnt`; open/read/write/mkdir/unlink/rmdir
-- [x] On-disk swap and paging — clock eviction in `kernel/swap.c`; 1024 swap slots at end of disk; swap-in on page fault
-- [ ] Kernel `panic()` function — halt the system with a diagnostic message on unrecoverable errors (currently no C-side panic; only Rust `#[panic_handler]` exists)
-- [ ] TCP/IP networking via lwIP (see detailed plan below)
-- [ ] Multi-core support
+- [ ] exec() ELF segment permissions — currently installs every load segment as RWX; should respect ELF `p_flags` (PF_R/PF_W/PF_X)
+- [ ] exec() address-space leak — does not free old VMAs/pages on both success and failure paths
+- [ ] Review whether any ext2 symlink path traversal edge cases remain beyond the currently passing symlink regressions
 
 ### Remaining Fixes
 
@@ -316,6 +307,14 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Mount point injection in readdir — getdents64 appends synthetic DT_DIR entries for child mount points (dev, proc, sys, mnt) after filesystem readdir exhausts
 - [x] Ext2 rmdir support — `SYS_unlinkat` with `AT_REMOVEDIR` flag dispatches to `ext2_ops.rmdir`
 - [x] Strerror messages — libc `strerror()` returns correct POSIX error strings for all errno values
+- [x] Fork pgid/sid inheritance — `sys_clone()` copies parent's pgid and sid to child (POSIX compliance)
+- [x] Signal trampoline re-mapping — `deliver_signal()` checks trampoline PTE and re-maps if missing
+- [x] Host test runner reliability — increased timeout to 600s, early exit on shell prompt detection
+- [x] Test binary separation — test binaries excluded from regular builds via Makefile filter
+- [x] POSIX signal defines — added SIGHUP, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGUSR1, SIGUSR2, SIGALRM, SIGTERM, etc. to kernel header
+- [x] Execve symlink resolution — `follow_symlinks()` called in `sys_execve_handler()` before `to_tarfs_path()`
+- [x] Lazy mmap — removed eager `uvmalloc()` from `sys_mmap_handler()`; pages allocated on demand via page fault
+- [x] fsync syscall — `SYS_fsync` (82) flushes ext2 inode cache, block cache, and superblock to disk
 
 ## POSIX Compliance Checklist (Required Components)
 
@@ -336,7 +335,6 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Job Control Shell — sbush with sessions (`setsid`), process groups (`setpgid`/`tcsetpgrp`), fg/bg/jobs builtins
 - [x] Pipes — bidirectional pipe2 syscall; shell pipelines work across processes
 - [x] Limit System — `prlimit64` handles RLIMIT_STACK (8MB) and RLIMIT_NOFILE (16); libc getrlimit/setrlimit wrappers
-- [ ] Networks — no TCP/IP stack; lwIP integration not started (see detailed plan below)
 - [x] getrandom — LCG PRNG seeded from RTC via `r_time()`; functional but not cryptographically secure
   - **Note:** Implemented in commit `d72182c` (`kernel/trap.c`, SYS_getrandom handler). Uses a simple linear congruential generator — sufficient for test harnesses and non-security uses, but does not meet POSIX `getentropy()`/`getrandom()` entropy requirements. A hardware RNG or entropy pool would be needed for real crypto.
 
@@ -345,49 +343,6 @@ Syscall handlers added to `kernel/trap.c` to satisfy POSIX test expectations:
 - [x] Add WFI to scheduler idle loop — `wfi` halts hart until next interrupt when no RUNNABLE process exists
 - [x] Implement procfs (`/proc`) — `kernel/procfs.c` with per-PID `status`/`cmdline`, plus `dmesg` and `mounts`
 - [x] Implement sysfs (`/sys`) — `kernel/sysfs.c` with `kernel/{version,hostname}` and DTB device attributes
-- [ ] TCP/IP networking via lwIP (3 layers, detailed below)
-
-### TCP/IP Networking Plan (lwIP + virtio-net)
-
-QEMU already provides `virtio-net-pci-non-transitional` with user-mode networking (`-netdev user`). The device is present on the PCI bus but no kernel driver initializes it.
-
-**Existing infrastructure that lwIP can reuse:**
-- PCI ECAM enumeration — working in `kernel/virtio_blk.c`; virtio-net uses the same pattern (device ID `0x1041` vs `0x1042`)
-- `kmalloc()`/`kalloc()` — lwIP needs malloc/free for packet buffers and control blocks
-- PLIC interrupt routing — already working for UART; virtio-net RX interrupt follows same path
-- Kernel `string.h` — memcpy, memset, strlen already implemented (lwIP requires these)
-- Timer tick counter — `ticks` global incremented by timer interrupt; lwIP needs millisecond time
-
-**Layer 1: virtio-net driver** (`kernel/virtio_net.c`)
-- [ ] Clone virtio-blk PCI discovery; scan for device ID `0x1041` (virtio-net non-transitional)
-- [ ] Set up 2 virtqueues: RX (queue 0) and TX (queue 1), vs 1 for virtio-blk
-- [ ] Negotiate features: `VIRTIO_NET_F_MAC` (bit 5) to read MAC address from device config
-- [ ] Pre-post RX buffers (descriptor chain with virtio-net header + packet data)
-- [ ] TX path: format virtio-net header + ethernet frame, submit to TX virtqueue
-- [ ] RX interrupt handler: claim from PLIC, dequeue completed RX buffers, feed to lwIP `netif->input()`
-- [ ] Expose `virtio_net_send(buf, len)` and `virtio_net_init()` to kernel
-
-**Layer 2: lwIP platform port** (`kernel/lwip/`)
-- [ ] `lwipopts.h` — configure for NO_SYS=1 (no threading), MEM_SIZE, PBUF pool sizes, enable TCP/UDP/DHCP
-- [ ] `cc.h` / `arch.h` — type mappings (`u8_t`=`uint8_t`, etc.), `PACK_STRUCT_*` macros, `LWIP_PLATFORM_DIAG` → `printk`
-- [ ] `sys_arch.c` — `sys_now()` returns milliseconds from tick counter; no mutex/semaphore needed (NO_SYS=1)
-- [ ] Memory hooks: `mem_malloc`/`mem_free` → wrap `kmalloc`/`kmfree`; or use lwIP's internal allocator with a static pool from `kalloc()`
-- [ ] `netif` driver: register with `netif_add()`, set `linkoutput` → `virtio_net_send()`, call `ethernet_input()` from RX interrupt
-- [ ] Call `sys_check_timeouts()` from timer tick to drive lwIP timers (ARP, TCP retransmit, DHCP)
-- [ ] Build lwIP sources with cross-compiler flags (`-ffreestanding -nostdinc -mcmodel=medany`)
-
-**Layer 3: Socket syscalls** (kernel/trap.c + libc)
-- [ ] Kernel side: add syscall handlers for `SYS_socket` (198), `SYS_bind` (200), `SYS_listen` (201), `SYS_accept` (202), `SYS_connect` (203), `SYS_sendto` (206), `SYS_recvfrom` (207), `SYS_setsockopt` (208), `SYS_getsockopt` (209)
-- [ ] Dispatch to lwIP's sequential API: `lwip_socket()`, `lwip_bind()`, `lwip_connect()`, `lwip_send()`, `lwip_recv()`
-- [ ] Map lwIP socket fds into the per-process open file table (new `struct open_file` type)
-- [ ] Libc headers: `sys/socket.h`, `netinet/in.h`, `arpa/inet.h` with socket wrappers
-
-**Validation:**
-- [ ] Milestone 1: `virtio_net_init()` prints MAC address at boot — confirms PCI discovery works
-- [ ] Milestone 2: DHCP acquires IP from QEMU's built-in DHCP server (10.0.2.x)
-- [ ] Milestone 3: `ping 10.0.2.2` (QEMU gateway) from kernel — confirms ICMP round-trip
-- [ ] Milestone 4: Userspace UDP echo client/server
-- [ ] Milestone 5: Userspace TCP connect to host via QEMU port forwarding
 
 ## Grading Targets
 
@@ -396,118 +351,59 @@ QEMU already provides `virtio-net-pci-non-transitional` with user-mode networkin
 - [x] Signals (INT on ^C, ALARM, SEGV) and pipes (+10 pts) — SIGINT via `sigpending`, SIGALRM via `alarm()` syscall, SIGSEGV via `deliver_signal()`, SIGCHLD on exit; pipes work; tested with `spin`, `alarmtest`, `segvtest`
 - [x] On-disk r/w file system (+10 pts) — ext2-lite with block cache, inode cache, directory ops over virtio-blk
 - [x] On-disk swap and paging (+10 pts) — clock eviction, swap bitmap, PTE_SWAP encoding, transparent swap-in on page fault
-- [ ] TCP/IP networking via lwIP (+10 pts)
-- [ ] Multi-core (+20 pts)
 
 ## Automated Tests
 
-Testing architecture: kernel-side tests run from `boot()` before userspace; userspace tests run as shell scripts via `/etc/rc`. All tests print `[PASS] name` or `[FAIL] name` to serial. A host-side script (`tools/run_tests.sh`) launches QEMU with a timeout, captures serial output, and counts results.
+### Test Infrastructure — DONE
 
-### Test Infrastructure
+Test binaries are separated from utility binaries in the build system. Regular builds (`make`/`make qemu`) include only utilities; `make test` includes everything.
 
-- [ ] `kernel/test.c`: kernel test framework with `TEST(name, expr)` macro
-- [ ] `rootfs/etc/test.sh`: userspace test suite (run from `/etc/rc`)
-- [ ] `tools/run_tests.sh`: host-side runner (timeout + parse serial output)
-- [ ] `make test` target in Makefile
+- [x] `tools/run_tests.sh`: host-side integrated runner — builds with `BUILD_TESTS=1`, launches QEMU, streams live serial output, and parses guest results
+- [x] `tools/guest-run-tests`: in-guest dispatcher — runs 24 guest binary invocations plus shell regression coverage, including persistence write/verify and shell exit-status checks
+- [x] Focused target runners in `tools/`: `run_fdiotest_target.sh`, `run_lazytest_target.sh`, `run_persist_flow.sh`, `run_sh_exit_code_target.sh`, `run_shell_e2e_target.sh`, `run_core_regressions_target.sh`
+- [x] Interactive PTY smoke automation: `run_interactive_smoke.py` + `ci_interactive_smoke.sh` cover Ctrl-C, Ctrl-Z, Ctrl-U, Ctrl-\, Ctrl-D, `jobs`, and `fg`
+- [x] Repo-agnostic CI entrypoints: `ci_smoke.sh`, `ci_focused.sh`, `ci_full.sh`, `ci_thirdparty.sh`
+- [x] Coverage reporting: `tools/test_manifest.json` + `tools/render_test_coverage.py` generate `docs/review/2026-03-13-test-coverage-matrix.md`
+- [x] `rootfs/etc/rc`: test-aware boot flow; test images run `/bin/run-tests` when present
+- [x] Custom `/etc/rc` override support in the build/test tooling for focused guest boots
 
-### 2. Trap/Interrupt Subsystem Tests
+### Current Test State
 
-- [ ] `trap_vector_set` (kernel): `stvec` CSR is non-zero after setup
-- [ ] `timer_fires` (kernel): timer callback increments counter; assert counter > 0 after delay loop
-- [ ] `timer_monotonic` (kernel): two successive timer reads yield t2 > t1
-- [ ] `plic_claim_complete` (kernel): PLIC claim returns valid IRQ for UART; complete doesn't fault
-- [ ] `preempt_tick` (kernel): two kernel threads both get scheduled within N timer ticks
+### Current Automated Coverage
 
-### 3. Memory Subsystem Tests
+**Integrated guest suite:**
+- [x] Process, scheduler, signal, filesystem, swap, `mmap`, libc, `/proc`, COW, lazy allocation, pgrp/session, symlink, clock, exec, persistence, and shell regressions run through `tools/run_tests.sh`
+- [x] `libc-test` currently completes its `sys/mman`, `fcntl`, and `ioctl` sections successfully
+- [x] `mmaptest` completes successfully after the adjacent-VMA merge fix in `kernel/vm.c`
 
-- [ ] `palloc_single` (kernel): `palloc()` returns non-NULL, page-aligned address
-- [ ] `palloc_free_reuse` (kernel): free a page, allocate again — get same page back
-- [ ] `palloc_exhaust` (kernel): allocate until NULL; count matches expected free pages
-- [ ] `pt_map_read` (kernel): map a page at a VA, write through PA, read through VA — values match
-- [ ] `pt_unmap` (kernel): unmap a page, access causes page fault (trap handler sets a flag)
-- [ ] `pt_kernel_identity` (kernel): after enabling `satp`, kernel text/data still accessible
-- [ ] `kmalloc_basic` (kernel): `kmalloc(64)` returns non-NULL; write/read back works
-- [ ] `kmalloc_alignment` (kernel): returned pointer is at least 8-byte aligned
-- [ ] `kmalloc_multiple` (kernel): multiple allocations return non-overlapping regions
+**Focused target proofs:**
+- [x] `fdio_core` — proven by `tools/run_fdiotest_target.sh`
+- [x] `memory_lazy_allocation` — proven by `tools/run_lazytest_target.sh`
+- [x] `persistence_write_and_sync` / `persistence_verify_after_reboot` — proven by `tools/run_persist_flow.sh`
+- [x] `shell_exit_status` — proven by `tools/run_sh_exit_code_target.sh`
+- [x] Shell E2E categories — proven by `tools/run_shell_e2e_target.sh`
 
-### 4. Process Subsystem Tests
+**Interactive shell coverage:**
+- [x] Ctrl-C interrupt
+- [x] Ctrl-Z stop
+- [x] Ctrl-U line kill
+- [x] `jobs`
+- [x] `fg`
+- [x] Ctrl-\ SIGQUIT
+- [x] Ctrl-D EOF
 
-- [ ] `kthread_create_run` (kernel): create kernel thread, it sets a global flag; main thread sees flag set
-- [ ] `kthread_two_threads` (kernel): two threads each increment separate counters; both > 0 after yield loop
-- [ ] `context_switch_regs` (kernel): thread stores known values in saved regs, switches out and back — regs preserved
-- [ ] `user_mode_entry` (kernel): jump to U-mode code that does `ecall`; trap handler sees `scause == 8`
-- [ ] `per_process_pt` (kernel): two processes map same VA to different PAs; each reads its own value
+### Remaining Gaps
 
-### 5. User-level Subsystem Tests (VMAs, COW, Page Faults)
+1. **Third-party runtime payloads are still missing**
+   - [ ] Python
+   - [ ] `make+tcc`
+   - [ ] BusyBox
 
-- [ ] `vma_track` (kernel): after mapping a region, VMA list contains entry with correct start/end/prot
-- [ ] `cow_fork_isolation` (kernel/user): parent writes X, fork, child writes Y — parent still sees X
-- [ ] `cow_fork_page_count` (kernel): after fork, physical page count doesn't double (pages shared)
-- [ ] `stack_autoexpand` (user): recursive function touches stack well below initial SP — no crash
-- [ ] `segv_on_bad_addr` (user): dereference `0xDEADBEEF` → process killed (parent sees non-zero exit via waitpid)
-- [ ] `page_fault_demand` (kernel): map VMA without backing page; first access triggers fault, handler allocates, second access succeeds
+2. **Third-party packaging/integration still needs to be finished once payloads exist**
+   - [ ] Stage the required static RISC-V binaries in `thirdparty/`
+   - [ ] Copy them into the rootfs during test builds
+   - [ ] Add focused target proofs beyond inventory checks
 
-### 6. I/O Subsystem Tests
-
-- [ ] `syscall_write_stdout` (user): `write(1, "hello", 5)` → "hello" appears in serial output
-- [ ] `syscall_read_stdin` (user): pipe "abc" to child, `read(0, buf, 3)` returns 3, buf == "abc"
-- [ ] `syscall_open_close` (user): `open("/etc/rc")` returns fd >= 0; `close(fd)` returns 0
-- [ ] `syscall_bad_fd` (user): `read(999, buf, 1)` returns -EBADF
-- [ ] `tarfs_open_read` (user): `open("/etc/rc")` + `read()` returns file contents matching expected
-- [ ] `tarfs_opendir` (user): `opendir("/bin")` succeeds; `readdir` yields "cat", "ls", "echo", "sbush"
-- [ ] `tarfs_file_not_found` (user): `open("/nonexistent")` returns -ENOENT
-- [ ] `tarfs_read_binary` (user): read first 4 bytes of `/bin/echo` → matches ELF magic `\x7fELF`
-- [ ] `pipe_basic` (user): `pipe()`, write "xyz" to write-end, read from read-end → "xyz"
-- [ ] `pipe_close_read_end` (user): close read end, write → SIGPIPE or -EPIPE
-
-### 7. Userspace Binary Tests
-
-- [ ] `echo_basic` (user-script): `echo hello world` → stdout is "hello world\n"
-- [ ] `echo_no_args` (user-script): `echo` → stdout is "\n"
-- [ ] `cat_file` (user-script): `cat /etc/rc` → output matches known rc contents
-- [ ] `cat_nonexistent` (user-script): `cat /nope` → non-zero exit
-- [ ] `ls_bin` (user-script): `ls /bin` → output contains "echo", "cat", "ls", "sbush"
-- [ ] `ls_nonexistent` (user-script): `ls /nope` → non-zero exit
-- [ ] `sleep_duration` (user-script): `sleep 1` completes without crash (verify exit 0)
-- [ ] `kill_process` (user-script): launch background `sleep 999`, then `kill -9 $!` → waitpid returns
-- [ ] `ps_output` (user-script): `ps` output includes at least init and current shell
-
-### 8. Shell (sbush) Tests
-
-- [ ] `sh_simple_cmd` (user-script): `/bin/echo hello` → "hello"
-- [ ] `sh_builtin_cd` (user-script): `cd /bin && /bin/ls` → shows binary names
-- [ ] `sh_pipe` (user-script): `echo hello | cat` → "hello"
-- [ ] `sh_multi_pipe` (user-script): `echo abc | cat | cat` → "abc"
-- [ ] `sh_env_var` (user-script): `export FOO=bar && echo $FOO` → "bar"
-- [ ] `sh_path_resolve` (user-script): `export PATH=/bin && echo works` → "works"
-- [ ] `sh_background` (user-script): `sleep 0 &` doesn't block shell; next command runs
-- [ ] `sh_script` (user-script): write and run a script, check output
-- [ ] `sh_exit_code` (user-script): `false; echo $?` → non-zero (once `$?` supported)
-
-### 9. /bin/init Tests
-
-- [ ] `init_runs_rc` (user-script): boot output includes "Running /etc/rc"
-- [ ] `init_spawns_shell` (user-script): after rc, shell prompt appears (PS1 printed)
-- [ ] `init_reaps_zombies` (user-script): fork a child that exits; after wait, `ps` shows no zombie
-
-### Grading Target Tests (Bonus)
-
-- [ ] `preempt_fairness` (kernel): two CPU-bound loops each get roughly equal time slices
-- [ ] `signal_sigint` (user): `^C` kills foreground process; shell survives
-- [ ] `signal_segv` (user): null deref in child → child killed with SIGSEGV, parent gets status
-- [ ] `signal_alarm` (user): `alarm(1)` → SIGALRM delivered after ~1 second
-- [ ] `disk_write_read` (kernel): write pattern to disk blocks, read back, verify (existing WP3 test)
-- [ ] `swap_pressure` (kernel): allocate more pages than physical RAM; pages evicted to disk and faulted back
-- [ ] `pipe_across_procs` (user): `echo test | cat` across two separate processes via shell pipe
-
-### Test Priority Order
-
-Build tests in this order (matching implementation order):
-
-1. Memory subsystem tests — validates the foundation everything else depends on
-2. Process/context-switch tests — needed before any userspace works
-3. Syscall + I/O tests — validates the kernel-user boundary
-4. Tarfs tests — needed before any binary can be loaded
-5. Binary tests (echo, cat, ls) — quick smoke tests
-6. Shell tests — integration-level, depend on everything above
-7. Bonus tests (signals, swap, etc.) — add as each feature is implemented
+3. **Kernel/runtime cleanup items still worth investigating**
+   - [ ] Investigate non-fatal warnings such as `swap_free: double free ...` observed during some full guest runs
+   - [ ] Decide whether to broaden `fcntl`/`ioctl` compatibility further for third-party runtimes beyond the currently proven MicroPython-adjacent gaps

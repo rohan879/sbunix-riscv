@@ -14,6 +14,7 @@
 #include <ext2.h>
 #include <tty.h>
 #include <swap.h>
+#include <kmalloc.h>
 
 // Declare symbols for the embedded tarfs
 extern char _tarfs_start[];
@@ -28,6 +29,7 @@ void boot(uint64_t hartid, void *dtb) {
   dtb_print_devices();
 
   kinit();
+  kmalloc_init();
   kvminit();
 
   timer_init();
@@ -51,5 +53,5 @@ void boot(uint64_t hartid, void *dtb) {
   scheduler();
 
   // Should never reach here
-  while(1);
+  panic("scheduler returned");
 }

@@ -20,6 +20,7 @@ USER_BIN += $(patsubst bin/%,build/rootfs/bin/%,$(TEST_BIN_DIRS))
 endif
 
 TIMEOUT ?= 600
+RC_SCRIPT ?= rootfs/etc/rc
 
 # Language-specific kernel object/library
 ifeq ($(KLANG),c)
@@ -63,12 +64,17 @@ build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o bin/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 
-build/tarfs.o: $(USER_BIN)
+build/tarfs.o: $(USER_BIN) $(RC_SCRIPT)
 	cp -a rootfs/. build/rootfs/
+	cp $(RC_SCRIPT) build/rootfs/etc/rc
 	ln -sf sbush build/rootfs/bin/sh
 ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests
 endif
+	@mkdir -p build/rootfs/usr/lib build/rootfs/usr/include
+	cp build/libc/crt.S.o build/rootfs/usr/lib/crt1.o
+	cp build/libc.a build/rootfs/usr/lib/libc.a
+	cp -a libc/include/. build/rootfs/usr/include/
 	tar cf build/rootfs.tar -C build/rootfs .
 	cd build && $(OBJCOPY) -I binary -O elf64-littleriscv -B riscv \
 		--rename-section .data=.tarfs \
@@ -102,7 +108,7 @@ qemu: build/kernel.elf $(DISK_IMG)
 		-nographic
 
 test: $(DISK_IMG)
-	TIMEOUT=$(TIMEOUT) bash tools/run_tests.sh
+	TIMEOUT=$(TIMEOUT) bash tools/ci_full.sh
 
 clean:
 	rm -rf build zig-out .zig-cache
@@ -115,7 +121,7 @@ submit:
 	rsync -a \
 		--exclude='.git' --exclude='build/' --exclude='zig-out/' \
 		--exclude='.zig-cache/' --exclude='.claude/' --exclude='thirdparty/' \
-		--max-size=120K \
+		--max-size=150K \
 		. "$$STMP/"; \
 	cd "$$STMP"; \
 	git init -q; \

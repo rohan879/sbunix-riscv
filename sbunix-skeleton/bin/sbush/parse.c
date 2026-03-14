@@ -138,6 +138,30 @@ static long arith_factor(void) {
     }
     if (*arith_p >= '0' && *arith_p <= '9') {
         long v = 0;
+        if (*arith_p == '0' && (arith_p[1] == 'x' || arith_p[1] == 'X')) {
+            /* Hexadecimal: 0x... */
+            arith_p += 2;
+            while ((*arith_p >= '0' && *arith_p <= '9') ||
+                   (*arith_p >= 'a' && *arith_p <= 'f') ||
+                   (*arith_p >= 'A' && *arith_p <= 'F')) {
+                if (*arith_p >= '0' && *arith_p <= '9')
+                    v = v * 16 + (*arith_p - '0');
+                else if (*arith_p >= 'a' && *arith_p <= 'f')
+                    v = v * 16 + (*arith_p - 'a' + 10);
+                else
+                    v = v * 16 + (*arith_p - 'A' + 10);
+                arith_p++;
+            }
+            return v;
+        }
+        if (*arith_p == '0' && arith_p[1] >= '0' && arith_p[1] <= '7') {
+            /* Octal: 0... */
+            arith_p++;
+            while (*arith_p >= '0' && *arith_p <= '7')
+                v = v * 8 + (*arith_p++ - '0');
+            return v;
+        }
+        /* Decimal */
         while (*arith_p >= '0' && *arith_p <= '9')
             v = v * 10 + (*arith_p++ - '0');
         return v;
@@ -240,8 +264,28 @@ static long arith_bitor(void) {
     return v;
 }
 
-static long arith_ternary(void) {
+static long arith_logand(void) {
     long v = arith_bitor();
+    while (1) {
+        arith_skip_ws();
+        if (arith_p[0] == '&' && arith_p[1] == '&') { arith_p += 2; long r = arith_bitor(); v = (v && r); }
+        else break;
+    }
+    return v;
+}
+
+static long arith_logor(void) {
+    long v = arith_logand();
+    while (1) {
+        arith_skip_ws();
+        if (arith_p[0] == '|' && arith_p[1] == '|') { arith_p += 2; long r = arith_logand(); v = (v || r); }
+        else break;
+    }
+    return v;
+}
+
+static long arith_ternary(void) {
+    long v = arith_logor();
     arith_skip_ws();
     if (*arith_p == '?') {
         arith_p++;
@@ -457,6 +501,14 @@ static void expand_vars(char *line) {
         if (*src == '\'' ) {
             in_sq = !in_sq;
             *dst++ = *src++;
+        } else if (*src == '\\' && !in_sq) {
+            char next = *(src + 1);
+            if (next == '$' || next == '`' || next == '\\') {
+                src++;           /* skip backslash */
+                *dst++ = *src++; /* copy escaped char literally */
+            } else {
+                *dst++ = *src++; /* copy backslash literally */
+            }
         } else if (*src == '$' && !in_sq) {
             src++;
             if (*src == '?') {
@@ -479,6 +531,17 @@ static void expand_vars(char *line) {
                 char tmp[16];
                 itoa((int)getpid(), tmp, 10);
                 for (char *v = tmp; *v && dst < end; )
+                    *dst++ = *v++;
+            } else if (*src == '-') {
+                /* $- -- current option flags */
+                src++;
+                char flags[8];
+                int fi = 0;
+                if (opt_errexit) flags[fi++] = 'e';
+                if (opt_xtrace)  flags[fi++] = 'x';
+                if (opt_nounset) flags[fi++] = 'u';
+                flags[fi] = '\0';
+                for (char *v = flags; *v && dst < end; )
                     *dst++ = *v++;
             } else if (*src == '#') {
                 /* $# -- positional parameter count */
@@ -531,6 +594,9 @@ static void expand_vars(char *line) {
                 if (val) {
                     while (*val && dst < end)
                         *dst++ = *val++;
+                } else if (opt_nounset && i > 0) {
+                    dprintf(2, "sbush: %s: unbound variable\n", name);
+                    last_exit_status = 1;
                 }
             }
         } else if (*src == '`' && !in_sq) {

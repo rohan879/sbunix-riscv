@@ -20,8 +20,15 @@ int exec(char *path) {
     Elf64_Phdr *phdr;
     char *elf_data;
     unsigned int i;
-    pagetable_t pagetable;
+    pagetable_t pagetable = 0;
+    pagetable_t old_pt = current_proc->pagetable;
+    struct shared_pagetable *old_shared_pt = current_proc->shared_pt;
+    struct shared_sigactions *old_shared_sa = current_proc->shared_sa;
+    int old_clone_flags = current_proc->clone_flags;
+    struct vm_area *old_vmas = current_proc->vma_list;
+    struct vm_area *new_vmas = NULL;
     uint64_t sz = 0;
+    unsigned long old_satp = 0;
     struct trapframe *tf = current_proc->trapframe;
     
     // 1. Find ELF
@@ -35,35 +42,11 @@ int exec(char *path) {
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
         ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3) return -1;
 
-    /* Detach from shared pagetable if this is a CLONE_VM thread */
-    if (current_proc->shared_pt) {
-        current_proc->shared_pt->refcount--;
-        if (current_proc->shared_pt->refcount == 0) {
-            /* We were the last user -- free old shared pagetable wrapper.
-             * The actual pagetable pages leak (pre-existing issue). */
-            kmfree(current_proc->shared_pt, sizeof(struct shared_pagetable));
-        }
-        current_proc->shared_pt = NULL;
-        current_proc->clone_flags &= ~CLONE_VM;
-        /* exec will create a brand new pagetable below */
-    }
-
-    /* Detach from shared signal handlers (exec resets all to SIG_DFL) */
-    if (current_proc->shared_sa) {
-        current_proc->shared_sa->refcount--;
-        if (current_proc->shared_sa->refcount == 0)
-            kmfree(current_proc->shared_sa, sizeof(struct shared_sigactions));
-        current_proc->shared_sa = NULL;
-        current_proc->clone_flags &= ~CLONE_SIGHAND;
-    }
-    /* Reset all sigactions to default */
-    memset(current_proc->sigactions, 0, sizeof(current_proc->sigactions));
-
-    /* Clear old VMAs before loading new binary */
-    vma_free_all(current_proc);
-
     pagetable = uvmcreate();
     if(pagetable == 0) return -1;
+    old_satp = r_satp();
+    w_satp(MAKE_SATP(kernel_pagetable));
+    sfence_vma();
 
     // 3. Load PT_LOAD segments
     for (i = 0; i < ehdr->e_phnum; i++) {
@@ -86,25 +69,43 @@ int exec(char *path) {
             if (phdr->p_flags & 0x1) vprot |= PROT_EXEC;   /* PF_X */
             uint64_t vma_start = PGROUNDDOWN(phdr->p_vaddr);
             uint64_t vma_end   = PGROUNDUP(phdr->p_vaddr + phdr->p_memsz);
-            vma_add(current_proc, vma_start, vma_end, vprot, MAP_PRIVATE);
+            if (vma_add_list(&new_vmas, vma_start, vma_end, vprot, MAP_PRIVATE) < 0)
+                goto bad;
         }
     }
 
-    // 4. User Stack — allocate 8 pages (32 KB) to accommodate deep call stacks
-    #define USER_STACK_PAGES 8
+    // 3b. Tighten PTE permissions — remove PTE_W added for copyout
+    for (i = 0; i < ehdr->e_phnum; i++) {
+        phdr = (Elf64_Phdr *)(elf_data + ehdr->e_phoff + i*sizeof(Elf64_Phdr));
+        if (phdr->p_type == PT_LOAD) {
+            int pte_flags = PTE_U;
+            if (phdr->p_flags & 0x4) pte_flags |= PTE_R;
+            if (phdr->p_flags & 0x2) pte_flags |= PTE_W;
+            if (phdr->p_flags & 0x1) pte_flags |= PTE_X;
+            uvmprotect(pagetable, phdr->p_vaddr, phdr->p_memsz, pte_flags);
+        }
+    }
+
+    // 4. User Stack — allocate 16 pages (64 KB) to accommodate deep call stacks
+    #define USER_STACK_PAGES 16
     uint64_t stack_va = MAXVA - (USER_STACK_PAGES * PAGE_SIZE);
     char *top_page_mem = NULL;
     for (int pg = 0; pg < USER_STACK_PAGES; pg++) {
         char *sp_mem = kalloc();
         if (!sp_mem) goto bad;
         uint64_t vaddr = stack_va + pg * PAGE_SIZE;
-        if (uvmmap(pagetable, vaddr, (uint64_t)sp_mem, PAGE_SIZE, PTE_R | PTE_W | PTE_U) < 0) goto bad;
+        if (uvmmap(pagetable, vaddr, (uint64_t)sp_mem, PAGE_SIZE, PTE_R | PTE_W | PTE_U) < 0) {
+            kfree(sp_mem);
+            goto bad;
+        }
         if (pg == USER_STACK_PAGES - 1)
             top_page_mem = sp_mem;  /* remember physical addr of topmost page */
     }
     
     /* Add a VMA for the user stack region */
-    vma_add(current_proc, stack_va, MAXVA, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+    if (vma_add_list(&new_vmas, stack_va, MAXVA, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON) < 0)
+        goto bad;
 
     // 5. Identity map kernel and ALL RAM (No PTE_U)
     // This ensures kernel code, data, AND dynamically allocated pages (like kstack)
@@ -122,12 +123,12 @@ int exec(char *path) {
     uvmmap_sigtrampoline(pagetable);
 
     // 6. Update process state
-    /* Note: old pagetable is intentionally not freed here because it
-     * contains kernel identity maps sharing physical pages with the
-     * running kernel.  Freeing those would corrupt kernel memory.
-     * The first exec (init_starter) uses the kernel pagetable itself.
-     * This is a known, small leak per-exec. */
     current_proc->pagetable = pagetable;
+    current_proc->vma_list = new_vmas;
+    new_vmas = NULL;
+    current_proc->shared_pt = NULL;
+    current_proc->shared_sa = NULL;
+    current_proc->clone_flags = old_clone_flags & ~(CLONE_VM | CLONE_SIGHAND);
     current_proc->sz = sz;
 
     // Initialize stack bounds for auto-grow
@@ -151,10 +152,21 @@ int exec(char *path) {
         current_proc->name[ni] = '\0';
     }
 
+    /* Reset all sigactions to default in the now-private table. */
+    memset(current_proc->sigactions, 0, sizeof(current_proc->sigactions));
+
     // Switch satp to the new page table immediately so that trap_restore's
     // sret enters user mode with the correct address space.
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
+
+    /* Defer old-image teardown until sys_execve_handler has rebuilt argv/envp on
+     * the new user stack. Freeing the old image inline here has been observed to
+     * corrupt post-exec user state on swap-heavy paths. */
+    current_proc->deferred_free_pt = old_pt;
+    current_proc->deferred_free_vmas = old_vmas;
+    current_proc->deferred_shared_pt = old_shared_pt;
+    current_proc->deferred_shared_sa = old_shared_sa;
 
     // 7. Initialize trapframe
     memset(tf, 0, sizeof(*tf));
@@ -172,8 +184,16 @@ int exec(char *path) {
     return 0;
 
 bad:
-    /* The new pagetable may contain kernel identity maps — we cannot
-     * call uvmunmap on the whole range without corrupting kernel memory.
-     * Accept the leak on the (rare) exec failure path. */
+    if (old_satp)
+        w_satp(old_satp);
+    sfence_vma();
+    /* Free user pages from the partially constructed new pagetable.
+     * freewalk_user only frees PTE_U pages, leaving kernel identity
+     * maps intact (their physical pages are shared with the kernel). */
+    if (pagetable) {
+        freewalk_user(pagetable);
+    }
+    if (new_vmas)
+        vma_free_list(&new_vmas);
     return -1;
 }

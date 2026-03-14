@@ -94,7 +94,9 @@ static void emit_signed(char *buf, int *pos, int *total, long val)
 {
 	if (val < 0) {
 		emit_buf(buf, pos, total, '-');
-		emit_unsigned(buf, pos, total, (unsigned long)(-val), 10, 0);
+		/* Use unsigned cast to avoid UB when val == LONG_MIN:
+		 * -(unsigned long)val is well-defined for all values. */
+		emit_unsigned(buf, pos, total, -(unsigned long)val, 10, 0);
 	} else {
 		emit_unsigned(buf, pos, total, (unsigned long)val, 10, 0);
 	}

@@ -38,6 +38,26 @@ static int64_t devzero_write(const char *buf, uint64_t count) {
   return (int64_t)count;
 }
 
+/* /dev/random and /dev/urandom — same PRNG as getrandom syscall */
+static uint64_t devrand_state;
+
+static int64_t devrand_read(char *buf, uint64_t count) {
+  if (devrand_state == 0)
+    devrand_state = 0xdeadbeefcafe1234ULL; /* seed on first use */
+  for (uint64_t i = 0; i < count; i++) {
+    devrand_state = devrand_state * 6364136223846793005ULL + 1442695040888963407ULL;
+    buf[i] = (char)(devrand_state >> 33);
+  }
+  return (int64_t)count;
+}
+
+static int64_t devrand_write(const char *buf, uint64_t count) {
+  /* Optionally mix written bytes into PRNG state as entropy */
+  for (uint64_t i = 0; i < count; i++)
+    devrand_state ^= ((uint64_t)(unsigned char)buf[i]) << ((i % 8) * 8);
+  return (int64_t)count;
+}
+
 /* /dev/console */
 static int64_t devconsole_read(char *buf, uint64_t count) {
   return (int64_t)tty_read(buf, (int)count);
@@ -52,8 +72,10 @@ static struct device devices[MAX_DEVICES] = {
   { "null",    devnull_read,    devnull_write,    0 },
   { "zero",    devzero_read,    devzero_write,    0 },
   { "console", devconsole_read, devconsole_write, 1 },
+  { "random",  devrand_read,    devrand_write,    0 },
+  { "urandom", devrand_read,    devrand_write,    0 },
 };
-static int num_devices = 3;
+static int num_devices = 5;
 
 /* ------------------------------------------------------------------ */
 /* devfs private data                                                   */

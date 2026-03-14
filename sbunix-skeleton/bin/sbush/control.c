@@ -444,26 +444,43 @@ static int cf_process_segment(const char *seg) {
         f->type = CF_FOR;
         f->lp_phase = LOOP_COND; /* will transition to LOOP_BODY on "do" */
 
-        /* Parse: for VAR in WORDS... */
+        /* Parse: for VAR in WORDS... or for VAR; do (positional params) */
         const char *rest = seg + 3;
         while (*rest == ' ' || *rest == '\t') rest++;
 
         /* extract variable name */
         int vi = 0;
-        while (*rest && *rest != ' ' && *rest != '\t' && vi < 63)
+        while (*rest && *rest != ' ' && *rest != '\t' && *rest != ';' && vi < 63)
             f->for_var[vi++] = *rest++;
         f->for_var[vi] = '\0';
 
+        /* Skip whitespace after variable name */
         while (*rest == ' ' || *rest == '\t') rest++;
-        /* skip "in" keyword */
+
+        /* Check for "in" keyword */
         if (rest[0] == 'i' && rest[1] == 'n' &&
             (rest[2] == ' ' || rest[2] == '\t' || rest[2] == '\0')) {
             rest += 2;
             while (*rest == ' ' || *rest == '\t') rest++;
+            strncpy(f->for_words, rest, MAX_LINE - 1);
+            f->for_words[MAX_LINE - 1] = '\0';
+        } else {
+            /* No "in" clause: iterate over positional parameters ($1, $2, ...) */
+            int wpos = 0;
+            for (int pi = 1; pi <= positional_count && wpos < MAX_LINE - 2; pi++) {
+                char *pv = positional_get(pi);
+                if (pv) {
+                    if (pi > 1 && wpos < MAX_LINE - 1)
+                        f->for_words[wpos++] = ' ';
+                    while (*pv && wpos < MAX_LINE - 1)
+                        f->for_words[wpos++] = *pv++;
+                }
+            }
+            f->for_words[wpos] = '\0';
+            /* Skip past semicolon if present (for VAR; do) */
+            if (*rest == ';') rest++;
+            while (*rest == ' ' || *rest == '\t') rest++;
         }
-
-        strncpy(f->for_words, rest, MAX_LINE - 1);
-        f->for_words[MAX_LINE - 1] = '\0';
         return 1;
     }
 

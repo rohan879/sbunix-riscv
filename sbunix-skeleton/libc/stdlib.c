@@ -86,6 +86,15 @@ long strtol(const char *s, char **endptr, int base) {
     return neg ? -(long)val : (long)val;
 }
 
+/* On LP64 (rv64), long and long long are both 64-bit. */
+long long strtoll(const char *s, char **endptr, int base) {
+    return (long long)strtol(s, endptr, base);
+}
+
+unsigned long long strtoull(const char *s, char **endptr, int base) {
+    return (unsigned long long)strtoul(s, endptr, base);
+}
+
 int atoi(const char *s) {
     return (int)strtol(s, (char **)0, 10);
 }
@@ -263,6 +272,121 @@ void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
     return (void *)0;
 }
 
+/* -----------------------------------------------------------------------
+ * realpath() — resolve a pathname to an absolute path.
+ * Handles . and .. components.  Does not follow symlinks beyond what
+ * the kernel already resolves on stat().
+ * ---------------------------------------------------------------------- */
+
+#include <sys/stat.h>
+#include <limits.h>
+#include <errno.h>
+
+char *realpath(const char *path, char *resolved_path) {
+    if (!path || !*path) {
+        errno = 22; /* EINVAL */
+        return (void *)0;
+    }
+
+    static char buf[PATH_MAX];
+    char *out = resolved_path ? resolved_path : buf;
+    char work[PATH_MAX];
+
+    /* Start with absolute path */
+    if (path[0] != '/') {
+        if (!getcwd(out, PATH_MAX))
+            return (void *)0;
+        size_t cwdlen = strlen(out);
+        if (cwdlen + 1 + strlen(path) >= PATH_MAX) {
+            errno = 36; /* ENAMETOOLONG */
+            return (void *)0;
+        }
+        out[cwdlen] = '/';
+        strcpy(out + cwdlen + 1, path);
+    } else {
+        if (strlen(path) >= PATH_MAX) {
+            errno = 36;
+            return (void *)0;
+        }
+        strcpy(out, path);
+    }
+
+    /* Normalize: resolve . and .. */
+    strcpy(work, out);
+    char *components[256];
+    int ncomp = 0;
+
+    char *p = work;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        char *start = p;
+        while (*p && *p != '/') p++;
+        if (*p) *p++ = '\0';
+
+        if (strcmp(start, ".") == 0) {
+            continue;
+        } else if (strcmp(start, "..") == 0) {
+            if (ncomp > 0) ncomp--;
+        } else {
+            if (ncomp < 256)
+                components[ncomp++] = start;
+        }
+    }
+
+    /* Rebuild path */
+    out[0] = '/';
+    out[1] = '\0';
+    for (int i = 0; i < ncomp; i++) {
+        if (i > 0) strcat(out, "/");
+        else out[1] = '\0'; /* overwrite the initial NUL after / */
+        if (i == 0)
+            strcpy(out + 1, components[i]);
+        else {
+            strcat(out, components[i]);
+        }
+    }
+
+    /* Verify the path exists */
+    struct stat st;
+    if (stat(out, &st) < 0)
+        return (void *)0;
+
+    return out;
+}
+
+/* -----------------------------------------------------------------------
+ * system() — execute a command via the shell.
+ * ---------------------------------------------------------------------- */
+
+#include <sys/wait.h>
+
+int system(const char *command) {
+    if (!command)
+        return 1; /* shell is available */
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+
+    if (pid == 0) {
+        /* child */
+        char *argv[4];
+        argv[0] = "sh";
+        argv[1] = "-c";
+        argv[2] = (char *)command;
+        argv[3] = (void *)0;
+        execve("/bin/sh", argv, environ);
+        _exit(127);
+    }
+
+    /* parent */
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0)
+        return -1;
+    return status;
+}
+
 /*
  * abort() — terminate the process abnormally.
  */
@@ -315,28 +439,36 @@ int setenv(const char *name, const char *value, int overwrite) {
         return -1;
     env_ensure_init();
     size_t nlen = strlen(name);
+    size_t vlen = strlen(value);
+
+    /* Allocate a new "NAME=VALUE" string */
+    char *entry = (char *)malloc(nlen + 1 + vlen + 1);
+    if (!entry)
+        return -1;
+    memcpy(entry, name, nlen);
+    entry[nlen] = '=';
+    memcpy(entry + nlen + 1, value, vlen);
+    entry[nlen + 1 + vlen] = '\0';
+
     /* find existing */
     for (int i = 0; environ[i]; i++) {
         if (strncmp(environ[i], name, nlen) == 0 && environ[i][nlen] == '=') {
-            if (!overwrite) return 0;
-            /* build new entry */
-            static char buf[320];
-            strcpy(buf, name);
-            strcat(buf, "=");
-            strcat(buf, value);
-            environ[i] = buf;
+            if (!overwrite) {
+                free(entry);
+                return 0;
+            }
+            environ[i] = entry;
             return 0;
         }
     }
     /* add new */
     int count = 0;
     while (environ[count]) count++;
-    if (count >= MAX_ENV) return -1;
-    static char newbuf[320];
-    strcpy(newbuf, name);
-    strcat(newbuf, "=");
-    strcat(newbuf, value);
-    environ[count] = newbuf;
+    if (count >= MAX_ENV) {
+        free(entry);
+        return -1;
+    }
+    environ[count] = entry;
     environ[count + 1] = (void *)0;
     return 0;
 }
@@ -357,6 +489,102 @@ int unsetenv(const char *name) {
         }
     }
     return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Temporary file creation: mkstemp / mktemp
+ * ---------------------------------------------------------------------- */
+
+#include <fcntl.h>
+#include <errno.h>
+
+/* Forward declarations to avoid pulling in all of syscall.h (which
+ * conflicts with sys/wait.h macros included later in this file). */
+#ifndef SYS_getrandom
+#define SYS_getrandom 278
+#endif
+long syscall(long num, ...);
+
+/*
+ * _mktemp_fill() — fill trailing XXXXXX in template with pseudo-random
+ * characters.  Uses SYS_getrandom if available, falls back to a mix of
+ * getpid() and a counter.
+ */
+static int _mktemp_fill(char *tmpl) {
+    static const char chars[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    int len = strlen(tmpl);
+    if (len < 6) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* Verify trailing XXXXXX */
+    for (int i = len - 6; i < len; i++) {
+        if (tmpl[i] != 'X') {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+
+    /* Try to get randomness from the kernel */
+    unsigned char randbuf[6];
+    long ret = syscall(SYS_getrandom, randbuf, 6, 0);
+    if (ret == 6) {
+        for (int i = 0; i < 6; i++)
+            tmpl[len - 6 + i] = chars[randbuf[i] % 62];
+    } else {
+        /* Fallback: mix pid and a counter */
+        static unsigned int counter = 0;
+        unsigned int seed = (unsigned int)getpid() * 31u + counter++;
+        for (int i = 0; i < 6; i++) {
+            seed = seed * 1103515245u + 12345u;
+            tmpl[len - 6 + i] = chars[(seed >> 16) % 62];
+        }
+    }
+    return 0;
+}
+
+/*
+ * mkstemp() — create and open a unique temporary file.
+ * template must end with "XXXXXX".  Returns an open fd or -1.
+ */
+int mkstemp(char *tmpl) {
+    for (int attempts = 0; attempts < 100; attempts++) {
+        /* Save the template suffix in case we need to retry */
+        char saved[7];
+        int len = strlen(tmpl);
+        if (len < 6) { errno = EINVAL; return -1; }
+        memcpy(saved, tmpl + len - 6, 6);
+        saved[6] = '\0';
+
+        if (_mktemp_fill(tmpl) < 0)
+            return -1;
+
+        int fd = open(tmpl, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0)
+            return fd;
+
+        if (errno != EEXIST)
+            return -1;
+
+        /* Restore XXXXXX for next attempt */
+        memcpy(tmpl + len - 6, saved, 6);
+    }
+
+    errno = EEXIST;
+    return -1;
+}
+
+/*
+ * mktemp() — generate a unique temporary filename without opening it.
+ * template must end with "XXXXXX".  Returns template or empty string on error.
+ */
+char *mktemp(char *tmpl) {
+    if (_mktemp_fill(tmpl) < 0) {
+        tmpl[0] = '\0';
+        return tmpl;
+    }
+    return tmpl;
 }
 
 int putenv(char *string) {

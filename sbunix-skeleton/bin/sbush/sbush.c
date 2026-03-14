@@ -21,8 +21,79 @@ static char hd_delim[64];
 static char hd_cmd[MAX_LINE];
 static char hd_buf[CF_BODY_SIZE];
 static int hd_len = 0;
+static int hd_quoted = 0;     /* 1 if delimiter was quoted — no expansion */
+static int hd_strip_tabs = 0; /* 1 if <<- was used — strip leading tabs */
+
+/* Simple variable expansion for heredoc body text (not full shell parsing).
+ * Expands $NAME and ${NAME} references in-place. */
+static void heredoc_expand_vars(char *buf, int *len) {
+    static char tmp[CF_BODY_SIZE];
+    char *src = buf;
+    char *srcend = buf + *len;
+    char *dst = tmp;
+    char *dstend = tmp + CF_BODY_SIZE - 1;
+
+    while (src < srcend && dst < dstend) {
+        if (*src == '\\' && (src + 1) < srcend && *(src + 1) == '$') {
+            /* Escaped $ — emit literal $ */
+            src++;
+            *dst++ = *src++;
+        } else if (*src == '$') {
+            src++;
+            if (src < srcend && *src == '{') {
+                /* ${NAME} */
+                src++;
+                char name[64];
+                int ni = 0;
+                while (src < srcend && *src != '}' && ni < 63)
+                    name[ni++] = *src++;
+                name[ni] = '\0';
+                if (src < srcend && *src == '}') src++;
+                char *val = var_get(name);
+                if (val) {
+                    while (*val && dst < dstend) *dst++ = *val++;
+                }
+            } else if (src < srcend && *src == '?') {
+                src++;
+                char tmp2[16];
+                itoa(last_exit_status, tmp2, 10);
+                for (char *v = tmp2; *v && dst < dstend; )
+                    *dst++ = *v++;
+            } else if (src < srcend && *src == '$') {
+                src++;
+                char tmp2[16];
+                itoa((int)getpid(), tmp2, 10);
+                for (char *v = tmp2; *v && dst < dstend; )
+                    *dst++ = *v++;
+            } else if (src < srcend && *src >= '0' && *src <= '9') {
+                int idx = *src - '0'; src++;
+                char *pv = positional_get(idx);
+                if (pv) { while (*pv && dst < dstend) *dst++ = *pv++; }
+            } else {
+                /* $NAME */
+                char name[64];
+                int ni = 0;
+                while (src < srcend && is_name_char(*src) && ni < 63)
+                    name[ni++] = *src++;
+                name[ni] = '\0';
+                char *val = var_get(name);
+                if (val) {
+                    while (*val && dst < dstend) *dst++ = *val++;
+                }
+            }
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *len = dst - tmp;
+    memcpy(buf, tmp, *len);
+}
 
 static void execute_heredoc(void) {
+    /* If delimiter was unquoted, expand variables in body */
+    if (!hd_quoted)
+        heredoc_expand_vars(hd_buf, &hd_len);
+
     int pfd[2];
     if (pipe(pfd) < 0) {
         dprintf(2, "sbush: heredoc pipe failed\n");
@@ -94,10 +165,27 @@ static int check_heredoc(char *line) {
         if (!in_sq && !in_dq && *p == '<' && *(p+1) == '<' && *(p+2) != '<') {
             char *hd_start = p;
             p += 2;
+            /* Check for <<- (tab-stripping) */
+            hd_strip_tabs = 0;
+            if (*p == '-') {
+                hd_strip_tabs = 1;
+                p++;
+            }
             while (*p == ' ' || *p == '\t') p++;
+            /* Check for quoted delimiter */
+            hd_quoted = 0;
             int di = 0;
-            while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != ';' && di < 63)
-                hd_delim[di++] = *p++;
+            if (*p == '\'' || *p == '"') {
+                /* Quoted delimiter — no variable expansion in body */
+                char quote = *p++;
+                hd_quoted = 1;
+                while (*p && *p != quote && di < 63)
+                    hd_delim[di++] = *p++;
+                if (*p == quote) p++;
+            } else {
+                while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != ';' && di < 63)
+                    hd_delim[di++] = *p++;
+            }
             hd_delim[di] = '\0';
             if (di == 0) return 0;
             *hd_start = '\0';
@@ -117,15 +205,23 @@ int heredoc_active(void) { return hd_active; }
 void execute_line(char *line) {
     /* Here-document accumulation */
     if (hd_active) {
-        char *stripped = line;
-        while (*stripped == ' ' || *stripped == '\t') stripped++;
-        if (strcmp(stripped, hd_delim) == 0) {
+        char *check = line;
+        /* For <<-, strip leading tabs for delimiter comparison */
+        if (hd_strip_tabs) {
+            while (*check == '\t') check++;
+        }
+        if (strcmp(check, hd_delim) == 0) {
             hd_active = 0;
             execute_heredoc();
         } else {
-            int slen = strlen(line);
+            char *body_line = line;
+            /* For <<-, strip leading tabs from body lines */
+            if (hd_strip_tabs) {
+                while (*body_line == '\t') body_line++;
+            }
+            int slen = strlen(body_line);
             if (hd_len + slen + 1 < CF_BODY_SIZE) {
-                memcpy(hd_buf + hd_len, line, slen);
+                memcpy(hd_buf + hd_len, body_line, slen);
                 hd_len += slen;
                 hd_buf[hd_len++] = '\n';
             }
@@ -143,6 +239,69 @@ void execute_line(char *line) {
     /* Check for heredoc before parsing */
     if (check_heredoc(line))
         return;
+
+    /* Check for standalone VAR=value assignments.
+     * If ALL whitespace-separated tokens are NAME=VALUE, set them and return.
+     * Skip leading whitespace, then examine each token. */
+    {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p && *p != '#') {
+            /* Check if this line is purely assignments */
+            char tmp[MAX_LINE];
+            strncpy(tmp, p, MAX_LINE - 1);
+            tmp[MAX_LINE - 1] = '\0';
+            char *t = tmp;
+            int all_assign = 1;
+            int any_token = 0;
+            while (*t) {
+                while (*t == ' ' || *t == '\t') t++;
+                if (!*t) break;
+                /* Extract token start */
+                char *tok = t;
+                while (*t && *t != ' ' && *t != '\t') t++;
+                if (*t) *t++ = '\0';
+                any_token = 1;
+                /* Check if tok matches NAME=VALUE */
+                char *eq = strchr(tok, '=');
+                if (!eq || eq == tok) { all_assign = 0; break; }
+                /* Validate NAME: [A-Za-z_][A-Za-z0-9_]* */
+                char *nc = tok;
+                if (!((*nc >= 'A' && *nc <= 'Z') || (*nc >= 'a' && *nc <= 'z') || *nc == '_')) {
+                    all_assign = 0; break;
+                }
+                nc++;
+                while (nc < eq) {
+                    if (!((*nc >= 'A' && *nc <= 'Z') || (*nc >= 'a' && *nc <= 'z') ||
+                          (*nc >= '0' && *nc <= '9') || *nc == '_')) {
+                        all_assign = 0; break;
+                    }
+                    nc++;
+                }
+                if (!all_assign) break;
+            }
+            if (any_token && all_assign) {
+                /* Re-parse the original line and set variables */
+                char tmp2[MAX_LINE];
+                strncpy(tmp2, p, MAX_LINE - 1);
+                tmp2[MAX_LINE - 1] = '\0';
+                char *t2 = tmp2;
+                while (*t2) {
+                    while (*t2 == ' ' || *t2 == '\t') t2++;
+                    if (!*t2) break;
+                    char *tok2 = t2;
+                    while (*t2 && *t2 != ' ' && *t2 != '\t') t2++;
+                    if (*t2) *t2++ = '\0';
+                    char *eq2 = strchr(tok2, '=');
+                    if (eq2) {
+                        *eq2 = '\0';
+                        var_set(tok2, eq2 + 1);
+                    }
+                }
+                return;
+            }
+        }
+    }
 
     if (exec_depth >= MAX_EXEC_DEPTH) {
         dprintf(2, "sbush: execution recursion limit reached\n");
@@ -193,7 +352,8 @@ static void sigint_handler(int sig) {
     pid_t p = fg_pid;
     if (p > 0)
         kill(p, SIGINT);
-    /* If no foreground child, do nothing — tty already echoed ^C\n, reprint prompt */
+    /* Run trap command for SIGINT if set */
+    trap_run(SIGINT);
 }
 
 /* SIGQUIT handler: forward Ctrl-\ to the foreground child if one exists.
@@ -204,7 +364,8 @@ static void sigquit_handler(int sig) {
     pid_t p = fg_pid;
     if (p > 0)
         kill(p, SIGQUIT);
-    /* If no foreground child, do nothing — tty already echoed ^\\n */
+    /* Run trap command for SIGQUIT if set */
+    trap_run(SIGQUIT);
 }
 
 /* SIGTSTP handler: forward Ctrl-Z to the foreground child if one exists */
@@ -213,7 +374,8 @@ static void sigtstp_handler(int sig) {
     pid_t p = fg_pid;
     if (p > 0)
         kill(p, SIGTSTP);
-    /* Shell itself must NOT stop */
+    /* Run trap command for SIGTSTP if set */
+    trap_run(SIGTSTP);
 }
 
 /* SIGCHLD handler: reap children and set flag for main-loop notification */
@@ -333,12 +495,19 @@ int main(int argc, char *argv[], char *envp[]) {
     /* -c mode: execute command string */
     if (argc >= 3 && strcmp(argv[1], "-c") == 0) {
         execute_line(argv[2]);
+        trap_run(0);
         return last_exit_status;
     }
 
     /* script mode */
-    if (argc >= 2)
-        return run_script(argv[1]);
+    if (argc >= 2) {
+        positional_set_zero(argv[1]);
+        if (argc > 2)
+            positional_set_args(argc - 2, argv + 2);
+        int ret = run_script(argv[1]);
+        trap_run(0);
+        return ret;
+    }
 
     /* interactive REPL */
     static char line[MAX_LINE];
@@ -354,8 +523,20 @@ int main(int argc, char *argv[], char *envp[]) {
         int r = read_line(line, sizeof(line), ps1);
         if (r == -1)
             break;       /* EOF */
+        /* Backslash-newline continuation: if line ends with '\', read more */
+        while (r > 0 && line[r - 1] == '\\') {
+            line[r - 1] = '\0';  /* strip trailing backslash */
+            r--;
+            int space = sizeof(line) - r;
+            if (space <= 1) break;
+            int r2 = read_line(line + r, space, "> ");
+            if (r2 == -1) break;
+            r += r2;
+        }
         execute_line(line);
     }
 
+    /* Run EXIT trap before exiting */
+    trap_run(0);
     return 0;
 }

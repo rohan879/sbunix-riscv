@@ -67,8 +67,11 @@ struct signal_frame {
 
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+/* Maximum processes in system */
+#define NPROC 128
+
 /* Maximum open file descriptors per process */
-#define NOFILE 16
+#define NOFILE 64
 
 /* Forward declarations */
 struct vm_area;
@@ -90,6 +93,7 @@ struct shared_pagetable {
 
 struct shared_ftable {
   struct open_file *ofile[NOFILE]; /* the fd array */
+  int               fd_flags[NOFILE];
   int               refcount;     /* number of procs sharing this table */
 };
 
@@ -149,15 +153,22 @@ struct proc {
   char name[16];               // Process name (debugging)
   int waiting_for_uart;        // 1 if sleeping for UART input; 2 if timed sleep
   uint64_t sleep_until;        // for timed sleep: wake when r_time() >= this deadline
+  void *sleep_channel;         // channel address for targeted wakeup (NULL = any)
   unsigned long alarm_ticks;   // tick count when alarm fires (0 = no alarm)
   int exit_status;             // exit status (for wait4)
   int killed_by_signal;        // signal number if killed by signal, 0 otherwise
+  int stopped;                 // non-zero signal number when stopped (SIGTSTP etc)
   char cwd[256];               // current working directory
   unsigned int umask_val;       // file creation mask
   struct open_file *ofile[NOFILE]; // open file descriptors (VFS)
+  int fd_flags[NOFILE];            // per-fd flags (FD_CLOEXEC, etc.)
   /* VMA list for tracking all user memory regions */
   struct vm_area *vma_list;    // sorted linked list of virtual memory areas
   uint64_t mmap_base;          // next VA to use for non-MAP_FIXED mmap
+  /* Small free-list for reclaiming munmap'd mmap ranges */
+#define MMAP_FREELIST_SIZE 8
+  struct { uint64_t addr; uint64_t len; } mmap_freelist[MMAP_FREELIST_SIZE];
+  int mmap_freelist_count;
   /* signal handling */
   struct kern_sigaction sigactions[32]; /* one per signal (indices 0-31) */
   uint64_t sigmask;             /* blocked signal mask */
@@ -173,7 +184,11 @@ struct proc {
   struct shared_pagetable  *shared_pt;      /* non-NULL if CLONE_VM */
   struct shared_ftable     *shared_ft;      /* non-NULL if CLONE_FILES */
   struct shared_sigactions *shared_sa;      /* non-NULL if CLONE_SIGHAND */
-};
+  pagetable_t deferred_free_pt;             /* exec-old image pending free */
+  struct vm_area *deferred_free_vmas;       /* VMA metadata for deferred free */
+  struct shared_pagetable *deferred_shared_pt; /* shared_pt wrapper pending free */
+  struct shared_sigactions *deferred_shared_sa; /* shared_sa wrapper pending free */
+ };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,
  * indirecting through shared wrappers when present. */
@@ -181,11 +196,16 @@ static inline struct open_file **proc_ofile(struct proc *p) {
   return p->shared_ft ? p->shared_ft->ofile : p->ofile;
 }
 
+static inline int *proc_fdflags(struct proc *p) {
+  return p->shared_ft ? p->shared_ft->fd_flags : p->fd_flags;
+}
+
 static inline struct kern_sigaction *proc_sigactions(struct proc *p) {
   return p->shared_sa ? p->shared_sa->actions : p->sigactions;
 }
 
 static inline uint64_t signal_bit(int signum) {
+  if (signum <= 0) return 0;
   return 1UL << (signum - 1);
 }
 
@@ -200,10 +220,11 @@ void            scheduler(void) __attribute__((noreturn));
 void            forkret(void);
 void            swtch(struct context*, struct context*);
 void            trap_restore(struct trapframe*);
+void            trap_return_saved(struct trapframe*) __attribute__((noreturn));
 void            uart_wakeup(void);
 
 extern struct proc *current_proc;
-extern struct proc proc[64];
+extern struct proc proc[NPROC];
 extern struct context scheduler_context;
 
 #endif

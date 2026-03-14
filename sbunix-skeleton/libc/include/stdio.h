@@ -27,6 +27,7 @@ typedef struct _FILE {
     int buf_mode;                 /* _IONBF, _IOLBF, or _IOFBF */
     char wbuf[FILE_BUF_SIZE];    /* write buffer */
     int  wpos;                   /* current position in write buffer */
+    int  ungot;                  /* ungetc'd char, or -1 if none */
 } FILE;
 
 extern FILE *stdin;

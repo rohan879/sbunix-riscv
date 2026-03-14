@@ -30,6 +30,10 @@ struct tty {
 
   /* Foreground process group — signals go here on ^C / ^Z */
   int    fg_pgid;
+  uint16_t ws_row;
+  uint16_t ws_col;
+  uint16_t ws_xpixel;
+  uint16_t ws_ypixel;
 
   /* Escape sequence state for cooked mode:
    *   0 = normal, 1 = saw ESC, 2 = saw ESC [ */
@@ -99,17 +103,22 @@ void tty_init(void) {
   tty0.termios.c_cc[VINTR]  = 0x03;   /* ^C */
   tty0.termios.c_cc[VQUIT]  = 0x1C;   /* ^\ */
   tty0.termios.c_cc[VERASE] = 0x7F;   /* DEL (backspace) */
+  tty0.termios.c_cc[VKILL]  = 0x15;   /* ^U */
   tty0.termios.c_cc[VEOF]   = 0x04;   /* ^D */
   tty0.termios.c_cc[VSUSP]  = 0x1A;   /* ^Z */
   tty0.termios.c_cc[VMIN]   = 1;
   tty0.termios.c_cc[VTIME]  = 0;
+  tty0.ws_row = 24;
+  tty0.ws_col = 80;
+  tty0.ws_xpixel = 0;
+  tty0.ws_ypixel = 0;
 }
 
 /* Deliver a signal to the foreground process group.
  * If fg_pgid is 0 (not yet set), fall back to all processes pid > 1. */
 static void tty_signal_fg(int sig) {
     int target_pgid = tty0.fg_pgid;
-    for (struct proc *p = proc; p < &proc[64]; p++) {
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state == UNUSED || p->state == ZOMBIE)
             continue;
         if (p->pid <= 1)
@@ -251,6 +260,20 @@ void tty_input(char c) {
         uart_putc('\b');
         uart_putc(' ');
         uart_putc('\b');
+      }
+    }
+    return;
+  }
+
+  /* ^U (line kill) */
+  if ((uint8_t)c == tty0.termios.c_cc[VKILL]) {
+    if (tty0.line_len > 0) {
+      tty0.line_len = 0;
+      tty0.esc_state = 0;
+      if (lflag & ECHO) {
+        uart_putc('^');
+        uart_putc('U');
+        uart_putc('\n');
       }
     }
     return;
@@ -399,9 +422,43 @@ int tty_ioctl(unsigned long request, void *argp) {
     }
     return 0;
 
+  case TIOCGWINSZ:
+    if (argp) {
+      uint16_t *ws = (uint16_t *)argp;
+      ws[0] = tty0.ws_row;
+      ws[1] = tty0.ws_col;
+      ws[2] = tty0.ws_xpixel;
+      ws[3] = tty0.ws_ypixel;
+    }
+    return 0;
+
+  case TIOCSWINSZ:
+    if (argp) {
+      uint16_t *ws = (uint16_t *)argp;
+      tty0.ws_row = ws[0];
+      tty0.ws_col = ws[1];
+      tty0.ws_xpixel = ws[2];
+      tty0.ws_ypixel = ws[3];
+    }
+    return 0;
+
+  case FIONREAD:
+    if (argp) {
+      int *available = (int *)argp;
+      *available = tty_bytes_available();
+    }
+    return 0;
+
   default:
     return -25; /* -ENOTTY */
   }
+}
+
+int tty_bytes_available(void) {
+    if (tty0.termios.c_lflag & ICANON) {
+        return ring_avail(tty0.cooked_r, tty0.cooked_w) + tty0.cooked_eof;
+    }
+    return ring_avail(tty0.raw_r, tty0.raw_w);
 }
 
 int tty_fg_pgid(void) {

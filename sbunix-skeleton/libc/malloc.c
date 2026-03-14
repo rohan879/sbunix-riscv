@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <syscall.h>
 #include <string.h>
+#include <stdint.h>
 
 /* -----------------------------------------------------------------------
  * sbrk / brk — raw heap expansion via SYS_brk
@@ -138,6 +139,8 @@ void free(void *ptr) {
 }
 
 void *calloc(size_t nmemb, size_t size) {
+    if (nmemb > 0 && size > SIZE_MAX / nmemb)
+        return (void *)0;
     size_t total = nmemb * size;
     void *ptr = malloc(total);
     if (ptr)

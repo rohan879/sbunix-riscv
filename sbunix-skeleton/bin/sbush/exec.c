@@ -5,11 +5,30 @@
 int last_exit_status = 0;
 pid_t last_bg_pid = 0;
 
+/* Shell option flags */
+int opt_errexit  = 0;  /* set -e */
+int opt_xtrace   = 0;  /* set -x */
+int opt_nounset  = 0;  /* set -u */
+int in_condition = 0;  /* suppress errexit in if/while conditions */
+
 /* Run one pipeline; return its exit status (last command's status).
  * For background pipelines returns 0 immediately. */
 int execute_pipeline(struct pipeline *pl) {
     if (pl->ncmds == 0)
         return 0;
+
+    /* set -x: print commands to stderr before execution */
+    if (opt_xtrace) {
+        for (int ci = 0; ci < pl->ncmds; ci++) {
+            if (ci > 0) dprintf(2, " | ");
+            dprintf(2, "+ ");
+            for (int ai = 0; ai < pl->cmds[ci].argc; ai++) {
+                if (ai > 0) dprintf(2, " ");
+                dprintf(2, "%s", pl->cmds[ci].argv[ai]);
+            }
+        }
+        dprintf(2, "\n");
+    }
 
     /* single builtin — run in-process (with save/restore for redirections) */
     if (pl->ncmds == 1 && !pl->background && is_builtin(pl->cmds[0].argv[0])) {
@@ -284,7 +303,7 @@ int execute_pipeline(struct pipeline *pl) {
             if (i == pl->ncmds - 1)
                 last_status = 128 + WSTOPSIG(status);
         } else if (i == pl->ncmds - 1) {
-            last_status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+            last_status = WIFEXITED(status) ? WEXITSTATUS(status) : (128 + WTERMSIG(status));
         }
     }
 
@@ -311,6 +330,20 @@ void execute_cmdlist(struct cmdlist *cl) {
             /* CONN_SEQ always runs */
         }
 
+        /* Check for ! pipeline negation prefix */
+        int negate = 0;
+        {
+            char *rp = pl->raw;
+            while (*rp == ' ' || *rp == '\t') rp++;
+            if (*rp == '!' && (rp[1] == ' ' || rp[1] == '\t' || rp[1] == '\0')) {
+                negate = 1;
+                /* Remove the ! prefix from raw text */
+                rp++;
+                while (*rp == ' ' || *rp == '\t') rp++;
+                memmove(pl->raw, rp, strlen(rp) + 1);
+            }
+        }
+
         /* Expand variables and parse now (deferred from parse_line).
          * Use pl->raw directly — it's not needed after expansion. */
         int saved_conn = pl->connector;
@@ -321,6 +354,18 @@ void execute_cmdlist(struct cmdlist *cl) {
         pl->connector = saved_conn;
 
         status = execute_pipeline(pl);
+        if (negate)
+            status = (status == 0) ? 1 : 0;
         last_exit_status = status;
+
+        /* set -e: exit on non-zero status (unless in if/while condition or negated) */
+        if (opt_errexit && status != 0 && !in_condition && !negate) {
+            /* Don't exit for && / || chains — only for CONN_SEQ or last in list */
+            int next_conn = pl->connector;
+            if (next_conn != CONN_AND && next_conn != CONN_OR) {
+                trap_run(0);
+                exit(status);
+            }
+        }
     }
 }

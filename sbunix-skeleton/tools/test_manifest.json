@@ -1,0 +1,675 @@
+{
+  "categories": [
+    {
+      "id": "syscall_basic",
+      "name": "Basic syscall interface coverage",
+      "layer": "integration",
+      "status": "covered",
+      "tests": [
+        "bin/libc-test/test.c",
+        "bin/proctest/proctest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Covered by libc and process guest regressions."
+    },
+    {
+      "id": "memory_allocation",
+      "name": "Memory allocation coverage",
+      "layer": "integration",
+      "status": "covered",
+      "tests": [
+        "bin/libc-test/test.c",
+        "bin/swaptest/swaptest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Heap, vm, and swap behavior covered through guest binaries."
+    },
+    {
+      "id": "string_libc",
+      "name": "libc string function coverage",
+      "layer": "unit",
+      "status": "covered",
+      "tests": [
+        "bin/libc-test/test.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Covered in libc-test."
+    },
+    {
+      "id": "fdio_core",
+      "name": "File descriptor and I/O coverage",
+      "layer": "unit+e2e",
+      "status": "covered",
+      "tests": [
+        "bin/fdiotest/fdiotest.c"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_fdiotest_target.sh",
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Focused runner plus guest suite coverage."
+    },
+    {
+      "id": "process_fork_wait",
+      "name": "fork, waitpid, and exit coverage",
+      "layer": "integration",
+      "status": "covered",
+      "tests": [
+        "bin/proctest/proctest.c",
+        "bin/exectest/exectest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Fork/wait/exit and fork+exec are covered in guest runs."
+    },
+    {
+      "id": "exec_elf_loading",
+      "name": "execve and ELF loading coverage",
+      "layer": "unit+integration",
+      "status": "covered",
+      "tests": [
+        "bin/exectest/exectest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Expanded exec regressions cover success, failure, argv, and envp."
+    },
+    {
+      "id": "thirdparty_micropython",
+      "name": "MicroPython third-party coverage",
+      "layer": "integration",
+      "status": "blocked_external",
+      "tests": [
+        "tools/ci_thirdparty.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_thirdparty.sh micropython"
+      ],
+      "notes": "Requires external MicroPython binary to be staged in thirdparty."
+    },
+    {
+      "id": "directory_operations",
+      "name": "Directory operation coverage",
+      "layer": "integration",
+      "status": "covered",
+      "tests": [
+        "bin/dirtest/dirtest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "mkdir, readdir, and cleanup covered."
+    },
+    {
+      "id": "environment_variables",
+      "name": "Environment variable coverage",
+      "layer": "integration+e2e",
+      "status": "covered",
+      "tests": [
+        "tools/guest-run-tests",
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh",
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Explicit shell assertions cover expansion and PATH lookup."
+    },
+    {
+      "id": "pipe_syscall",
+      "name": "pipe() syscall coverage",
+      "layer": "integration+e2e",
+      "status": "covered",
+      "tests": [
+        "bin/fdiotest/fdiotest.c",
+        "tools/guest-run-tests",
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh",
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Kernel pipe usage and shell pipeline behavior are both covered."
+    },
+    {
+      "id": "signal_delivery",
+      "name": "Signal delivery and kill() coverage",
+      "layer": "unit+integration",
+      "status": "covered",
+      "tests": [
+        "bin/sigtest/sigtest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Includes bad pid probing and default signal termination."
+    },
+    {
+      "id": "signal_handlers",
+      "name": "Signal handler and sigaction coverage",
+      "layer": "unit+integration",
+      "status": "covered",
+      "tests": [
+        "bin/sighandtest/sighandtest.c",
+        "bin/sigilltest/sigilltest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Covers installed handlers and SIGILL default-vs-handler paths."
+    },
+    {
+      "id": "procfs_core",
+      "name": "/proc filesystem coverage",
+      "layer": "unit+integration",
+      "status": "covered",
+      "tests": [
+        "bin/procfstest/procfstest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Expanded procfs content checks cover self and global nodes."
+    },
+    {
+      "id": "filesystem_writable",
+      "name": "Writable filesystem coverage",
+      "layer": "integration+e2e",
+      "status": "covered",
+      "tests": [
+        "bin/fstest/fstest.c",
+        "bin/fdiotest/fdiotest.c",
+        "bin/persisttest/persisttest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh",
+        "TIMEOUT=120 bash tools/run_persist_flow.sh"
+      ],
+      "notes": "Covers create, append, sync, and persistence."
+    },
+    {
+      "id": "thirdparty_pdpmake_basic",
+      "name": "pdpmake basic coverage",
+      "layer": "integration",
+      "status": "blocked_external",
+      "tests": [
+        "tools/ci_thirdparty.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_thirdparty.sh pdpmake"
+      ],
+      "notes": "Requires external pdpmake binary in thirdparty."
+    },
+    {
+      "id": "thirdparty_pdpmake_build",
+      "name": "pdpmake build coverage",
+      "layer": "integration",
+      "status": "blocked_external",
+      "tests": [
+        "tools/ci_thirdparty.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_thirdparty.sh pdpmake-build"
+      ],
+      "notes": "Requires external pdpmake binary and makefile fixtures."
+    },
+    {
+      "id": "thirdparty_tcc_basic",
+      "name": "TCC basic coverage",
+      "layer": "integration",
+      "status": "blocked_external",
+      "tests": [
+        "tools/ci_thirdparty.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_thirdparty.sh tcc"
+      ],
+      "notes": "Requires external TCC binary in thirdparty."
+    },
+    {
+      "id": "thirdparty_tcc_compile",
+      "name": "TCC compile and run coverage",
+      "layer": "integration+e2e",
+      "status": "blocked_external",
+      "tests": [
+        "tools/ci_thirdparty.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_thirdparty.sh tcc-compile"
+      ],
+      "notes": "Requires external TCC binary and runtime payload."
+    },
+    {
+      "id": "fork_copy_on_write",
+      "name": "Copy-on-write fork coverage",
+      "layer": "unit+integration",
+      "status": "covered",
+      "tests": [
+        "bin/cowtest/cowtest.c",
+        "bin/lazytest/lazytest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Covered directly and as part of mmap+fork behavior."
+    },
+    {
+      "id": "memory_lazy_allocation",
+      "name": "Lazy allocation coverage",
+      "layer": "unit+e2e",
+      "status": "covered",
+      "tests": [
+        "bin/lazytest/lazytest.c"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_lazytest_target.sh",
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Focused target proof plus guest suite."
+    },
+    {
+      "id": "process_groups_sessions",
+      "name": "Process group and session coverage",
+      "layer": "unit+integration",
+      "status": "covered",
+      "tests": [
+        "bin/pgrptest/pgrptest.c",
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh",
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "C process group API plus shell job control assertions."
+    },
+    {
+      "id": "filesystem_symlink_resolution",
+      "name": "Symlink resolution coverage",
+      "layer": "unit+integration",
+      "status": "covered",
+      "tests": [
+        "bin/symlinktest/symlinktest.c",
+        "bin/fdiotest/fdiotest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Absolute, relative, and readlink* behavior."
+    },
+    {
+      "id": "rtc_wallclock",
+      "name": "RTC wall-clock coverage",
+      "layer": "unit+integration",
+      "status": "covered",
+      "tests": [
+        "bin/clocktest/clocktest.c"
+      ],
+      "commands": [
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Realtime sanity and forward progress checks."
+    },
+    {
+      "id": "thirdparty_busybox_basic",
+      "name": "BusyBox basic coverage",
+      "layer": "integration",
+      "status": "blocked_external",
+      "tests": [
+        "tools/ci_thirdparty.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_thirdparty.sh busybox"
+      ],
+      "notes": "Requires external BusyBox static binary."
+    },
+    {
+      "id": "thirdparty_busybox_filesystem",
+      "name": "BusyBox file utility coverage",
+      "layer": "integration",
+      "status": "blocked_external",
+      "tests": [
+        "tools/ci_thirdparty.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_thirdparty.sh busybox-fs"
+      ],
+      "notes": "Requires external BusyBox static binary."
+    },
+    {
+      "id": "thirdparty_busybox_text",
+      "name": "BusyBox text utility coverage",
+      "layer": "integration",
+      "status": "blocked_external",
+      "tests": [
+        "tools/ci_thirdparty.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_thirdparty.sh busybox-txt"
+      ],
+      "notes": "Requires external BusyBox static binary."
+    },
+    {
+      "id": "persistence_verify_after_reboot",
+      "name": "Persistence verify coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "bin/persisttest/persisttest.c",
+        "tools/run_persist_flow.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_persist_flow.sh"
+      ],
+      "notes": "Two-boot verify phase."
+    },
+    {
+      "id": "persistence_write_and_sync",
+      "name": "Persistence write and sync coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "bin/persisttest/persisttest.c",
+        "tools/run_persist_flow.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_persist_flow.sh"
+      ],
+      "notes": "Two-boot write and fsync phase."
+    },
+    {
+      "id": "shell_echo_output",
+      "name": "Shell echo output coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests",
+        "tools/guest-run-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh",
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Explicit shell echo assertions."
+    },
+    {
+      "id": "shell_exit_status",
+      "name": "Shell exit status coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "tools/guest-run-tests",
+        "tools/run_sh_exit_code_target.sh",
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_sh_exit_code_target.sh",
+        "TIMEOUT=180 bash tools/run_tests.sh"
+      ],
+      "notes": "Focused target proof and integrated shell assertions."
+    },
+    {
+      "id": "shell_cd_and_pwd",
+      "name": "Shell cd and pwd coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "Shell builtins verified in focused guest flow."
+    },
+    {
+      "id": "shell_path_lookup",
+      "name": "Shell PATH lookup coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "PATH-based execution regression."
+    },
+    {
+      "id": "shell_single_pipe",
+      "name": "Shell single-pipe coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "Single pipeline assertion."
+    },
+    {
+      "id": "shell_pipe_chain",
+      "name": "Shell pipeline chain coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "Multi-stage pipeline assertion."
+    },
+    {
+      "id": "shell_pipe_with_filter",
+      "name": "Shell pipe filter coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "Pipeline with filtering assertion."
+    },
+    {
+      "id": "shell_redirect_write",
+      "name": "Shell write redirection coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "Redirect create/truncate assertion."
+    },
+    {
+      "id": "shell_redirect_append",
+      "name": "Shell append redirection coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "Append semantics assertion."
+    },
+    {
+      "id": "shell_redirect_input",
+      "name": "Shell input redirection coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "Input redirection assertion."
+    },
+    {
+      "id": "shell_background_jobs",
+      "name": "Shell background job coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "Backgrounding and prompt continuity."
+    },
+    {
+      "id": "shell_script_execution",
+      "name": "Shell script execution coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "Script execution path."
+    },
+    {
+      "id": "shell_script_arguments",
+      "name": "Shell script argument coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "Positional argument passing."
+    },
+    {
+      "id": "shell_test_cleanup",
+      "name": "Shell test cleanup coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh"
+      ],
+      "notes": "Cleanup expectations after shell tests."
+    },
+    {
+      "id": "shell_ctrl_u_line_kill",
+      "name": "Shell Ctrl-U line-kill coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "local_result": "passed",
+      "tests": [
+        "tools/ci_interactive_smoke.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_interactive_smoke.sh ctrl-u"
+      ],
+      "notes": "Covered by the PTY smoke runner."
+    },
+    {
+      "id": "shell_ctrl_c_interrupt",
+      "name": "Shell Ctrl-C interrupt coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "local_result": "passed",
+      "tests": [
+        "tools/ci_interactive_smoke.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_interactive_smoke.sh ctrl-c"
+      ],
+      "notes": "Covered by the PTY smoke runner."
+    },
+    {
+      "id": "shell_ctrl_z_stop",
+      "name": "Shell Ctrl-Z stop coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "local_result": "passed",
+      "tests": [
+        "tools/ci_interactive_smoke.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_interactive_smoke.sh ctrl-z"
+      ],
+      "notes": "Covered by the PTY smoke runner."
+    },
+    {
+      "id": "shell_jobs_builtin",
+      "name": "Shell jobs builtin coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "local_result": "passed",
+      "tests": [
+        "rootfs/bin/shell-e2e-tests",
+        "tools/ci_interactive_smoke.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/run_shell_e2e_target.sh",
+        "TIMEOUT=120 bash tools/ci_interactive_smoke.sh jobs"
+      ],
+      "notes": "Covered by shell E2E plus the PTY smoke runner."
+    },
+    {
+      "id": "shell_fg_resume",
+      "name": "Shell fg resume coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "local_result": "passed",
+      "tests": [
+        "tools/ci_interactive_smoke.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_interactive_smoke.sh fg"
+      ],
+      "notes": "Covered by the PTY smoke runner."
+    },
+    {
+      "id": "shell_ctrl_backslash_sigquit",
+      "name": "Shell Ctrl-\\ SIGQUIT coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "local_result": "passed",
+      "tests": [
+        "tools/ci_interactive_smoke.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_interactive_smoke.sh ctrl-backslash"
+      ],
+      "notes": "Covered by the PTY smoke runner."
+    },
+    {
+      "id": "shell_ctrl_d_eof",
+      "name": "Shell Ctrl-D EOF coverage",
+      "layer": "e2e",
+      "status": "covered",
+      "local_result": "passed",
+      "tests": [
+        "tools/ci_interactive_smoke.sh"
+      ],
+      "commands": [
+        "TIMEOUT=120 bash tools/ci_interactive_smoke.sh ctrl-d"
+      ],
+      "notes": "Covered by the PTY smoke runner."
+    }
+  ]
+}

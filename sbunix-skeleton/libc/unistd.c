@@ -5,6 +5,11 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <errno.h>
+#include <string.h>
+#include <stdlib.h>
+#include <limits.h>
+
+void __stdio_after_fork_child(void);
 
 ssize_t read(int fd, void *buf, size_t count) {
     return __syscall_ret(syscall(SYS_read, fd, buf, count));
@@ -47,7 +52,10 @@ int pipe(int fds[2]) {
 }
 
 pid_t fork(void) {
-    return (pid_t)__syscall_ret(syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0));
+    pid_t pid = (pid_t)__syscall_ret(syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0));
+    if (pid == 0)
+        __stdio_after_fork_child();
+    return pid;
 }
 
 pid_t waitpid(pid_t pid, int *status, int options) {
@@ -137,8 +145,55 @@ int execv(const char *path, char *const argv[]) {
 }
 
 int execvp(const char *file, char *const argv[]) {
-    /* Simple implementation: only searches absolute/relative paths */
-    return execve(file, argv, environ);
+    if (!file || !*file) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    /* If the filename contains a slash, use it directly */
+    if (strchr(file, '/'))
+        return execve(file, argv, environ);
+
+    /* Search PATH for the executable */
+    const char *path = getenv("PATH");
+    if (!path)
+        path = "/bin:/usr/bin";
+
+    size_t flen = strlen(file);
+    char buf[PATH_MAX];
+
+    while (*path) {
+        /* Find end of this PATH component */
+        const char *sep = strchr(path, ':');
+        size_t dlen = sep ? (size_t)(sep - path) : strlen(path);
+
+        if (dlen == 0) {
+            /* Empty component means current directory */
+            if (flen < PATH_MAX) {
+                memcpy(buf, file, flen);
+                buf[flen] = '\0';
+                execve(buf, argv, environ);
+            }
+        } else if (dlen + 1 + flen < PATH_MAX) {
+            memcpy(buf, path, dlen);
+            buf[dlen] = '/';
+            memcpy(buf + dlen + 1, file, flen);
+            buf[dlen + 1 + flen] = '\0';
+            execve(buf, argv, environ);
+        }
+
+        /* If execve returned, it failed -- try next component
+         * unless the error is not "not found" related */
+        if (errno != ENOENT && errno != EACCES && errno != ENOTDIR)
+            return -1;
+
+        if (!sep)
+            break;
+        path = sep + 1;
+    }
+
+    errno = ENOENT;
+    return -1;
 }
 
 int ioctl(int fd, unsigned long request, ...) {
@@ -222,4 +277,32 @@ int symlink(const char *target, const char *linkpath) {
 
 ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
     return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, AT_FDCWD, path, buf, bufsiz));
+}
+
+ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+    return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, dirfd, path, buf, bufsiz));
+}
+
+int faccessat(int dirfd, const char *path, int mode, int flags) {
+    return (int)__syscall_ret(syscall(SYS_faccessat, dirfd, path, mode, flags));
+}
+
+int fcntl(int fd, int cmd, ...) {
+    va_list ap;
+    va_start(ap, cmd);
+    long arg = va_arg(ap, long);
+    va_end(ap);
+    return (int)__syscall_ret(syscall(SYS_fcntl, fd, cmd, arg));
+}
+
+int openat(int dirfd, const char *path, int flags, ...) {
+    va_list ap;
+    va_start(ap, flags);
+    int mode = va_arg(ap, int);
+    va_end(ap);
+    return (int)__syscall_ret(syscall(SYS_openat, dirfd, path, flags, mode));
+}
+
+int creat(const char *path, mode_t mode) {
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC, (int)mode);
 }

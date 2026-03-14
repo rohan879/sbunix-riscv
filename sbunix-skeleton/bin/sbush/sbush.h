@@ -19,7 +19,7 @@
 #define WSTOPSIG(s)     (((s) >> 8) & 0xff)
 #endif
 
-#define MAX_LINE  1024
+#define MAX_LINE  2048
 #define MAX_ARGS  64
 #define MAX_PIPES 16
 #define MAX_VARS  128
@@ -97,9 +97,20 @@ void  alias_list(void);
 void  env_init(char **envp);
 char *var_get(const char *name);
 void  var_set(const char *name, const char *value);
+int   var_set_checked(const char *name, const char *value); /* returns -1 if readonly */
 void  var_unset(const char *name);
+int   var_unset_checked(const char *name);  /* returns -1 if readonly */
 void  var_export(const char *name);
+void  var_set_readonly(const char *name);
+int   var_is_readonly(const char *name);
+void  var_list_readonly(void);
 char **build_environ(void);
+
+/* Local variable scoping for functions (vars.c) */
+#define MAX_LOCAL_VARS 16
+void  local_scope_push(void);
+void  local_scope_pop(void);
+void  local_declare(const char *name);
 
 /* Positional parameters (vars.c) */
 #define MAX_POSITIONAL 64
@@ -126,6 +137,12 @@ int  execute_pipeline(struct pipeline *pl);
 void execute_cmdlist(struct cmdlist *cl);
 extern int   last_exit_status;
 extern pid_t last_bg_pid;
+
+/* Shell option flags (exec.c) */
+extern int opt_errexit;   /* set -e */
+extern int opt_xtrace;    /* set -x */
+extern int opt_nounset;   /* set -u */
+extern int in_condition;  /* suppress errexit inside if/while conditions */
 
 /* script.c */
 int run_script(const char *path);
@@ -154,6 +171,7 @@ void exec_reset_depth(void);
 
 /* trap.c (or inline trap support) */
 void trap_set(int sig, const char *action);
+void trap_run(int sig);
 
 /* signal globals (sbush.c) */
 extern volatile sig_atomic_t fg_pid;
