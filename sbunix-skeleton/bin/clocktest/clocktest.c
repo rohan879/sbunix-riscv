@@ -26,6 +26,13 @@ int main(void) {
     check(diff > 0, "time advances");
     check(diff >= 50000000, "elapsed >= 50ms");
 
+    struct timespec ts3;
+    clock_gettime(CLOCK_REALTIME, &ts3);
+    check(ts3.tv_sec > 0, "second sample positive");
+    check(ts3.tv_sec > ts1.tv_sec ||
+          (ts3.tv_sec == ts1.tv_sec && ts3.tv_nsec >= ts1.tv_nsec),
+          "samples do not move backwards");
+
     printf("clocktest: %d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;
 }

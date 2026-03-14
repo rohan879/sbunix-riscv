@@ -109,7 +109,6 @@ qemu: build/kernel.elf $(DISK_IMG)
 
 test: $(DISK_IMG)
 	TIMEOUT=$(TIMEOUT) bash tools/ci_full.sh
-# 	TIMEOUT=$(TIMEOUT) bash tools/run_tests.sh
 
 clean:
 	rm -rf build zig-out .zig-cache

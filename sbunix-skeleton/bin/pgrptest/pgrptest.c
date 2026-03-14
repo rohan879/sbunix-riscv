@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sys/wait.h>
 
 static int tests_passed = 0;
@@ -49,6 +50,15 @@ int main(void) {
 
     pid_t sid = getsid(0);
     check(sid > 0, "getsid positive");
+
+    errno = 0;
+    check(getpgid(9999) == -1 && errno == ESRCH, "getpgid bad pid");
+
+    errno = 0;
+    check(getsid(9999) == -1 && errno == ESRCH, "getsid bad pid");
+
+    errno = 0;
+    check(setsid() == -1 && errno == EPERM, "setsid fails for pgrp leader");
 
     printf("pgrptest: %d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;

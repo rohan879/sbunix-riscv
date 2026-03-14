@@ -30,6 +30,7 @@
 #define VINTR    0   /* ^C  -> SIGINT  */
 #define VQUIT    1   /* ^\  -> SIGQUIT */
 #define VERASE   2   /* ^?  -> backspace */
+#define VKILL    3   /* ^U  -> line kill */
 #define VEOF     4   /* ^D  -> EOF */
 #define VSUSP    10  /* ^Z  -> SIGTSTP */
 #define VMIN     6   /* raw mode: min chars before read returns */

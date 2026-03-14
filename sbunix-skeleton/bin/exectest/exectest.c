@@ -170,6 +170,7 @@ int main(void) {
     waitpid(pid, &status, 0);
     check(WIFEXITED(status) && WEXITSTATUS(status) == 0,
           "execve failure preserved process mappings");
+
     printf("exectest: %d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;
 }

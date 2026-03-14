@@ -36,6 +36,8 @@ echo === C Binary Tests ===
 /bin/pgrptest
 /bin/symlinktest
 /bin/clocktest
+/bin/persisttest write
+/bin/persisttest verify
 /bin/exectest
 echo === C Binary Tests Done ===
 
@@ -172,6 +174,8 @@ echo INT3_$sum
 set msg "hello world"
 echo INT4_${#msg}
 echo INT5_${msg%% *}
+set sh_exit $(/bin/sbush -c "false; echo \$?")
+check "$sh_exit" "1" "SH_EXIT_CODE"
 /bin/sh /bin/shell-e2e-tests
 echo === Integration Done ===
 

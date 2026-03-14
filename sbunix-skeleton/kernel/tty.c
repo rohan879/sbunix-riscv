@@ -103,6 +103,7 @@ void tty_init(void) {
   tty0.termios.c_cc[VINTR]  = 0x03;   /* ^C */
   tty0.termios.c_cc[VQUIT]  = 0x1C;   /* ^\ */
   tty0.termios.c_cc[VERASE] = 0x7F;   /* DEL (backspace) */
+  tty0.termios.c_cc[VKILL]  = 0x15;   /* ^U */
   tty0.termios.c_cc[VEOF]   = 0x04;   /* ^D */
   tty0.termios.c_cc[VSUSP]  = 0x1A;   /* ^Z */
   tty0.termios.c_cc[VMIN]   = 1;
@@ -259,6 +260,20 @@ void tty_input(char c) {
         uart_putc('\b');
         uart_putc(' ');
         uart_putc('\b');
+      }
+    }
+    return;
+  }
+
+  /* ^U (line kill) */
+  if ((uint8_t)c == tty0.termios.c_cc[VKILL]) {
+    if (tty0.line_len > 0) {
+      tty0.line_len = 0;
+      tty0.esc_state = 0;
+      if (lflag & ECHO) {
+        uart_putc('^');
+        uart_putc('U');
+        uart_putc('\n');
       }
     }
     return;

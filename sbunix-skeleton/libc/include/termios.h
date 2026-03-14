@@ -12,6 +12,7 @@ typedef unsigned char cc_t;
 #define VINTR    0
 #define VQUIT    1
 #define VERASE   2
+#define VKILL    3
 #define VEOF     4
 #define VTIME    5
 #define VMIN     6
