@@ -719,7 +719,8 @@ static void normalize_path(const char *in, char *out) {
 
     tmp[tlen++] = '/';
     /* Stack of segment-end positions in tmp (indices of the '/' before each segment) */
-    int stack[64];
+    #define NORMALIZE_MAX_DEPTH 128
+    int stack[NORMALIZE_MAX_DEPTH];
     int depth = 0;
 
     while (*p) {
@@ -736,7 +737,9 @@ static void normalize_path(const char *in, char *out) {
                 tlen = stack[--depth];
             }
         } else {
-            /* Normal component — push */
+            /* Normal component — push (guard against overflow) */
+            if (depth >= NORMALIZE_MAX_DEPTH)
+                break;
             stack[depth++] = tlen; /* save position before adding '/' + component */
             if (tlen > 1) tmp[tlen++] = '/'; /* add separator (root already has '/') */
             if (tlen + clen < 255) {
@@ -826,55 +829,54 @@ static int vfs_is_dir(const char *path) {
     return 0;
 }
 
-/* Follow symlinks in a resolved path (up to 8 levels to prevent loops) */
+/* Follow symlinks in a resolved path (iterative, up to maxdepth levels) */
 static int follow_symlinks(char *resolved, int maxdepth) {
-    if (maxdepth <= 0) return -40; /* ELOOP */
+    for (int depth = 0; depth < maxdepth; depth++) {
+        const char *relpath;
+        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+        if (!ops || !ops->readlink) return 0; /* not a symlink-capable fs */
 
-    const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
-    if (!ops || !ops->readlink) return 0; /* no readlink = not a symlink-capable fs */
+        char target[256];
+        int ret = ops->readlink(relpath, target, sizeof(target) - 1);
+        if (ret < 0) return 0; /* not a symlink, path is final */
+        target[ret] = '\0';
 
-    char target[256];
-    int ret = ops->readlink(relpath, target, sizeof(target) - 1);
-    if (ret < 0) return 0; /* not a symlink, path is final */
-    target[ret] = '\0';
+        /* Resolve the symlink target */
+        char new_resolved[256];
+        if (target[0] == '/') {
+            resolve_path("/", target, new_resolved);
+        } else {
+            /* Relative: resolve from symlink's parent directory */
+            char dir[256];
+            int rlen = strlen(resolved);
+            if (rlen > 255) rlen = 255;
+            memcpy(dir, resolved, rlen);
+            dir[rlen] = '\0';
+            char *last_slash = dir;
+            for (char *p = dir; *p; p++)
+                if (*p == '/') last_slash = p;
+            if (last_slash != dir)
+                *(last_slash + 1) = '\0';
+            else
+                dir[1] = '\0';
 
-    /* Resolve the symlink target */
-    char new_resolved[256];
-    if (target[0] == '/') {
-        resolve_path("/", target, new_resolved);
-    } else {
-        /* Relative: resolve from symlink's parent directory */
-        char dir[256];
-        int rlen = strlen(resolved);
-        if (rlen > 255) rlen = 255;
-        memcpy(dir, resolved, rlen);
-        dir[rlen] = '\0';
-        char *last_slash = dir;
-        for (char *p = dir; *p; p++)
-            if (*p == '/') last_slash = p;
-        if (last_slash != dir)
-            *(last_slash + 1) = '\0';
-        else
-            dir[1] = '\0';
+            char combined[512];
+            int dlen = strlen(dir);
+            int tlen = strlen(target);
+            if (dlen + tlen >= 510) return -36; /* ENAMETOOLONG */
+            memcpy(combined, dir, dlen);
+            memcpy(combined + dlen, target, tlen + 1);
 
-        char combined[512];
-        int dlen = strlen(dir);
-        int tlen = strlen(target);
-        if (dlen + tlen >= 510) return -36; /* ENAMETOOLONG */
-        memcpy(combined, dir, dlen);
-        memcpy(combined + dlen, target, tlen + 1);
+            resolve_path("/", combined, new_resolved);
+        }
 
-        resolve_path("/", combined, new_resolved);
+        int nlen = strlen(new_resolved);
+        if (nlen > 255) nlen = 255;
+        memcpy(resolved, new_resolved, nlen);
+        resolved[nlen] = '\0';
     }
-
-    int nlen = strlen(new_resolved);
-    if (nlen > 255) nlen = 255;
-    memcpy(resolved, new_resolved, nlen);
-    resolved[nlen] = '\0';
-
-    /* Recursively follow in case target is also a symlink */
-    return follow_symlinks(resolved, maxdepth - 1);
+    /* Exhausted maxdepth without resolving to a non-symlink */
+    return -40; /* ELOOP */
 }
 
 /* ------------------------------------------------------------------ */
@@ -1223,14 +1225,24 @@ static long sys_read_handler(struct trapframe *tf) {
                 /* SA_RESTART: continue the loop to re-block */
             }
         }
-        /* Drain all available bytes (up to len) without re-blocking */
-        while (read_bytes < len && pipe_avail(pid) > 0) {
-            char kc = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
-            pipes[pid].rpos++;
-            if (copyout(current_proc->pagetable, ubuf + read_bytes, &kc, 1) < 0) {
-                return (read_bytes > 0) ? (long)read_bytes : (long)-14;
+        /* Drain all available bytes (up to len) without re-blocking.
+         * Batch into a local buffer to avoid per-byte copyout overhead. */
+        {
+            char kchunk[512];
+            while (read_bytes < len && pipe_avail(pid) > 0) {
+                size_t want = len - read_bytes;
+                if (want > sizeof(kchunk)) want = sizeof(kchunk);
+                size_t k;
+                for (k = 0; k < want && pipe_avail(pid) > 0; k++) {
+                    kchunk[k] = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
+                    pipes[pid].rpos++;
+                }
+                if (k > 0 && copyout(current_proc->pagetable,
+                                     ubuf + read_bytes, kchunk, k) < 0) {
+                    return (read_bytes > 0) ? (long)read_bytes : (long)-14;
+                }
+                read_bytes += k;
             }
-            read_bytes++;
         }
         /* Wake blocked pipe writers on this pipe since we freed buffer space */
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {

@@ -1118,15 +1118,8 @@ static int ext2_close(void *private) {
   return 0;
 }
 
-static int ext2_stat(const char *path, uint8_t *st) {
-  if (!ext2_mounted)
-    return -1;
-
-  while (*path == '/') path++;
-
-  struct ext2_inode_mem *ip = ext2_namei(path);
-  if (!ip) return -2; /* -ENOENT */
-
+/* Shared helper: fill a stat buffer from an already-acquired inode */
+static void ext2_fill_stat(struct ext2_inode_mem *ip, uint8_t *st) {
   memset(st, 0, 128);
   uint64_t dev = 2; /* ext2 device */
   uint64_t ino = (uint64_t)ip->ino;
@@ -1162,7 +1155,18 @@ static int ext2_stat(const char *path, uint8_t *st) {
   memcpy(st + 72, &mtime_sec, 8);   /* st_atime_sec (use mtime as atime) */
   memcpy(st + 88, &mtime_sec, 8);   /* st_mtime_sec */
   memcpy(st + 104, &ctime_sec, 8);  /* st_ctime_sec */
+}
 
+static int ext2_stat(const char *path, uint8_t *st) {
+  if (!ext2_mounted)
+    return -1;
+
+  while (*path == '/') path++;
+
+  struct ext2_inode_mem *ip = ext2_namei(path);
+  if (!ip) return -2; /* -ENOENT */
+
+  ext2_fill_stat(ip, st);
   icache_release(ip);
   return 0;
 }
@@ -1174,42 +1178,7 @@ static int ext2_fstat(void *private, uint8_t *st) {
   struct ext2_inode_mem *ip = icache_get(priv->ino);
   if (!ip) return -1;
 
-  memset(st, 0, 128);
-  uint64_t dev = 2; /* ext2 device */
-  uint64_t ino = (uint64_t)ip->ino;
-  uint32_t mode;
-  if (ip->type == EXT2_TYPE_DIR)
-    mode = (uint32_t)(0x4000 | (ip->mode & 0xfff));
-  else if (ip->type == EXT2_TYPE_CHRDEV)
-    mode = (uint32_t)(0x2000 | (ip->mode & 0xfff));
-  else if (ip->type == EXT2_TYPE_BLKDEV)
-    mode = (uint32_t)(0x6000 | (ip->mode & 0xfff));
-  else if (ip->type == EXT2_TYPE_SYMLINK)
-    mode = (uint32_t)(0xA000 | (ip->mode & 0xfff));
-  else
-    mode = (uint32_t)(0x8000 | (ip->mode & 0xfff));
-  uint32_t nlink = ip->link_count;
-  int64_t size = (int64_t)ip->size;
-  int32_t blksz = 4096;
-  int64_t blks = ((int64_t)ip->size + 511) / 512;
-  uint64_t rdev = (uint64_t)ip->rdev;
-
-  memcpy(st + 0, &dev, 8);
-  memcpy(st + 8, &ino, 8);
-  memcpy(st + 16, &mode, 4);
-  memcpy(st + 20, &nlink, 4);
-  /* uid=0, gid=0 already zeroed */
-  memcpy(st + 32, &rdev, 8);  /* st_rdev */
-  memcpy(st + 48, &size, 8);
-  memcpy(st + 56, &blksz, 4);
-  memcpy(st + 64, &blks, 8);
-  /* timestamps */
-  int64_t mtime_sec = (int64_t)ip->mtime;
-  int64_t ctime_sec = (int64_t)ip->ctime;
-  memcpy(st + 72, &mtime_sec, 8);   /* st_atime_sec (use mtime as atime) */
-  memcpy(st + 88, &mtime_sec, 8);   /* st_mtime_sec */
-  memcpy(st + 104, &ctime_sec, 8);  /* st_ctime_sec */
-
+  ext2_fill_stat(ip, st);
   icache_release(ip);
   return 0;
 }
