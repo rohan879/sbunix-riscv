@@ -1579,6 +1579,16 @@ static long sys_execve_handler(struct trapframe *tf) {
     kfree(kstrbuf);
     if (kenvbuf) kfree(kenvbuf);
 
+    /* FD_CLOEXEC: close file descriptors marked close-on-exec */
+    {
+        struct open_file **ftab = proc_ofile(current_proc);
+        int *fdflags = proc_fdflags(current_proc);
+        for (int i = 0; i < NOFILE; i++) {
+            if (ftab[i] && (fdflags[i] & 1))
+                close_ofile(current_proc, i);
+        }
+    }
+
     trap_return_saved(current_proc->trapframe);
     /* never reached */
     return SYSCALL_NORETURN;
