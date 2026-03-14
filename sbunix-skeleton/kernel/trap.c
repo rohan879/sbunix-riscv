@@ -1157,6 +1157,12 @@ static long sys_openat_handler(struct trapframe *tf) {
     int dirfd = (int)tf->a0;
     int flags = (int)tf->a2;
 
+    /* Validate access mode: O_RDONLY(0), O_WRONLY(1), O_RDWR(2) are valid */
+    int accmode = flags & 3;
+    if (accmode == 3) {
+        return (long)-22; /* -EINVAL */
+    }
+
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
@@ -1260,7 +1266,7 @@ static long sys_dup3_handler(struct trapframe *tf) {
 static long sys_pipe2_handler(struct trapframe *tf) {
     int pipeid = alloc_pipe();
     if (pipeid < 0) {
-        return (long)-1;
+        return (long)-24; /* -EMFILE */
     } else {
         struct open_file **ftab = proc_ofile(current_proc);
         struct open_file *rf = vfs_alloc_file();
@@ -1286,7 +1292,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             }
             if (wf) vfs_free_file(wf);
             pipes[pipeid].used = 0;
-            return (long)-1;
+            return (long)-24; /* -EMFILE */
         } else {
             wf->is_pipe = 1;
             wf->pipe_read = 0;
@@ -1641,7 +1647,7 @@ static long sys_kill_handler(struct trapframe *tf) {
     int sig = (int)tf->a1;
 
     /* Validate signal number */
-    if (sig < 0 || sig >= 64) {
+    if (sig < 0 || sig >= 32) {
         return (long)-22; /* -EINVAL */
     }
 
@@ -2051,7 +2057,18 @@ static long sys_mmap_handler(struct trapframe *tf) {
 
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (len == 0) {
-        return (long)-1;
+        return (long)-22; /* -EINVAL */
+    }
+
+    /* Validate prot: only PROT_READ/WRITE/EXEC bits allowed */
+    if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) {
+        return (long)-22; /* -EINVAL */
+    }
+
+    /* Validate flags: must have exactly one of MAP_SHARED or MAP_PRIVATE */
+    int sharing = flags & 0x03; /* MAP_SHARED=0x01, MAP_PRIVATE=0x02 */
+    if (sharing == 0 || sharing == 0x03) {
+        return (long)-22; /* -EINVAL */
     }
 
     uint64_t va;
@@ -2073,7 +2090,7 @@ static long sys_mmap_handler(struct trapframe *tf) {
     /* Register VMA only — pages allocated lazily on first access via
      * the demand paging path in the page fault handler. */
     if (vma_add(current_proc, va, va + len, prot, flags) < 0) {
-        return (long)-1;
+        return (long)-12; /* -ENOMEM */
     }
 
     return (long)va;
@@ -2307,6 +2324,11 @@ static long sys_rt_sigprocmask_handler(struct trapframe *tf) {
     uint64_t set_uaddr = tf->a1;
     uint64_t oldset_uaddr = tf->a2;
 
+    /* Validate 'how' parameter upfront */
+    if (set_uaddr && how != 0 && how != 1 && how != 2) {
+        return (long)-22; /* -EINVAL: invalid how */
+    }
+
     if (oldset_uaddr) {
         uint64_t oldmask = current_proc->sigmask;
         if (copyout(current_proc->pagetable, oldset_uaddr, &oldmask, sizeof(oldmask)) < 0) {
@@ -2322,10 +2344,8 @@ static long sys_rt_sigprocmask_handler(struct trapframe *tf) {
             current_proc->sigmask |= newset;
         else if (how == 1) /* SIG_UNBLOCK */
             current_proc->sigmask &= ~newset;
-        else if (how == 2) /* SIG_SETMASK */
+        else               /* SIG_SETMASK */
             current_proc->sigmask = newset;
-        else
-            return (long)-22; /* -EINVAL */
     }
     return (long)0;
 }
