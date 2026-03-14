@@ -142,9 +142,9 @@ static void close_ofile(struct proc *p, int fd) {
       pipes[pid].read_open--;
       if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
         pipes[pid].used = 0;
-      /* Wake any sleeping pipe readers/writers */
+      /* Wake processes sleeping on this specific pipe */
       for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
-        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
+        if (pp->state == SLEEPING && pp->sleep_channel == &pipes[pid])
           pp->state = RUNNABLE;
       }
     }
@@ -153,7 +153,7 @@ static void close_ofile(struct proc *p, int fd) {
       if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
         pipes[pid].used = 0;
       for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
-        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
+        if (pp->state == SLEEPING && pp->sleep_channel == &pipes[pid])
           pp->state = RUNNABLE;
       }
     }
@@ -1115,8 +1115,10 @@ static long sys_write_handler(struct trapframe *tf) {
             }
             int avail = PIPE_BUF - pipe_avail(pid);
             if (avail <= 0) {
+                current_proc->sleep_channel = &pipes[pid];
                 current_proc->state = SLEEPING;
                 swtch(&current_proc->context, &scheduler_context);
+                current_proc->sleep_channel = NULL;
                 /* Check for actionable pending signals after waking */
                 if (has_actionable_signal(current_proc)) {
                     if (has_non_restartable_signal(current_proc))
@@ -1140,9 +1142,9 @@ static long sys_write_handler(struct trapframe *tf) {
                 written += chunk;
                 n -= chunk;
             }
+            /* Wake processes sleeping on this pipe (readers) */
             for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-                if (p->state == SLEEPING && p != current_proc &&
-                    p->waiting_for_uart != 2)
+                if (p->state == SLEEPING && p->sleep_channel == &pipes[pid])
                     p->state = RUNNABLE;
             }
         }
@@ -1188,8 +1190,10 @@ static long sys_read_handler(struct trapframe *tf) {
         /* Block until at least one byte is available (or EOF) */
         while (pipe_avail(pid) == 0) {
             if (pipes[pid].write_open == 0) goto pipe_eof;
+            current_proc->sleep_channel = &pipes[pid];
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            current_proc->sleep_channel = NULL;
             /* Check for actionable pending signals after waking */
             if (has_actionable_signal(current_proc)) {
                 if (has_non_restartable_signal(current_proc))
@@ -1206,10 +1210,9 @@ static long sys_read_handler(struct trapframe *tf) {
             }
             read_bytes++;
         }
-        /* Wake any blocked pipe writers since we freed buffer space */
+        /* Wake blocked pipe writers on this pipe since we freed buffer space */
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->state == SLEEPING && p != current_proc &&
-                p->waiting_for_uart != 2)
+            if (p->state == SLEEPING && p->sleep_channel == &pipes[pid])
                 p->state = RUNNABLE;
         }
 pipe_eof:
@@ -2268,12 +2271,86 @@ static long sys_munmap_handler(struct trapframe *tf) {
     /* Remove VMA tracking (handles splits automatically) */
     vma_remove(current_proc, addr, addr + len);
 
-    /* Track freed range for reuse by future mmap calls */
-    if (current_proc->mmap_freelist_count < MMAP_FREELIST_SIZE) {
-        int idx = current_proc->mmap_freelist_count++;
-        current_proc->mmap_freelist[idx].addr = addr;
-        current_proc->mmap_freelist[idx].len  = len;
+    /* Track freed range for reuse by future mmap calls.
+     * Insert sorted by address, then merge adjacent/overlapping entries. */
+    {
+        int cnt = current_proc->mmap_freelist_count;
+
+        /* Find sorted insertion point */
+        int ins = 0;
+        while (ins < cnt && current_proc->mmap_freelist[ins].addr < addr)
+            ins++;
+
+        /* Check if we can merge with the previous entry */
+        if (ins > 0) {
+            uint64_t prev_end = current_proc->mmap_freelist[ins - 1].addr +
+                                current_proc->mmap_freelist[ins - 1].len;
+            if (prev_end >= addr) {
+                /* Extend previous entry to cover this range */
+                uint64_t new_end = addr + len;
+                if (new_end > prev_end)
+                    current_proc->mmap_freelist[ins - 1].len =
+                        new_end - current_proc->mmap_freelist[ins - 1].addr;
+                /* Also try merging with the next entry */
+                prev_end = current_proc->mmap_freelist[ins - 1].addr +
+                           current_proc->mmap_freelist[ins - 1].len;
+                while (ins < cnt && current_proc->mmap_freelist[ins].addr <= prev_end) {
+                    uint64_t nxt_end = current_proc->mmap_freelist[ins].addr +
+                                       current_proc->mmap_freelist[ins].len;
+                    if (nxt_end > prev_end)
+                        current_proc->mmap_freelist[ins - 1].len =
+                            nxt_end - current_proc->mmap_freelist[ins - 1].addr;
+                    /* Remove entry at ins by shifting */
+                    for (int j = ins; j < cnt - 1; j++)
+                        current_proc->mmap_freelist[j] = current_proc->mmap_freelist[j + 1];
+                    cnt--;
+                    prev_end = current_proc->mmap_freelist[ins - 1].addr +
+                               current_proc->mmap_freelist[ins - 1].len;
+                }
+                current_proc->mmap_freelist_count = cnt;
+                goto munmap_done;
+            }
+        }
+
+        /* Check if we can merge with the next entry */
+        if (ins < cnt && addr + len >= current_proc->mmap_freelist[ins].addr) {
+            uint64_t nxt_end = current_proc->mmap_freelist[ins].addr +
+                               current_proc->mmap_freelist[ins].len;
+            current_proc->mmap_freelist[ins].addr = addr;
+            if (nxt_end > addr + len)
+                current_proc->mmap_freelist[ins].len = nxt_end - addr;
+            else
+                current_proc->mmap_freelist[ins].len = len;
+            /* Continue merging with subsequent entries */
+            uint64_t cur_end = current_proc->mmap_freelist[ins].addr +
+                               current_proc->mmap_freelist[ins].len;
+            while (ins + 1 < cnt &&
+                   current_proc->mmap_freelist[ins + 1].addr <= cur_end) {
+                uint64_t n_end = current_proc->mmap_freelist[ins + 1].addr +
+                                 current_proc->mmap_freelist[ins + 1].len;
+                if (n_end > cur_end)
+                    current_proc->mmap_freelist[ins].len =
+                        n_end - current_proc->mmap_freelist[ins].addr;
+                for (int j = ins + 1; j < cnt - 1; j++)
+                    current_proc->mmap_freelist[j] = current_proc->mmap_freelist[j + 1];
+                cnt--;
+                cur_end = current_proc->mmap_freelist[ins].addr +
+                          current_proc->mmap_freelist[ins].len;
+            }
+            current_proc->mmap_freelist_count = cnt;
+            goto munmap_done;
+        }
+
+        /* No merge possible: insert as new entry if room */
+        if (cnt < MMAP_FREELIST_SIZE) {
+            for (int j = cnt; j > ins; j--)
+                current_proc->mmap_freelist[j] = current_proc->mmap_freelist[j - 1];
+            current_proc->mmap_freelist[ins].addr = addr;
+            current_proc->mmap_freelist[ins].len  = len;
+            current_proc->mmap_freelist_count = cnt + 1;
+        }
     }
+munmap_done:
 
     return 0;
 }

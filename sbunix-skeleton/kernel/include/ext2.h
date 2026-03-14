@@ -35,7 +35,7 @@
 #define EXT2_NAME_MAX     255
 
 /* Block cache size */
-#define BCACHE_SIZE       16
+#define BCACHE_SIZE       64
 
 /* Inode cache size */
 #define ICACHE_SIZE       32

@@ -64,6 +64,9 @@ int mappages(pagetable_t pagetable, uint64_t va, uint64_t size, uint64_t pa, int
     uint64_t a, last;
     pte_t *pte;
 
+    if (size == 0)
+        return 0;
+
     a = PGROUNDDOWN(va);
     last = PGROUNDDOWN(va + size - 1);
     for(;;) {

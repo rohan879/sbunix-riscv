@@ -153,6 +153,7 @@ struct proc {
   char name[16];               // Process name (debugging)
   int waiting_for_uart;        // 1 if sleeping for UART input; 2 if timed sleep
   uint64_t sleep_until;        // for timed sleep: wake when r_time() >= this deadline
+  void *sleep_channel;         // channel address for targeted wakeup (NULL = any)
   unsigned long alarm_ticks;   // tick count when alarm fires (0 = no alarm)
   int exit_status;             // exit status (for wait4)
   int killed_by_signal;        // signal number if killed by signal, 0 otherwise
