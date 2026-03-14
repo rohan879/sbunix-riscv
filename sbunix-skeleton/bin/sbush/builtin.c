@@ -235,6 +235,9 @@ int is_builtin(const char *cmd) {
             strcmp(cmd, "type") == 0 ||
             strcmp(cmd, "pwd") == 0 ||
             strcmp(cmd, "kill") == 0 ||
+            strcmp(cmd, "wait") == 0 ||
+            strcmp(cmd, "readonly") == 0 ||
+            strcmp(cmd, "local") == 0 ||
             strcmp(cmd, ":") == 0);
 }
 
@@ -369,8 +372,49 @@ int run_builtin(struct command *cmd) {
     }
 
     if (strcmp(cmd->argv[0], "set") == 0) {
-        if (cmd->argc == 3) {
-            var_set(cmd->argv[1], cmd->argv[2]);
+        if (cmd->argc == 1) {
+            /* set with no args: return 0 */
+            return 0;
+        }
+        for (int i = 1; i < cmd->argc; i++) {
+            char *arg = cmd->argv[i];
+            if (strcmp(arg, "--") == 0) {
+                /* set -- args: set positional parameters */
+                if (i + 1 < cmd->argc)
+                    positional_set_args(cmd->argc - i - 1, cmd->argv + i + 1);
+                else
+                    positional_set_args(0, NULL);
+                return 0;
+            }
+            if (arg[0] == '-' && arg[1] != '\0') {
+                /* set -e, -x, -u (can be combined: -exu) */
+                for (int k = 1; arg[k]; k++) {
+                    switch (arg[k]) {
+                        case 'e': opt_errexit = 1; break;
+                        case 'x': opt_xtrace = 1;  break;
+                        case 'u': opt_nounset = 1;  break;
+                        default:
+                            dprintf(2, "sbush: set: -%c: invalid option\n", arg[k]);
+                            return 1;
+                    }
+                }
+            } else if (arg[0] == '+' && arg[1] != '\0') {
+                /* set +e, +x, +u (turn off options) */
+                for (int k = 1; arg[k]; k++) {
+                    switch (arg[k]) {
+                        case 'e': opt_errexit = 0; break;
+                        case 'x': opt_xtrace = 0;  break;
+                        case 'u': opt_nounset = 0;  break;
+                        default:
+                            dprintf(2, "sbush: set: +%c: invalid option\n", arg[k]);
+                            return 1;
+                    }
+                }
+            } else if (cmd->argc == 3) {
+                /* Legacy: set NAME VALUE */
+                var_set(cmd->argv[1], cmd->argv[2]);
+                return 0;
+            }
         }
         return 0;
     }
@@ -743,6 +787,67 @@ int run_builtin(struct command *cmd) {
         }
         dprintf(2, "sbush: pwd: cannot determine working directory\n");
         return 1;
+    }
+
+    if (strcmp(cmd->argv[0], "wait") == 0) {
+        if (cmd->argc == 1) {
+            /* wait with no args: wait for all background children */
+            int status;
+            while (waitpid(-1, &status, 0) > 0)
+                ;
+            return 0;
+        }
+        /* wait pid: wait for specific process */
+        pid_t pid = (pid_t)atoi(cmd->argv[1]);
+        int status = 0;
+        if (waitpid(pid, &status, 0) < 0) {
+            dprintf(2, "sbush: wait: pid %d: no such process\n", (int)pid);
+            return 127;
+        }
+        return WIFEXITED(status) ? WEXITSTATUS(status) : (128 + WTERMSIG(status));
+    }
+
+    if (strcmp(cmd->argv[0], "readonly") == 0) {
+        if (cmd->argc == 1) {
+            /* readonly with no args: list all readonly variables */
+            var_list_readonly();
+            return 0;
+        }
+        for (int i = 1; i < cmd->argc; i++) {
+            char *eq = strchr(cmd->argv[i], '=');
+            if (eq) {
+                /* readonly VAR=value */
+                *eq = '\0';
+                var_set(cmd->argv[i], eq + 1);
+                var_set_readonly(cmd->argv[i]);
+                *eq = '=';
+            } else {
+                /* readonly VAR — mark existing variable as readonly */
+                if (!var_get(cmd->argv[i]))
+                    var_set(cmd->argv[i], "");
+                var_set_readonly(cmd->argv[i]);
+            }
+        }
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "local") == 0) {
+        for (int i = 1; i < cmd->argc; i++) {
+            char *eq = strchr(cmd->argv[i], '=');
+            if (eq) {
+                /* local VAR=value */
+                *eq = '\0';
+                local_declare(cmd->argv[i]);
+                var_set(cmd->argv[i], eq + 1);
+                *eq = '=';
+            } else {
+                /* local VAR — just mark it as local */
+                local_declare(cmd->argv[i]);
+                if (!var_get(cmd->argv[i]))
+                    var_set(cmd->argv[i], "");
+            }
+        }
+        return 0;
     }
 
     if (strcmp(cmd->argv[0], "kill") == 0) {

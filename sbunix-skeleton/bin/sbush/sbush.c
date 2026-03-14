@@ -21,8 +21,79 @@ static char hd_delim[64];
 static char hd_cmd[MAX_LINE];
 static char hd_buf[CF_BODY_SIZE];
 static int hd_len = 0;
+static int hd_quoted = 0;     /* 1 if delimiter was quoted — no expansion */
+static int hd_strip_tabs = 0; /* 1 if <<- was used — strip leading tabs */
+
+/* Simple variable expansion for heredoc body text (not full shell parsing).
+ * Expands $NAME and ${NAME} references in-place. */
+static void heredoc_expand_vars(char *buf, int *len) {
+    static char tmp[CF_BODY_SIZE];
+    char *src = buf;
+    char *srcend = buf + *len;
+    char *dst = tmp;
+    char *dstend = tmp + CF_BODY_SIZE - 1;
+
+    while (src < srcend && dst < dstend) {
+        if (*src == '\\' && (src + 1) < srcend && *(src + 1) == '$') {
+            /* Escaped $ — emit literal $ */
+            src++;
+            *dst++ = *src++;
+        } else if (*src == '$') {
+            src++;
+            if (src < srcend && *src == '{') {
+                /* ${NAME} */
+                src++;
+                char name[64];
+                int ni = 0;
+                while (src < srcend && *src != '}' && ni < 63)
+                    name[ni++] = *src++;
+                name[ni] = '\0';
+                if (src < srcend && *src == '}') src++;
+                char *val = var_get(name);
+                if (val) {
+                    while (*val && dst < dstend) *dst++ = *val++;
+                }
+            } else if (src < srcend && *src == '?') {
+                src++;
+                char tmp2[16];
+                itoa(last_exit_status, tmp2, 10);
+                for (char *v = tmp2; *v && dst < dstend; )
+                    *dst++ = *v++;
+            } else if (src < srcend && *src == '$') {
+                src++;
+                char tmp2[16];
+                itoa((int)getpid(), tmp2, 10);
+                for (char *v = tmp2; *v && dst < dstend; )
+                    *dst++ = *v++;
+            } else if (src < srcend && *src >= '0' && *src <= '9') {
+                int idx = *src - '0'; src++;
+                char *pv = positional_get(idx);
+                if (pv) { while (*pv && dst < dstend) *dst++ = *pv++; }
+            } else {
+                /* $NAME */
+                char name[64];
+                int ni = 0;
+                while (src < srcend && is_name_char(*src) && ni < 63)
+                    name[ni++] = *src++;
+                name[ni] = '\0';
+                char *val = var_get(name);
+                if (val) {
+                    while (*val && dst < dstend) *dst++ = *val++;
+                }
+            }
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *len = dst - tmp;
+    memcpy(buf, tmp, *len);
+}
 
 static void execute_heredoc(void) {
+    /* If delimiter was unquoted, expand variables in body */
+    if (!hd_quoted)
+        heredoc_expand_vars(hd_buf, &hd_len);
+
     int pfd[2];
     if (pipe(pfd) < 0) {
         dprintf(2, "sbush: heredoc pipe failed\n");
@@ -94,10 +165,27 @@ static int check_heredoc(char *line) {
         if (!in_sq && !in_dq && *p == '<' && *(p+1) == '<' && *(p+2) != '<') {
             char *hd_start = p;
             p += 2;
+            /* Check for <<- (tab-stripping) */
+            hd_strip_tabs = 0;
+            if (*p == '-') {
+                hd_strip_tabs = 1;
+                p++;
+            }
             while (*p == ' ' || *p == '\t') p++;
+            /* Check for quoted delimiter */
+            hd_quoted = 0;
             int di = 0;
-            while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != ';' && di < 63)
-                hd_delim[di++] = *p++;
+            if (*p == '\'' || *p == '"') {
+                /* Quoted delimiter — no variable expansion in body */
+                char quote = *p++;
+                hd_quoted = 1;
+                while (*p && *p != quote && di < 63)
+                    hd_delim[di++] = *p++;
+                if (*p == quote) p++;
+            } else {
+                while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != ';' && di < 63)
+                    hd_delim[di++] = *p++;
+            }
             hd_delim[di] = '\0';
             if (di == 0) return 0;
             *hd_start = '\0';
@@ -117,15 +205,23 @@ int heredoc_active(void) { return hd_active; }
 void execute_line(char *line) {
     /* Here-document accumulation */
     if (hd_active) {
-        char *stripped = line;
-        while (*stripped == ' ' || *stripped == '\t') stripped++;
-        if (strcmp(stripped, hd_delim) == 0) {
+        char *check = line;
+        /* For <<-, strip leading tabs for delimiter comparison */
+        if (hd_strip_tabs) {
+            while (*check == '\t') check++;
+        }
+        if (strcmp(check, hd_delim) == 0) {
             hd_active = 0;
             execute_heredoc();
         } else {
-            int slen = strlen(line);
+            char *body_line = line;
+            /* For <<-, strip leading tabs from body lines */
+            if (hd_strip_tabs) {
+                while (*body_line == '\t') body_line++;
+            }
+            int slen = strlen(body_line);
             if (hd_len + slen + 1 < CF_BODY_SIZE) {
-                memcpy(hd_buf + hd_len, line, slen);
+                memcpy(hd_buf + hd_len, body_line, slen);
                 hd_len += slen;
                 hd_buf[hd_len++] = '\n';
             }
