@@ -215,9 +215,7 @@ static int cf_process_segment(const char *seg) {
                 /* Evaluate previous cond/body pair */
                 if (!f->if_matched) {
                     f->evaluating = 1;
-                    in_condition = 1;
                     cf_run_lines(f->if_cond, f->if_cond_len);
-                    in_condition = 0;
                     if (last_exit_status == 0) {
                         f->if_matched = 1;
                         cf_run_lines(f->if_body, f->if_body_len);
@@ -238,9 +236,7 @@ static int cf_process_segment(const char *seg) {
                 /* Evaluate previous cond/body pair */
                 if (!f->if_matched) {
                     f->evaluating = 1;
-                    in_condition = 1;
                     cf_run_lines(f->if_cond, f->if_cond_len);
-                    in_condition = 0;
                     if (last_exit_status == 0) {
                         f->if_matched = 1;
                         cf_run_lines(f->if_body, f->if_body_len);
@@ -270,9 +266,7 @@ static int cf_process_segment(const char *seg) {
                     /* Evaluate condition and run body if true */
                     if (!f->if_matched) {
                         f->evaluating = 1;
-                        in_condition = 1;
                         cf_run_lines(f->if_cond, f->if_cond_len);
-                        in_condition = 0;
                         if (last_exit_status == 0) {
                             cf_run_lines(f->if_body, f->if_body_len);
                         }
@@ -304,9 +298,7 @@ static int cf_process_segment(const char *seg) {
             if (strcmp(word, "done") == 0 && f->nested_loop == 0) {
                 f->evaluating = 1;
                 while (1) {
-                    in_condition = 1;
                     cf_run_lines(f->lp_cond, f->lp_cond_len);
-                    in_condition = 0;
                     int cond_true = (last_exit_status == 0);
                     if (f->type == CF_UNTIL) cond_true = !cond_true;
                     if (!cond_true) break;
@@ -341,11 +333,6 @@ static int cf_process_segment(const char *seg) {
                 char words_buf[MAX_LINE];
                 strncpy(words_buf, f->for_words, MAX_LINE - 1);
                 words_buf[MAX_LINE - 1] = '\0';
-
-                /* Expand variables and command substitution in word list
-                 * (POSIX requires tilde, parameter, command, and arithmetic
-                 * expansion plus field splitting on for-in words). */
-                expand_vars(words_buf);
 
                 /* Iterate over space-separated words */
                 char *wp = words_buf;
@@ -457,43 +444,26 @@ static int cf_process_segment(const char *seg) {
         f->type = CF_FOR;
         f->lp_phase = LOOP_COND; /* will transition to LOOP_BODY on "do" */
 
-        /* Parse: for VAR in WORDS... or for VAR; do (positional params) */
+        /* Parse: for VAR in WORDS... */
         const char *rest = seg + 3;
         while (*rest == ' ' || *rest == '\t') rest++;
 
         /* extract variable name */
         int vi = 0;
-        while (*rest && *rest != ' ' && *rest != '\t' && *rest != ';' && vi < 63)
+        while (*rest && *rest != ' ' && *rest != '\t' && vi < 63)
             f->for_var[vi++] = *rest++;
         f->for_var[vi] = '\0';
 
-        /* Skip whitespace after variable name */
         while (*rest == ' ' || *rest == '\t') rest++;
-
-        /* Check for "in" keyword */
+        /* skip "in" keyword */
         if (rest[0] == 'i' && rest[1] == 'n' &&
             (rest[2] == ' ' || rest[2] == '\t' || rest[2] == '\0')) {
             rest += 2;
             while (*rest == ' ' || *rest == '\t') rest++;
-            strncpy(f->for_words, rest, MAX_LINE - 1);
-            f->for_words[MAX_LINE - 1] = '\0';
-        } else {
-            /* No "in" clause: iterate over positional parameters ($1, $2, ...) */
-            int wpos = 0;
-            for (int pi = 1; pi <= positional_count && wpos < MAX_LINE - 2; pi++) {
-                char *pv = positional_get(pi);
-                if (pv) {
-                    if (pi > 1 && wpos < MAX_LINE - 1)
-                        f->for_words[wpos++] = ' ';
-                    while (*pv && wpos < MAX_LINE - 1)
-                        f->for_words[wpos++] = *pv++;
-                }
-            }
-            f->for_words[wpos] = '\0';
-            /* Skip past semicolon if present (for VAR; do) */
-            if (*rest == ';') rest++;
-            while (*rest == ' ' || *rest == '\t') rest++;
         }
+
+        strncpy(f->for_words, rest, MAX_LINE - 1);
+        f->for_words[MAX_LINE - 1] = '\0';
         return 1;
     }
 

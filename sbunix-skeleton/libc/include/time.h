@@ -31,26 +31,10 @@ struct tm {
 #define CLOCK_PROCESS_CPUTIME_ID 2
 #define CLOCK_THREAD_CPUTIME_ID  3
 
-/* Number of seconds per minute/hour/day */
-#define SECS_PER_MIN   60
-#define SECS_PER_HOUR  3600
-#define SECS_PER_DAY   86400
-
-/* CLOCKS_PER_SEC for clock() */
-#define CLOCKS_PER_SEC 1000000L
-
 time_t time(time_t *t);
 int    clock_gettime(int clk_id, struct timespec *tp);
 int    nanosleep(const struct timespec *req, struct timespec *rem);
 int    gettimeofday(struct timeval *tv, void *tz);
-
-/* Time conversion functions */
-struct tm *gmtime(const time_t *timer);
-struct tm *localtime(const time_t *timer);
-time_t     mktime(struct tm *tm);
-size_t     strftime(char *s, size_t max, const char *format,
-                    const struct tm *tm);
-long       difftime(time_t t1, time_t t0);
 
 /* Timer flags */
 #define TIMER_ABSTIME 1

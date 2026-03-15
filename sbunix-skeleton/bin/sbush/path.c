@@ -1,17 +1,11 @@
 #include "sbush.h"
-#include <fcntl.h>
 
 static char path_buf[MAX_LINE];
 
 char *resolve_path(const char *cmd) {
-    int cmd_len = strlen(cmd);
-
     /* absolute or relative path — return as-is */
     if (strchr(cmd, '/')) {
-        if (cmd_len >= MAX_LINE)
-            return NULL;
-        strncpy(path_buf, cmd, MAX_LINE - 1);
-        path_buf[MAX_LINE - 1] = '\0';
+        strcpy(path_buf, cmd);
         return path_buf;
     }
 
@@ -29,18 +23,11 @@ char *resolve_path(const char *cmd) {
             dlen = strlen(p);
 
         if (dlen == 0) {
-            if (cmd_len >= MAX_LINE)
-                goto next;
-            strncpy(path_buf, cmd, MAX_LINE - 1);
-            path_buf[MAX_LINE - 1] = '\0';
+            strcpy(path_buf, cmd);
         } else {
-            /* Check: dlen + 1 (slash) + cmd_len + 1 (NUL) must fit */
-            if (dlen + 1 + cmd_len + 1 > MAX_LINE)
-                goto next;
-            memcpy(path_buf, p, dlen);
+            strncpy(path_buf, p, dlen);
             path_buf[dlen] = '/';
-            memcpy(path_buf + dlen + 1, cmd, cmd_len);
-            path_buf[dlen + 1 + cmd_len] = '\0';
+            strcpy(path_buf + dlen + 1, cmd);
         }
 
         /* probe: try open, close to check existence */
@@ -50,7 +37,6 @@ char *resolve_path(const char *cmd) {
             return path_buf;
         }
 
-    next:
         if (colon)
             p = colon + 1;
         else

@@ -53,7 +53,7 @@ typedef int            pid_t;
 #define PXSHIFT(level)  (12 + (level) * 9)
 #define PX(level, va)   ((((uint64_t)(va)) >> PXSHIFT(level)) & PXMASK)
 
-// User address space boundary.
+// User address space boundary. 
 // Set to 1GB to stay safely below kernel space (0x80000000).
 #define MAXVA 0x40000000L
 
@@ -78,7 +78,6 @@ typedef uint64_t *pagetable_t; // 512 PTEs
 #define SCAUSE_S_TIMER_INT    (SCAUSE_INTERRUPT | 5)
 #define SCAUSE_S_EXTERNAL_INT (SCAUSE_INTERRUPT | 9)
 #define SCAUSE_ECALL_U        8
-#define SCAUSE_ILLEGAL_INSTRUCTION 2
 #define SCAUSE_INST_PAGE_FAULT   12
 #define SCAUSE_LOAD_PAGE_FAULT   13
 #define SCAUSE_STORE_PAGE_FAULT  15
@@ -130,12 +129,6 @@ static inline void w_sstatus(unsigned long x) {
 // Write the SATP register to enable paging
 static inline void w_satp(unsigned long x) {
     asm volatile("csrw satp, %0" : : "r" (x));
-}
-
-static inline unsigned long r_satp() {
-    unsigned long x;
-    asm volatile("csrr %0, satp" : "=r" (x));
-    return x;
 }
 
 // Flush the TLB

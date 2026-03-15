@@ -9,9 +9,9 @@
 #define DMESG_BUFSZ 16384
 static char dmesg_buf[DMESG_BUFSZ];
 static int dmesg_head;   /* next write position */
-static unsigned int dmesg_count;  /* total bytes written (may exceed DMESG_BUFSZ) */
+static int dmesg_count;  /* total bytes written (may exceed DMESG_BUFSZ) */
 
-unsigned int dmesg_total(void) {
+int dmesg_total(void) {
   return dmesg_count;
 }
 
@@ -94,9 +94,7 @@ static void emit_signed(char *buf, int *pos, int *total, long val)
 {
 	if (val < 0) {
 		emit_buf(buf, pos, total, '-');
-		/* Use unsigned cast to avoid UB when val == LONG_MIN:
-		 * -(unsigned long)val is well-defined for all values. */
-		emit_unsigned(buf, pos, total, -(unsigned long)val, 10, 0);
+		emit_unsigned(buf, pos, total, (unsigned long)(-val), 10, 0);
 	} else {
 		emit_unsigned(buf, pos, total, (unsigned long)val, 10, 0);
 	}

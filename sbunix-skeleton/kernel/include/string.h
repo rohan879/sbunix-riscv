@@ -10,6 +10,5 @@ int strncmp(const char *s1, const char *s2, size_t n);
 int strcmp(const char *s1, const char *s2);
 size_t strlen(const char *s);
 char *strchr(const char *s, int c);
-void *memmove(void *dst, const void *src, size_t n);
 
 #endif

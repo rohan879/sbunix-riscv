@@ -64,13 +64,6 @@ int mappages(pagetable_t pagetable, uint64_t va, uint64_t size, uint64_t pa, int
     uint64_t a, last;
     pte_t *pte;
 
-    if (size == 0)
-        return 0;
-
-    /* Guard against integer overflow: va + size must not wrap around */
-    if (va + size < va)
-        return -1;
-
     a = PGROUNDDOWN(va);
     last = PGROUNDDOWN(va + size - 1);
     for(;;) {
@@ -184,19 +177,14 @@ uint64_t uvmalloc(pagetable_t pagetable, uint64_t start_va, uint64_t end_va, int
     return start_va;
 
   start_va = PGROUNDDOWN(start_va);
-  uint64_t first_va = start_va;
   for(a = start_va; a < end_va; a += PAGE_SIZE){
     mem = kalloc();
     if(mem == 0){
-      if(a > first_va)
-        uvmunmap(pagetable, first_va, a - first_va);
       return 0;
     }
     memset(mem, 0, PAGE_SIZE);
     if(mappages(pagetable, a, PAGE_SIZE, (uint64_t)mem, perm|PTE_U|PTE_V) != 0){
       kfree(mem);
-      if(a > first_va)
-        uvmunmap(pagetable, first_va, a - first_va);
       return 0;
     }
   }
@@ -237,9 +225,8 @@ void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len) {
             }
         } else if (PTE_IS_SWAPPED(*pte)) {
             /* Swapped-out page: free the swap slot */
-            int slot = pte_swap_take(pte, 0);
-            if (slot >= 0)
-                swap_free(slot);
+            swap_free(PTE_SWAP_SLOT(*pte));
+            *pte = 0;
             a += PAGE_SIZE;
         } else {
             /* Completely unmapped */
@@ -298,53 +285,8 @@ void uvmmap_sigtrampoline(pagetable_t pagetable) {
 /* Add a VMA covering [start, end) with given prot/flags.
  * Inserts into the sorted linked list, merging with adjacent VMAs
  * that have matching prot and flags. Returns 0 on success, -1 on error. */
-int vma_add_list(struct vm_area **head, uint64_t start, uint64_t end, int prot,
-                 int flags) {
+int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   if (start >= end) return -1;
-
-  struct vm_area *prev = NULL;
-  struct vm_area **pp = head;
-  while (*pp && (*pp)->start < start) {
-    prev = *pp;
-    pp = &(*pp)->next;
-  }
-
-  /* Merge directly into the previous compatible VMA when possible. */
-  if (prev && prev->end >= start &&
-      prev->prot == prot && prev->flags == flags) {
-    if (end > prev->end)
-      prev->end = end;
-
-    while (prev->next && prev->next->start <= prev->end &&
-           prev->next->prot == prot && prev->next->flags == flags) {
-      struct vm_area *nxt = prev->next;
-      if (nxt->end > prev->end)
-        prev->end = nxt->end;
-      prev->next = nxt->next;
-      kmfree(nxt, sizeof(struct vm_area));
-    }
-    return 0;
-  }
-
-  /* Likewise extend the next compatible VMA backward if it touches us. */
-  if (*pp && (*pp)->start <= end &&
-      (*pp)->prot == prot && (*pp)->flags == flags) {
-    struct vm_area *vma = *pp;
-    if (start < vma->start)
-      vma->start = start;
-    if (end > vma->end)
-      vma->end = end;
-
-    while (vma->next && vma->next->start <= vma->end &&
-           vma->next->prot == prot && vma->next->flags == flags) {
-      struct vm_area *nxt = vma->next;
-      if (nxt->end > vma->end)
-        vma->end = nxt->end;
-      vma->next = nxt->next;
-      kmfree(nxt, sizeof(struct vm_area));
-    }
-    return 0;
-  }
 
   struct vm_area *vma = (struct vm_area *)kmalloc(sizeof(struct vm_area));
   if (!vma) return -1;
@@ -353,7 +295,13 @@ int vma_add_list(struct vm_area **head, uint64_t start, uint64_t end, int prot,
   vma->end   = end;
   vma->prot  = prot;
   vma->flags = flags;
-  vma->next  = *pp;
+  vma->next  = NULL;
+
+  /* Insert into sorted list by start address */
+  struct vm_area **pp = &p->vma_list;
+  while (*pp && (*pp)->start < start)
+    pp = &(*pp)->next;
+  vma->next = *pp;
   *pp = vma;
 
   /* Merge with next if they touch and have same prot/flags */
@@ -366,11 +314,22 @@ int vma_add_list(struct vm_area **head, uint64_t start, uint64_t end, int prot,
     kmfree(nxt, sizeof(struct vm_area));
   }
 
-  return 0;
-}
+  /* Merge with previous if they touch and have same prot/flags */
+  pp = &p->vma_list;
+  while (*pp && *pp != vma) {
+    struct vm_area *prev = *pp;
+    if (prev->next == vma && prev->end >= vma->start &&
+        prev->prot == vma->prot && prev->flags == vma->flags) {
+      if (vma->end > prev->end)
+        prev->end = vma->end;
+      prev->next = vma->next;
+      kmfree(vma, sizeof(struct vm_area));
+      break;
+    }
+    pp = &(*pp)->next;
+  }
 
-int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
-  return vma_add_list(&p->vma_list, start, end, prot, flags);
+  return 0;
 }
 
 /* Find the VMA containing addr (start <= addr < end), or NULL. */
@@ -412,12 +371,8 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
         tail->next  = v->next;
         v->end = start;
         v->next = tail;
-        pp = &tail->next;
-      } else {
-        /* kmalloc failed: can't split, just trim the front portion */
-        v->end = start;
-        pp = &v->next;
       }
+      pp = &tail->next;
     } else if (v->start < start) {
       /* VMA starts before range: trim end */
       v->end = start;
@@ -460,86 +415,14 @@ int vma_dup(struct proc *src, struct proc *dst) {
 }
 
 /* Free entire VMA list. Used by exec and exit. */
-void vma_free_list(struct vm_area **head) {
-  struct vm_area *v = *head;
+void vma_free_all(struct proc *p) {
+  struct vm_area *v = p->vma_list;
   while (v) {
     struct vm_area *nxt = v->next;
     kmfree(v, sizeof(struct vm_area));
     v = nxt;
   }
-  *head = NULL;
-}
-
-void vma_free_all(struct proc *p) {
-  vma_free_list(&p->vma_list);
-}
-
-/* ------------------------------------------------------------------ */
-/* Free a user-process page table, releasing only user pages (PTE_U). */
-/* Kernel identity-mapped leaf PTEs are left alone.                    */
-/* ------------------------------------------------------------------ */
-/* Returns 1 if pa is within kalloc-managed RAM, 0 otherwise. */
-static int is_ram_pa(uint64_t pa) {
-    return pa >= 0x80000000UL && pa < PHYSTOP;
-}
-
-static void _freewalk_user(pagetable_t pt, int level, uint64_t *seen_slots) {
-    for (int i = 0; i < 512; i++) {
-        pte_t pte = pt[i];
-        if (pte == 0)
-            continue;
-        if (!(pte & PTE_V)) {
-            /* Not valid — may be a swapped page */
-            if (level == 0 && PTE_IS_SWAPPED(pte)) {
-                int slot = pte_swap_take(&pt[i], 0);
-                if (slot >= 0) {
-                    int w = slot / 64;
-                    uint64_t bit = 1ULL << (slot % 64);
-                    if ((seen_slots[w] & bit) == 0) {
-                        seen_slots[w] |= bit;
-                        swap_free(slot);
-                    }
-                }
-            } else {
-                pt[i] = 0;
-            }
-            continue;
-        }
-        uint64_t pa = PTE2PA(pte);
-        if (PTE_IS_LEAF(pte)) {
-            /* Only free physical pages belonging to userspace in RAM */
-            if ((pte & PTE_U) && is_ram_pa(pa)) {
-                if (level == 1)
-                    kfree_super((void *)pa);
-                else
-                    kfree((void *)pa);
-            }
-        } else if (level > 0) {
-            if (is_ram_pa(pa)) {
-                _freewalk_user((pagetable_t)pa, level - 1, seen_slots);
-                kfree((void *)pa);
-            }
-        }
-        pt[i] = 0;
-    }
-}
-
-void freewalk_user(pagetable_t pagetable) {
-    uint64_t seen_slots[(SWAP_NSLOTS + 63) / 64];
-    memset(seen_slots, 0, sizeof(seen_slots));
-    _freewalk_user(pagetable, 2, seen_slots);
-    kfree((void *)pagetable);
-}
-
-/* Update PTE permissions for a range. Only affects valid mapped PTEs. */
-void uvmprotect(pagetable_t pagetable, uint64_t va, uint64_t len, int perm) {
-    uint64_t a = PGROUNDDOWN(va);
-    uint64_t end = PGROUNDUP(va + len);
-    for (; a < end; a += PAGE_SIZE) {
-        pte_t *pte = walk(pagetable, a, 0);
-        if (pte && (*pte & PTE_V))
-            *pte = PA2PTE(PTE2PA(*pte)) | perm | PTE_V;
-    }
+  p->vma_list = NULL;
 }
 
 // Copy from kernel to user.
@@ -551,50 +434,9 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
   while (len > 0) {
     if (dstva >= MAXVA)
       return -1;
-    uint64_t page_va = PGROUNDDOWN(dstva);
-    pte_t *wpte = walk(pagetable, page_va, 0);
-    if (!wpte)
-      return -1;
-
-    if (PTE_IS_SWAPPED(*wpte)) {
-      int sflags = 0;
-      int slot = pte_swap_take(wpte, &sflags);
-      char *newpage = kalloc();
-      if (!newpage || slot < 0) {
-        if (newpage)
-          kfree(newpage);
-        return -1;
-      }
-      swap_read(slot, newpage);
-      swap_free(slot);
-      *wpte = PA2PTE((uint64_t)newpage) | sflags | PTE_V;
-      asm volatile("sfence.vma %0, zero" : : "r"(page_va));
-    }
-
-    if ((*wpte & PTE_V) == 0 || (*wpte & PTE_U) == 0)
-      return -1;
-
-    if (*wpte & PTE_COW) {
-      uint64_t pa = PTE2PA(*wpte);
-      int flags = PTE_FLAGS(*wpte);
-
-      if (page_ref_get(pa) == 1) {
-        *wpte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
-      } else {
-        char *newpage = kalloc();
-        if (!newpage)
-          return -1;
-        memcpy(newpage, (void *)pa, PAGE_SIZE);
-        *wpte = PA2PTE((uint64_t)newpage) | ((flags & ~PTE_COW) | PTE_W);
-        kfree((void *)pa);
-      }
-      asm volatile("sfence.vma %0, zero" : : "r"(page_va));
-    }
-
     int level;
     pte_t *pte = walk_super(pagetable, dstva, &level);
-    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-        (*pte & PTE_W) == 0)
+    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
       return -1;
 
     uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
@@ -604,6 +446,7 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
     if (n > len)
       n = len;
 
+    // Copy to physical address directly since we are in kernel 1:1 map
     memcpy((void *)pa0, s, n);
 
     len -= n;

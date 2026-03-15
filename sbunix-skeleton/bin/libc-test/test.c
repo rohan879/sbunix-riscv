@@ -22,7 +22,6 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
-#include <sys/ioctl.h>
 
 /* -----------------------------------------------------------------------
  * Helpers
@@ -431,77 +430,6 @@ static void test_fcntl(void) {
     CHECK("O_CREAT defined",   O_CREAT   != 0);
     CHECK("O_TRUNC defined",   O_TRUNC   != 0);
     CHECK("AT_FDCWD == -100",  AT_FDCWD  == -100);
-    CHECK("F_DUPFD_CLOEXEC defined", F_DUPFD_CLOEXEC == 1030);
-
-    section("fcntl runtime");
-
-    int fd = open("/bin/echo", O_RDONLY);
-    CHECK("open /bin/echo for fcntl", fd >= 0);
-    if (fd >= 0) {
-        int flags = fcntl(fd, F_GETFL);
-        CHECK("fcntl F_GETFL works", flags >= 0);
-        CHECK("fcntl access mode preserved", (flags & O_ACCMODE) == O_RDONLY);
-        CHECK("fcntl F_GETFD default clear", fcntl(fd, F_GETFD) == 0);
-        CHECK("fcntl F_SETFD cloexec", fcntl(fd, F_SETFD, FD_CLOEXEC) == 0);
-        CHECK("fcntl F_GETFD cloexec", fcntl(fd, F_GETFD) == FD_CLOEXEC);
-        CHECK("fcntl F_SETFL nonblock", fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0);
-        int new_flags = fcntl(fd, F_GETFL);
-        CHECK("fcntl F_SETFL kept access mode", (new_flags & O_ACCMODE) == O_RDONLY);
-        CHECK("fcntl F_SETFL enabled nonblock", (new_flags & O_NONBLOCK) != 0);
-        errno = 0;
-        CHECK("fcntl invalid cmd", fcntl(fd, 9999, 0) == -1 && errno == EINVAL);
-        close(fd);
-    }
-
-    int dup_src = open("/bin/echo", O_RDONLY);
-    CHECK("open /bin/echo for dupfd_cloexec", dup_src >= 0);
-    if (dup_src >= 0) {
-        int dup_fd = fcntl(dup_src, F_DUPFD_CLOEXEC, 7);
-        CHECK("fcntl F_DUPFD_CLOEXEC works", dup_fd >= 7);
-        if (dup_fd >= 0) {
-            CHECK("fcntl dupfd cloexec flag set", fcntl(dup_fd, F_GETFD) == FD_CLOEXEC);
-            close(dup_fd);
-        }
-        close(dup_src);
-    }
-
-    section("ioctl runtime");
-
-    struct winsize ws;
-    memset(&ws, 0, sizeof(ws));
-    CHECK("ioctl TIOCGWINSZ tty", ioctl(0, TIOCGWINSZ, &ws) == 0);
-    CHECK("ioctl TIOCGWINSZ cols", ws.ws_col > 0);
-    CHECK("ioctl TIOCGWINSZ rows", ws.ws_row > 0);
-
-    struct winsize set_ws = { .ws_row = 30, .ws_col = 100, .ws_xpixel = 0, .ws_ypixel = 0 };
-    CHECK("ioctl TIOCSWINSZ tty", ioctl(0, TIOCSWINSZ, &set_ws) == 0);
-    memset(&ws, 0, sizeof(ws));
-    CHECK("ioctl TIOCGWINSZ updated", ioctl(0, TIOCGWINSZ, &ws) == 0 &&
-                                      ws.ws_row == 30 && ws.ws_col == 100);
-
-    int available = -1;
-    CHECK("ioctl FIONREAD tty", ioctl(0, FIONREAD, &available) == 0);
-    CHECK("ioctl FIONREAD tty nonnegative", available >= 0);
-
-    int pfd[2] = { -1, -1 };
-    int pipe_rc = pipe(pfd);
-    CHECK("pipe for ioctl FIONREAD", pipe_rc == 0);
-    if (pipe_rc == 0) {
-        CHECK("write pipe payload", write(pfd[1], "xyz", 3) == 3);
-        int pipe_avail = -1;
-        CHECK("ioctl FIONREAD pipe", ioctl(pfd[0], FIONREAD, &pipe_avail) == 0);
-        CHECK("ioctl FIONREAD pipe count", pipe_avail == 3);
-        close(pfd[0]);
-        close(pfd[1]);
-    }
-
-    fd = open("/bin/echo", O_RDONLY);
-    CHECK("open /bin/echo for ioctl ENOTTY", fd >= 0);
-    if (fd >= 0) {
-        errno = 0;
-        CHECK("ioctl regular file ENOTTY", ioctl(fd, TIOCGWINSZ, &ws) == -1 && errno == ENOTTY);
-        close(fd);
-    }
 }
 
 /* -----------------------------------------------------------------------
@@ -674,102 +602,6 @@ static void test_stdio_streams(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 18. realpath — path resolution
- * ---------------------------------------------------------------------- */
-
-static void test_realpath(void) {
-    section("realpath");
-
-    /* Absolute path that exists */
-    char resolved[PATH_MAX];
-    char *r = realpath("/bin/echo", resolved);
-    CHECK("realpath /bin/echo", r != NULL && strcmp(resolved, "/bin/echo") == 0);
-
-    /* Path with . component */
-    r = realpath("/bin/./echo", resolved);
-    CHECK("realpath /bin/./echo", r != NULL && strcmp(resolved, "/bin/echo") == 0);
-
-    /* Path with .. component */
-    r = realpath("/bin/../bin/echo", resolved);
-    CHECK("realpath /bin/../bin/echo", r != NULL && strcmp(resolved, "/bin/echo") == 0);
-
-    /* Root path */
-    r = realpath("/", resolved);
-    CHECK("realpath /", r != NULL && strcmp(resolved, "/") == 0);
-
-    /* Nonexistent path returns NULL */
-    r = realpath("/no/such/path", resolved);
-    CHECK("realpath nonexistent NULL", r == NULL);
-
-    /* NULL path returns NULL with EINVAL */
-    errno = 0;
-    r = realpath(NULL, resolved);
-    CHECK("realpath NULL EINVAL", r == NULL && errno == EINVAL);
-}
-
-/* -----------------------------------------------------------------------
- * 19. system — command execution via shell
- * ---------------------------------------------------------------------- */
-
-static void test_system(void) {
-    section("system");
-
-    /* NULL command: returns nonzero (shell available) */
-    int r = system(NULL);
-    CHECK("system(NULL) nonzero", r != 0);
-
-    /* Run a command that succeeds */
-    r = system("true");
-    CHECK("system true exit 0", WIFEXITED(r) && WEXITSTATUS(r) == 0);
-
-    /* Run a command that fails */
-    r = system("false");
-    CHECK("system false exit 1", WIFEXITED(r) && WEXITSTATUS(r) == 1);
-
-    /* Run echo and verify process completes */
-    r = system("echo system_test > /dev/null");
-    CHECK("system echo exit 0", WIFEXITED(r) && WEXITSTATUS(r) == 0);
-}
-
-/* -----------------------------------------------------------------------
- * 20. statvfs / fstatvfs — filesystem statistics
- * ---------------------------------------------------------------------- */
-
-#include <sys/statvfs.h>
-
-static void test_statvfs(void) {
-    section("statvfs");
-
-    struct statvfs vfs;
-
-    /* statvfs on root */
-    int r = statvfs("/", &vfs);
-    CHECK("statvfs / ret 0", r == 0);
-    CHECK("statvfs f_bsize > 0", vfs.f_bsize > 0);
-    CHECK("statvfs f_blocks > 0", vfs.f_blocks > 0);
-    CHECK("statvfs f_namemax > 0", vfs.f_namemax > 0);
-
-    /* statvfs on nonexistent path */
-    r = statvfs("/no/such/path", &vfs);
-    CHECK("statvfs bad path -1", r == -1);
-
-    /* fstatvfs on a valid fd */
-    int fd = open("/bin/echo", O_RDONLY);
-    CHECK("open for fstatvfs", fd >= 0);
-    if (fd >= 0) {
-        struct statvfs vfs2;
-        r = fstatvfs(fd, &vfs2);
-        CHECK("fstatvfs ret 0", r == 0);
-        CHECK("fstatvfs f_bsize > 0", vfs2.f_bsize > 0);
-        close(fd);
-    }
-
-    /* fstatvfs on invalid fd */
-    r = fstatvfs(-1, &vfs);
-    CHECK("fstatvfs bad fd -1", r == -1);
-}
-
-/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -793,9 +625,6 @@ int main(void) {
     test_mman();
     test_stdint();
     test_stdio_streams();
-    test_realpath();
-    test_system();
-    test_statvfs();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

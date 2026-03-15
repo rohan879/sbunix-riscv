@@ -22,15 +22,11 @@
 #define TCSETSF 0x5404   /* drain output, flush input, then set */
 #define TIOCGPGRP 0x540F
 #define TIOCSPGRP 0x5410
-#define TIOCGWINSZ 0x5413
-#define TIOCSWINSZ 0x5414
-#define FIONREAD  0x541B
 
 /* Special control character indices */
 #define VINTR    0   /* ^C  -> SIGINT  */
 #define VQUIT    1   /* ^\  -> SIGQUIT */
 #define VERASE   2   /* ^?  -> backspace */
-#define VKILL    3   /* ^U  -> line kill */
 #define VEOF     4   /* ^D  -> EOF */
 #define VSUSP    10  /* ^Z  -> SIGTSTP */
 #define VMIN     6   /* raw mode: min chars before read returns */
@@ -60,7 +56,6 @@ int tty_read(char *buf, int len);
 /* ioctl dispatch -- called from SYS_ioctl handler.
  * Returns 0 on success, negative errno on failure. */
 int tty_ioctl(unsigned long request, void *argp);
-int tty_bytes_available(void);
 
 /* Return the foreground process group ID stored in the TTY */
 int tty_fg_pgid(void);

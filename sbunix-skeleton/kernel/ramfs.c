@@ -33,8 +33,6 @@ struct ramfs_inode {
   uint32_t         mode;       /* permission bits (no S_IF prefix stored here) */
   int              nlink;
   uint64_t         size;       /* bytes for files, 0 for dirs */
-  int              open_count; /* number of open file descriptors */
-  int              deleted;    /* set when unlinked while still open */
   /* File data blocks (each is a kalloc page = 4096 bytes) */
   char            *blocks[RAMFS_MAX_BLOCKS];
   int              nblocks;
@@ -286,7 +284,6 @@ static int ramfs_open(const char *path, int flags, void **private) {
   struct ramfs_private *priv = (struct ramfs_private *)kmalloc(sizeof(struct ramfs_private));
   if (!priv) return -12;
   priv->inode = ino;
-  ino->open_count++;
   *private = priv;
   return 0;
 }
@@ -354,17 +351,8 @@ static int64_t ramfs_write(void *private, const char *buf, uint64_t count, int64
 }
 
 static int ramfs_close(void *private) {
-  if (private) {
-    struct ramfs_private *priv = (struct ramfs_private *)private;
-    struct ramfs_inode *ino = priv->inode;
-    if (ino) {
-      ino->open_count--;
-      if (ino->open_count <= 0 && ino->deleted) {
-        ramfs_free_inode(ino);
-      }
-    }
+  if (private)
     kmfree(private, sizeof(struct ramfs_private));
-  }
   return 0;
 }
 
@@ -489,13 +477,8 @@ static int ramfs_unlink(const char *path) {
 
   ramfs_dir_remove(parent, basename);
   ino->nlink--;
-  if (ino->nlink <= 0) {
-    if (ino->open_count > 0) {
-      ino->deleted = 1; /* defer free until last close */
-    } else {
-      ramfs_free_inode(ino);
-    }
-  }
+  if (ino->nlink <= 0)
+    ramfs_free_inode(ino);
   return 0;
 }
 

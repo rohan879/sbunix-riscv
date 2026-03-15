@@ -2,4 +2,4 @@
 void printk(const char *, ...);
 void panic(const char *msg) __attribute__((noreturn));
 int dmesg_read(char *buf, int bufsz, int offset);
-unsigned int dmesg_total(void);
+int dmesg_total(void);

@@ -7,7 +7,7 @@
 #include <printk.h>
 #include <exec.h>
 
-struct proc proc[NPROC];
+struct proc proc[64];
 struct proc *current_proc = NULL;
 struct context scheduler_context;
 
@@ -15,7 +15,7 @@ int nextpid = 1;
 
 void procinit(void) {
   struct proc *p;
-  for(p = proc; p < &proc[NPROC]; p++) {
+  for(p = proc; p < &proc[64]; p++) {
       p->state = UNUSED;
       p->kstack = NULL;
   }
@@ -23,16 +23,6 @@ void procinit(void) {
 
 // A fork child's very first scheduling by scheduler()
 // will swtch to forkret.
-void trap_return_saved(struct trapframe *saved) {
-  struct trapframe *ktf =
-      (struct trapframe *)((char *)current_proc->kstack + PAGE_SIZE - sizeof(*ktf));
-  memcpy(ktf, saved, sizeof(*ktf));
-  asm volatile("csrw sscratch, %0"
-               : : "r" ((char *)current_proc->kstack + PAGE_SIZE));
-  trap_restore(ktf);
-  __builtin_unreachable();
-}
-
 void forkret(void) {
   // Before jumping to user mode, we MUST set satp to the process's page table
   // and set sscratch to the kernel stack.
@@ -45,7 +35,9 @@ void forkret(void) {
   x |= SSTATUS_SPIE | SSTATUS_SUM;
   w_sstatus(x);
 
-  trap_return_saved(current_proc->trapframe);
+  asm volatile("csrw sscratch, %0" : : "r" ((char *)current_proc->kstack + PAGE_SIZE));
+
+  trap_restore(current_proc->trapframe);
 }
 
 /* Open /dev/console via VFS and assign to the next free ofile slot.
@@ -71,7 +63,6 @@ static int kern_open_console(void) {
   for (int i = 0; i < NOFILE; i++) {
     if (current_proc->ofile[i] == NULL) {
       current_proc->ofile[i] = f;
-      current_proc->fd_flags[i] = 0;
       return i;
     }
   }
@@ -107,46 +98,14 @@ void init_starter(void) {
 struct proc* allocproc(void) {
   struct proc *p;
 
-  /* Disable interrupts to prevent TOCTOU race: timer preemption between
-   * finding an UNUSED slot and claiming it could let two processes claim
-   * the same slot or PID. */
-  unsigned long saved_sstatus = r_sstatus();
-  w_sstatus(saved_sstatus & ~SSTATUS_SIE);
-
-  for(p = proc; p < &proc[NPROC]; p++) {
+  for(p = proc; p < &proc[64]; p++) {
     if(p->state == UNUSED) {
       goto found;
     }
   }
-  w_sstatus(saved_sstatus); /* restore interrupts */
   return 0;
 
 found:
-  /* Wrap PID at 32768 and skip PIDs already in use */
-  if (nextpid >= 32768)
-    nextpid = 1;
-  {
-    int attempts = 0;
-    while (attempts < 32768) {
-      int in_use = 0;
-      for (struct proc *q = proc; q < &proc[NPROC]; q++) {
-        if (q != p && q->state != UNUSED && q->pid == nextpid) {
-          in_use = 1;
-          break;
-        }
-      }
-      if (!in_use) break;
-      nextpid++;
-      if (nextpid >= 32768) nextpid = 1;
-      attempts++;
-    }
-    if (attempts >= 32768) {
-      /* All PIDs taken */
-      p->state = UNUSED;
-      w_sstatus(saved_sstatus); /* restore interrupts */
-      return 0;
-    }
-  }
   p->pid = nextpid++;
   p->pgid = p->pid;
   p->sid = p->pid;
@@ -155,16 +114,13 @@ found:
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     p->state = UNUSED;
-    w_sstatus(saved_sstatus); /* restore interrupts */
     return 0;
   }
-  memset(p->trapframe, 0, PAGE_SIZE); /* zero trapframe page to prevent info leak */
 
   // Allocate a kernel stack page.
   if((p->kstack = kalloc()) == 0){
     kfree(p->trapframe);
     p->state = UNUSED;
-    w_sstatus(saved_sstatus); /* restore interrupts */
     return 0;
   }
 
@@ -179,15 +135,12 @@ found:
   p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
 
   // Initialize open file table
-  for (int i = 0; i < NOFILE; i++) {
+  for (int i = 0; i < NOFILE; i++)
     p->ofile[i] = NULL;
-    p->fd_flags[i] = 0;
-  }
 
   // Initialize VMA list and mmap base
   p->vma_list = NULL;
   p->mmap_base = 0; /* lazily set on first mmap call */
-  p->mmap_freelist_count = 0;
 
   // Initialize signal handling fields
   memset(p->sigactions, 0, sizeof(p->sigactions));
@@ -201,12 +154,7 @@ found:
   p->shared_pt = NULL;
   p->shared_ft = NULL;
   p->shared_sa = NULL;
-  p->deferred_free_pt = 0;
-  p->deferred_free_vmas = NULL;
-  p->deferred_shared_pt = NULL;
-  p->deferred_shared_sa = NULL;
 
-  w_sstatus(saved_sstatus); /* restore interrupts */
   return p;
 }
 
@@ -231,7 +179,7 @@ void userinit(void) {
 // Do NOT wake timed-sleep processes (waiting_for_uart==2).
 void uart_wakeup(void) {
   struct proc *p;
-  for (p = proc; p < &proc[NPROC]; p++) {
+  for (p = proc; p < &proc[64]; p++) {
     if (p->state == SLEEPING && p->waiting_for_uart == 1) {
       p->waiting_for_uart = 0;
       p->state = RUNNABLE;
@@ -254,7 +202,7 @@ void scheduler(void) {
     w_sstatus(r_sstatus() | SSTATUS_SIE);
 
     int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
+    for(p = proc; p < &proc[64]; p++) {
       if(p->state == RUNNABLE) {
         found = 1;
         p->state = RUNNING;

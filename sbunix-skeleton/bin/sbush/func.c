@@ -97,9 +97,6 @@ int func_call(const char *name, int argc, char **argv) {
     }
     save_depth++;
 
-    /* Push local variable scope */
-    local_scope_push();
-
     /* Set new positional parameters (skip function name) */
     if (argc > 1)
         positional_set_args(argc - 1, argv + 1);
@@ -121,9 +118,6 @@ int func_call(const char *name, int argc, char **argv) {
     }
     func_return_flag = 0;
     int ret = last_exit_status;
-
-    /* Pop local variable scope (restore saved values) */
-    local_scope_pop();
 
     /* Restore positional parameters */
     save_depth--;

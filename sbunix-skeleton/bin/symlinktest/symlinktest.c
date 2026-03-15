@@ -40,34 +40,7 @@ int main(void) {
         close(fd);
     }
 
-    /* relative symlink */
-    fd = open("/mnt/rel_target", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    check(fd >= 0, "create relative target");
-    if (fd >= 0) {
-        write(fd, "rel", 3);
-        close(fd);
-    }
-    r = symlink("rel_target", "/mnt/rel_link");
-    check(r == 0, "relative symlink created");
-    fd = open("/mnt/rel_link", O_RDONLY);
-    check(fd >= 0, "open relative symlink");
-    if (fd >= 0) {
-        memset(buf, 0, sizeof(buf));
-        read(fd, buf, sizeof(buf));
-        check(strcmp(buf, "rel") == 0, "read through relative symlink");
-        close(fd);
-    }
-
-    /* dangling symlink reports open failure */
-    r = symlink("/mnt/no_such_target", "/mnt/dangling_link");
-    check(r == 0, "dangling symlink created");
-    fd = open("/mnt/dangling_link", O_RDONLY);
-    check(fd == -1, "dangling symlink open fails");
-
     /* cleanup */
-    unlink("/mnt/dangling_link");
-    unlink("/mnt/rel_link");
-    unlink("/mnt/rel_target");
     unlink("/mnt/sym_link");
     unlink("/mnt/sym_target");
 

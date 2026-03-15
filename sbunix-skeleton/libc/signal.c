@@ -65,7 +65,7 @@ int sigismember(const sigset_t *set, int signum) {
  * Routes through SYS_rt_sigprocmask; the kernel may not implement this.
  */
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-    return (int)__syscall_ret(syscall(SYS_rt_sigprocmask, how, set, oldset, sizeof(sigset_t)));
+    return (int)syscall(SYS_rt_sigprocmask, how, set, oldset, sizeof(sigset_t));
 }
 
 /*
@@ -74,24 +74,20 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
  */
 int sigaction(int signum, const struct sigaction *act,
               struct sigaction *oldact) {
-    return (int)__syscall_ret(syscall(SYS_rt_sigaction, signum, act, oldact,
-                        sizeof(sigset_t)));
+    return (int)syscall(SYS_rt_sigaction, signum, act, oldact,
+                        sizeof(sigset_t));
 }
 
 /*
  * signal() — simplified BSD-style signal() using sigaction() underneath.
  * Returns the previous handler, or SIG_ERR on failure.
- *
- * NOTE: SA_RESTART is set unconditionally.  This is the desired BSD
- * behavior for our simple OS — interrupted syscalls are automatically
- * restarted, which is what most programs expect.
  */
 void (*signal(int signum, void (*handler)(int)))(int) {
     struct sigaction sa, old;
 
     sigemptyset(&sa.sa_mask);
     sa.sa_handler = handler;
-    sa.sa_flags   = SA_RESTART;  /* BSD behavior: always restart syscalls */
+    sa.sa_flags   = SA_RESTART;
     sa.sa_restorer = (void *)0;
 
     if (sigaction(signum, &sa, &old) < 0)
