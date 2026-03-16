@@ -2111,6 +2111,27 @@ static long sys_rt_sigreturn_handler(struct trapframe *tf) {
     return SYSCALL_NORETURN;
 }
 
+static long sys_rt_sigsuspend_handler(struct trapframe *tf) {
+    uint64_t mask;
+    if (copyin(current_proc->pagetable, &mask, tf->a0, sizeof(uint64_t)) < 0)
+        return -14; // EFAULT
+    uint64_t old_mask = current_proc->sigmask;
+    current_proc->sigmask = mask;
+    // Sleep until a signal is delivered
+    current_proc->state = SLEEPING;
+    swtch(&current_proc->context, &scheduler_context);
+    // Restore old mask
+    current_proc->sigmask = old_mask;
+    return -4; // EINTR
+}
+
+static long sys_rt_sigpending_handler(struct trapframe *tf) {
+    uint64_t pending = current_proc->sigpending & current_proc->sigmask;
+    if (copyout(current_proc->pagetable, tf->a0, &pending, sizeof(uint64_t)) < 0)
+        return -14;
+    return 0;
+}
+
 static long sys_gettimeofday_handler(struct trapframe *tf) {
     uint64_t tv_uaddr = tf->a0;
     if (tv_uaddr) {
@@ -2633,6 +2654,39 @@ static long sys_madvise_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+static long sys_fchmodat_handler(struct trapframe *tf) {
+    /* a0 = dirfd (AT_FDCWD), a1 = user path, a2 = mode, a3 = flags */
+    char kpath[256];
+    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
+        return (long)-14; /* EFAULT */
+
+    /* Resolve path and verify it exists via stat */
+    char resolved[256];
+    resolve_path(current_proc->cwd, kpath, resolved);
+
+    const char *relpath;
+    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    if (ops && ops->stat) {
+        uint8_t st[128];
+        int ret = ops->stat(relpath, st);
+        if (ret < 0)
+            return (long)-2; /* ENOENT */
+    } else {
+        return (long)-2; /* ENOENT */
+    }
+    /* No VFS chmod op — tarfs is read-only, ext2 mode set at open time */
+    return 0;
+}
+
+static long sys_fchmod_handler(struct trapframe *tf) {
+    /* a0 = fd, a1 = mode */
+    int fd = (int)tf->a0;
+    if (fd < 0 || fd >= 64 || !current_proc->ofile[fd])
+        return (long)-9; /* EBADF */
+    /* No-op: mode already stored in inode from open/create */
+    return 0;
+}
+
 static long sys_ftruncate_handler(struct trapframe *tf) {
     (void)tf;
     return (long)-30;
@@ -3071,6 +3125,8 @@ void syscall_init(void) {
     syscall_table[SYS_rt_sigaction]    = sys_rt_sigaction_handler;
     syscall_table[SYS_rt_sigprocmask]  = sys_rt_sigprocmask_handler;
     syscall_table[SYS_rt_sigreturn]    = sys_rt_sigreturn_handler;
+    syscall_table[SYS_rt_sigsuspend]   = sys_rt_sigsuspend_handler;
+    syscall_table[SYS_rt_sigpending]   = sys_rt_sigpending_handler;
     syscall_table[SYS_gettimeofday]    = sys_gettimeofday_handler;
     syscall_table[SYS_fcntl]           = sys_fcntl_handler;
     syscall_table[SYS_faccessat]       = sys_faccessat_handler;
@@ -3095,6 +3151,8 @@ void syscall_init(void) {
     syscall_table[SYS_getsid]          = sys_getsid_handler;
     syscall_table[SYS_alarm]           = sys_alarm_handler;
     syscall_table[SYS_madvise]         = sys_madvise_handler;
+    syscall_table[SYS_fchmod]          = sys_fchmod_handler;
+    syscall_table[SYS_fchmodat]        = sys_fchmodat_handler;
     syscall_table[SYS_ftruncate]       = sys_ftruncate_handler;
     syscall_table[SYS_tgkill]          = sys_tgkill_handler;
     syscall_table[SYS_uname]           = sys_uname_handler;
