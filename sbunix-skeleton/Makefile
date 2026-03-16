@@ -66,6 +66,8 @@ build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
 build/tarfs.o: $(USER_BIN)
 	cp -a rootfs/. build/rootfs/
 	ln -sf sbush build/rootfs/bin/sh
+	ln -sf tst build/rootfs/bin/test
+	ln -sf tst build/rootfs/bin/[
 ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests
 endif
