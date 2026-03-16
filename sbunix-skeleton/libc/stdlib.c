@@ -601,22 +601,187 @@ int remove(const char *path) {
 }
 
 /*
- * realpath() — resolve a path to its canonical form.
- * Simplified: just copies the path if absolute, or prepends cwd.
+ * realpath() — resolve a path to its canonical, absolute form.
+ *
+ * Resolves:
+ *   - relative paths (prepends cwd)
+ *   - "." and ".." components
+ *   - symbolic links (via readlink)
+ *
+ * If resolved_path is NULL a static buffer is used.
+ * Returns NULL on error (sets errno).
  */
 char *realpath(const char *path, char *resolved_path) {
-    static char buf[256];
-    if (!resolved_path) resolved_path = buf;
-    if (path[0] == '/') {
-        strncpy(resolved_path, path, 255);
-        resolved_path[255] = '\0';
-    } else {
-        if (!getcwd(resolved_path, 240)) return (void *)0;
-        int clen = strlen(resolved_path);
-        if (clen > 0 && resolved_path[clen - 1] != '/')
-            resolved_path[clen++] = '/';
-        strncpy(resolved_path + clen, path, 255 - clen);
-        resolved_path[255] = '\0';
+    static char static_buf[PATH_MAX];
+    char work[PATH_MAX];   /* working copy we walk through */
+    char result[PATH_MAX]; /* canonical result being built */
+    int  rlen = 0;         /* length of result so far */
+    int  symlinks = 0;     /* symlink recursion counter */
+
+    if (!path || !*path) {
+        errno = EINVAL;
+        return (void *)0;
     }
+
+    if (!resolved_path)
+        resolved_path = static_buf;
+
+    /* Build an absolute working path */
+    if (path[0] != '/') {
+        if (!getcwd(work, sizeof(work)))
+            return (void *)0;
+        int wlen = strlen(work);
+        if (wlen + 1 + (int)strlen(path) + 1 > (int)sizeof(work)) {
+            errno = ENAMETOOLONG;
+            return (void *)0;
+        }
+        work[wlen] = '/';
+        strcpy(work + wlen + 1, path);
+    } else {
+        if ((int)strlen(path) >= (int)sizeof(work)) {
+            errno = ENAMETOOLONG;
+            return (void *)0;
+        }
+        strcpy(work, path);
+    }
+
+    /* result starts as "/" */
+    result[0] = '/';
+    result[1] = '\0';
+    rlen = 1;
+
+    char *p = work;
+    while (*p) {
+        /* Skip slashes */
+        while (*p == '/')
+            p++;
+        if (!*p)
+            break;
+
+        /* Extract the next component */
+        char *seg = p;
+        while (*p && *p != '/')
+            p++;
+        int slen = (int)(p - seg);
+
+        /* "." — skip */
+        if (slen == 1 && seg[0] == '.')
+            continue;
+
+        /* ".." — go up one directory */
+        if (slen == 2 && seg[0] == '.' && seg[1] == '.') {
+            /* Strip trailing component from result */
+            if (rlen > 1) {
+                rlen--; /* step back over trailing char */
+                while (rlen > 1 && result[rlen - 1] != '/')
+                    rlen--;
+            }
+            result[rlen] = '\0';
+            continue;
+        }
+
+        /* Append '/' if result doesn't already end with one */
+        if (rlen > 0 && result[rlen - 1] != '/') {
+            if (rlen + 1 >= (int)sizeof(result)) {
+                errno = ENAMETOOLONG;
+                return (void *)0;
+            }
+            result[rlen++] = '/';
+            result[rlen] = '\0';
+        }
+
+        /* Append the component */
+        if (rlen + slen >= (int)sizeof(result)) {
+            errno = ENAMETOOLONG;
+            return (void *)0;
+        }
+        memcpy(result + rlen, seg, slen);
+        rlen += slen;
+        result[rlen] = '\0';
+
+        /* Check if this path is a symlink */
+        char link_buf[PATH_MAX];
+        ssize_t llen = readlink(result, link_buf, sizeof(link_buf) - 1);
+        if (llen >= 0) {
+            /* It is a symlink */
+            if (++symlinks > 40) {
+                errno = ELOOP;
+                return (void *)0;
+            }
+            link_buf[llen] = '\0';
+
+            /* Build new working path: resolved_link + remaining */
+            char newwork[PATH_MAX];
+            int remaining_len = (int)strlen(p);
+
+            if (link_buf[0] == '/') {
+                /* Absolute symlink: restart from root */
+                if (llen + 1 + remaining_len + 1 > (int)sizeof(newwork)) {
+                    errno = ENAMETOOLONG;
+                    return (void *)0;
+                }
+                memcpy(newwork, link_buf, llen);
+                if (remaining_len > 0) {
+                    newwork[llen] = '/';
+                    memcpy(newwork + llen + 1, p, remaining_len + 1);
+                } else {
+                    newwork[llen] = '\0';
+                }
+                /* Reset result to root */
+                result[0] = '/';
+                result[1] = '\0';
+                rlen = 1;
+            } else {
+                /* Relative symlink: resolve relative to parent dir */
+                /* Strip the component we just appended from result */
+                if (rlen > 1) {
+                    rlen -= slen;
+                    result[rlen] = '\0';
+                }
+                /* Remove trailing '/' if result isn't just "/" */
+                if (rlen > 1 && result[rlen - 1] == '/') {
+                    rlen--;
+                    result[rlen] = '\0';
+                }
+
+                int parent_rlen = rlen; /* save for absolute prefix later */
+                (void)parent_rlen;
+
+                if (llen + 1 + remaining_len + 1 > (int)sizeof(newwork)) {
+                    errno = ENAMETOOLONG;
+                    return (void *)0;
+                }
+                memcpy(newwork, link_buf, llen);
+                if (remaining_len > 0) {
+                    newwork[llen] = '/';
+                    memcpy(newwork + llen + 1, p, remaining_len + 1);
+                } else {
+                    newwork[llen] = '\0';
+                }
+            }
+
+            /* Continue parsing from newwork */
+            if ((int)strlen(newwork) >= (int)sizeof(work)) {
+                errno = ENAMETOOLONG;
+                return (void *)0;
+            }
+            strcpy(work, newwork);
+            p = work;
+        }
+        /* Not a symlink — continue with next component */
+    }
+
+    /* Remove trailing '/' unless the result is just "/" */
+    if (rlen > 1 && result[rlen - 1] == '/') {
+        rlen--;
+        result[rlen] = '\0';
+    }
+
+    if (rlen >= (int)sizeof(result)) {
+        errno = ENAMETOOLONG;
+        return (void *)0;
+    }
+
+    memcpy(resolved_path, result, rlen + 1);
     return resolved_path;
 }

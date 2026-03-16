@@ -36,6 +36,7 @@ echo === C Binary Tests ===
 /bin/symlinktest
 /bin/clocktest
 /bin/exectest
+/bin/posixtest
 echo === C Binary Tests Done ===
 
 echo === Task345 Test ===

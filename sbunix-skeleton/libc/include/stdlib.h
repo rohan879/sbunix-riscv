@@ -14,13 +14,18 @@ void *calloc(size_t nmemb, size_t size);
 void *realloc(void *ptr, size_t size);
 void  free(void *ptr);
 
-/* Number conversion */
+/* Number conversion — integer */
 int                atoi(const char *s);
 long               atol(const char *s);
 long               strtol(const char *s, char **endptr, int base);
 unsigned long      strtoul(const char *s, char **endptr, int base);
 long long          strtoll(const char *s, char **endptr, int base);
 unsigned long long strtoull(const char *s, char **endptr, int base);
+
+/* Number conversion — floating point */
+double strtod(const char *s, char **endptr);
+float  strtof(const char *s, char **endptr);
+double atof(const char *s);
 
 /* Integer to string */
 char *itoa(int value, char *buf, int base);

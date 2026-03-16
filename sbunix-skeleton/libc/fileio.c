@@ -6,6 +6,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -274,6 +275,20 @@ FILE *fdopen(int fd, const char *mode) {
 
     errno = EMFILE;
     return (void *)0;
+}
+
+FILE *tmpfile(void) {
+    char name[] = "/tmp/tmpXXXXXX";
+    int fd = mkstemp(name);
+    if (fd < 0)
+        return (void *)0;
+    unlink(name); /* delete-on-close semantics */
+    FILE *fp = fdopen(fd, "w+");
+    if (!fp) {
+        close(fd);
+        return (void *)0;
+    }
+    return fp;
 }
 
 int fclose(FILE *stream) {
