@@ -195,13 +195,8 @@ check "$gout" "3" "grep: -ic count case insensitive"
 set gout $(echo testpipe | grep testpipe)
 check "$gout" "testpipe" "grep: stdin pipe"
 
-grep -q banana /mnt/grepfile
-set gq1 $?
-check "$gq1" "0" "grep: -q found returns 0"
-
-grep -q nonexistent /mnt/grepfile
-set gq2 $?
-check "$gq2" "1" "grep: -q not found returns 1"
+grep -q banana /mnt/grepfile && echo GREPQ_FOUND_PASS || echo GREPQ_FOUND_FAIL
+grep -q nonexistent /mnt/grepfile && echo GREPQ_MISS_FAIL || echo GREPQ_MISS_PASS
 
 rm /mnt/grepfile
 

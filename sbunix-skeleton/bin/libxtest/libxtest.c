@@ -315,48 +315,91 @@ static void test_locale(void) {
  * 4. syslog — log to console
  * ================================================================= */
 static void test_syslog(void) {
-    /* openlog sets ident */
-    openlog("libxtest", LOG_PID | LOG_PERROR, LOG_USER);
-    CHECK("syslog: openlog succeeds", 1); /* no crash */
+    /*
+     * Test syslog by redirecting fd 2 (stderr) to a file,
+     * then reading back to verify messages were written and filtered.
+     */
 
-    /* setlogmask returns old mask */
-    int oldmask = setlogmask(LOG_UPTO(LOG_WARNING));
-    CHECK("syslog: setlogmask returns old mask", oldmask != 0 || oldmask == 0); /* any value ok first time */
+    /* Save original stderr */
+    int saved_stderr = dup(2);
 
-    /* syslog writes (we can't easily capture stderr, but verify no crash) */
-    syslog(LOG_WARNING, "test warning message %d", 42);
-    CHECK("syslog: LOG_WARNING no crash", 1);
+    /* Redirect stderr to a temp file */
+    int logfd = open("/mnt/syslog_test.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    dup2(logfd, 2);
+    close(logfd);
 
-    syslog(LOG_ERR, "test error: %s", "something failed");
-    CHECK("syslog: LOG_ERR no crash", 1);
+    /* Open syslog with ident and PID */
+    openlog("mytest", LOG_PID, LOG_USER);
 
-    /* LOG_DEBUG should be masked (we set UPTO WARNING) */
-    syslog(LOG_DEBUG, "this should be filtered");
-    CHECK("syslog: LOG_DEBUG filtered no crash", 1);
+    /* Set mask to WARNING and above */
+    setlogmask(LOG_UPTO(LOG_WARNING));
 
-    /* Verify setlogmask works — set mask to only ERR */
-    int prev = setlogmask(LOG_MASK(LOG_ERR));
-    CHECK("syslog: prev mask returned", prev >= 0);
+    /* Write a WARNING message — should appear */
+    syslog(LOG_WARNING, "visible_warning_%d", 99);
 
-    /* Restore mask */
-    setlogmask(LOG_UPTO(LOG_DEBUG));
+    /* Write an ERR message — should appear (ERR < WARNING) */
+    syslog(LOG_ERR, "visible_error");
 
-    /* closelog resets state */
+    /* Write a DEBUG message — should be FILTERED (DEBUG > WARNING) */
+    syslog(LOG_DEBUG, "hidden_debug");
+
+    /* Write an INFO message — should be FILTERED */
+    syslog(LOG_INFO, "hidden_info");
+
+    /* Verify setlogmask returns previous mask */
+    int prev = setlogmask(LOG_UPTO(LOG_DEBUG));
+    CHECK("syslog: setlogmask returns prev mask", prev == LOG_UPTO(LOG_WARNING));
+
+    /* Now write INFO — should appear (mask includes all) */
+    syslog(LOG_INFO, "now_visible_info");
+
+    /* closelog and reopen with different ident */
     closelog();
-    CHECK("syslog: closelog no crash", 1);
+    openlog("other", 0, LOG_DAEMON);
+    syslog(LOG_ERR, "other_ident_msg");
+    closelog();
 
-    /* syslog still works after closelog (uses defaults) */
-    syslog(LOG_INFO, "after closelog");
-    CHECK("syslog: works after closelog", 1);
+    /* Restore stderr */
+    dup2(saved_stderr, 2);
+    close(saved_stderr);
+
+    /* Read back the log file and verify contents */
+    int rfd = open("/mnt/syslog_test.log", O_RDONLY);
+    CHECK("syslog: log file exists", rfd >= 0);
+    char buf[1024] = {0};
+    int n = 0;
+    if (rfd >= 0) {
+        n = read(rfd, buf, sizeof(buf) - 1);
+        close(rfd);
+    }
+    CHECK("syslog: log file has content", n > 0);
+
+    /* Verify WARNING message was written with ident */
+    CHECK("syslog: contains 'mytest'", strstr(buf, "mytest") != NULL);
+    CHECK("syslog: contains visible_warning_99", strstr(buf, "visible_warning_99") != NULL);
+    CHECK("syslog: contains visible_error", strstr(buf, "visible_error") != NULL);
+
+    /* Verify filtered messages are NOT present */
+    CHECK("syslog: hidden_debug filtered out", strstr(buf, "hidden_debug") == NULL);
+    CHECK("syslog: hidden_info filtered out", strstr(buf, "hidden_info") == NULL);
+
+    /* Verify message appeared after mask change */
+    CHECK("syslog: now_visible_info present", strstr(buf, "now_visible_info") != NULL);
+
+    /* Verify ident changed after closelog+openlog */
+    CHECK("syslog: other ident present", strstr(buf, "other") != NULL);
+    CHECK("syslog: other_ident_msg present", strstr(buf, "other_ident_msg") != NULL);
 
     /* Verify LOG_PRI and LOG_FAC macros */
     int pri = LOG_MAKEPRI(LOG_USER, LOG_ERR);
     CHECK("syslog: LOG_PRI extracts priority", LOG_PRI(pri) == LOG_ERR);
     CHECK("syslog: LOG_FAC extracts facility", LOG_FAC(pri) == LOG_FAC(LOG_USER));
 
-    /* LOG_MASK and LOG_UPTO */
-    CHECK("syslog: LOG_MASK(LOG_ERR)", LOG_MASK(LOG_ERR) == (1 << LOG_ERR));
-    CHECK("syslog: LOG_UPTO(LOG_WARNING)", LOG_UPTO(LOG_WARNING) == ((1 << (LOG_WARNING + 1)) - 1));
+    /* LOG_MASK and LOG_UPTO arithmetic */
+    CHECK("syslog: LOG_MASK(LOG_ERR)=8", LOG_MASK(LOG_ERR) == (1 << LOG_ERR));
+    CHECK("syslog: LOG_UPTO(LOG_WARNING)=31", LOG_UPTO(LOG_WARNING) == ((1 << (LOG_WARNING + 1)) - 1));
+
+    unlink("/mnt/syslog_test.log");
 }
 
 /* =================================================================
