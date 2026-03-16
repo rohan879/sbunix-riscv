@@ -12,6 +12,11 @@
  *  8. Multiple mmap allocations return distinct addresses
  *  9. Large mmap allocation works (multi-page)
  * 10. mmap with PROT_READ only — writing triggers SIGSEGV
+ * 11. mmap PROT_READ|PROT_EXEC — mapping succeeds
+ * 12. Execute code from PROT_EXEC page (JIT: li a0,42; ret)
+ * 13. W^X transition: mmap RW, write code, mprotect RX, execute
+ * 14. Execute after munmap of PROT_EXEC page triggers fault
+ * 15. Multi-function JIT: two functions on same PROT_EXEC page
  */
 
 #include <stdio.h>
@@ -154,6 +159,165 @@ int main(void) {
                 CHECK("write to PROT_READ mmap faults", child_ok);
             }
             munmap(ro, 4096);
+        }
+    }
+
+    /*
+     * ======== PROT_EXEC tests ========
+     *
+     * RISC-V RV64IMAC instructions used:
+     *   li a0, N  =>  addi a0, zero, N  =>  0x00N00513  (for small N)
+     *   ret       =>  jalr zero, ra, 0  =>  0x00008067
+     *   add a0, a0, a1                  =>  0x00b50533
+     *
+     * After writing instructions we issue fence.i to synchronize the
+     * instruction cache with the data writes (required by RISC-V).
+     */
+
+    /* Test 11: mmap with PROT_READ|PROT_EXEC succeeds */
+    {
+        void *xp = mmap(0, 4096, PROT_READ | PROT_EXEC,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        CHECK("mmap PROT_READ|PROT_EXEC ok", xp != MAP_FAILED);
+        if (xp != MAP_FAILED)
+            munmap(xp, 4096);
+    }
+
+    /* Test 12: JIT — write code to RWX page, execute it
+     *   function returns 42: addi a0, zero, 42; ret */
+    {
+        void *jit = mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        CHECK("mmap RWX ok", jit != MAP_FAILED);
+        if (jit != MAP_FAILED) {
+            unsigned int *code = (unsigned int *)jit;
+            code[0] = 0x02a00513;  /* addi a0, zero, 42 */
+            code[1] = 0x00008067;  /* ret (jalr zero, ra, 0) */
+
+            /* fence.i: flush icache so CPU sees the new instructions */
+            __asm__ volatile ("fence.i" ::: "memory");
+
+            typedef int (*fn_t)(void);
+            fn_t fn = (fn_t)jit;
+            int result = fn();
+            CHECK("JIT exec returns 42", result == 42);
+            munmap(jit, 4096);
+        }
+    }
+
+    /* Test 13: W^X transition — mmap RW, write code, mprotect RX, execute
+     * This is the pattern TCC and other JIT compilers use. */
+    {
+        void *wx = mmap(0, 4096, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        CHECK("mmap RW for W^X ok", wx != MAP_FAILED);
+        if (wx != MAP_FAILED) {
+            /* Phase 1: write code while page is RW */
+            unsigned int *code = (unsigned int *)wx;
+            code[0] = 0x00700513;  /* addi a0, zero, 7 */
+            code[1] = 0x00008067;  /* ret */
+
+            /* Phase 2: transition to RX (remove write, add exec) */
+            r = mprotect(wx, 4096, PROT_READ | PROT_EXEC);
+            CHECK("mprotect RW->RX ok", r == 0);
+
+            /* fence.i: required after writing instructions */
+            __asm__ volatile ("fence.i" ::: "memory");
+
+            /* Phase 3: execute */
+            typedef int (*fn_t)(void);
+            fn_t fn = (fn_t)wx;
+            int result = fn();
+            CHECK("W^X exec returns 7", result == 7);
+
+            /* Phase 4: verify write is now blocked */
+            {
+                int child_wx = fork();
+                if (child_wx == 0) {
+                    struct sigaction sa;
+                    sa.sa_handler = segv_handler;
+                    sa.sa_mask = 0;
+                    sa.sa_flags = 0;
+                    sa.sa_restorer = 0;
+                    sigaction(SIGSEGV, &sa, 0);
+                    ((volatile char *)wx)[0] = 0xFF; /* should fault */
+                    _exit(1);
+                } else {
+                    int status = 0;
+                    waitpid(child_wx, &status, 0);
+                    int child_ok = (status >> 8) == 0;
+                    CHECK("write to RX page faults", child_ok);
+                }
+            }
+            munmap(wx, 4096);
+        }
+    }
+
+    /* Test 14: execute after munmap triggers fault */
+    {
+        void *gone = mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (gone != MAP_FAILED) {
+            unsigned int *code = (unsigned int *)gone;
+            code[0] = 0x00100513;  /* addi a0, zero, 1 */
+            code[1] = 0x00008067;  /* ret */
+            __asm__ volatile ("fence.i" ::: "memory");
+
+            /* Verify it works before unmap */
+            typedef int (*fn_t)(void);
+            fn_t fn = (fn_t)gone;
+            int pre = fn();
+
+            munmap(gone, 4096);
+
+            /* Now call into unmapped memory — child should fault */
+            int child_gone = fork();
+            if (child_gone == 0) {
+                struct sigaction sa;
+                sa.sa_handler = segv_handler;
+                sa.sa_mask = 0;
+                sa.sa_flags = 0;
+                sa.sa_restorer = 0;
+                sigaction(SIGSEGV, &sa, 0);
+                fn(); /* should fault — page is gone */
+                _exit(1);
+            } else {
+                int status = 0;
+                waitpid(child_gone, &status, 0);
+                int child_ok = (status >> 8) == 0 && pre == 1;
+                CHECK("exec after munmap faults", child_ok);
+            }
+        }
+    }
+
+    /* Test 15: two JIT functions on the same page, both callable */
+    {
+        void *multi = mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        CHECK("mmap for multi-fn JIT ok", multi != MAP_FAILED);
+        if (multi != MAP_FAILED) {
+            unsigned int *code = (unsigned int *)multi;
+
+            /* fn_a at offset 0: returns 10 */
+            code[0] = 0x00a00513;  /* addi a0, zero, 10 */
+            code[1] = 0x00008067;  /* ret */
+
+            /* fn_b at offset 8: a0 = a0 + a1, ret (add two args) */
+            code[2] = 0x00b50533;  /* add a0, a0, a1 */
+            code[3] = 0x00008067;  /* ret */
+
+            __asm__ volatile ("fence.i" ::: "memory");
+
+            typedef int (*fn0_t)(void);
+            typedef int (*fn2_t)(int, int);
+            fn0_t fn_a = (fn0_t)&code[0];
+            fn2_t fn_b = (fn2_t)&code[2];
+
+            int ra = fn_a();
+            int rb = fn_b(30, 12);
+            CHECK("multi-fn JIT: fn_a returns 10", ra == 10);
+            CHECK("multi-fn JIT: fn_b(30,12) returns 42", rb == 42);
+            munmap(multi, 4096);
         }
     }
 
