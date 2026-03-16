@@ -27,7 +27,8 @@ typedef struct _FILE {
     int buf_mode;                 /* _IONBF, _IOLBF, or _IOFBF */
     char wbuf[FILE_BUF_SIZE];    /* write buffer */
     int  wpos;                   /* current position in write buffer */
-    int  ungot;                  /* ungetc'd char, or -1 if none */
+    int  unget_char;             /* pushed-back character */
+    int  has_unget;              /* 1 if unget_char is valid */
 } FILE;
 
 extern FILE *stdin;
@@ -74,19 +75,10 @@ void setbuf(FILE *stream, char *buf);
 int ungetc(int c, FILE *stream);
 int getc(FILE *stream);
 int putc(int c, FILE *stream);
-
-/* fdopen — associate a FILE with an existing fd */
 FILE *fdopen(int fd, const char *mode);
-
-/* tmpfile — create a temporary file (unlinked immediately) */
 FILE *tmpfile(void);
-
-/* popen/pclose — pipe to/from a shell command */
 FILE *popen(const char *command, const char *type);
-int pclose(FILE *stream);
-
-/* remove — delete a file or directory */
-int remove(const char *pathname);
+int   pclose(FILE *stream);
 
 /* Basic I/O */
 int puts(const char *s);

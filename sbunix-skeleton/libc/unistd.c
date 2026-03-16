@@ -3,13 +3,9 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <errno.h>
-#include <string.h>
-#include <stdlib.h>
-#include <limits.h>
-
-void __stdio_after_fork_child(void);
 
 ssize_t read(int fd, void *buf, size_t count) {
     return __syscall_ret(syscall(SYS_read, fd, buf, count));
@@ -20,13 +16,10 @@ ssize_t write(int fd, const void *buf, size_t count) {
 }
 
 int open(const char *path, int flags, ...) {
-    int mode = 0;
-    if (flags & O_CREAT) {
-        va_list ap;
-        va_start(ap, flags);
-        mode = va_arg(ap, int);
-        va_end(ap);
-    }
+    va_list ap;
+    va_start(ap, flags);
+    int mode = va_arg(ap, int);
+    va_end(ap);
     long ret = syscall(SYS_openat, AT_FDCWD, path, flags, mode);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -55,10 +48,7 @@ int pipe(int fds[2]) {
 }
 
 pid_t fork(void) {
-    pid_t pid = (pid_t)__syscall_ret(syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0));
-    if (pid == 0)
-        __stdio_after_fork_child();
-    return pid;
+    return (pid_t)__syscall_ret(syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0));
 }
 
 pid_t waitpid(pid_t pid, int *status, int options) {
@@ -117,8 +107,9 @@ gid_t getgid(void) {
 }
 
 int usleep(unsigned int usecs) {
-    unsigned long ns = (unsigned long)usecs * 1000UL;
-    unsigned long req[2] = { ns / 1000000000UL, ns % 1000000000UL };
+    unsigned long sec = usecs / 1000000;
+    unsigned long nsec = (usecs % 1000000) * 1000UL;
+    unsigned long req[2] = { sec, nsec };
     syscall(SYS_nanosleep, req, 0);
     return 0;
 }
@@ -149,54 +140,49 @@ int execv(const char *path, char *const argv[]) {
 }
 
 int execvp(const char *file, char *const argv[]) {
-    if (!file || !*file) {
-        errno = ENOENT;
-        return -1;
-    }
-
-    /* If the filename contains a slash, use it directly */
-    if (strchr(file, '/'))
+    /* If file contains '/', use it directly */
+    if (strchr(file, '/') != NULL)
         return execve(file, argv, environ);
 
     /* Search PATH for the executable */
-    const char *path = getenv("PATH");
+    const char *path = NULL;
+    if (environ) {
+        for (char **ep = environ; *ep; ep++) {
+            if (strncmp(*ep, "PATH=", 5) == 0) {
+                path = *ep + 5;
+                break;
+            }
+        }
+    }
     if (!path)
         path = "/bin:/usr/bin";
 
-    size_t flen = strlen(file);
-    char buf[PATH_MAX];
+    size_t filelen = strlen(file);
+    const char *p = path;
+    while (*p) {
+        const char *colon = strchr(p, ':');
+        size_t dirlen = colon ? (size_t)(colon - p) : strlen(p);
 
-    while (*path) {
-        /* Find end of this PATH component */
-        const char *sep = strchr(path, ':');
-        size_t dlen = sep ? (size_t)(sep - path) : strlen(path);
+        /* Build "dir/file" in buf; skip if it would overflow */
+        char buf[256];
+        if (dirlen + 1 + filelen + 1 <= sizeof(buf)) {
+            strncpy(buf, p, dirlen);
+            buf[dirlen] = '/';
+            strcpy(buf + dirlen + 1, file);
 
-        if (dlen == 0) {
-            /* Empty component means current directory */
-            if (flen < PATH_MAX) {
-                memcpy(buf, file, flen);
-                buf[flen] = '\0';
-                execve(buf, argv, environ);
-            }
-        } else if (dlen + 1 + flen < PATH_MAX) {
-            memcpy(buf, path, dlen);
-            buf[dlen] = '/';
-            memcpy(buf + dlen + 1, file, flen);
-            buf[dlen + 1 + flen] = '\0';
             execve(buf, argv, environ);
+
+            /* ENOENT: file not in this dir, try next */
+            if (errno != 2)
+                return -1;
         }
 
-        /* If execve returned, it failed -- try next component
-         * unless the error is not "not found" related */
-        if (errno != ENOENT && errno != EACCES && errno != ENOTDIR)
-            return -1;
-
-        if (!sep)
+        if (!colon)
             break;
-        path = sep + 1;
+        p = colon + 1;
     }
 
-    errno = ENOENT;
+    errno = 2; /* ENOENT */
     return -1;
 }
 
@@ -283,12 +269,29 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
     return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, AT_FDCWD, path, buf, bufsiz));
 }
 
-ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
-    return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, dirfd, path, buf, bufsiz));
+int openat(int dirfd, const char *path, int flags, ...) {
+    va_list ap;
+    va_start(ap, flags);
+    int mode = va_arg(ap, int);
+    va_end(ap);
+    long ret = syscall(SYS_openat, dirfd, path, flags, mode);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return (int)ret;
+}
+
+int creat(const char *path, mode_t mode) {
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
 }
 
 int faccessat(int dirfd, const char *path, int mode, int flags) {
     return (int)__syscall_ret(syscall(SYS_faccessat, dirfd, path, mode, flags));
+}
+
+ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+    return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, dirfd, path, buf, bufsiz));
 }
 
 int fcntl(int fd, int cmd, ...) {
@@ -297,16 +300,4 @@ int fcntl(int fd, int cmd, ...) {
     long arg = va_arg(ap, long);
     va_end(ap);
     return (int)__syscall_ret(syscall(SYS_fcntl, fd, cmd, arg));
-}
-
-int openat(int dirfd, const char *path, int flags, ...) {
-    va_list ap;
-    va_start(ap, flags);
-    int mode = va_arg(ap, int);
-    va_end(ap);
-    return (int)__syscall_ret(syscall(SYS_openat, dirfd, path, flags, mode));
-}
-
-int creat(const char *path, mode_t mode) {
-    return open(path, O_WRONLY | O_CREAT | O_TRUNC, (int)mode);
 }

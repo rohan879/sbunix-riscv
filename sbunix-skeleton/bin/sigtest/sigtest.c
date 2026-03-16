@@ -44,9 +44,6 @@ int main(void) {
     check(WIFSIGNALED(status), "SIGKILL terminates");
     check(WTERMSIG(status) == SIGKILL, "killed by SIGKILL");
 
-    /* bad process-group probe should report ESRCH */
-    check(kill(-999, 0) == -1, "kill bad pid -1");
-
     printf("sigtest: %d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;
 }

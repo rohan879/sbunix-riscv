@@ -19,52 +19,29 @@
 /* PTE encoding for swapped-out pages                                  */
 /*                                                                      */
 /* When PTE_V=0, hardware ignores all other bits.  We repurpose them:  */
-/*   Bit  0:     0           (PTE_V cleared -- triggers page fault)    */
-/*   Bit  8:     1           (PTE_SWAP marker, same position as PTE_COW)*/
-/*   Bits 1-7:   original permission flags (R,W,X,U,G,A,D) preserved   */
-/*   Bits 10-19: swap slot index (10 bits for 1024 slots)              */
-/*   Bits 54-60: fixed magic tag to distinguish swap from junk PTEs    */
+/*   Bit  0:     0         (PTE_V cleared -- triggers page fault)      */
+/*   Bit  8:     1         (PTE_SWAP marker, same position as PTE_COW) */
+/*   Bits 1-7:   original permission flags (R,W,X,U,G,A,D) preserved  */
+/*   Bits 10-53: swap slot index (44 bits, only 10 needed for 1024)    */
 /*                                                                      */
-/* The additional magic tag is important during teardown: stale or      */
-/* corrupted invalid PTE values must not be mistaken for swapped pages. */
+/* PTE_SWAP reuses PTE_COW's bit position.  This is safe because       */
+/* PTE_COW is only meaningful when PTE_V=1 (page present), while       */
+/* PTE_SWAP is only meaningful when PTE_V=0 (page absent).             */
 /* ------------------------------------------------------------------ */
-#define PTE_SWAP              (1L << 8)
-#define PTE_SWAP_SLOT_SHIFT   10
-#define PTE_SWAP_SLOT_MASK    (((uint64_t)(SWAP_NSLOTS - 1)) << PTE_SWAP_SLOT_SHIFT)
-#define PTE_SWAP_MAGIC_SHIFT  54
-#define PTE_SWAP_MAGIC_MASK   (0x7fULL << PTE_SWAP_MAGIC_SHIFT)
-#define PTE_SWAP_MAGIC        (0x2dULL << PTE_SWAP_MAGIC_SHIFT)
+#define PTE_SWAP  (1L << 8)
 
 /* Encode a swapped-out PTE.  Store original flags (excluding V) and slot. */
 #define PTE_SWAP_ENCODE(slot, orig_flags) \
-  (PTE_SWAP_MAGIC | (((uint64_t)(slot) & (SWAP_NSLOTS - 1)) << PTE_SWAP_SLOT_SHIFT) | \
-   PTE_SWAP | ((orig_flags) & 0xFE))
+  (((uint64_t)(slot) << 10) | PTE_SWAP | ((orig_flags) & 0xFE))
 
 /* Decode swap slot from a swapped-out PTE */
-#define PTE_SWAP_SLOT(pte)  ((int)(((pte) & PTE_SWAP_SLOT_MASK) >> PTE_SWAP_SLOT_SHIFT))
+#define PTE_SWAP_SLOT(pte)  ((int)((pte) >> 10))
 
 /* Recover original permission flags for remapping on swap-in */
 #define PTE_SWAP_FLAGS(pte) ((int)((pte) & 0xFE))
 
 /* Test whether a PTE represents a swapped-out page */
-#define PTE_IS_SWAPPED(pte) \
-  ((((pte) & PTE_V) == 0) && \
-   (((pte) & (PTE_SWAP | PTE_SWAP_MAGIC_MASK)) == (PTE_SWAP | PTE_SWAP_MAGIC)) && \
-   ((PTE_SWAP_FLAGS(pte) & PTE_U) != 0) && \
-   (PTE_SWAP_SLOT(pte) >= 0) && (PTE_SWAP_SLOT(pte) < SWAP_NSLOTS))
-
-/* Take ownership of a swapped-out PTE: return its slot, optionally its flags,
- * and clear the PTE so the slot cannot be released twice by another teardown
- * path. Returns -1 if the PTE is not swapped out. */
-static inline int pte_swap_take(pte_t *pte, int *flags_out) {
-  pte_t old = *pte;
-  if (!PTE_IS_SWAPPED(old))
-    return -1;
-  if (flags_out)
-    *flags_out = PTE_SWAP_FLAGS(old);
-  *pte = 0;
-  return PTE_SWAP_SLOT(old);
-}
+#define PTE_IS_SWAPPED(pte) (((pte) & PTE_V) == 0 && ((pte) & PTE_SWAP))
 
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */

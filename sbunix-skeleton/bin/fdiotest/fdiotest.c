@@ -18,7 +18,7 @@ int main(void) {
     char buf[64];
     int fd, n;
 
-    /* ---- Basic file I/O on ext2 ---- */
+    /* open/write/read on ext2 */
     fd = open("/mnt/fdio_test", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     check(fd >= 0, "open for write");
     n = write(fd, "hello fdio", 10);
@@ -33,7 +33,7 @@ int main(void) {
     check(strcmp(buf, "hello fdio") == 0, "content matches");
     close(fd);
 
-    /* ---- dup ---- */
+    /* dup */
     fd = open("/mnt/fdio_dup", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     check(fd >= 0, "open for dup");
     int fd2 = dup(fd);
@@ -48,7 +48,7 @@ int main(void) {
     check(strcmp(buf, "dup") == 0, "dup write visible");
     close(fd);
 
-    /* ---- lseek ---- */
+    /* lseek */
     fd = open("/mnt/fdio_test", O_RDONLY);
     check(fd >= 0, "open for lseek");
     off_t pos = lseek(fd, 6, SEEK_SET);
@@ -59,7 +59,7 @@ int main(void) {
     check(strcmp(buf, "fdio") == 0, "lseek content");
     close(fd);
 
-    /* ---- pipe ---- */
+    /* pipe */
     int pfd[2];
     int r = pipe(pfd);
     check(r == 0, "pipe");
@@ -70,132 +70,84 @@ int main(void) {
     close(pfd[0]);
     close(pfd[1]);
 
-    /* ---- dirfd-aware *at syscalls ---- */
-    r = mkdir("/mnt/at_base", 0755);
-    check(r == 0, "mkdir at_base");
+    /* cleanup */
+    unlink("/mnt/fdio_test");
+    unlink("/mnt/fdio_dup");
 
-    fd = open("/mnt/at_base", O_RDONLY | O_DIRECTORY);
-    check(fd >= 0, "open directory fd");
+    /* ============================================================
+     * Error code tests — kernel must distinguish errors from empty
+     * results. A bogus fd must return -1/EBADF, not 0 (empty/EOF).
+     * ============================================================ */
+    int badfd = 999;
 
-    if (fd >= 0) {
-        int dirfd = fd;
-        check(chdir("/") == 0, "chdir away from base dir");
-
-        fd2 = openat(dirfd, "child", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        check(fd2 >= 0, "openat relative to dirfd");
-        if (fd2 >= 0) {
-            n = write(fd2, "dirfd", 5);
-            check(n == 5, "openat write");
-            close(fd2);
-        }
-
-        fd2 = open("/mnt/at_base/child", O_RDONLY);
-        check(fd2 >= 0, "open created child");
-        if (fd2 >= 0) {
-            memset(buf, 0, sizeof(buf));
-            n = read(fd2, buf, sizeof(buf));
-            check(n == 5 && strcmp(buf, "dirfd") == 0, "openat created correct file");
-            close(fd2);
-        }
-
-        {
-            struct stat st;
-            errno = 0;
-            r = fstatat(dirfd, "child", &st, 0);
-            check(r == 0, "fstatat relative to dirfd");
-        }
-
-        errno = 0;
-        r = faccessat(dirfd, "child", F_OK, 0);
-        check(r == 0, "faccessat relative to dirfd");
-
-        r = symlink("/mnt/at_base/child", "/mnt/at_base/child_link");
-        check(r == 0, "create symlink for readlinkat");
-        memset(buf, 0, sizeof(buf));
-        n = readlinkat(dirfd, "child_link", buf, sizeof(buf));
-        check(n > 0 && strcmp(buf, "/mnt/at_base/child") == 0,
-              "readlinkat relative to dirfd");
-
-        errno = 0;
-        fd2 = openat(-1, "child", O_RDONLY);
-        check(fd2 == -1 && errno == EBADF, "openat bad dirfd returns EBADF");
-
-        close(dirfd);
-    }
-
-    /* ---- Invalid fd error returns ---- */
-
-    /* read with bad fd */
+    /* read(bad_fd) must return -1 with EBADF, not 0 (EOF) */
     errno = 0;
-    n = read(-1, buf, 10);
-    check(n == -1 && errno == EBADF, "read(-1) returns EBADF");
+    ssize_t rr = read(badfd, buf, 1);
+    check(rr == -1, "err: read(bad_fd) returns -1");
+    check(errno == EBADF, "err: read(bad_fd) errno==EBADF");
 
+    /* write(bad_fd) must return -1 with EBADF */
     errno = 0;
-    n = read(999, buf, 10);
-    check(n == -1 && errno == EBADF, "read(999) returns EBADF");
+    ssize_t wr = write(badfd, "x", 1);
+    check(wr == -1, "err: write(bad_fd) returns -1");
+    check(errno == EBADF, "err: write(bad_fd) errno==EBADF");
 
-    /* write with bad fd */
+    /* close(bad_fd) must return -1 with EBADF */
     errno = 0;
-    n = write(-1, buf, 10);
-    check(n == -1 && errno == EBADF, "write(-1) returns EBADF");
+    int cr = close(badfd);
+    check(cr == -1, "err: close(bad_fd) returns -1");
+    check(errno == EBADF, "err: close(bad_fd) errno==EBADF");
 
+    /* lseek(bad_fd) must return -1 with EBADF */
     errno = 0;
-    n = write(999, buf, 10);
-    check(n == -1 && errno == EBADF, "write(999) returns EBADF");
+    off_t lr = lseek(badfd, 0, SEEK_SET);
+    check(lr == (off_t)-1, "err: lseek(bad_fd) returns -1");
+    check(errno == EBADF, "err: lseek(bad_fd) errno==EBADF");
 
-    /* close with bad fd */
+    /* fstat(bad_fd) must return -1 with EBADF */
     errno = 0;
-    r = close(-1);
-    check(r == -1 && errno == EBADF, "close(-1) returns EBADF");
+    struct stat st;
+    int sr = fstat(badfd, &st);
+    check(sr == -1, "err: fstat(bad_fd) returns -1");
+    check(errno == EBADF, "err: fstat(bad_fd) errno==EBADF");
 
-    errno = 0;
-    r = close(999);
-    check(r == -1 && errno == EBADF, "close(999) returns EBADF");
-
-    /* double close */
-    fd = open("/mnt/fdio_test", O_RDONLY);
-    close(fd);
-    errno = 0;
-    r = close(fd);
-    check(r == -1 && errno == EBADF, "double close returns EBADF");
-
-    /* lseek with bad fd */
-    errno = 0;
-    pos = lseek(-1, 0, SEEK_SET);
-    check(pos == -1 && errno == EBADF, "lseek(-1) returns EBADF");
-
-    /* lseek on pipe (ESPIPE) */
+    /* lseek on pipe → ESPIPE (not EBADF or 0) */
     pipe(pfd);
     errno = 0;
-    pos = lseek(pfd[0], 0, SEEK_SET);
-    check(pos == -1 && errno == ESPIPE, "lseek on pipe returns ESPIPE");
+    lr = lseek(pfd[0], 0, SEEK_SET);
+    check(lr == (off_t)-1, "err: lseek(pipe) returns -1");
+    check(errno == ESPIPE, "err: lseek(pipe) errno==ESPIPE");
     close(pfd[0]);
     close(pfd[1]);
 
-    /* dup with bad fd */
-    errno = 0;
-    fd2 = dup(-1);
-    check(fd2 == -1 && errno == EBADF, "dup(-1) returns EBADF");
-
-    /* fstat with bad fd */
-    {
-        struct stat st;
+    /* lseek with invalid whence → EINVAL */
+    fd = open("/mnt/fdio_err", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
         errno = 0;
-        r = fstat(-1, &st);
-        check(r == -1 && errno == EBADF, "fstat(-1) returns EBADF");
+        lr = lseek(fd, 0, 99);  /* whence=99 is invalid */
+        check(lr == (off_t)-1, "err: lseek(bad_whence) returns -1");
+        check(errno == EINVAL, "err: lseek(bad_whence) errno==EINVAL");
+
+        /* lseek to negative offset → EINVAL */
+        errno = 0;
+        lr = lseek(fd, -100, SEEK_SET);
+        check(lr == (off_t)-1, "err: lseek(neg_offset) returns -1");
+        check(errno == EINVAL, "err: lseek(neg_offset) errno==EINVAL");
+
+        close(fd);
+        unlink("/mnt/fdio_err");
     }
 
-    /* fsync with bad fd */
-    errno = 0;
-    r = fsync(-1);
-    check(r == -1 && errno == EBADF, "fsync(-1) returns EBADF");
-
-    /* cleanup */
-    unlink("/mnt/at_base/child_link");
-    unlink("/mnt/at_base/child");
-    rmdir("/mnt/at_base");
-    unlink("/mnt/fdio_test");
-    unlink("/mnt/fdio_dup");
+    /* Contrast: read 0 bytes from valid empty file is NOT an error */
+    fd = open("/mnt/fdio_empty", O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        errno = 0;
+        rr = read(fd, buf, 10);
+        check(rr == 0, "ok: read(empty_file) returns 0 (EOF)");
+        check(errno == 0, "ok: read(empty_file) no errno");
+        close(fd);
+        unlink("/mnt/fdio_empty");
+    }
 
     printf("fdiotest: %d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;

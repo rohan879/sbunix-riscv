@@ -1,167 +1,236 @@
 /*
- * glob.c — pathname pattern expansion for SBUnix libc.
+ * glob.c — POSIX glob() and globfree() for SBUnix libc.
  *
- * Expands shell-style glob patterns against the filesystem using
- * opendir/readdir/fnmatch.  Supports *, ?, and [...] in the last
- * path component.
- *
- * Flags: GLOB_APPEND, GLOB_NOSORT, GLOB_NOCHECK
+ * Expands file-name patterns by reading directories and matching
+ * entries with fnmatch().
  */
 
 #include <glob.h>
-#include <fnmatch.h>
-#include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <fnmatch.h>
 #include <errno.h>
 
-/* Check if a string contains glob metacharacters */
-static int has_magic(const char *s) {
-    for (; *s; s++) {
-        if (*s == '*' || *s == '?' || *s == '[')
-            return 1;
-    }
-    return 0;
-}
-
-/* Add a path to pglob->gl_pathv, reallocating as needed */
-static int glob_add(glob_t *pglob, const char *path) {
-    size_t count = pglob->gl_pathc + 1;
-    char **nv = (char **)realloc(pglob->gl_pathv,
-                                  (count + 1) * sizeof(char *));
-    if (!nv)
-        return GLOB_NOSPACE;
-    pglob->gl_pathv = nv;
-
-    char *dup = strdup(path);
-    if (!dup)
-        return GLOB_NOSPACE;
-
-    pglob->gl_pathv[pglob->gl_pathc] = dup;
-    pglob->gl_pathc = count;
-    pglob->gl_pathv[count] = (void *)0;  /* NULL-terminate the list */
-    return 0;
-}
-
-/* strcmp wrapper for qsort */
-static int cmp_strings(const void *a, const void *b) {
-    return strcmp(*(const char **)a, *(const char **)b);
+/* Simple strcmp-based comparator for qsort */
+static int glob_cmp(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
 int glob(const char *pattern, int flags,
          int (*errfunc)(const char *, int),
-         glob_t *pglob) {
+         glob_t *pglob)
+{
+    if (!pattern || !pglob)
+        return GLOB_NOMATCH;
 
-    /* Initialize if not appending */
-    if (!(flags & GLOB_APPEND)) {
-        pglob->gl_pathc = 0;
-        pglob->gl_pathv = (void *)0;
-        pglob->gl_offs  = 0;
-    }
+    /* ---------------------------------------------------------------
+     * Split pattern into directory part and filename (base) part
+     * at the last '/'.  If there is no '/', the directory is "."
+     * and the base is the whole pattern.
+     * --------------------------------------------------------------- */
+    char dir[256];
+    const char *base;
 
-    size_t old_pathc = pglob->gl_pathc;
-
-    /* No metacharacters — just check if file exists or use NOCHECK */
-    if (!has_magic(pattern)) {
-        int ret = glob_add(pglob, pattern);
-        if (ret != 0) return ret;
-        return 0;
-    }
-
-    /* Split pattern into directory and filename components */
     const char *slash = (void *)0;
     for (const char *p = pattern; *p; p++) {
         if (*p == '/')
             slash = p;
     }
 
-    char dir[1024];
-    const char *base_pattern;
-
     if (slash) {
         size_t dlen = (size_t)(slash - pattern);
         if (dlen == 0) {
+            /* Pattern starts with '/' (e.g. "/foo.c") */
             dir[0] = '/';
             dir[1] = '\0';
         } else {
-            if (dlen >= sizeof(dir)) dlen = sizeof(dir) - 1;
+            if (dlen >= sizeof(dir))
+                dlen = sizeof(dir) - 1;
             memcpy(dir, pattern, dlen);
             dir[dlen] = '\0';
         }
-        base_pattern = slash + 1;
+        base = slash + 1;
     } else {
         dir[0] = '.';
         dir[1] = '\0';
-        base_pattern = pattern;
+        base = pattern;
     }
 
-    /* If the directory part itself has globs, we don't handle recursive
-     * expansion — just try opening it literally.  This covers the common
-     * case where only the filename component has globs. */
+    /* ---------------------------------------------------------------
+     * Initialise or prepare for GLOB_APPEND
+     * --------------------------------------------------------------- */
+    size_t old_pathc = 0;
+    char **old_pathv = (void *)0;
 
+    if (flags & GLOB_APPEND) {
+        old_pathc = pglob->gl_pathc;
+        old_pathv = pglob->gl_pathv;
+    } else {
+        pglob->gl_pathc = 0;
+        pglob->gl_pathv = (void *)0;
+    }
+
+    /* ---------------------------------------------------------------
+     * Read directory and collect matches
+     * --------------------------------------------------------------- */
     DIR *dp = opendir(dir);
     if (!dp) {
-        if (errfunc && errfunc(dir, errno))
+        if (errfunc) {
+            if (errfunc(dir, errno))
+                return GLOB_ABORTED;
+        }
+        if (flags & GLOB_ERR)
             return GLOB_ABORTED;
+        /* No directory — treat as no matches */
         if (flags & GLOB_NOCHECK)
-            return glob_add(pglob, pattern);
+            goto nocheck;
         return GLOB_NOMATCH;
     }
 
-    struct dirent *ent;
-    while ((ent = readdir(dp)) != (void *)0) {
-        /* Skip . and .. */
-        if (ent->d_name[0] == '.' &&
-            (ent->d_name[1] == '\0' ||
-             (ent->d_name[1] == '.' && ent->d_name[2] == '\0')))
+    /* Dynamic array of matched paths */
+    size_t cap = 16;
+    size_t count = 0;
+    char **results = malloc(cap * sizeof(char *));
+    if (!results) {
+        closedir(dp);
+        return GLOB_NOSPACE;
+    }
+
+    int fnm_flags = 0;
+    if (flags & GLOB_NOESCAPE)
+        fnm_flags |= FNM_NOESCAPE;
+
+    struct dirent *de;
+    while ((de = readdir(dp)) != (void *)0) {
+        /* Skip "." and ".." */
+        if (de->d_name[0] == '.' && (de->d_name[1] == '\0' ||
+            (de->d_name[1] == '.' && de->d_name[2] == '\0')))
             continue;
 
-        /* Skip hidden files unless pattern starts with . */
-        if (ent->d_name[0] == '.' && base_pattern[0] != '.')
+        /* Skip hidden files unless the pattern explicitly starts with '.' */
+        if (de->d_name[0] == '.' && base[0] != '.')
             continue;
 
-        if (fnmatch(base_pattern, ent->d_name, 0) == 0) {
-            /* Build full path */
-            char fullpath[1024];
-            if (slash) {
-                size_t dlen = strlen(dir);
-                if (dlen + 1 + strlen(ent->d_name) < sizeof(fullpath)) {
-                    memcpy(fullpath, dir, dlen);
-                    fullpath[dlen] = '/';
-                    strcpy(fullpath + dlen + 1, ent->d_name);
-                } else {
-                    continue;  /* path too long, skip */
-                }
-            } else {
-                if (strlen(ent->d_name) < sizeof(fullpath))
-                    strcpy(fullpath, ent->d_name);
-                else
-                    continue;
-            }
-            int ret = glob_add(pglob, fullpath);
-            if (ret != 0) {
+        if (fnmatch(base, de->d_name, fnm_flags) == 0) {
+            /* Build full path: dir/name */
+            size_t dlen = strlen(dir);
+            size_t nlen = strlen(de->d_name);
+            int need_slash = (dir[dlen - 1] != '/');
+            size_t plen = dlen + need_slash + nlen + 1;
+
+            char *path = malloc(plen);
+            if (!path) {
+                /* Free what we've collected so far */
+                for (size_t i = 0; i < count; i++)
+                    free(results[i]);
+                free(results);
                 closedir(dp);
-                return ret;
+                return GLOB_NOSPACE;
             }
+
+            memcpy(path, dir, dlen);
+            if (need_slash)
+                path[dlen] = '/';
+            memcpy(path + dlen + need_slash, de->d_name, nlen + 1);
+
+            /* Grow the results array if needed */
+            if (count >= cap) {
+                size_t newcap = cap * 2;
+                char **tmp = realloc(results, newcap * sizeof(char *));
+                if (!tmp) {
+                    free(path);
+                    for (size_t i = 0; i < count; i++)
+                        free(results[i]);
+                    free(results);
+                    closedir(dp);
+                    return GLOB_NOSPACE;
+                }
+                results = tmp;
+                cap = newcap;
+            }
+
+            results[count++] = path;
         }
     }
 
     closedir(dp);
 
-    /* No new matches found? */
-    if (pglob->gl_pathc == old_pathc) {
+    /* ---------------------------------------------------------------
+     * No matches
+     * --------------------------------------------------------------- */
+    if (count == 0) {
+        free(results);
         if (flags & GLOB_NOCHECK)
-            return glob_add(pglob, pattern);
+            goto nocheck;
         return GLOB_NOMATCH;
     }
 
-    /* Sort results (unless GLOB_NOSORT) */
-    if (!(flags & GLOB_NOSORT) && pglob->gl_pathc > old_pathc) {
-        qsort(pglob->gl_pathv + old_pathc,
-              pglob->gl_pathc - old_pathc,
-              sizeof(char *), cmp_strings);
+    /* ---------------------------------------------------------------
+     * Sort results unless GLOB_NOSORT
+     * --------------------------------------------------------------- */
+    if (!(flags & GLOB_NOSORT))
+        qsort(results, count, sizeof(char *), glob_cmp);
+
+    /* ---------------------------------------------------------------
+     * Build final gl_pathv (with NULL sentinel)
+     * --------------------------------------------------------------- */
+    size_t total = old_pathc + count;
+    char **pathv = malloc((total + 1) * sizeof(char *));
+    if (!pathv) {
+        for (size_t i = 0; i < count; i++)
+            free(results[i]);
+        free(results);
+        return GLOB_NOSPACE;
     }
 
+    /* Copy old entries (for GLOB_APPEND) */
+    for (size_t i = 0; i < old_pathc; i++)
+        pathv[i] = old_pathv[i];
+
+    /* Copy new entries */
+    for (size_t i = 0; i < count; i++)
+        pathv[old_pathc + i] = results[i];
+
+    pathv[total] = (void *)0;
+
+    /* Free old pathv array (but not the strings — they're reused) */
+    if (old_pathv)
+        free(old_pathv);
+    free(results);
+
+    pglob->gl_pathc = total;
+    pglob->gl_pathv = pathv;
+    return 0;
+
+nocheck:
+    /* GLOB_NOCHECK: return the pattern itself as the single match */
+    {
+        size_t total = old_pathc + 1;
+        char **pathv = malloc((total + 1) * sizeof(char *));
+        if (!pathv)
+            return GLOB_NOSPACE;
+
+        for (size_t i = 0; i < old_pathc; i++)
+            pathv[i] = old_pathv[i];
+
+        size_t plen = strlen(pattern);
+        char *copy = malloc(plen + 1);
+        if (!copy) {
+            free(pathv);
+            return GLOB_NOSPACE;
+        }
+        memcpy(copy, pattern, plen + 1);
+
+        pathv[old_pathc] = copy;
+        pathv[total] = (void *)0;
+
+        if (old_pathv)
+            free(old_pathv);
+
+        pglob->gl_pathc = total;
+        pglob->gl_pathv = pathv;
+    }
     return 0;
 }
 

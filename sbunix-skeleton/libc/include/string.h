@@ -26,5 +26,7 @@ size_t strcspn(const char *s, const char *reject);
 char  *strpbrk(const char *s, const char *accept);
 char  *strtok(char *str, const char *delim);
 char  *strerror(int errnum);
+int    strcasecmp(const char *s1, const char *s2);
+int    strncasecmp(const char *s1, const char *s2, size_t n);
 
 #endif

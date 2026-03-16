@@ -232,15 +232,11 @@ int is_builtin(const char *cmd) {
             strcmp(cmd, "unalias") == 0 ||
             strcmp(cmd, "exec") == 0 ||
             strcmp(cmd, "umask") == 0 ||
-            strcmp(cmd, "type") == 0 ||
             strcmp(cmd, "pwd") == 0 ||
-            strcmp(cmd, "kill") == 0 ||
-            strcmp(cmd, "wait") == 0 ||
-            strcmp(cmd, "readonly") == 0 ||
-            strcmp(cmd, "local") == 0 ||
-            strcmp(cmd, "printf") == 0 ||
+            strcmp(cmd, ":") == 0 ||
             strcmp(cmd, "command") == 0 ||
-            strcmp(cmd, ":") == 0);
+            strcmp(cmd, "wait") == 0 ||
+            strcmp(cmd, "type") == 0);
 }
 
 /* -----------------------------------------------------------------------
@@ -324,45 +320,21 @@ static int builtin_which(struct command *cmd) {
 }
 
 int run_builtin(struct command *cmd) {
-    if (strcmp(cmd->argv[0], ":") == 0)
-        return 0;
-
     if (strcmp(cmd->argv[0], "cd") == 0) {
         const char *dir = cmd->argc > 1 ? cmd->argv[1] : var_get("HOME");
         if (!dir)
             dir = "/";
-        /* cd - : change to OLDPWD */
-        int print_dir = 0;
-        if (strcmp(dir, "-") == 0) {
-            dir = var_get("OLDPWD");
-            if (!dir) {
-                dprintf(2, "sbush: cd: OLDPWD not set\n");
-                return 1;
-            }
-            print_dir = 1;
-        }
-        /* Save current directory as OLDPWD before changing */
-        char oldcwd[256];
-        if (getcwd(oldcwd, sizeof(oldcwd)))
-            var_set("OLDPWD", oldcwd);
         if (chdir(dir) < 0) {
             printf("cd: %s: No such file or directory\n", dir);
             return 1;
         }
         char cwd[256];
-        if (getcwd(cwd, sizeof(cwd))) {
+        if (getcwd(cwd, sizeof(cwd)))
             var_set("PWD", cwd);
-            if (print_dir)
-                printf("%s\n", cwd);
-        }
         return 0;
     }
 
     if (strcmp(cmd->argv[0], "export") == 0) {
-        if (cmd->argc == 1) {
-            var_list_exported();
-            return 0;
-        }
         for (int i = 1; i < cmd->argc; i++) {
             char *eq = strchr(cmd->argv[i], '=');
             if (eq) {
@@ -378,50 +350,20 @@ int run_builtin(struct command *cmd) {
     }
 
     if (strcmp(cmd->argv[0], "set") == 0) {
-        if (cmd->argc == 1) {
-            /* set with no args: list all shell variables */
-            var_list_all();
+        if (cmd->argc == 1) return 0;
+        /* Handle set -e/-x/-u/-- flags */
+        if (cmd->argv[1][0] == '-' || cmd->argv[1][0] == '+') {
+            int enable = (cmd->argv[1][0] == '-');
+            for (const char *p = cmd->argv[1] + 1; *p; p++) {
+                if (*p == 'e') set_flag_e = enable;
+                else if (*p == 'x') set_flag_x = enable;
+                else if (*p == 'u') set_flag_u = enable;
+                else if (*p == '-') break; /* -- */
+            }
             return 0;
         }
-        for (int i = 1; i < cmd->argc; i++) {
-            char *arg = cmd->argv[i];
-            if (strcmp(arg, "--") == 0) {
-                /* set -- args: set positional parameters */
-                if (i + 1 < cmd->argc)
-                    positional_set_args(cmd->argc - i - 1, cmd->argv + i + 1);
-                else
-                    positional_set_args(0, NULL);
-                return 0;
-            }
-            if (arg[0] == '-' && arg[1] != '\0') {
-                /* set -e, -x, -u (can be combined: -exu) */
-                for (int k = 1; arg[k]; k++) {
-                    switch (arg[k]) {
-                        case 'e': opt_errexit = 1; break;
-                        case 'x': opt_xtrace = 1;  break;
-                        case 'u': opt_nounset = 1;  break;
-                        default:
-                            dprintf(2, "sbush: set: -%c: invalid option\n", arg[k]);
-                            return 1;
-                    }
-                }
-            } else if (arg[0] == '+' && arg[1] != '\0') {
-                /* set +e, +x, +u (turn off options) */
-                for (int k = 1; arg[k]; k++) {
-                    switch (arg[k]) {
-                        case 'e': opt_errexit = 0; break;
-                        case 'x': opt_xtrace = 0;  break;
-                        case 'u': opt_nounset = 0;  break;
-                        default:
-                            dprintf(2, "sbush: set: +%c: invalid option\n", arg[k]);
-                            return 1;
-                    }
-                }
-            } else if (cmd->argc == 3) {
-                /* Legacy: set NAME VALUE */
-                var_set(cmd->argv[1], cmd->argv[2]);
-                return 0;
-            }
+        if (cmd->argc == 3) {
+            var_set(cmd->argv[1], cmd->argv[2]);
         }
         return 0;
     }
@@ -463,8 +405,7 @@ int run_builtin(struct command *cmd) {
             if (i > start) write(STDOUT_FILENO, " ", 1);
             write(STDOUT_FILENO, cmd->argv[i], strlen(cmd->argv[i]));
         }
-        if (!no_newline)
-            write(STDOUT_FILENO, "\n", 1);
+        if (!no_newline) write(STDOUT_FILENO, "\n", 1);
         return 0;
     }
 
@@ -472,7 +413,6 @@ int run_builtin(struct command *cmd) {
         int code = last_exit_status;
         if (cmd->argc > 1) {
             /* simple atoi */
-            code = 0;
             const char *s = cmd->argv[1];
             int neg = 0;
             if (*s == '-') { neg = 1; s++; }
@@ -480,8 +420,6 @@ int run_builtin(struct command *cmd) {
                 code = code * 10 + (*s++ - '0');
             if (neg) code = -code;
         }
-        /* Run EXIT trap before exiting */
-        trap_run(0);
         exit(code);
     }
 
@@ -491,13 +429,8 @@ int run_builtin(struct command *cmd) {
     }
 
     if (strcmp(cmd->argv[0], "fg") == 0) {
-        struct job *j;
-        if (cmd->argc > 1) {
-            int id = atoi(cmd->argv[1]);
-            j = (id > 0) ? job_find(id) : NULL;
-        } else {
-            j = job_find_last();
-        }
+        int id = cmd->argc > 1 ? atoi(cmd->argv[1]) : -1;
+        struct job *j = (id > 0) ? job_find(id) : job_last();
         if (!j) {
             printf("fg: no such job\n");
             return 1;
@@ -560,14 +493,9 @@ int run_builtin(struct command *cmd) {
 
     if (strcmp(cmd->argv[0], "trap") == 0) {
         /* trap 'cmd' SIGNAL or trap '' SIGNAL (reset) or trap - SIGNAL */
-        if (cmd->argc == 1) {
-            /* List all active traps */
-            trap_list();
-            return 0;
-        }
         if (cmd->argc < 3) {
-            dprintf(2, "sbush: trap: usage: trap 'command' SIGNAL\n");
-            return 1;
+            /* List traps or usage — just return OK for now */
+            return 0;
         }
         const char *action = cmd->argv[1];
         for (int i = 2; i < cmd->argc; i++) {
@@ -586,13 +514,7 @@ int run_builtin(struct command *cmd) {
     }
 
     if (strcmp(cmd->argv[0], "read") == 0) {
-        int raw_mode = 0;
-        int arg_start = 1;
-        if (cmd->argc > 1 && strcmp(cmd->argv[1], "-r") == 0) {
-            raw_mode = 1;
-            arg_start = 2;
-        }
-        if (cmd->argc < arg_start + 1) {
+        if (cmd->argc < 2) {
             dprintf(2, "sbush: read: variable name required\n");
             return 1;
         }
@@ -601,33 +523,19 @@ int run_builtin(struct command *cmd) {
         char ch;
         while (ri < MAX_LINE - 1 && read(STDIN_FILENO, &ch, 1) == 1) {
             if (ch == '\n') break;
-            if (!raw_mode && ch == '\\') {
-                /* In non-raw mode, backslash-newline is line continuation */
-                char next;
-                if (read(STDIN_FILENO, &next, 1) == 1) {
-                    if (next == '\n')
-                        continue; /* line continuation, keep reading */
-                    /* Otherwise keep both chars */
-                    rbuf[ri++] = ch;
-                    if (ri < MAX_LINE - 1)
-                        rbuf[ri++] = next;
-                }
-                continue;
-            }
             rbuf[ri++] = ch;
         }
         rbuf[ri] = '\0';
         if (ri == 0 && ch != '\n')
             return 1; /* EOF */
 
-        int var_count = cmd->argc - arg_start;
-        if (var_count == 1) {
+        if (cmd->argc == 2) {
             /* Single variable gets entire line */
-            var_set(cmd->argv[arg_start], rbuf);
+            var_set(cmd->argv[1], rbuf);
         } else {
             /* Multiple variables: split by whitespace, last gets remainder */
             char *p = rbuf;
-            for (int i = arg_start; i < cmd->argc; i++) {
+            for (int i = 1; i < cmd->argc; i++) {
                 while (*p == ' ' || *p == '\t') p++;
                 if (i == cmd->argc - 1) {
                     /* Last variable gets the rest */
@@ -663,13 +571,8 @@ int run_builtin(struct command *cmd) {
     }
 
     if (strcmp(cmd->argv[0], "bg") == 0) {
-        struct job *j;
-        if (cmd->argc > 1) {
-            int id = atoi(cmd->argv[1]);
-            j = (id > 0) ? job_find(id) : NULL;
-        } else {
-            j = job_find_last();
-        }
+        int id = cmd->argc > 1 ? atoi(cmd->argv[1]) : -1;
+        struct job *j = (id > 0) ? job_find(id) : job_last();
         if (!j) {
             printf("bg: no such job\n");
             return 1;
@@ -747,344 +650,71 @@ int run_builtin(struct command *cmd) {
         return 0;
     }
 
-    if (strcmp(cmd->argv[0], "type") == 0) {
-        if (cmd->argc < 2) {
-            dprintf(2, "sbush: type: argument required\n");
-            return 1;
-        }
-        int ret = 0;
-        for (int i = 1; i < cmd->argc; i++) {
-            const char *name = cmd->argv[i];
-            if (is_builtin(name)) {
-                printf("type: %s is a shell builtin\n", name);
-            } else if (func_find(name)) {
-                printf("type: %s is a function\n", name);
-            } else {
-                /* Search PATH for executable */
-                char *path = var_get("PATH");
-                if (!path) path = "/bin";
-                char buf[MAX_LINE];
-                char *p = path;
-                int found = 0;
-                while (*p) {
-                    char *colon = strchr(p, ':');
-                    int dlen;
-                    if (colon)
-                        dlen = colon - p;
-                    else
-                        dlen = strlen(p);
-                    if (dlen == 0) {
-                        strcpy(buf, name);
-                    } else {
-                        strncpy(buf, p, dlen);
-                        buf[dlen] = '/';
-                        strcpy(buf + dlen + 1, name);
-                    }
-                    struct stat st;
-                    if (stat(buf, &st) == 0 && S_ISREG(st.st_mode) &&
-                        (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
-                        printf("type: %s is %s\n", name, buf);
-                        found = 1;
-                        break;
-                    }
-                    if (colon)
-                        p = colon + 1;
-                    else
-                        break;
-                }
-                if (!found) {
-                    dprintf(2, "type: %s: not found\n", name);
-                    ret = 1;
-                }
-            }
-        }
-        return ret;
-    }
-
     if (strcmp(cmd->argv[0], "pwd") == 0) {
         char cwd[256];
         if (getcwd(cwd, sizeof(cwd))) {
-            printf("%s\n", cwd);
+            write(STDOUT_FILENO, cwd, strlen(cwd));
+            write(STDOUT_FILENO, "\n", 1);
             return 0;
         }
-        dprintf(2, "sbush: pwd: cannot determine working directory\n");
         return 1;
     }
 
-    if (strcmp(cmd->argv[0], "wait") == 0) {
-        if (cmd->argc == 1) {
-            /* wait with no args: wait for all background children */
-            int status;
-            while (waitpid(-1, &status, 0) > 0)
-                ;
-            return 0;
-        }
-        /* wait pid: wait for specific process */
-        pid_t pid = (pid_t)atoi(cmd->argv[1]);
-        int status = 0;
-        if (waitpid(pid, &status, 0) < 0) {
-            dprintf(2, "sbush: wait: pid %d: no such process\n", (int)pid);
-            return 127;
-        }
-        return WIFEXITED(status) ? WEXITSTATUS(status) : (128 + WTERMSIG(status));
-    }
-
-    if (strcmp(cmd->argv[0], "readonly") == 0) {
-        if (cmd->argc == 1) {
-            /* readonly with no args: list all readonly variables */
-            var_list_readonly();
-            return 0;
-        }
-        for (int i = 1; i < cmd->argc; i++) {
-            char *eq = strchr(cmd->argv[i], '=');
-            if (eq) {
-                /* readonly VAR=value */
-                *eq = '\0';
-                var_set(cmd->argv[i], eq + 1);
-                var_set_readonly(cmd->argv[i]);
-                *eq = '=';
-            } else {
-                /* readonly VAR — mark existing variable as readonly */
-                if (!var_get(cmd->argv[i]))
-                    var_set(cmd->argv[i], "");
-                var_set_readonly(cmd->argv[i]);
-            }
-        }
-        return 0;
-    }
-
-    if (strcmp(cmd->argv[0], "local") == 0) {
-        for (int i = 1; i < cmd->argc; i++) {
-            char *eq = strchr(cmd->argv[i], '=');
-            if (eq) {
-                /* local VAR=value */
-                *eq = '\0';
-                local_declare(cmd->argv[i]);
-                var_set(cmd->argv[i], eq + 1);
-                *eq = '=';
-            } else {
-                /* local VAR — just mark it as local */
-                local_declare(cmd->argv[i]);
-                if (!var_get(cmd->argv[i]))
-                    var_set(cmd->argv[i], "");
-            }
-        }
-        return 0;
-    }
-
-    if (strcmp(cmd->argv[0], "kill") == 0) {
-        int sig = SIGTERM; /* default signal */
-        int arg_start = 1;
-        if (cmd->argc > 1 && cmd->argv[1][0] == '-') {
-            const char *sigarg = cmd->argv[1] + 1;
-            arg_start = 2;
-            /* Try signal names first */
-            if (strcmp(sigarg, "HUP") == 0) sig = SIGHUP;
-            else if (strcmp(sigarg, "INT") == 0) sig = SIGINT;
-            else if (strcmp(sigarg, "QUIT") == 0) sig = SIGQUIT;
-            else if (strcmp(sigarg, "ILL") == 0) sig = SIGILL;
-            else if (strcmp(sigarg, "TRAP") == 0) sig = SIGTRAP;
-            else if (strcmp(sigarg, "ABRT") == 0) sig = SIGABRT;
-            else if (strcmp(sigarg, "BUS") == 0) sig = SIGBUS;
-            else if (strcmp(sigarg, "FPE") == 0) sig = SIGFPE;
-            else if (strcmp(sigarg, "KILL") == 0) sig = SIGKILL;
-            else if (strcmp(sigarg, "USR1") == 0) sig = SIGUSR1;
-            else if (strcmp(sigarg, "SEGV") == 0) sig = SIGSEGV;
-            else if (strcmp(sigarg, "USR2") == 0) sig = SIGUSR2;
-            else if (strcmp(sigarg, "PIPE") == 0) sig = SIGPIPE;
-            else if (strcmp(sigarg, "ALRM") == 0) sig = SIGALRM;
-            else if (strcmp(sigarg, "TERM") == 0) sig = SIGTERM;
-            else if (strcmp(sigarg, "CHLD") == 0) sig = SIGCHLD;
-            else if (strcmp(sigarg, "CONT") == 0) sig = SIGCONT;
-            else if (strcmp(sigarg, "STOP") == 0) sig = SIGSTOP;
-            else if (strcmp(sigarg, "TSTP") == 0) sig = SIGTSTP;
-            else {
-                /* Try as numeric signal */
-                int n = atoi(sigarg);
-                if (n > 0 && n < 32)
-                    sig = n;
-                else {
-                    dprintf(2, "sbush: kill: invalid signal: %s\n", sigarg);
-                    return 1;
-                }
-            }
-        }
-        if (cmd->argc < arg_start + 1) {
-            dprintf(2, "sbush: kill: usage: kill [-signal] pid\n");
-            return 1;
-        }
-        int ret = 0;
-        for (int i = arg_start; i < cmd->argc; i++) {
-            pid_t pid = (pid_t)atoi(cmd->argv[i]);
-            if (kill(pid, sig) < 0) {
-                dprintf(2, "sbush: kill: (%d) - No such process\n", (int)pid);
-                ret = 1;
-            }
-        }
-        return ret;
-    }
-
-    if (strcmp(cmd->argv[0], "printf") == 0) {
-        if (cmd->argc < 2) {
-            dprintf(2, "sbush: printf: usage: printf format [args...]\n");
-            return 1;
-        }
-        const char *fmt = cmd->argv[1];
-        int ai = 2; /* index into cmd->argv for format arguments */
-        const char *p = fmt;
-        while (*p) {
-            if (*p == '\\') {
-                p++;
-                switch (*p) {
-                    case 'n':  write(STDOUT_FILENO, "\n", 1); break;
-                    case 't':  write(STDOUT_FILENO, "\t", 1); break;
-                    case '\\': write(STDOUT_FILENO, "\\", 1); break;
-                    case '0':  write(STDOUT_FILENO, "\0", 1); break;
-                    default:
-                        write(STDOUT_FILENO, "\\", 1);
-                        if (*p) write(STDOUT_FILENO, p, 1);
-                        break;
-                }
-                if (*p) p++;
-            } else if (*p == '%') {
-                p++;
-                if (*p == '%') {
-                    write(STDOUT_FILENO, "%", 1);
-                    p++;
-                } else if (*p == 's') {
-                    const char *arg = (ai < cmd->argc) ? cmd->argv[ai++] : "";
-                    write(STDOUT_FILENO, arg, strlen(arg));
-                    p++;
-                } else if (*p == 'd') {
-                    const char *arg = (ai < cmd->argc) ? cmd->argv[ai++] : "0";
-                    long val = 0;
-                    const char *s = arg;
-                    int neg = 0;
-                    if (*s == '-') { neg = 1; s++; }
-                    else if (*s == '+') s++;
-                    while (*s >= '0' && *s <= '9')
-                        val = val * 10 + (*s++ - '0');
-                    if (neg) val = -val;
-                    char nbuf[24];
-                    int ni = 0;
-                    unsigned long uv;
-                    if (val < 0) {
-                        write(STDOUT_FILENO, "-", 1);
-                        uv = (unsigned long)(-(val + 1)) + 1;
-                    } else {
-                        uv = (unsigned long)val;
-                    }
-                    if (uv == 0) {
-                        nbuf[ni++] = '0';
-                    } else {
-                        while (uv > 0) {
-                            nbuf[ni++] = '0' + (uv % 10);
-                            uv /= 10;
-                        }
-                    }
-                    for (int k = ni - 1; k >= 0; k--)
-                        write(STDOUT_FILENO, &nbuf[k], 1);
-                    p++;
-                } else if (*p == 'x') {
-                    const char *arg = (ai < cmd->argc) ? cmd->argv[ai++] : "0";
-                    unsigned long val = 0;
-                    const char *s = arg;
-                    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
-                    while ((*s >= '0' && *s <= '9') ||
-                           (*s >= 'a' && *s <= 'f') ||
-                           (*s >= 'A' && *s <= 'F')) {
-                        val *= 16;
-                        if (*s >= '0' && *s <= '9') val += *s - '0';
-                        else if (*s >= 'a' && *s <= 'f') val += *s - 'a' + 10;
-                        else val += *s - 'A' + 10;
-                        s++;
-                    }
-                    char xbuf[20];
-                    int xi = 0;
-                    if (val == 0) {
-                        xbuf[xi++] = '0';
-                    } else {
-                        while (val > 0) {
-                            int d = val % 16;
-                            xbuf[xi++] = (d < 10) ? ('0' + d) : ('a' + d - 10);
-                            val /= 16;
-                        }
-                    }
-                    for (int k = xi - 1; k >= 0; k--)
-                        write(STDOUT_FILENO, &xbuf[k], 1);
-                    p++;
-                } else {
-                    /* Unknown format specifier, print literally */
-                    write(STDOUT_FILENO, "%", 1);
-                    /* don't advance p, let it be re-examined */
-                }
-            } else {
-                write(STDOUT_FILENO, p, 1);
-                p++;
-            }
-        }
+    if (strcmp(cmd->argv[0], ":") == 0) {
         return 0;
     }
 
     if (strcmp(cmd->argv[0], "command") == 0) {
-        if (cmd->argc < 2) {
-            dprintf(2, "sbush: command: usage: command [-v] name [args...]\n");
-            return 1;
-        }
-        /* command -v name: print path of command */
-        if (strcmp(cmd->argv[1], "-v") == 0) {
-            if (cmd->argc < 3) {
-                dprintf(2, "sbush: command: -v: argument required\n");
-                return 1;
-            }
-            const char *name = cmd->argv[2];
-            if (is_builtin(name)) {
-                printf("%s\n", name);
-                return 0;
-            }
-            char *path = resolve_path(name);
-            if (path) {
-                printf("%s\n", path);
-                return 0;
-            }
-            return 1;
-        }
-        /* command name [args...]: execute bypassing functions/aliases */
-        if (is_builtin(cmd->argv[1])) {
-            /* Build a sub-command structure for the builtin */
-            struct command sub;
-            memset(&sub, 0, sizeof(sub));
-            sub.argc = cmd->argc - 1;
-            for (int i = 0; i < sub.argc; i++)
-                sub.argv[i] = cmd->argv[i + 1];
-            sub.argv[sub.argc] = NULL;
-            sub.redir_in = cmd->redir_in;
-            sub.redir_out = cmd->redir_out;
-            sub.redir_append = cmd->redir_append;
-            sub.redir_err = cmd->redir_err;
-            sub.redir_err_to_out = cmd->redir_err_to_out;
-            return run_builtin(&sub);
-        }
+        if (cmd->argc < 2) return 0;
+        /* Skip functions/aliases; execute external command directly */
         char *path = resolve_path(cmd->argv[1]);
         if (!path) {
-            dprintf(2, "sbush: command: %s: not found\n", cmd->argv[1]);
+            dprintf(2, "%s: command not found\n", cmd->argv[1]);
             return 127;
         }
-        /* Fork and exec the command directly */
+        char **envp = build_environ();
         pid_t pid = fork();
         if (pid == 0) {
-            char **envp = build_environ();
             execve(path, cmd->argv + 1, envp);
-            dprintf(2, "sbush: command: %s: exec failed\n", cmd->argv[1]);
-            _exit(126);
+            _exit(127);
         }
-        if (pid < 0) {
-            dprintf(2, "sbush: command: fork failed\n");
-            return 1;
-        }
-        int status = 0;
+        int status;
         waitpid(pid, &status, 0);
-        return WIFEXITED(status) ? WEXITSTATUS(status) : (128 + WTERMSIG(status));
+        if (WIFEXITED(status)) return WEXITSTATUS(status);
+        return 1;
+    }
+
+    if (strcmp(cmd->argv[0], "wait") == 0) {
+        int status;
+        if (cmd->argc > 1) {
+            pid_t pid = (pid_t)atoi(cmd->argv[1]);
+            waitpid(pid, &status, 0);
+        } else {
+            /* Wait for all background children */
+            while (waitpid(-1, &status, 0) > 0)
+                ;
+        }
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "type") == 0) {
+        if (cmd->argc < 2) return 1;
+        for (int i = 1; i < cmd->argc; i++) {
+            if (is_builtin(cmd->argv[i]))
+                printf("%s is a shell builtin\n", cmd->argv[i]);
+            else if (func_find(cmd->argv[i]))
+                printf("%s is a function\n", cmd->argv[i]);
+            else {
+                char *path = resolve_path(cmd->argv[i]);
+                if (path)
+                    printf("%s is %s\n", cmd->argv[i], path);
+                else {
+                    dprintf(2, "type: %s: not found\n", cmd->argv[i]);
+                    return 1;
+                }
+            }
+        }
+        return 0;
     }
 
     return 1;

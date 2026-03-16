@@ -80,16 +80,9 @@ struct stat {
 #define major(dev)        (((unsigned long)(dev) >> 8) & 0xff)
 #define minor(dev)        ((unsigned long)(dev) & 0xff)
 
-/* AT_* flags for fstatat */
-#define AT_SYMLINK_NOFOLLOW  0x100
-#define AT_REMOVEDIR         0x200
-#define AT_SYMLINK_FOLLOW    0x400
-#define AT_EMPTY_PATH        0x1000
-
 int stat(const char *path, struct stat *buf);
 int fstat(int fd, struct stat *buf);
 int lstat(const char *path, struct stat *buf);
-int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 int mkdir(const char *path, mode_t mode);
 int mknod(const char *path, mode_t mode, dev_t dev);
 mode_t umask(mode_t mask);

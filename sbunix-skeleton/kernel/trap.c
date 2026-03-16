@@ -44,25 +44,25 @@ static void rtc_init(void) {
 }
 
 /* Get current wall-clock time as {sec, nsec} */
-void get_wall_time(long *sec, long *nsec) {
+static void get_wall_time(int64_t *sec, int64_t *nsec) {
     uint64_t elapsed_ticks = r_time() - boot_time;
     uint64_t elapsed_ns = elapsed_ticks * 100; /* 10MHz -> ns */
     uint64_t now_ns = boot_epoch_ns + elapsed_ns;
-    *sec  = (long)(now_ns / 1000000000ULL);
-    *nsec = (long)(now_ns % 1000000000ULL);
+    *sec  = (int64_t)(now_ns / 1000000000ULL);
+    *nsec = (int64_t)(now_ns % 1000000000ULL);
 }
 
 /* ------------------------------------------------------------------ */
 /* Kernel pipe table                                                    */
 /* ------------------------------------------------------------------ */
-#define NPIPES 32
+#define NPIPES 16
 #define PIPE_BUF 4096
 
 struct kpipe {
   int used;
   char buf[PIPE_BUF];
-  unsigned int rpos;        // next read position
-  unsigned int wpos;        // next write position
+  int rpos;        // next read position
+  int wpos;        // next write position
   int write_open;  // number of writers still open
   int read_open;   // number of readers still open
 };
@@ -84,11 +84,7 @@ static int alloc_pipe(void) {
 }
 
 static int pipe_avail(int pid) {
-  return (int)(pipes[pid].wpos - pipes[pid].rpos);
-}
-
-static int is_tty_file(struct open_file *f) {
-  return f && f->ops == &devfs_ops && f->private && devfs_is_tty(f->private);
+  return pipes[pid].wpos - pipes[pid].rpos;
 }
 
 /* ------------------------------------------------------------------ */
@@ -108,10 +104,8 @@ static int alloc_fd(void) {
 /* Shallow copy fd table from src to dst (for clone), incrementing refcounts */
 static void copy_ofile(struct proc *dst, struct proc *src) {
   struct open_file **srctab = proc_ofile(src);
-  int *srcflags = proc_fdflags(src);
   for (int i = 0; i < NOFILE; i++) {
     dst->ofile[i] = srctab[i];
-    dst->fd_flags[i] = srcflags[i];
     if (srctab[i]) {
       srctab[i]->refcount++;
       /* bump pipe refcounts too */
@@ -130,11 +124,9 @@ static void copy_ofile(struct proc *dst, struct proc *src) {
  * Also clears the slot in the given proc's ofile[fd] (or shared_ft). */
 static void close_ofile(struct proc *p, int fd) {
   struct open_file **ftable = proc_ofile(p);
-  int *fdflags = proc_fdflags(p);
   struct open_file *f = ftable[fd];
   if (!f) return;
   ftable[fd] = NULL;
-  fdflags[fd] = 0;
 
   if (f->is_pipe) {
     int pid = f->pipe_id;
@@ -142,9 +134,9 @@ static void close_ofile(struct proc *p, int fd) {
       pipes[pid].read_open--;
       if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
         pipes[pid].used = 0;
-      /* Wake processes sleeping on this specific pipe */
-      for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
-        if (pp->state == SLEEPING && pp->sleep_channel == &pipes[pid])
+      /* Wake any sleeping pipe readers/writers */
+      for (struct proc *pp = proc; pp < &proc[64]; pp++) {
+        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
           pp->state = RUNNABLE;
       }
     }
@@ -152,8 +144,8 @@ static void close_ofile(struct proc *p, int fd) {
       pipes[pid].write_open--;
       if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
         pipes[pid].used = 0;
-      for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
-        if (pp->state == SLEEPING && pp->sleep_channel == &pipes[pid])
+      for (struct proc *pp = proc; pp < &proc[64]; pp++) {
+        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
           pp->state = RUNNABLE;
       }
     }
@@ -249,7 +241,7 @@ static void handle_external_interrupt(void) {
          * Only wake waitpid sleepers (waiting_for_uart==0); do NOT wake
          * timed sleeps (waiting_for_uart==2) or UART-input sleeps (==1,
          * already handled by uart_wakeup above). */
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        for (struct proc *p = proc; p < &proc[64]; p++) {
             if (p->state == SLEEPING && p->waiting_for_uart == 0)
                 p->state = RUNNABLE;
         }
@@ -269,16 +261,15 @@ static void handle_timer_interrupt(void) {
     #endif
     timer_set_next();
     /* Wake processes whose timed sleep has expired */
-    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+    for (struct proc *p = proc; p < &proc[64]; p++) {
         if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
-            p->sleep_until != (uint64_t)-1 &&
             r_time() >= p->sleep_until) {
             p->waiting_for_uart = 0;
             p->state = RUNNABLE;
         }
     }
     /* Check for expired alarms and deliver SIGALRM */
-    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+    for (struct proc *p = proc; p < &proc[64]; p++) {
         if (p->state != UNUSED && p->state != ZOMBIE &&
             p->alarm_ticks > 0 && ticks >= p->alarm_ticks) {
             p->alarm_ticks = 0;  /* one-shot */
@@ -345,7 +336,7 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
             flags = (flags & ~PTE_W) | PTE_COW;
         }
 
-        /* Share the same physical page in both parent and child. */
+        /* Share the same physical page */
         page_ref_inc(pa);
         if (mappages(dst, va, PAGE_SIZE, pa, flags) < 0)
             return -1;
@@ -361,52 +352,10 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
 /* ------------------------------------------------------------------ */
 static void cleanup_proc_resources(struct proc *p) {
     /* ---- Pagetable / VMAs ---- */
-    if (p->deferred_shared_pt || p->deferred_free_pt ||
-        p->deferred_shared_sa || p->deferred_free_vmas) {
-        pagetable_t deferred_pt = p->deferred_free_pt;
-        struct vm_area *deferred_vmas = p->deferred_free_vmas;
-        struct shared_pagetable *deferred_shared_pt = p->deferred_shared_pt;
-        struct shared_sigactions *deferred_shared_sa = p->deferred_shared_sa;
-
-        p->deferred_free_pt = 0;
-        p->deferred_free_vmas = NULL;
-        p->deferred_shared_pt = NULL;
-        p->deferred_shared_sa = NULL;
-
-        if (deferred_shared_pt) {
-            deferred_shared_pt->refcount--;
-            if (deferred_shared_pt->refcount == 0) {
-                if (deferred_pt && deferred_pt != kernel_pagetable) {
-                    freewalk_user(deferred_pt);
-                }
-                kmfree(deferred_shared_pt, sizeof(struct shared_pagetable));
-            }
-        } else if (deferred_pt && deferred_pt != kernel_pagetable) {
-            freewalk_user(deferred_pt);
-        }
-
-        if (deferred_shared_sa) {
-            deferred_shared_sa->refcount--;
-            if (deferred_shared_sa->refcount == 0)
-                kmfree(deferred_shared_sa, sizeof(struct shared_sigactions));
-        }
-        if (deferred_vmas)
-            vma_free_list(&deferred_vmas);
-    }
-
-    pagetable_t old_pt = NULL;
-    if (p == current_proc && p->pagetable != kernel_pagetable) {
-        old_pt = p->pagetable;
-        w_satp(MAKE_SATP(kernel_pagetable));
-        sfence_vma();
-    }
     if (p->shared_pt) {
         p->shared_pt->refcount--;
         if (p->shared_pt->refcount == 0) {
-            /* Last user: free the shared user image exactly once. */
-            if (p->shared_pt->pt != kernel_pagetable) {
-                freewalk_user(p->shared_pt->pt);
-            }
+            /* Last user: free VMAs (pagetable pages leak is pre-existing) */
             vma_free_all(p);
             kmfree(p->shared_pt, sizeof(struct shared_pagetable));
         } else {
@@ -417,14 +366,8 @@ static void cleanup_proc_resources(struct proc *p) {
         /* Point to kernel pagetable so scheduler doesn't use freed pt */
         p->pagetable = kernel_pagetable;
     } else {
-        /* Traditional fork: free the private user image and VMA metadata. */
-        if (old_pt) {
-            freewalk_user(old_pt);
-        } else if (p->pagetable != kernel_pagetable) {
-            freewalk_user(p->pagetable);
-        }
+        /* Traditional fork: free VMAs as before */
         vma_free_all(p);
-        p->pagetable = kernel_pagetable;
     }
 
     /* ---- File descriptors ---- */
@@ -463,12 +406,10 @@ static void cleanup_proc_resources(struct proc *p) {
 /* a0 = flags (CLONE_VM | CLONE_FILES | CLONE_SIGHAND | SIGCHLD etc.)  */
 /* a1 = child stack pointer (0 means inherit parent sp)                 */
 /* ------------------------------------------------------------------ */
-static pid_t sys_clone(struct trapframe *tf) {
-    uint64_t flags    = tf->a0;
-    uint64_t child_sp = tf->a1;
+static pid_t sys_clone(void) {
+    uint64_t flags    = current_proc->trapframe->a0;
+    uint64_t child_sp = current_proc->trapframe->a1;
     int clone_flags   = (int)(flags & ~0xFFUL); /* mask out low-byte signal */
-    unsigned long old_satp = 0;
-    pagetable_t new_pt = 0; /* hoisted for cleanup in error path */
 
     /* CLONE_SIGHAND requires CLONE_VM (Linux semantics) */
     if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
@@ -483,7 +424,7 @@ static pid_t sys_clone(struct trapframe *tf) {
     memcpy(p->name, current_proc->name, sizeof(p->name));
 
     /* Copy trapframe -- child starts after the ecall just like parent */
-    memcpy(p->trapframe, tf, sizeof(struct trapframe));
+    memcpy(p->trapframe, current_proc->trapframe, sizeof(struct trapframe));
     p->trapframe->a0 = 0; /* child returns 0 */
 
     /* Set child stack pointer if caller provided one */
@@ -521,35 +462,30 @@ static pid_t sys_clone(struct trapframe *tf) {
         vma_dup(current_proc, p);
     } else {
         /* Traditional COW fork: build independent child page table */
-        new_pt = uvmcreate();
+        pagetable_t new_pt = uvmcreate();
         if (!new_pt) goto bad;
-        old_satp = r_satp();
-        w_satp(MAKE_SATP(kernel_pagetable));
-        sfence_vma();
 
         /* Identity map kernel RAM and I/O (same as exec) */
-        if (mappages_super(new_pt, 0x80000000, PHYSTOP - 0x80000000, 0x80000000,
-                     PTE_R | PTE_W | PTE_X) < 0) goto bad_restore_satp;
+        if (mappages(new_pt, 0x80000000, PHYSTOP - 0x80000000, 0x80000000,
+                     PTE_R | PTE_W | PTE_X) < 0) goto bad;
         if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000,
-                     PTE_R | PTE_W) < 0) goto bad_restore_satp;
+                     PTE_R | PTE_W) < 0) goto bad;
         /* RTC (0x101000) NOT mapped — only used during kernel boot */
         if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000,
-                     PTE_R | PTE_W) < 0) goto bad_restore_satp;
-        if (mappages_super(new_pt, 0x0c000000, 0x400000, 0x0c000000,
-                     PTE_R | PTE_W) < 0) goto bad_restore_satp;
+                     PTE_R | PTE_W) < 0) goto bad;
+        if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000,
+                     PTE_R | PTE_W) < 0) goto bad;
         if (mappages_super(new_pt, 0x30000000, 0x200000, 0x30000000,
-                     PTE_R | PTE_W) < 0) goto bad_restore_satp;
+                     PTE_R | PTE_W) < 0) goto bad;
         if (mappages_super(new_pt, 0x40000000, 0x40000000, 0x40000000,
-                     PTE_R | PTE_W) < 0) goto bad_restore_satp;
+                     PTE_R | PTE_W) < 0) goto bad;
 
         /* COW-share user pages */
         if (copy_pagetable_cow(new_pt, current_proc->pagetable, MAXVA) < 0)
-            goto bad_restore_satp;
+            goto bad;
 
         /* Map signal trampoline into child */
         uvmmap_sigtrampoline(new_pt);
-        w_satp(old_satp);
-        sfence_vma();
 
         p->pagetable = new_pt;
 
@@ -564,10 +500,8 @@ static pid_t sys_clone(struct trapframe *tf) {
             struct shared_ftable *sft =
                 (struct shared_ftable *)kmalloc(sizeof(struct shared_ftable));
             if (!sft) goto bad;
-            for (int i = 0; i < NOFILE; i++) {
+            for (int i = 0; i < NOFILE; i++)
                 sft->ofile[i] = current_proc->ofile[i];
-                sft->fd_flags[i] = current_proc->fd_flags[i];
-            }
             sft->refcount = 1;
             current_proc->shared_ft = sft;
             current_proc->clone_flags |= CLONE_FILES;
@@ -607,14 +541,7 @@ static pid_t sys_clone(struct trapframe *tf) {
     p->state = RUNNABLE;
     return p->pid;
 
-bad_restore_satp:
-    w_satp(old_satp);
-    sfence_vma();
-    /* Free the partially-built child page table to prevent leaks */
-    if (new_pt) { freewalk_user(new_pt); new_pt = 0; }
 bad:
-    if (p->kstack) { kfree(p->kstack); p->kstack = NULL; }
-    if (p->trapframe) { kfree(p->trapframe); p->trapframe = NULL; }
     p->state = UNUSED;
     return -1;
 }
@@ -622,31 +549,14 @@ bad:
 /* ------------------------------------------------------------------ */
 /* sys_wait4: wait for a child to exit                                  */
 /* ------------------------------------------------------------------ */
-/* WUNTRACED=2, WNOHANG=1, WCONTINUED=8 */
-#define W_UNTRACED 2
-#define W_CONTINUED 8
-
 static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
     for (;;) {
         int found_child = 0;
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        for (struct proc *p = proc; p < &proc[64]; p++) {
             if (p->state == UNUSED) continue;
             if (p->parent != current_proc) continue;
             if (wpid > 0 && p->pid != wpid) continue;
-            if (wpid == 0 && p->pgid != current_proc->pgid) continue;
-            if (wpid < -1 && p->pgid != -wpid) continue;
             found_child = 1;
-
-            /* Report stopped children if WUNTRACED */
-            if ((options & W_UNTRACED) && p->stopped) {
-                pid_t pid = p->pid;
-                if (wstatus) {
-                    *wstatus = (p->stopped << 8) | 0x7f;
-                }
-                p->stopped = 0; /* reported — don't report again */
-                return pid;
-            }
-
             if (p->state == ZOMBIE) {
                 pid_t pid = p->pid;
                 if (wstatus) {
@@ -659,15 +569,13 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
                     }
                 }
                 /* free child resources */
-                if (p->kstack) { kfree(p->kstack); p->kstack = NULL; }
-                if (p->trapframe) { kfree(p->trapframe); p->trapframe = NULL; }
                 p->state = UNUSED;
                 p->pid = 0;
                 p->parent = NULL;
                 return pid;
             }
         }
-        if (!found_child) return -10; /* -ECHILD */
+        if (!found_child) return -1;
         /* WNOHANG: don't block */
         if (options & 1) return 0;
         /* Otherwise sleep until a child exits */
@@ -719,8 +627,7 @@ static void normalize_path(const char *in, char *out) {
 
     tmp[tlen++] = '/';
     /* Stack of segment-end positions in tmp (indices of the '/' before each segment) */
-    #define NORMALIZE_MAX_DEPTH 128
-    int stack[NORMALIZE_MAX_DEPTH];
+    int stack[64];
     int depth = 0;
 
     while (*p) {
@@ -737,9 +644,7 @@ static void normalize_path(const char *in, char *out) {
                 tlen = stack[--depth];
             }
         } else {
-            /* Normal component — push (guard against overflow) */
-            if (depth >= NORMALIZE_MAX_DEPTH)
-                break;
+            /* Normal component — push */
             stack[depth++] = tlen; /* save position before adding '/' + component */
             if (tlen > 1) tmp[tlen++] = '/'; /* add separator (root already has '/') */
             if (tlen + clen < 255) {
@@ -788,32 +693,6 @@ static void resolve_path(const char *cwd, const char *path, char *out) {
     normalize_path(raw, out);
 }
 
-static int vfs_is_dir(const char *path);
-
-static long resolve_at_path(int dirfd, const char *path, char *resolved) {
-    if (!path || !resolved)
-        return (long)-14; /* -EFAULT */
-
-    if (path[0] == '/' || dirfd == AT_FDCWD) {
-        resolve_path(current_proc->cwd, path, resolved);
-        return 0;
-    }
-
-    if (dirfd < 0 || dirfd >= NOFILE)
-        return (long)-9; /* -EBADF */
-
-    struct open_file *base = proc_ofile(current_proc)[dirfd];
-    if (!base)
-        return (long)-9; /* -EBADF */
-    if (base->is_pipe)
-        return (long)-20; /* -ENOTDIR */
-    if (!vfs_is_dir(base->path))
-        return (long)-20; /* -ENOTDIR */
-
-    resolve_path(base->path, path, resolved);
-    return 0;
-}
-
 /* Check if a resolved path exists as a directory by trying to open it */
 static int vfs_is_dir(const char *path) {
     const char *relpath;
@@ -829,114 +708,60 @@ static int vfs_is_dir(const char *path) {
     return 0;
 }
 
-/* Follow symlinks in a resolved path (iterative, up to maxdepth levels) */
+/* Follow symlinks in a resolved path (up to 8 levels to prevent loops) */
 static int follow_symlinks(char *resolved, int maxdepth) {
-    for (int depth = 0; depth < maxdepth; depth++) {
-        const char *relpath;
-        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
-        if (!ops || !ops->readlink) return 0; /* not a symlink-capable fs */
+    if (maxdepth <= 0) return -40; /* ELOOP */
 
-        char target[256];
-        int ret = ops->readlink(relpath, target, sizeof(target) - 1);
-        if (ret < 0) return 0; /* not a symlink, path is final */
-        target[ret] = '\0';
+    const char *relpath;
+    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    if (!ops || !ops->readlink) return 0; /* no readlink = not a symlink-capable fs */
 
-        /* Resolve the symlink target */
-        char new_resolved[256];
-        if (target[0] == '/') {
-            resolve_path("/", target, new_resolved);
-        } else {
-            /* Relative: resolve from symlink's parent directory */
-            char dir[256];
-            int rlen = strlen(resolved);
-            if (rlen > 255) rlen = 255;
-            memcpy(dir, resolved, rlen);
-            dir[rlen] = '\0';
-            char *last_slash = dir;
-            for (char *p = dir; *p; p++)
-                if (*p == '/') last_slash = p;
-            if (last_slash != dir)
-                *(last_slash + 1) = '\0';
-            else
-                dir[1] = '\0';
+    char target[256];
+    int ret = ops->readlink(relpath, target, sizeof(target) - 1);
+    if (ret < 0) return 0; /* not a symlink, path is final */
+    target[ret] = '\0';
 
-            char combined[512];
-            int dlen = strlen(dir);
-            int tlen = strlen(target);
-            if (dlen + tlen >= 510) return -36; /* ENAMETOOLONG */
-            memcpy(combined, dir, dlen);
-            memcpy(combined + dlen, target, tlen + 1);
+    /* Resolve the symlink target */
+    char new_resolved[256];
+    if (target[0] == '/') {
+        resolve_path("/", target, new_resolved);
+    } else {
+        /* Relative: resolve from symlink's parent directory */
+        char dir[256];
+        int rlen = strlen(resolved);
+        if (rlen > 255) rlen = 255;
+        memcpy(dir, resolved, rlen);
+        dir[rlen] = '\0';
+        char *last_slash = dir;
+        for (char *p = dir; *p; p++)
+            if (*p == '/') last_slash = p;
+        if (last_slash != dir)
+            *(last_slash + 1) = '\0';
+        else
+            dir[1] = '\0';
 
-            resolve_path("/", combined, new_resolved);
-        }
+        char combined[512];
+        int dlen = strlen(dir);
+        int tlen = strlen(target);
+        if (dlen + tlen >= 510) return -36; /* ENAMETOOLONG */
+        memcpy(combined, dir, dlen);
+        memcpy(combined + dlen, target, tlen + 1);
 
-        int nlen = strlen(new_resolved);
-        if (nlen > 255) nlen = 255;
-        memcpy(resolved, new_resolved, nlen);
-        resolved[nlen] = '\0';
+        resolve_path("/", combined, new_resolved);
     }
-    /* Exhausted maxdepth without resolving to a non-symlink */
-    return -40; /* ELOOP */
+
+    int nlen = strlen(new_resolved);
+    if (nlen > 255) nlen = 255;
+    memcpy(resolved, new_resolved, nlen);
+    resolved[nlen] = '\0';
+
+    /* Recursively follow in case target is also a symlink */
+    return follow_symlinks(resolved, maxdepth - 1);
 }
 
 /* ------------------------------------------------------------------ */
 /* Signal delivery                                                      */
 /* ------------------------------------------------------------------ */
-
-/* Check whether any pending unblocked signal would actually interrupt
- * a blocking syscall.  Signals with SIG_DFL whose default action is
- * "ignore" (SIGCHLD, SIGURG, SIGWINCH) should NOT cause EINTR.
- * SIGCONT's default (resume) also should not interrupt reads/writes. */
-static int has_actionable_signal(struct proc *p) {
-    uint64_t deliverable = p->sigpending & ~p->sigmask;
-    if (deliverable == 0) return 0;
-    struct kern_sigaction *sa = proc_sigactions(p);
-    for (int i = 1; i < 32; i++) {
-        if (!(deliverable & signal_bit(i)))
-            continue;
-        uint64_t handler = sa[i].handler;
-        if (handler == 1) /* SIG_IGN */
-            continue;
-        if (handler == 0) {
-            /* SIG_DFL: check default action */
-            if (i == SIGCHLD || i == SIGURG || i == SIGWINCH || i == SIGCONT)
-                continue; /* default is ignore/continue -- not EINTR-worthy */
-        }
-        /* Either a user handler or a fatal/stop default -- actionable */
-        return 1;
-    }
-    return 0;
-}
-
-/* SA_RESTART flag value (must match libc) */
-#define SA_RESTART_FLAG  0x10000000
-
-/* Check whether an actionable pending signal should NOT be restarted.
- * Returns 1 if the blocking syscall should return -EINTR (not restartable),
- * 0 if all actionable signals have SA_RESTART (syscall should be restarted). */
-static int has_non_restartable_signal(struct proc *p) {
-    uint64_t deliverable = p->sigpending & ~p->sigmask;
-    if (deliverable == 0) return 0;
-    struct kern_sigaction *sa = proc_sigactions(p);
-    for (int i = 1; i < 32; i++) {
-        if (!(deliverable & signal_bit(i)))
-            continue;
-        uint64_t handler = sa[i].handler;
-        if (handler == 1) /* SIG_IGN */
-            continue;
-        if (handler == 0) {
-            /* SIG_DFL: check default action */
-            if (i == SIGCHLD || i == SIGURG || i == SIGWINCH || i == SIGCONT)
-                continue;
-            /* Fatal/stop default: not restartable */
-            return 1;
-        }
-        /* User handler: check SA_RESTART flag */
-        if (!(sa[i].flags & SA_RESTART_FLAG))
-            return 1; /* handler without SA_RESTART: return EINTR */
-    }
-    return 0; /* all actionable signals are restartable */
-}
 
 static void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* Find lowest-numbered pending unblocked signal */
@@ -968,10 +793,6 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         if (signum == SIGCONT) {
             p->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
                                signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
-            if (p->stopped) {
-                p->stopped = 0;
-                p->state = RUNNABLE;
-            }
             return;
         }
 
@@ -979,7 +800,6 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         if (signum == SIGSTOP || signum == SIGTSTP ||
             signum == SIGTTIN || signum == SIGTTOU) {
             p->exit_status = (signum << 8) | 0x7f;
-            p->stopped = signum;
             p->state = SLEEPING;
             p->sigpending &= ~signal_bit(SIGCONT);
             if (p->parent) {
@@ -988,10 +808,6 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
                     p->parent->state = RUNNABLE;
             }
             swtch(&p->context, &scheduler_context);
-            while (p->stopped) {
-                p->state = SLEEPING;
-                swtch(&p->context, &scheduler_context);
-            }
             return;
         }
 
@@ -999,17 +815,6 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         p->exit_status = 128 + signum;
         p->killed_by_signal = signum;
         cleanup_proc_resources(p);
-        /* Reparent children to init (proc[0]) */
-        for (struct proc *child = proc; child < &proc[NPROC]; child++) {
-            if (child->parent == p) {
-                child->parent = &proc[0];
-                if (child->state == ZOMBIE) {
-                    proc[0].sigpending |= signal_bit(SIGCHLD);
-                    if (proc[0].state == SLEEPING)
-                        proc[0].state = RUNNABLE;
-                }
-            }
-        }
         p->state = ZOMBIE;
         if (p->parent) {
             p->parent->sigpending |= signal_bit(SIGCHLD);
@@ -1050,7 +855,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     if (copyout(p->pagetable, sp, &frame, sizeof(frame)) < 0)
         return; /* can't deliver signal -- just drop it */
 
-    /* Verify trampoline is mapped */
+    /* Verify trampoline is mapped before directing handler return there */
     {
         pte_t *tpte = walk(p->pagetable, SIG_TRAMPOLINE_VA, 0);
         if (!tpte || !(*tpte & PTE_V)) {
@@ -1088,22 +893,8 @@ static long sys_brk_handler(struct trapframe *tf) {
 
     if (new_brk == 0) {
         return (long)cur_sz;
-    }
-    /* Reject brk values that would extend into kernel address space or
-     * overlap the user stack region */
-    if (new_brk >= current_proc->stack_bottom || new_brk >= MAXVA) {
-        return (long)cur_sz; /* return current brk unchanged */
-    }
-    if (new_brk < cur_sz) {
-        /* Shrink: unmap freed pages between new_brk and cur_sz */
-        uint64_t unmap_start = (new_brk + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-        uint64_t unmap_end   = (cur_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-        if (unmap_start < unmap_end) {
-            uvmunmap(current_proc->pagetable, unmap_start, unmap_end - unmap_start);
-            sfence_vma();
-        }
-        current_proc->sz = new_brk;
-        return (long)new_brk;
+    } else if (new_brk < cur_sz) {
+        return (long)cur_sz;
     } else {
         uint64_t heap_start = (cur_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
         uint64_t rounded    = (new_brk + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
@@ -1139,16 +930,8 @@ static long sys_write_handler(struct trapframe *tf) {
             }
             int avail = PIPE_BUF - pipe_avail(pid);
             if (avail <= 0) {
-                current_proc->sleep_channel = &pipes[pid];
                 current_proc->state = SLEEPING;
                 swtch(&current_proc->context, &scheduler_context);
-                current_proc->sleep_channel = NULL;
-                /* Check for actionable pending signals after waking */
-                if (has_actionable_signal(current_proc)) {
-                    if (has_non_restartable_signal(current_proc))
-                        return (written > 0) ? (long)written : (long)-4; /* -EINTR */
-                    /* SA_RESTART: continue the loop to re-block */
-                }
                 continue;
             }
             int n = len - written;
@@ -1166,9 +949,9 @@ static long sys_write_handler(struct trapframe *tf) {
                 written += chunk;
                 n -= chunk;
             }
-            /* Wake processes sleeping on this pipe (readers) */
-            for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-                if (p->state == SLEEPING && p->sleep_channel == &pipes[pid])
+            for (struct proc *p = proc; p < &proc[64]; p++) {
+                if (p->state == SLEEPING && p != current_proc &&
+                    p->waiting_for_uart != 2)
                     p->state = RUNNABLE;
             }
         }
@@ -1198,7 +981,7 @@ static long sys_write_handler(struct trapframe *tf) {
         }
         return (long)total;
     } else {
-        return (long)-9; /* -EBADF */
+        return (long)-9; /* EBADF */
     }
 }
 
@@ -1214,39 +997,22 @@ static long sys_read_handler(struct trapframe *tf) {
         /* Block until at least one byte is available (or EOF) */
         while (pipe_avail(pid) == 0) {
             if (pipes[pid].write_open == 0) goto pipe_eof;
-            current_proc->sleep_channel = &pipes[pid];
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
-            current_proc->sleep_channel = NULL;
-            /* Check for actionable pending signals after waking */
-            if (has_actionable_signal(current_proc)) {
-                if (has_non_restartable_signal(current_proc))
-                    return (long)-4; /* -EINTR */
-                /* SA_RESTART: continue the loop to re-block */
-            }
         }
-        /* Drain all available bytes (up to len) without re-blocking.
-         * Batch into a local buffer to avoid per-byte copyout overhead. */
-        {
-            char kchunk[512];
-            while (read_bytes < len && pipe_avail(pid) > 0) {
-                size_t want = len - read_bytes;
-                if (want > sizeof(kchunk)) want = sizeof(kchunk);
-                size_t k;
-                for (k = 0; k < want && pipe_avail(pid) > 0; k++) {
-                    kchunk[k] = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
-                    pipes[pid].rpos++;
-                }
-                if (k > 0 && copyout(current_proc->pagetable,
-                                     ubuf + read_bytes, kchunk, k) < 0) {
-                    return (read_bytes > 0) ? (long)read_bytes : (long)-14;
-                }
-                read_bytes += k;
+        /* Drain all available bytes (up to len) without re-blocking */
+        while (read_bytes < len && pipe_avail(pid) > 0) {
+            char kc = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
+            pipes[pid].rpos++;
+            if (copyout(current_proc->pagetable, ubuf + read_bytes, &kc, 1) < 0) {
+                return (read_bytes > 0) ? (long)read_bytes : (long)-14;
             }
+            read_bytes++;
         }
-        /* Wake blocked pipe writers on this pipe since we freed buffer space */
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->state == SLEEPING && p->sleep_channel == &pipes[pid])
+        /* Wake any blocked pipe writers since we freed buffer space */
+        for (struct proc *p = proc; p < &proc[64]; p++) {
+            if (p->state == SLEEPING && p != current_proc &&
+                p->waiting_for_uart != 2)
                 p->state = RUNNABLE;
         }
 pipe_eof:
@@ -1268,19 +1034,12 @@ pipe_eof:
         }
         return (long)total;
     } else {
-        return (long)-9; /* -EBADF */
+        return (long)-9; /* EBADF */
     }
 }
 
 static long sys_openat_handler(struct trapframe *tf) {
-    int dirfd = (int)tf->a0;
     int flags = (int)tf->a2;
-
-    /* Validate access mode: O_RDONLY(0), O_WRONLY(1), O_RDWR(2) are valid */
-    int accmode = flags & 3;
-    if (accmode == 3) {
-        return (long)-22; /* -EINVAL */
-    }
 
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
@@ -1288,9 +1047,7 @@ static long sys_openat_handler(struct trapframe *tf) {
     }
 
     char resolved[256];
-    long path_ret = resolve_at_path(dirfd, kpath, resolved);
-    if (path_ret < 0)
-        return path_ret;
+    resolve_path(current_proc->cwd, kpath, resolved);
 
     /* Follow symlinks unless O_NOFOLLOW */
     if (!(flags & 0400000)) { /* O_NOFOLLOW = 0400000 */
@@ -1300,7 +1057,7 @@ static long sys_openat_handler(struct trapframe *tf) {
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
     if (!ops) {
-        return (long)-2; /* -ENOENT */
+        return (long)-1;
     }
 
     void *priv = NULL;
@@ -1308,7 +1065,7 @@ static long sys_openat_handler(struct trapframe *tf) {
     if (ret < 0) {
         return (long)ret;
     } else {
-        /* O_DIRECTORY: error if set and path is NOT a directory (ENOTDIR = -20) */
+        /* Reject non-directory with O_DIRECTORY (ENOTDIR = -20) */
 #define O_DIRECTORY 0200000
         if ((flags & O_DIRECTORY) && !vfs_is_dir(resolved)) {
             if (ops->close) ops->close(priv);
@@ -1323,7 +1080,7 @@ static long sys_openat_handler(struct trapframe *tf) {
         if (fd < 0) {
             if (ops->close) ops->close(priv);
             vfs_free_file(f);
-            return (long)-24; /* -EMFILE */
+            return (long)-1;
         }
         f->ops = ops;
         f->private = priv;
@@ -1337,7 +1094,6 @@ static long sys_openat_handler(struct trapframe *tf) {
           f->path[plen] = '\0';
         }
         proc_ofile(current_proc)[fd] = f;
-        proc_fdflags(current_proc)[fd] = (flags & 02000000) ? 1 : 0; /* O_CLOEXEC -> FD_CLOEXEC */
         return (long)fd;
     }
 }
@@ -1348,7 +1104,7 @@ static long sys_close_handler(struct trapframe *tf) {
         close_ofile(current_proc, fd);
         return (long)0;
     } else {
-        return (long)-9; /* -EBADF */
+        return (long)-9; /* EBADF */
     }
 }
 
@@ -1356,21 +1112,16 @@ static long sys_dup3_handler(struct trapframe *tf) {
     int oldfd = (int)tf->a0;
     int newfd = (int)tf->a1;
     struct open_file **ftab = proc_ofile(current_proc);
-    int *fdflags = proc_fdflags(current_proc);
-    int flags = (int)tf->a2;
     if (oldfd < 0 || oldfd >= NOFILE || !ftab[oldfd] ||
         newfd < 0 || newfd >= NOFILE) {
-        return (long)-9; /* -EBADF */
+        return (long)-1;
     } else if (oldfd == newfd) {
-        return (long)-22; /* -EINVAL (dup3 requires oldfd != newfd) */
-    } else if (flags & ~02000000) {
-        return (long)-22; /* -EINVAL */
+        return (long)newfd;
     } else {
         if (ftab[newfd])
             close_ofile(current_proc, newfd);
         ftab[newfd] = ftab[oldfd];
         ftab[oldfd]->refcount++;
-        fdflags[newfd] = (flags & 02000000) ? 1 : 0;
         if (ftab[oldfd]->is_pipe) {
             int pid = ftab[oldfd]->pipe_id;
             if (pid >= 0) {
@@ -1383,16 +1134,14 @@ static long sys_dup3_handler(struct trapframe *tf) {
 }
 
 static long sys_pipe2_handler(struct trapframe *tf) {
-    int pipe_flags = (int)tf->a1;
     int pipeid = alloc_pipe();
     if (pipeid < 0) {
-        return (long)-24; /* -EMFILE */
+        return (long)-1;
     } else {
         struct open_file **ftab = proc_ofile(current_proc);
         struct open_file *rf = vfs_alloc_file();
         struct open_file *wf = vfs_alloc_file();
         int rfd = -1, wfd = -1;
-        int cloexec = (pipe_flags & 02000000) ? 1 : 0; /* O_CLOEXEC */
         if (rf) rfd = alloc_fd();
         if (rfd >= 0 && rf) {
             rf->is_pipe = 1;
@@ -1401,7 +1150,6 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             rf->pipe_id = pipeid;
             rf->ops = NULL;
             ftab[rfd] = rf;
-            proc_fdflags(current_proc)[rfd] = cloexec;
             if (wf) wfd = alloc_fd();
         }
         if (wfd < 0 || !wf) {
@@ -1413,7 +1161,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             }
             if (wf) vfs_free_file(wf);
             pipes[pipeid].used = 0;
-            return (long)-24; /* -EMFILE */
+            return (long)-1;
         } else {
             wf->is_pipe = 1;
             wf->pipe_read = 0;
@@ -1421,7 +1169,6 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             wf->pipe_id = pipeid;
             wf->ops = NULL;
             ftab[wfd] = wf;
-            proc_fdflags(current_proc)[wfd] = cloexec;
             int kfds[2] = { rfd, wfd };
             if (copyout(current_proc->pagetable, tf->a0, kfds, sizeof(kfds)) < 0) {
                 close_ofile(current_proc, rfd);
@@ -1444,7 +1191,7 @@ static long sys_getcwd_handler(struct trapframe *tf) {
         }
         return (long)tf->a0; /* return buf pointer */
     } else {
-        return (long)-34; /* -ERANGE */
+        return (long)0;
     }
 }
 
@@ -1455,27 +1202,17 @@ static long sys_chdir_handler(struct trapframe *tf) {
     }
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
-    /* Check if path exists and is a directory */
-    const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
-    if (!ops || !ops->stat) {
-        return (long)-2; /* -ENOENT */
+    if (vfs_is_dir(resolved)) {
+        memcpy(current_proc->cwd, resolved, sizeof(current_proc->cwd));
+        return (long)0;
+    } else {
+        return (long)-1;
     }
-    uint8_t st[128];
-    if (ops->stat(relpath, st) != 0) {
-        return (long)-2; /* -ENOENT */
-    }
-    uint32_t mode;
-    memcpy(&mode, st + 16, 4);
-    if ((mode & 0xF000) != 0x4000) {
-        return (long)-20; /* -ENOTDIR */
-    }
-    memcpy(current_proc->cwd, resolved, sizeof(current_proc->cwd));
-    return (long)0;
 }
 
 static long sys_clone_handler(struct trapframe *tf) {
-    pid_t child = sys_clone(tf);
+    (void)tf;
+    pid_t child = sys_clone();
     tf->a0 = (uint64_t)child;
     return SYSCALL_NORETURN;
 }
@@ -1652,13 +1389,6 @@ static long sys_execve_handler(struct trapframe *tf) {
         int total        = header + argv_ptrs_sz + envp_ptrs_sz + kstroff + kenvoff;
         total = (total + 15) & ~15;
 
-        /* Guard: total must fit in a single kernel page used as staging buffer */
-        if (total > (int)PAGE_SIZE) {
-            kfree(kstrbuf);
-            if (kenvbuf) kfree(kenvbuf);
-            return (long)-7; /* -E2BIG: argument list too long */
-        }
-
         uint64_t sp            = MAXVA - 32 - total;
         uint64_t argv_ptr_base = sp + header;
         uint64_t envp_ptr_base = sp + header + argv_ptrs_sz;
@@ -1716,17 +1446,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     kfree(kstrbuf);
     if (kenvbuf) kfree(kenvbuf);
 
-    /* FD_CLOEXEC: close file descriptors marked close-on-exec */
-    {
-        struct open_file **ftab = proc_ofile(current_proc);
-        int *fdflags = proc_fdflags(current_proc);
-        for (int i = 0; i < NOFILE; i++) {
-            if (ftab[i] && (fdflags[i] & 1))
-                close_ofile(current_proc, i);
-        }
-    }
-
-    trap_return_saved(current_proc->trapframe);
+    trap_restore(current_proc->trapframe);
     /* never reached */
     return SYSCALL_NORETURN;
 }
@@ -1767,146 +1487,61 @@ static long sys_getgid_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-/* Helper: deliver a signal to a single process */
-static void deliver_signal_to_proc(struct proc *target, int sig) {
-    if (sig == 9) {
-        if (target == current_proc) {
-            /* Self-SIGKILL: don't cleanup here -- set pending and let the
-             * normal signal delivery path handle it after we return to
-             * the trap handler, which correctly calls swtch after cleanup. */
-            target->sigpending |= signal_bit(9);
-            return;
-        }
-        target->exit_status = 128 + 9;
-        target->killed_by_signal = 9;
-        cleanup_proc_resources(target);
-        /* Reparent children to init (proc[0]) */
-        for (struct proc *child = proc; child < &proc[NPROC]; child++) {
-            if (child->parent == target) {
-                child->parent = &proc[0];
-                if (child->state == ZOMBIE) {
-                    proc[0].sigpending |= signal_bit(SIGCHLD);
-                    if (proc[0].state == SLEEPING)
-                        proc[0].state = RUNNABLE;
-                }
-            }
-        }
-        target->state = ZOMBIE;
-        if (target->parent) {
-            target->parent->sigpending |= signal_bit(SIGCHLD);
-            if (target->parent->state == SLEEPING)
-                target->parent->state = RUNNABLE;
-        }
-    } else {
-        target->sigpending |= signal_bit(sig);
-        if (target->state == SLEEPING)
-            target->state = RUNNABLE;
-        /* SIGCONT: also wake stopped processes */
-        if (sig == SIGCONT && target->stopped) {
-            target->stopped = 0;
-            target->state = RUNNABLE;
-        }
-    }
-}
-
 static long sys_kill_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
-
-    /* Validate signal number: 0 is allowed (permission probe) */
-    if (sig < 0 || sig >= 32) {
-        return (long)-22; /* -EINVAL */
+    if (target_pid <= 0) {
+        return (long)-1;
     }
-    /* For non-zero signals, validate before any delivery */
-    if (sig != 0 && !signal_is_valid(sig)) {
-        return (long)-22; /* -EINVAL */
+    struct proc *target = NULL;
+    for (int i = 0; i < 64; i++) {
+        if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
+            target = &proc[i];
+            break;
+        }
     }
-
-    if (target_pid > 0) {
-        /* Send to specific process */
-        struct proc *target = NULL;
-        for (int i = 0; i < NPROC; i++) {
-            if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
-                target = &proc[i];
-                break;
-            }
-        }
-        if (!target) {
-            return (long)-3; /* -ESRCH */
-        }
-        if (sig == 0) {
-            return (long)0; /* probe: process exists */
-        }
-        deliver_signal_to_proc(target, sig);
-        return (long)0;
-    } else if (target_pid == 0) {
-        /* Send to all processes in caller's process group */
-        pid_t pgid = current_proc->pgid;
-        int sent = 0;
-        for (int i = 0; i < NPROC; i++) {
-            if (proc[i].state != UNUSED && proc[i].pgid == pgid) {
-                sent++;
-                if (sig != 0)
-                    deliver_signal_to_proc(&proc[i], sig);
-            }
-        }
-        return sent > 0 ? (long)0 : (long)-3;
-    } else if (target_pid == -1) {
-        /* Send to all processes except init and sender.
-         * Also protect init (pid 1) from SIGKILL/SIGSTOP. */
-        int sent = 0;
-        for (int i = 0; i < NPROC; i++) {
-            if (proc[i].state == UNUSED)
-                continue;
-            /* Always skip init (pid 1) and the sender itself */
-            if (proc[i].pid == 1 || &proc[i] == current_proc)
-                continue;
-            sent++;
-            if (sig != 0)
-                deliver_signal_to_proc(&proc[i], sig);
-        }
-        return sent > 0 ? (long)0 : (long)-3;
+    if (!target) {
+        return (long)-3; /* -ESRCH */
     } else {
-        /* target_pid < -1: send to process group |target_pid| */
-        pid_t pgid = -target_pid;
-        int sent = 0;
-        for (int i = 0; i < NPROC; i++) {
-            if (proc[i].state != UNUSED && proc[i].pgid == pgid) {
-                sent++;
-                if (sig != 0)
-                    deliver_signal_to_proc(&proc[i], sig);
+        if (sig == 9) {
+            target->exit_status = 128 + 9;
+            target->killed_by_signal = 9;
+            cleanup_proc_resources(target);
+            target->state = ZOMBIE;
+            if (target->parent) {
+                target->parent->sigpending |= signal_bit(SIGCHLD);
+                if (target->parent->state == SLEEPING)
+                    target->parent->state = RUNNABLE;
+            }
+        } else if (signal_is_valid(sig)) {
+            target->sigpending |= signal_bit(sig);
+            if (target->state == SLEEPING)
+                target->state = RUNNABLE;
+            /* SIGCONT: also wake stopped processes */
+            if (sig == SIGCONT && target->state == SLEEPING) {
+                target->state = RUNNABLE;
             }
         }
-        return sent > 0 ? (long)0 : (long)-3;
+        return (long)0;
     }
 }
 
 static long sys_clock_gettime_handler(struct trapframe *tf) {
-    int clk_id = (int)tf->a0;
     uint64_t ts_uaddr = tf->a1;
-    if (!ts_uaddr) {
-        return (long)-14; /* -EFAULT */
-    }
-    struct { int64_t tv_sec; int64_t tv_nsec; } kts;
-    if (clk_id == 0) {
-        /* CLOCK_REALTIME */
+    if (ts_uaddr) {
         int64_t sec, nsec;
         get_wall_time(&sec, &nsec);
+        struct { int64_t tv_sec; int64_t tv_nsec; } kts;
         kts.tv_sec = sec;
         kts.tv_nsec = nsec;
-    } else if (clk_id == 1) {
-        /* CLOCK_MONOTONIC — time since boot */
-        uint64_t elapsed_ticks = r_time() - boot_time;
-        uint64_t elapsed_ns = elapsed_ticks * 100; /* 10MHz -> ns */
-        kts.tv_sec = (int64_t)(elapsed_ns / 1000000000ULL);
-        kts.tv_nsec = (int64_t)(elapsed_ns % 1000000000ULL);
+        if (copyout(current_proc->pagetable, ts_uaddr, &kts, 16) < 0) {
+            return (long)-14;
+        } else {
+            return (long)0;
+        }
     } else {
-        return (long)-22; /* -EINVAL */
-    }
-    if (copyout(current_proc->pagetable, ts_uaddr, &kts, 16) < 0) {
         return (long)-14;
     }
-    return (long)0;
 }
 
 static long sys_lseek_handler(struct trapframe *tf) {
@@ -1915,10 +1550,10 @@ static long sys_lseek_handler(struct trapframe *tf) {
     int whence  = (int)tf->a2;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
     if (!f) {
-        return (long)-9; /* -EBADF */
+        return (long)-9; /* EBADF */
     }
     if (f->is_pipe) {
-        return (long)-29; /* -ESPIPE */
+        return (long)-29; /* ESPIPE */
     }
     int64_t cur = f->offset;
     int64_t new_off;
@@ -1933,8 +1568,8 @@ static long sys_lseek_handler(struct trapframe *tf) {
         }
         new_off = file_size + (int64_t)offset;
     }
-    else { return (long)-22; /* -EINVAL */ }
-    if (new_off < 0) return (long)-22; /* -EINVAL */
+    else { return (long)-22; /* EINVAL */ }
+    if (new_off < 0) return (long)-22; /* EINVAL */
     f->offset = new_off;
     return (long)new_off;
 }
@@ -1943,11 +1578,12 @@ static long sys_fstat_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
     if (!f) {
-        return (long)-9; /* -EBADF */
+        return (long)-9; /* EBADF */
     }
     if (!tf->a1) {
-        return (long)-14; /* -EFAULT */
-    } else if (f->is_pipe) {
+        return (long)-14; /* EFAULT */
+    }
+    if (f->is_pipe) {
         uint8_t kstat[128];
         memset(kstat, 0, 128);
         uint32_t mode = 0x1000 | 0600;
@@ -2003,15 +1639,12 @@ static long sys_newfstatat_handler(struct trapframe *tf) {
     if (!tf->a1 || !tf->a2) {
         return (long)-1;
     }
-    int dirfd = (int)tf->a0;
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
     char resolved[256];
-    long path_ret = resolve_at_path(dirfd, kpath, resolved);
-    if (path_ret < 0)
-        return path_ret;
+    resolve_path(current_proc->cwd, kpath, resolved);
 
     /* Follow symlinks unless AT_SYMLINK_NOFOLLOW */
     int at_flags = (int)tf->a3;
@@ -2041,11 +1674,8 @@ static long sys_getdents64_handler(struct trapframe *tf) {
     unsigned int count = (unsigned int)tf->a2;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
-    if (!f) {
-        return (long)-9; /* -EBADF */
-    }
-    if (f->is_pipe) {
-        return (long)-20; /* -ENOTDIR */
+    if (!f || f->is_pipe) {
+        return (long)-1;
     }
 
     if (f->ops && f->ops->readdir) {
@@ -2098,7 +1728,7 @@ static long sys_getdents64_handler(struct trapframe *tf) {
             return (long)written;
         }
     } else {
-        return (long)-20; /* -ENOTDIR */
+        return (long)-1;
     }
 }
 
@@ -2134,31 +1764,20 @@ static long sys_exit_handler(struct trapframe *tf) {
             asm volatile("ecall" : : "r"(a0), "r"(a1), "r"(a7));
             while (1) {}
         }
-        /* Reparent children to init (proc[0]) */
-        for (struct proc *child = proc; child < &proc[NPROC]; child++) {
-            if (child->parent == current_proc) {
-                child->parent = &proc[0];
-                if (child->state == ZOMBIE) {
-                    proc[0].sigpending |= signal_bit(SIGCHLD);
-                    if (proc[0].state == SLEEPING)
-                        proc[0].state = RUNNABLE;
-                }
-            }
-        }
         current_proc->state = ZOMBIE;
         if (current_proc->parent) {
             current_proc->parent->sigpending |= signal_bit(SIGCHLD);
             if (current_proc->parent->state == SLEEPING)
                 current_proc->parent->state = RUNNABLE;
         }
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        for (struct proc *p = proc; p < &proc[64]; p++) {
             if (p->state == SLEEPING && p != current_proc &&
                 p->waiting_for_uart == 0)
                 p->state = RUNNABLE;
         }
         swtch(&current_proc->context, &scheduler_context);
     }
-    panic("exit called without current process");
+    while(1) {}
     return SYSCALL_NORETURN;
 }
 
@@ -2171,11 +1790,7 @@ static long sys_exit_handler(struct trapframe *tf) {
  * If called without correct magic, return -EPERM. */
 
 static long sys_fsync_handler(struct trapframe *tf) {
-    int fd = (int)tf->a0;
-    struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
-    if (!f) {
-        return (long)-9; /* -EBADF */
-    }
+    (void)tf;
     ext2_sync();
     return 0;
 }
@@ -2227,55 +1842,17 @@ static long sys_mmap_handler(struct trapframe *tf) {
 
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (len == 0) {
-        return (long)-22; /* -EINVAL */
-    }
-
-    /* Validate prot: only PROT_READ/WRITE/EXEC bits allowed */
-    if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) {
-        return (long)-22; /* -EINVAL */
-    }
-
-    /* Validate flags: must have exactly one of MAP_SHARED or MAP_PRIVATE */
-    int sharing = flags & 0x03; /* MAP_SHARED=0x01, MAP_PRIVATE=0x02 */
-    if (sharing == 0 || sharing == 0x03) {
-        return (long)-22; /* -EINVAL */
+        return (long)-1;
     }
 
     uint64_t va;
     if (flags & MAP_FIXED) {
         va = addr & ~(uint64_t)(PAGE_SIZE - 1);
-        /* Reject MAP_FIXED mappings that overlap kernel address space */
-        if (va + len > MAXVA || va + len < va) {
-            return (long)-22; /* -EINVAL */
-        }
     } else {
         if (current_proc->mmap_base == 0)
             current_proc->mmap_base = 0x20000000UL;
-        /* Check free list for a suitable previously-freed range */
-        int found_free = -1;
-        for (int i = 0; i < current_proc->mmap_freelist_count; i++) {
-            if (current_proc->mmap_freelist[i].len >= len) {
-                found_free = i;
-                break;
-            }
-        }
-        if (found_free >= 0) {
-            va = current_proc->mmap_freelist[found_free].addr;
-            uint64_t remaining = current_proc->mmap_freelist[found_free].len - len;
-            if (remaining > 0) {
-                /* Shrink the free entry */
-                current_proc->mmap_freelist[found_free].addr += len;
-                current_proc->mmap_freelist[found_free].len = remaining;
-            } else {
-                /* Remove the entry by shifting */
-                current_proc->mmap_freelist_count--;
-                for (int j = found_free; j < current_proc->mmap_freelist_count; j++)
-                    current_proc->mmap_freelist[j] = current_proc->mmap_freelist[j + 1];
-            }
-        } else {
-            va = current_proc->mmap_base;
-            current_proc->mmap_base += len;
-        }
+        va = current_proc->mmap_base;
+        current_proc->mmap_base += len;
     }
 
     int pte_flags = 0;
@@ -2287,7 +1864,7 @@ static long sys_mmap_handler(struct trapframe *tf) {
     /* Register VMA only — pages allocated lazily on first access via
      * the demand paging path in the page fault handler. */
     if (vma_add(current_proc, va, va + len, prot, flags) < 0) {
-        return (long)-12; /* -ENOMEM */
+        return (long)-1;
     }
 
     return (long)va;
@@ -2307,87 +1884,6 @@ static long sys_munmap_handler(struct trapframe *tf) {
 
     /* Remove VMA tracking (handles splits automatically) */
     vma_remove(current_proc, addr, addr + len);
-
-    /* Track freed range for reuse by future mmap calls.
-     * Insert sorted by address, then merge adjacent/overlapping entries. */
-    {
-        int cnt = current_proc->mmap_freelist_count;
-
-        /* Find sorted insertion point */
-        int ins = 0;
-        while (ins < cnt && current_proc->mmap_freelist[ins].addr < addr)
-            ins++;
-
-        /* Check if we can merge with the previous entry */
-        if (ins > 0) {
-            uint64_t prev_end = current_proc->mmap_freelist[ins - 1].addr +
-                                current_proc->mmap_freelist[ins - 1].len;
-            if (prev_end >= addr) {
-                /* Extend previous entry to cover this range */
-                uint64_t new_end = addr + len;
-                if (new_end > prev_end)
-                    current_proc->mmap_freelist[ins - 1].len =
-                        new_end - current_proc->mmap_freelist[ins - 1].addr;
-                /* Also try merging with the next entry */
-                prev_end = current_proc->mmap_freelist[ins - 1].addr +
-                           current_proc->mmap_freelist[ins - 1].len;
-                while (ins < cnt && current_proc->mmap_freelist[ins].addr <= prev_end) {
-                    uint64_t nxt_end = current_proc->mmap_freelist[ins].addr +
-                                       current_proc->mmap_freelist[ins].len;
-                    if (nxt_end > prev_end)
-                        current_proc->mmap_freelist[ins - 1].len =
-                            nxt_end - current_proc->mmap_freelist[ins - 1].addr;
-                    /* Remove entry at ins by shifting */
-                    for (int j = ins; j < cnt - 1; j++)
-                        current_proc->mmap_freelist[j] = current_proc->mmap_freelist[j + 1];
-                    cnt--;
-                    prev_end = current_proc->mmap_freelist[ins - 1].addr +
-                               current_proc->mmap_freelist[ins - 1].len;
-                }
-                current_proc->mmap_freelist_count = cnt;
-                goto munmap_done;
-            }
-        }
-
-        /* Check if we can merge with the next entry */
-        if (ins < cnt && addr + len >= current_proc->mmap_freelist[ins].addr) {
-            uint64_t nxt_end = current_proc->mmap_freelist[ins].addr +
-                               current_proc->mmap_freelist[ins].len;
-            current_proc->mmap_freelist[ins].addr = addr;
-            if (nxt_end > addr + len)
-                current_proc->mmap_freelist[ins].len = nxt_end - addr;
-            else
-                current_proc->mmap_freelist[ins].len = len;
-            /* Continue merging with subsequent entries */
-            uint64_t cur_end = current_proc->mmap_freelist[ins].addr +
-                               current_proc->mmap_freelist[ins].len;
-            while (ins + 1 < cnt &&
-                   current_proc->mmap_freelist[ins + 1].addr <= cur_end) {
-                uint64_t n_end = current_proc->mmap_freelist[ins + 1].addr +
-                                 current_proc->mmap_freelist[ins + 1].len;
-                if (n_end > cur_end)
-                    current_proc->mmap_freelist[ins].len =
-                        n_end - current_proc->mmap_freelist[ins].addr;
-                for (int j = ins + 1; j < cnt - 1; j++)
-                    current_proc->mmap_freelist[j] = current_proc->mmap_freelist[j + 1];
-                cnt--;
-                cur_end = current_proc->mmap_freelist[ins].addr +
-                          current_proc->mmap_freelist[ins].len;
-            }
-            current_proc->mmap_freelist_count = cnt;
-            goto munmap_done;
-        }
-
-        /* No merge possible: insert as new entry if room */
-        if (cnt < MMAP_FREELIST_SIZE) {
-            for (int j = cnt; j > ins; j--)
-                current_proc->mmap_freelist[j] = current_proc->mmap_freelist[j - 1];
-            current_proc->mmap_freelist[ins].addr = addr;
-            current_proc->mmap_freelist[ins].len  = len;
-            current_proc->mmap_freelist_count = cnt + 1;
-        }
-    }
-munmap_done:
 
     return 0;
 }
@@ -2444,8 +1940,8 @@ static long sys_ps_handler(struct trapframe *tf) {
     int      maxn     = (int)tf->a1;
     int      written  = 0;
     if (tf->a0 && maxn > 0) {
-        uint8_t kps[NPROC * 24];
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        uint8_t kps[64 * 24];
+        for (struct proc *p = proc; p < &proc[64]; p++) {
             if (p->state == UNUSED) continue;
             if (written >= maxn) break;
             char st;
@@ -2481,60 +1977,38 @@ static long sys_ioctl_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     unsigned long request = tf->a1;
     uint64_t argp = tf->a2;
-    struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
-    if (!f)
-        return (long)-9; /* EBADF */
-
-    if (request == FIONREAD && f->is_pipe && f->pipe_read) {
-        int pid = f->pipe_id;
-        int available = (pid >= 0 && pipes[pid].used) ? pipe_avail(pid) : 0;
-        if (argp && copyout(current_proc->pagetable, argp, &available, sizeof(available)) < 0)
-            return (long)-14;
-        return (long)0;
-    } else if (request == TIOCGWINSZ || request == TIOCSWINSZ) {
-        if (!is_tty_file(f))
+    if (request == 0x5413) { /* TIOCGWINSZ */
+        struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+        int is_tty = 0;
+        if (f && f->ops == &devfs_ops && f->private)
+          is_tty = devfs_is_tty(f->private);
+        if (is_tty) {
+            if (argp) {
+                struct { uint16_t row, col, xpix, ypix; } ws = {24, 80, 0, 0};
+                if (copyout(current_proc->pagetable, argp, &ws, sizeof(ws)) < 0) {
+                    return (long)-14;
+                }
+            }
+            return (long)0;
+        } else {
             return (long)-25;
-        uint16_t ws[4] = {0};
-        if (request == TIOCSWINSZ && argp) {
-            if (copyin(current_proc->pagetable, ws, argp, sizeof(ws)) < 0)
-                return (long)-14;
         }
-        long result = (long)tty_ioctl(request, (void *)ws);
-        if (result < 0)
-            return result;
-        if (request == TIOCGWINSZ && argp) {
-            if (copyout(current_proc->pagetable, argp, ws, sizeof(ws)) < 0)
-                return (long)-14;
-        }
-        return (long)0;
-    } else if (request == TIOCGPGRP || request == TIOCSPGRP) {
+    } else if (request == 0x540F || request == 0x5410) {
         /* TIOCGPGRP / TIOCSPGRP — delegate to tty_ioctl */
-        if (!is_tty_file(f))
-            return (long)-25;
         int kpgid = 0;
-        if (request == TIOCSPGRP && argp) {
+        if (request == 0x5410 && argp) {
             if (copyin(current_proc->pagetable, &kpgid, argp, sizeof(kpgid)) < 0)
                 return (long)-14;
         }
         long result = (long)tty_ioctl(request, (void *)&kpgid);
-        if (request == TIOCGPGRP && argp) {
+        if (request == 0x540F && argp) {
             if (copyout(current_proc->pagetable, argp, &kpgid, sizeof(kpgid)) < 0)
                 return (long)-14;
         }
         return result;
-    } else if (request == FIONREAD) {
-        if (!is_tty_file(f))
-            return (long)-25;
-        int available = 0;
-        long result = (long)tty_ioctl(request, (void *)&available);
-        if (result < 0)
-            return result;
-        if (argp && copyout(current_proc->pagetable, argp, &available, sizeof(available)) < 0)
-            return (long)-14;
-        return (long)0;
     } else if (request >= TCGETS && request <= TCSETSF) {
-        if (is_tty_file(f)) {
+        if (fd >= 0 && fd <= 2) {
             char ktermios[128];
             memset(ktermios, 0, sizeof(ktermios));
             if (request != TCGETS && argp) {
@@ -2602,11 +2076,6 @@ static long sys_rt_sigprocmask_handler(struct trapframe *tf) {
     uint64_t set_uaddr = tf->a1;
     uint64_t oldset_uaddr = tf->a2;
 
-    /* Validate 'how' parameter upfront */
-    if (set_uaddr && how != 0 && how != 1 && how != 2) {
-        return (long)-22; /* -EINVAL: invalid how */
-    }
-
     if (oldset_uaddr) {
         uint64_t oldmask = current_proc->sigmask;
         if (copyout(current_proc->pagetable, oldset_uaddr, &oldmask, sizeof(oldmask)) < 0) {
@@ -2618,11 +2087,11 @@ static long sys_rt_sigprocmask_handler(struct trapframe *tf) {
         if (copyin(current_proc->pagetable, &newset, set_uaddr, sizeof(newset)) < 0) {
             return (long)-14;
         }
-        if (how == 0)      /* SIG_BLOCK */
+        if (how == 0)
             current_proc->sigmask |= newset;
-        else if (how == 1) /* SIG_UNBLOCK */
+        else if (how == 1)
             current_proc->sigmask &= ~newset;
-        else               /* SIG_SETMASK */
+        else if (how == 2)
             current_proc->sigmask = newset;
     }
     return (long)0;
@@ -2637,13 +2106,6 @@ static long sys_rt_sigreturn_handler(struct trapframe *tf) {
         return (long)-14;
     }
 
-    /* Validate restored trapframe: epc and sp must be in user VA range.
-     * Prevent forging kernel addresses or blocking unkillable signals. */
-    if (frame.saved_tf.epc >= MAXVA || frame.saved_tf.sp >= MAXVA) {
-        return (long)-22; /* -EINVAL: reject forged kernel addresses */
-    }
-    /* Never allow blocking SIGKILL or SIGSTOP */
-    frame.saved_sigmask &= ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
     current_proc->sigmask = frame.saved_sigmask;
     memcpy(tf, &frame.saved_tf, sizeof(frame.saved_tf));
     return SYSCALL_NORETURN;
@@ -2668,8 +2130,6 @@ static long sys_fcntl_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     int cmd = (int)tf->a1;
     struct open_file **ftab = proc_ofile(current_proc);
-    int *fdflags = proc_fdflags(current_proc);
-    const int status_mask = 02000 | 04000; /* O_APPEND | O_NONBLOCK */
 
     if (fd < 0 || fd >= NOFILE || !ftab[fd])
         return (long)-9; /* EBADF */
@@ -2683,7 +2143,6 @@ static long sys_fcntl_handler(struct trapframe *tf) {
             if (ftab[i] == 0) {
                 ftab[i] = ftab[fd];
                 ftab[fd]->refcount++;
-                fdflags[i] = (cmd == 1030) ? 1 : 0;
                 if (ftab[fd]->is_pipe) {
                     int pid = ftab[fd]->pipe_id;
                     if (pid >= 0) {
@@ -2696,17 +2155,13 @@ static long sys_fcntl_handler(struct trapframe *tf) {
         }
         return (long)-24; /* EMFILE */
     } else if (cmd == 1) { /* F_GETFD */
-        return (long)fdflags[fd];
+        return (long)0;
     } else if (cmd == 2) { /* F_SETFD */
-        fdflags[fd] = ((int)tf->a2) & 1;
         return (long)0;
     } else if (cmd == 3) { /* F_GETFL */
         return (long)ftab[fd]->flags;
     } else if (cmd == 4) { /* F_SETFL */
-        int access_mode = ftab[fd]->flags & 3;
-        int keep_other = ftab[fd]->flags & ~(3 | status_mask);
-        int new_status = ((int)tf->a2) & status_mask;
-        ftab[fd]->flags = keep_other | access_mode | new_status;
+        ftab[fd]->flags = (int)tf->a2;
         return (long)0;
     } else {
         return (long)-22; /* EINVAL */
@@ -2714,53 +2169,26 @@ static long sys_fcntl_handler(struct trapframe *tf) {
 }
 
 static long sys_faccessat_handler(struct trapframe *tf) {
-    int dirfd = (int)tf->a0;
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
-    int amode = (int)tf->a2; /* F_OK=0, R_OK=4, W_OK=2, X_OK=1 */
 
     char resolved[256];
-    long path_ret = resolve_at_path(dirfd, kpath, resolved);
-    if (path_ret < 0)
-        return path_ret;
+    resolve_path(current_proc->cwd, kpath, resolved);
 
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
     if (ops && ops->stat) {
         uint8_t st[128];
         int ret = ops->stat(relpath, st);
-        if (ret != 0)
-            return (long)-2; /* -ENOENT */
-        /* F_OK: just check existence */
-        if (amode == 0)
-            return (long)0;
-        /* Extract st_mode from the stat buffer (offset 16, 4 bytes) */
-        uint32_t file_mode = 0;
-        memcpy(&file_mode, st + 16, 4);
-        /* For a single-user OS, check owner permission bits.
-         * tarfs (and other read-only filesystems) reject W_OK since
-         * they are read-only media. */
-        if ((amode & 4) && !(file_mode & 0400)) /* R_OK vs S_IRUSR */
-            return (long)-13; /* -EACCES */
-        if ((amode & 2)) {
-            /* Write check: reject for read-only filesystems (tarfs) */
-            if (ops == &tarfs_ops)
-                return (long)-30; /* -EROFS */
-            if (!(file_mode & 0200)) /* W_OK vs S_IWUSR */
-                return (long)-13; /* -EACCES */
-        }
-        if ((amode & 1) && !(file_mode & 0100)) /* X_OK vs S_IXUSR */
-            return (long)-13; /* -EACCES */
-        return (long)0;
+        return (ret == 0) ? (long)0 : (long)-2;
     } else {
         return (long)-2;
     }
 }
 
 static long sys_unlinkat_handler(struct trapframe *tf) {
-    int dirfd = (int)tf->a0;
     int flags = (int)tf->a2;
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
@@ -2768,9 +2196,7 @@ static long sys_unlinkat_handler(struct trapframe *tf) {
     }
     {
         char resolved[256];
-        long path_ret = resolve_at_path(dirfd, kpath, resolved);
-        if (path_ret < 0)
-            return path_ret;
+        resolve_path(current_proc->cwd, kpath, resolved);
         const char *relpath;
         struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
         if (flags & 0x200) {
@@ -2820,7 +2246,6 @@ static long sys_renameat2_handler(struct trapframe *tf) {
 }
 
 static long sys_mkdirat_handler(struct trapframe *tf) {
-    int dirfd = (int)tf->a0;
     int mode = (int)tf->a2;
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
@@ -2828,9 +2253,7 @@ static long sys_mkdirat_handler(struct trapframe *tf) {
     }
     {
         char resolved[256];
-        long path_ret = resolve_at_path(dirfd, kpath, resolved);
-        if (path_ret < 0)
-            return path_ret;
+        resolve_path(current_proc->cwd, kpath, resolved);
         const char *relpath;
         struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
         if (ops && ops->mkdir) {
@@ -2843,7 +2266,6 @@ static long sys_mkdirat_handler(struct trapframe *tf) {
 }
 
 static long sys_mknodat_handler(struct trapframe *tf) {
-    int dirfd = (int)tf->a0;
     uint32_t mode = (uint32_t)tf->a2;
     uint32_t rdev = (uint32_t)tf->a3;
     char kpath[256];
@@ -2852,9 +2274,7 @@ static long sys_mknodat_handler(struct trapframe *tf) {
     }
     {
         char resolved[256];
-        long path_ret = resolve_at_path(dirfd, kpath, resolved);
-        if (path_ret < 0)
-            return path_ret;
+        resolve_path(current_proc->cwd, kpath, resolved);
         const char *relpath;
         struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
         if (ops == &ext2_ops) {
@@ -2889,7 +2309,6 @@ static long sys_set_tid_address_handler(struct trapframe *tf) {
 }
 
 static long sys_readlinkat_handler(struct trapframe *tf) {
-    int dirfd = (int)tf->a0;
     char kpath[256];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
         return (long)-14;
@@ -2899,9 +2318,7 @@ static long sys_readlinkat_handler(struct trapframe *tf) {
         return (long)-22;
 
     char resolved[256];
-    long path_ret = resolve_at_path(dirfd, kpath, resolved);
-    if (path_ret < 0)
-        return path_ret;
+    resolve_path(current_proc->cwd, kpath, resolved);
 
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
@@ -3109,8 +2526,8 @@ static long sys_prlimit64_handler(struct trapframe *tf) {
             rlim[0] = 8 * 1024 * 1024;
             rlim[1] = 0xFFFFFFFFFFFFFFFFULL;
         } else if (resource == 7) {
-            rlim[0] = NOFILE;
-            rlim[1] = NOFILE;
+            rlim[0] = 16;
+            rlim[1] = 16;
         } else {
             rlim[0] = 0xFFFFFFFFFFFFFFFFULL;
             rlim[1] = 0xFFFFFFFFFFFFFFFFULL;
@@ -3149,35 +2566,19 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     pid_t pgid = (pid_t)tf->a1;
     if (target == 0) target = current_proc->pid;
     if (pgid == 0) pgid = target;
-
-    /* Find the target process */
-    struct proc *p = NULL;
-    for (int i = 0; i < NPROC; i++) {
-        if (proc[i].pid == target && proc[i].state != UNUSED) {
-            p = &proc[i];
+    long result = (long)-3;
+    for (struct proc *p = proc; p < &proc[64]; p++) {
+        if (p->pid == target && p->state != UNUSED) {
+            p->pgid = pgid;
+            result = 0;
             break;
         }
     }
-    if (!p) return (long)-3; /* -ESRCH */
-
-    /* Can only setpgid for self or a child */
-    if (p != current_proc && p->parent != current_proc)
-        return (long)-3; /* -ESRCH */
-
-    /* Must be in the same session */
-    if (p->sid != current_proc->sid)
-        return (long)-1; /* -EPERM */
-
-    p->pgid = pgid;
-    return (long)0;
+    return result;
 }
 
 static long sys_setsid_handler(struct trapframe *tf) {
     (void)tf;
-    /* EPERM if already a process group leader */
-    if (current_proc->pgid == current_proc->pid) {
-        return (long)-1; /* -EPERM */
-    }
     current_proc->sid = current_proc->pid;
     current_proc->pgid = current_proc->pid;
     return (long)current_proc->pid;
@@ -3189,7 +2590,7 @@ static long sys_getpgid_handler(struct trapframe *tf) {
         return (long)current_proc->pgid;
     } else {
         long result = (long)-3;
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        for (struct proc *p = proc; p < &proc[64]; p++) {
             if (p->pid == target && p->state != UNUSED) {
                 result = (long)p->pgid;
                 break;
@@ -3205,7 +2606,7 @@ static long sys_getsid_handler(struct trapframe *tf) {
         return (long)current_proc->sid;
     } else {
         long result = (long)-3;
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        for (struct proc *p = proc; p < &proc[64]; p++) {
             if (p->pid == target && p->state != UNUSED) {
                 result = (long)p->sid;
                 break;
@@ -3233,21 +2634,8 @@ static long sys_madvise_handler(struct trapframe *tf) {
 }
 
 static long sys_ftruncate_handler(struct trapframe *tf) {
-    int fd = (int)tf->a0;
-    int64_t length = (int64_t)tf->a1;
-    struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
-    if (!f) {
-        return (long)-9; /* -EBADF */
-    }
-    if (length < 0) {
-        return (long)-22; /* -EINVAL */
-    }
-    /* Check if this is an ext2 file */
-    if (f->ops == &ext2_ops && f->private) {
-        struct ext2_open_private *priv = (struct ext2_open_private *)f->private;
-        return (long)ext2_truncate_to(priv->ino, (uint32_t)length);
-    }
-    return (long)-30; /* -EROFS (not supported for non-ext2) */
+    (void)tf;
+    return (long)-30;
 }
 
 static long sys_tgkill_handler(struct trapframe *tf) {
@@ -3257,7 +2645,7 @@ static long sys_tgkill_handler(struct trapframe *tf) {
         return (long)0;
     } else if (signal_is_valid(sig)) {
         long result = (long)-3;
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        for (struct proc *p = proc; p < &proc[64]; p++) {
             if (p->pid == tid && p->state != UNUSED) {
                 p->sigpending |= signal_bit(sig);
                 if (p->state == SLEEPING)
@@ -3363,9 +2751,8 @@ static long sys_ppoll_handler(struct trapframe *tf) {
         return (long)-22;
 
     /* Copyin pollfd array: each entry is {int fd; short events; short revents} = 8 bytes */
-    struct kern_pollfd { int fd; short events; short revents; };
-    struct kern_pollfd kfds[NOFILE];
-    int fds_size = nfds * (int)sizeof(struct kern_pollfd);
+    uint8_t kfds[NOFILE * 8];
+    int fds_size = nfds * 8;
     if (fds_size > 0 && copyin(current_proc->pagetable, kfds, fds_uaddr, (uint64_t)fds_size) < 0)
         return (long)-14;
 
@@ -3403,35 +2790,32 @@ static long sys_ppoll_handler(struct trapframe *tf) {
     /* Check readiness */
     int ready = 0;
     for (int i = 0; i < nfds; i++) {
-        int fd = kfds[i].fd;
-        short events = kfds[i].events;
+        int fd = *(int *)(kfds + i * 8);
+        short events = *(short *)(kfds + i * 8 + 4);
         struct open_file *f = (fd >= 0 && fd < NOFILE) ? ftab[fd] : 0;
         short rev = check_fd_ready(f, events);
-        kfds[i].revents = rev;
+        *(short *)(kfds + i * 8 + 6) = rev;
         if (rev)
             ready++;
     }
 
     /* If none ready and timeout allows blocking */
-    while (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
+    if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
-        } else {
-            /* Infinite timeout: use sentinel so timer won't spuriously wake us */
-            current_proc->sleep_until = (uint64_t)-1;
+            current_proc->waiting_for_uart = 2;
+            current_proc->state = SLEEPING;
+            swtch(&current_proc->context, &scheduler_context);
         }
-        current_proc->waiting_for_uart = 2;
-        current_proc->state = SLEEPING;
-        swtch(&current_proc->context, &scheduler_context);
 
         /* Re-check after wakeup */
         ready = 0;
         for (int i = 0; i < nfds; i++) {
-            int fd = kfds[i].fd;
-            short events = kfds[i].events;
+            int fd = *(int *)(kfds + i * 8);
+            short events = *(short *)(kfds + i * 8 + 4);
             struct open_file *f = (fd >= 0 && fd < NOFILE) ? ftab[fd] : 0;
             short rev = check_fd_ready(f, events);
-            kfds[i].revents = rev;
+            *(short *)(kfds + i * 8 + 6) = rev;
             if (rev)
                 ready++;
         }
@@ -3517,16 +2901,13 @@ static long sys_pselect6_handler(struct trapframe *tf) {
     }
 
     /* Block if none ready and timeout allows */
-    while (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
+    if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
         if (sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
-        } else {
-            /* Infinite timeout: use sentinel so timer won't spuriously wake us */
-            current_proc->sleep_until = (uint64_t)-1;
+            current_proc->waiting_for_uart = 2;
+            current_proc->state = SLEEPING;
+            swtch(&current_proc->context, &scheduler_context);
         }
-        current_proc->waiting_for_uart = 2;
-        current_proc->state = SLEEPING;
-        swtch(&current_proc->context, &scheduler_context);
 
         /* Re-check */
         out_rfds = out_wfds = out_efds = 0;
@@ -3564,15 +2945,14 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
     uint64_t new_addr = tf->a0;
     uint64_t old_addr = tf->a1;
 
-    /* stack_t layout: { uint64_t ss_sp; int32_t ss_flags; uint32_t _pad; uint64_t ss_size; } = 24 bytes */
-    struct kern_stack_t { uint64_t ss_sp; int32_t ss_flags; uint32_t _pad; uint64_t ss_size; };
+    /* stack_t layout: { uint64_t ss_sp; int32_t ss_flags; int32_t _pad; uint64_t ss_size; } = 24 bytes */
     if (old_addr != 0) {
-        struct kern_stack_t kold;
-        memset(&kold, 0, sizeof(kold));
-        kold.ss_sp = current_proc->ss_sp;
-        kold.ss_flags = (int32_t)current_proc->ss_flags;
-        kold.ss_size = current_proc->ss_size;
-        if (copyout(current_proc->pagetable, old_addr, &kold, sizeof(kold)) < 0)
+        uint8_t kold[24];
+        memset(kold, 0, sizeof(kold));
+        *(uint64_t *)(kold + 0) = current_proc->ss_sp;
+        *(int32_t *)(kold + 8) = (int32_t)current_proc->ss_flags;
+        *(uint64_t *)(kold + 16) = current_proc->ss_size;
+        if (copyout(current_proc->pagetable, old_addr, kold, 24) < 0)
             return (long)-14;
     }
 
@@ -3581,13 +2961,13 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
         if (current_proc->ss_flags & 1) /* SS_ONSTACK */
             return (long)-1; /* EPERM */
 
-        struct kern_stack_t knew;
-        if (copyin(current_proc->pagetable, &knew, new_addr, sizeof(knew)) < 0)
+        uint8_t knew[24];
+        if (copyin(current_proc->pagetable, knew, new_addr, 24) < 0)
             return (long)-14;
 
-        current_proc->ss_sp = knew.ss_sp;
-        current_proc->ss_flags = (int)knew.ss_flags;
-        current_proc->ss_size = knew.ss_size;
+        current_proc->ss_sp = *(uint64_t *)(knew + 0);
+        current_proc->ss_flags = (int)(*(int32_t *)(knew + 8));
+        current_proc->ss_size = *(uint64_t *)(knew + 16);
     }
 
     return 0;
@@ -3735,7 +3115,6 @@ void syscall_init(void) {
 void trap_handler(struct trapframe *tf) {
     unsigned long cause = r_scause();
     unsigned long stval = r_stval();
-    int from_user = (r_sstatus() & SSTATUS_SPP) == 0;
 
     if (cause & SCAUSE_INTERRUPT) {
         if (cause == SCAUSE_S_TIMER_INT) {
@@ -3753,16 +3132,6 @@ void trap_handler(struct trapframe *tf) {
 
     /* Exception */
     if (cause != SCAUSE_ECALL_U) {
-        if (cause == SCAUSE_ILLEGAL_INSTRUCTION && from_user) {
-            printk("Illegal instruction pid=%d epc=0x%lx stval=0x%lx\n",
-                   current_proc ? current_proc->pid : -1, tf->epc, stval);
-            if (current_proc) {
-                current_proc->sigpending |= signal_bit(SIGILL);
-                deliver_signal(tf, current_proc);
-                return;
-            }
-            panic("kernel illegal instruction with no current process");
-        }
         if (cause == SCAUSE_LOAD_PAGE_FAULT ||
             cause == SCAUSE_STORE_PAGE_FAULT ||
             cause == SCAUSE_INST_PAGE_FAULT) {
@@ -3784,11 +3153,7 @@ void trap_handler(struct trapframe *tf) {
                         char *newpage = kalloc();
                         if (!newpage)
                             goto pagefault_kill;
-                        w_satp(MAKE_SATP(kernel_pagetable));
-                        sfence_vma();
                         memcpy(newpage, (void *)pa, PAGE_SIZE);
-                        w_satp(MAKE_SATP(current_proc->pagetable));
-                        sfence_vma();
                         *pte = PA2PTE((uint64_t)newpage) | ((flags & ~PTE_COW) | PTE_W);
                         kfree((void *)pa); /* decrement refcount on old page */
                     }
@@ -3803,11 +3168,11 @@ void trap_handler(struct trapframe *tf) {
                 uint64_t sva = PGROUNDDOWN(stval);
                 pte_t *spte = walk(current_proc->pagetable, sva, 0);
                 if (spte && PTE_IS_SWAPPED(*spte)) {
-                    int sflags = 0;
-                    int slot = pte_swap_take(spte, &sflags);
+                    int slot = PTE_SWAP_SLOT(*spte);
+                    int sflags = PTE_SWAP_FLAGS(*spte);
 
                     char *newpage = kalloc();
-                    if (!newpage || slot < 0)
+                    if (!newpage)
                         goto pagefault_kill;
 
                     swap_read(slot, newpage);
@@ -3825,34 +3190,14 @@ void trap_handler(struct trapframe *tf) {
                 stval >= current_proc->stack_bottom - 256 * PAGE_SIZE &&
                 stval < current_proc->stack_top) {
                 uint64_t va = PGROUNDDOWN(stval);
-                /* Compute the lowest address the stack may reach.
-                 * Leave a 1-page guard gap above the heap (sz) and
-                 * also above the mmap region to prevent silent overlap. */
-                uint64_t heap_limit = current_proc->sz;
-                if (current_proc->mmap_base > heap_limit)
-                    heap_limit = current_proc->mmap_base;
-                /* Guard page: stack must stay at least 1 page above the
-                 * heap/mmap area to prevent silent overlap. */
-                uint64_t stack_floor = heap_limit + PAGE_SIZE;
-                /* Don't even attempt if the faulting address is below
-                 * the floor (would overlap heap/mmap + guard). */
-                if (va < stack_floor)
-                    goto pagefault_kill;
                 int grew = 0;
                 while (current_proc->stack_bottom > va) {
-                    uint64_t new_bottom = current_proc->stack_bottom - PAGE_SIZE;
-                    /* Enforce stack floor (heap/mmap + guard page gap) */
-                    if (new_bottom < stack_floor)
-                        break;
+                    current_proc->stack_bottom -= PAGE_SIZE;
                     char *pg = kalloc();
                     if (!pg) break;
                     memset(pg, 0, PAGE_SIZE);
-                    if (mappages(current_proc->pagetable, new_bottom,
-                             PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U) != 0) {
-                        kfree(pg);
-                        break;
-                    }
-                    current_proc->stack_bottom = new_bottom;
+                    mappages(current_proc->pagetable, current_proc->stack_bottom,
+                             PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U);
                     grew = 1;
                 }
                 if (grew && current_proc->stack_bottom <= va) {
@@ -3894,16 +3239,30 @@ pagefault_kill:
                 /* If deliver_signal returned (handler caught it), resume */
                 return;
             }
-            panic("kernel page fault with no current process");
+            while(1) {}
+        }
+        /* Handle other user-mode exceptions by delivering a signal */
+        if (current_proc) {
+            int sig = SIGKILL;
+            if (cause == 2)                    sig = SIGILL;  /* Illegal instruction */
+            else if (cause == 0 || cause == 4 || cause == 6) sig = SIGBUS; /* Misaligned */
+            else if (cause == 5 || cause == 7) sig = SIGBUS;  /* Access fault */
+            printk("trap pid=%d scause=0x%lx epc=0x%lx stval=0x%lx -> sig %d\n",
+                   current_proc->pid, cause, tf->epc, stval, sig);
+            current_proc->sigpending |= signal_bit(sig);
+            deliver_signal(tf, current_proc);
+            return;
         }
         printk("UNEXPECTED TRAP! scause: 0x%lx, epc: 0x%lx, tval: 0x%lx\n",
                cause, tf->epc, stval);
-        panic("unhandled trap");
+        while(1) {}
     }
 
     /* ---- ecall from user ---- */
-    /* Advance past the ecall instruction (always 4 bytes in RISC-V) */
-    tf->epc += 4;
+    /* Advance past the ecall instruction */
+    uint16_t *instr = (uint16_t *)tf->epc;
+    int size = ((*instr & 0x3) == 0x3) ? 4 : 2;
+    tf->epc += size;
 
     long sysnum = (long)tf->a7;
 

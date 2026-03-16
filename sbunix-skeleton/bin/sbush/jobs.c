@@ -50,16 +50,6 @@ struct job *job_find_pid(pid_t pid) {
     return NULL;
 }
 
-struct job *job_find_last(void) {
-    struct job *last = NULL;
-    for (int i = 0; i < MAX_JOBS; i++) {
-        if (jobs[i].pid == 0) continue;
-        if (!last || jobs[i].id > last->id)
-            last = &jobs[i];
-    }
-    return last;
-}
-
 void job_list(void) {
     for (int i = 0; i < MAX_JOBS; i++) {
         if (jobs[i].pid == 0) continue;
@@ -68,6 +58,18 @@ void job_list(void) {
         if (jobs[i].state == JOB_DONE)    state = "Done";
         printf("[%d] %s\t%s\n", jobs[i].id, state, jobs[i].cmd);
     }
+}
+
+struct job *job_last(void) {
+    struct job *last = NULL;
+    int max_id = 0;
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (jobs[i].pid != 0 && jobs[i].id > max_id) {
+            max_id = jobs[i].id;
+            last = &jobs[i];
+        }
+    }
+    return last;
 }
 
 void job_reap(void) {

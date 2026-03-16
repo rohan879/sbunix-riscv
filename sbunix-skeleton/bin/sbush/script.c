@@ -24,7 +24,7 @@ int run_script(const char *path) {
             p++;
     }
 
-    /* execute each line, tracking exit status */
+    /* execute each line */
     while (*p) {
         char line[MAX_LINE];
         int i = 0;
@@ -33,20 +33,9 @@ int run_script(const char *path) {
         line[i] = '\0';
         if (*p == '\n')
             p++;
-        /* Backslash-newline continuation */
-        while (i > 0 && line[i - 1] == '\\' && *p) {
-            line[i - 1] = '\0';
-            i--;
-            while (*p && *p != '\n' && i < MAX_LINE - 1)
-                line[i++] = *p++;
-            line[i] = '\0';
-            if (*p == '\n')
-                p++;
-        }
         if (i > 0)
             execute_line(line);
     }
 
-    /* Return the last command's exit status per POSIX */
     return last_exit_status;
 }

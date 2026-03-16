@@ -1,130 +1,82 @@
 /*
- * fnmatch.c — shell-style pattern matching for SBUnix libc.
- *
- * Supports:
- *   *       — match any sequence of characters
- *   ?       — match any single character
- *   [...]   — match any character in the set
- *   [^...]  — match any character NOT in the set
- *
- * Flags:
- *   FNM_PATHNAME  — * and ? do not match /
- *   FNM_PERIOD    — leading . must be matched explicitly
+ * fnmatch.c — POSIX fnmatch() for SBUnix libc.
  */
 
-#include <fnmatch.h>
-#include <stddef.h>
+#include <string.h>
 
-static int _match(const char *pat, const char *str, int flags, int at_start) {
-    while (*pat) {
-        if (!*str) {
-            /* String exhausted: only match if rest of pattern is all '*' */
-            while (*pat == '*') pat++;
-            return *pat ? FNM_NOMATCH : 0;
-        }
+#define FNM_NOMATCH 1
+#define FNM_PATHNAME 0x01
+#define FNM_NOESCAPE 0x02
+#define FNM_PERIOD 0x04
 
-        /* FNM_PERIOD: leading dot must be matched explicitly */
-        if ((flags & FNM_PERIOD) && *str == '.' && at_start) {
-            if (*pat != '.')
-                return FNM_NOMATCH;
-            pat++;
-            str++;
-            at_start = 0;
-            continue;
-        }
+int fnmatch(const char *pattern, const char *string, int flags) {
+    const char *p = pattern, *s = string;
 
-        switch (*pat) {
+    while (*p) {
+        switch (*p) {
         case '?':
-            /* Match any single character, but not / if FNM_PATHNAME */
-            if ((flags & FNM_PATHNAME) && *str == '/')
+            if (*s == '\0') return FNM_NOMATCH;
+            if ((flags & FNM_PATHNAME) && *s == '/') return FNM_NOMATCH;
+            if ((flags & FNM_PERIOD) && *s == '.' &&
+                (s == string || ((flags & FNM_PATHNAME) && s[-1] == '/')))
                 return FNM_NOMATCH;
-            pat++;
-            str++;
-            at_start = 0;
+            s++;
+            p++;
             break;
 
-        case '*':
-            /* Skip consecutive '*' */
-            while (*pat == '*') pat++;
-
-            /* Trailing '*' matches everything (except / with FNM_PATHNAME) */
-            if (!*pat) {
+        case '*': {
+            /* Skip consecutive stars */
+            while (*p == '*') p++;
+            if (*p == '\0') {
                 if (flags & FNM_PATHNAME) {
-                    /* Must not contain / in rest of string */
-                    while (*str) {
-                        if (*str == '/') return FNM_NOMATCH;
-                        str++;
-                    }
+                    return strchr(s, '/') ? FNM_NOMATCH : 0;
                 }
                 return 0;
             }
-
-            /* Try matching the rest of the pattern at each position */
-            for (; *str; str++) {
-                if ((flags & FNM_PATHNAME) && *str == '/')
-                    break;
-                if (_match(pat, str, flags & ~FNM_PERIOD, 0) == 0)
+            while (*s) {
+                if (fnmatch(p, s, flags & ~FNM_PERIOD) == 0)
                     return 0;
+                if ((flags & FNM_PATHNAME) && *s == '/')
+                    break;
+                s++;
             }
-            /* Also try matching at the current exhausted position */
-            return _match(pat, str, flags & ~FNM_PERIOD, 0);
+            return FNM_NOMATCH;
+        }
 
         case '[': {
-            /* Character class */
-            if ((flags & FNM_PATHNAME) && *str == '/')
-                return FNM_NOMATCH;
-
-            pat++;
+            if (*s == '\0') return FNM_NOMATCH;
+            p++;
             int negate = 0;
-            if (*pat == '!' || *pat == '^') {
-                negate = 1;
-                pat++;
-            }
-
+            if (*p == '!' || *p == '^') { negate = 1; p++; }
             int matched = 0;
-            int c = (unsigned char)*str;
-
-            /* Empty class [] is invalid — treat as literal */
-            if (*pat == ']') {
-                if (c == ']') matched = 1;
-                pat++;
-            }
-
-            while (*pat && *pat != ']') {
-                int lo = (unsigned char)*pat;
-                pat++;
-                if (*pat == '-' && *(pat + 1) && *(pat + 1) != ']') {
-                    pat++; /* skip '-' */
-                    int hi = (unsigned char)*pat;
-                    pat++;
+            char c = *s;
+            while (*p && *p != ']') {
+                char lo = *p++;
+                if (*p == '-' && p[1] != ']' && p[1] != '\0') {
+                    p++;
+                    char hi = *p++;
                     if (c >= lo && c <= hi) matched = 1;
                 } else {
                     if (c == lo) matched = 1;
                 }
             }
-            if (*pat == ']') pat++;
-
+            if (*p == ']') p++;
             if (negate) matched = !matched;
             if (!matched) return FNM_NOMATCH;
-
-            str++;
-            at_start = 0;
+            s++;
             break;
         }
 
+        case '\\':
+            if (!(flags & FNM_NOESCAPE) && p[1]) p++;
+            /* FALLTHROUGH */
         default:
-            if (*pat != *str)
-                return FNM_NOMATCH;
-            pat++;
-            str++;
-            at_start = 0;
+            if (*p != *s) return FNM_NOMATCH;
+            p++;
+            s++;
             break;
         }
     }
 
-    return *str ? FNM_NOMATCH : 0;
-}
-
-int fnmatch(const char *pattern, const char *string, int flags) {
-    return _match(pattern, string, flags, 1);
+    return (*s == '\0') ? 0 : FNM_NOMATCH;
 }

@@ -246,6 +246,28 @@ char *strtok(char *str, const char *delim) {
     return start;
 }
 
+static int tolower_char(int c) {
+    return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+}
+
+int strcasecmp(const char *s1, const char *s2) {
+    while (*s1 && tolower_char((unsigned char)*s1) == tolower_char((unsigned char)*s2)) {
+        s1++;
+        s2++;
+    }
+    return tolower_char((unsigned char)*s1) - tolower_char((unsigned char)*s2);
+}
+
+int strncasecmp(const char *s1, const char *s2, size_t n) {
+    while (n && *s1 && tolower_char((unsigned char)*s1) == tolower_char((unsigned char)*s2)) {
+        s1++;
+        s2++;
+        n--;
+    }
+    if (n == 0) return 0;
+    return tolower_char((unsigned char)*s1) - tolower_char((unsigned char)*s2);
+}
+
 char *strerror(int errnum) {
     switch (errnum) {
     case 0:  return "Success";

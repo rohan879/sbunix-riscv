@@ -1,10 +1,343 @@
 /*
- * time.c — time-related syscall wrappers for SBUnix libc.
+ * time.c — time-related syscall wrappers and calendar functions for SBUnix libc.
  */
 
 #include <time.h>
 #include <syscall.h>
 #include <errno.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------ */
+/*  Internal helpers                                                   */
+/* ------------------------------------------------------------------ */
+
+static int _is_leap(int year)
+{
+    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+static int _days_in_year(int year)
+{
+    return _is_leap(year) ? 366 : 365;
+}
+
+static const int _mon_days[2][12] = {
+    /* non-leap */ {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31},
+    /* leap     */ {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+};
+
+static const char *_wday_abbr[] = {
+    "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+};
+
+static const char *_mon_abbr[] = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+};
+
+/*
+ * _append — append src to buf at *pos, respecting max.
+ * Returns number of characters written (excluding NUL).
+ */
+static size_t _append(char *buf, size_t max, size_t *pos, const char *src)
+{
+    size_t n = 0;
+    while (*src && *pos + 1 < max) {
+        buf[(*pos)++] = *src++;
+        n++;
+    }
+    return n;
+}
+
+/*
+ * _append_num — append a zero-padded decimal number of exactly `width` digits.
+ */
+static size_t _append_num(char *buf, size_t max, size_t *pos, int val, int width)
+{
+    char tmp[16];
+    int  i = 0;
+    int  neg = 0;
+
+    if (val < 0) { neg = 1; val = -val; }
+
+    /* generate digits in reverse */
+    do {
+        tmp[i++] = (char)('0' + val % 10);
+        val /= 10;
+    } while (val);
+
+    /* pad with zeros to desired width (after sign) */
+    while (i < width - neg)
+        tmp[i++] = '0';
+    if (neg)
+        tmp[i++] = '-';
+
+    /* reverse into buf */
+    size_t n = 0;
+    while (i > 0 && *pos + 1 < max) {
+        buf[(*pos)++] = tmp[--i];
+        n++;
+    }
+    return n;
+}
+
+/* ------------------------------------------------------------------ */
+/*  gmtime                                                             */
+/* ------------------------------------------------------------------ */
+
+struct tm *gmtime(const time_t *timep)
+{
+    static struct tm result;
+    time_t t;
+    int    year, mon, leap;
+
+    if (!timep)
+        return (struct tm *)0;
+
+    t = *timep;
+
+    /* seconds, minutes, hours */
+    result.tm_sec  = (int)(t % 60);  t /= 60;
+    result.tm_min  = (int)(t % 60);  t /= 60;
+    result.tm_hour = (int)(t % 24);
+
+    /* total days since epoch (Jan 1 1970 was a Thursday → wday 4) */
+    long days = (long)(t / 24);
+
+    result.tm_wday = (int)((days + 4) % 7);          /* Thu = 4 */
+    if (result.tm_wday < 0)
+        result.tm_wday += 7;
+
+    /* walk years from 1970 */
+    year = 1970;
+    if (days >= 0) {
+        while (days >= _days_in_year(year)) {
+            days -= _days_in_year(year);
+            year++;
+        }
+    } else {
+        while (days < 0) {
+            year--;
+            days += _days_in_year(year);
+        }
+    }
+
+    result.tm_year = year - 1900;
+    result.tm_yday = (int)days;
+
+    /* walk months */
+    leap = _is_leap(year);
+    for (mon = 0; mon < 11; mon++) {
+        if (days < _mon_days[leap][mon])
+            break;
+        days -= _mon_days[leap][mon];
+    }
+    result.tm_mon  = mon;
+    result.tm_mday = (int)days + 1;
+    result.tm_isdst = 0;
+
+    return &result;
+}
+
+/* ------------------------------------------------------------------ */
+/*  localtime  — same as gmtime (no timezone support)                  */
+/* ------------------------------------------------------------------ */
+
+struct tm *localtime(const time_t *timep)
+{
+    return gmtime(timep);
+}
+
+/* ------------------------------------------------------------------ */
+/*  mktime                                                             */
+/* ------------------------------------------------------------------ */
+
+time_t mktime(struct tm *tm)
+{
+    int sec, min, hour, mday, mon, year;
+
+    if (!tm)
+        return (time_t)-1;
+
+    /* copy and normalise */
+    sec  = tm->tm_sec;
+    min  = tm->tm_min;
+    hour = tm->tm_hour;
+    mday = tm->tm_mday;
+    mon  = tm->tm_mon;
+    year = tm->tm_year + 1900;
+
+    /* normalise seconds → minutes */
+    min += sec / 60;
+    sec  = sec % 60;
+    if (sec < 0) { sec += 60; min--; }
+
+    /* normalise minutes → hours */
+    hour += min / 60;
+    min   = min % 60;
+    if (min < 0) { min += 60; hour--; }
+
+    /* normalise hours → days */
+    mday += hour / 24;
+    hour  = hour % 24;
+    if (hour < 0) { hour += 24; mday--; }
+
+    /* normalise months → years */
+    if (mon < 0) {
+        int adj = (-mon + 11) / 12;
+        year -= adj;
+        mon  += adj * 12;
+    }
+    year += mon / 12;
+    mon   = mon % 12;
+
+    /* normalise days (handle underflow and overflow) */
+    while (mday < 1) {
+        mon--;
+        if (mon < 0) { mon = 11; year--; }
+        mday += _mon_days[_is_leap(year)][mon];
+    }
+    while (mday > _mon_days[_is_leap(year)][mon]) {
+        mday -= _mon_days[_is_leap(year)][mon];
+        mon++;
+        if (mon > 11) { mon = 0; year++; }
+    }
+
+    /* count days from epoch (1970-01-01) */
+    long days = 0;
+    if (year >= 1970) {
+        for (int y = 1970; y < year; y++)
+            days += _days_in_year(y);
+    } else {
+        for (int y = year; y < 1970; y++)
+            days -= _days_in_year(y);
+    }
+
+    int leap = _is_leap(year);
+    int yday = 0;
+    for (int m = 0; m < mon; m++)
+        yday += _mon_days[leap][m];
+    yday += mday - 1;
+    days += yday;
+
+    /* fill in derived fields */
+    tm->tm_year  = year - 1900;
+    tm->tm_mon   = mon;
+    tm->tm_mday  = mday;
+    tm->tm_hour  = hour;
+    tm->tm_min   = min;
+    tm->tm_sec   = sec;
+    tm->tm_yday  = yday;
+    tm->tm_wday  = (int)((days + 4) % 7);      /* epoch was Thursday */
+    if (tm->tm_wday < 0)
+        tm->tm_wday += 7;
+    tm->tm_isdst = 0;
+
+    return (time_t)(days * 86400 + hour * 3600 + min * 60 + sec);
+}
+
+/* ------------------------------------------------------------------ */
+/*  strftime                                                           */
+/* ------------------------------------------------------------------ */
+
+size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm)
+{
+    size_t pos = 0;
+
+    if (!s || max == 0 || !fmt || !tm)
+        return 0;
+
+    while (*fmt && pos + 1 < max) {
+        if (*fmt != '%') {
+            s[pos++] = *fmt++;
+            continue;
+        }
+
+        fmt++;  /* skip '%' */
+        switch (*fmt) {
+        case 'Y':   /* 4-digit year */
+            _append_num(s, max, &pos, tm->tm_year + 1900, 4);
+            break;
+        case 'm':   /* month 01-12 */
+            _append_num(s, max, &pos, tm->tm_mon + 1, 2);
+            break;
+        case 'd':   /* day 01-31 */
+            _append_num(s, max, &pos, tm->tm_mday, 2);
+            break;
+        case 'H':   /* hour 00-23 */
+            _append_num(s, max, &pos, tm->tm_hour, 2);
+            break;
+        case 'M':   /* minute 00-59 */
+            _append_num(s, max, &pos, tm->tm_min, 2);
+            break;
+        case 'S':   /* second 00-59 */
+            _append_num(s, max, &pos, tm->tm_sec, 2);
+            break;
+        case 'a':   /* abbreviated weekday name */
+            if (tm->tm_wday >= 0 && tm->tm_wday <= 6)
+                _append(s, max, &pos, _wday_abbr[tm->tm_wday]);
+            break;
+        case 'b':   /* abbreviated month name */
+        case 'h':   /* synonym for %b */
+            if (tm->tm_mon >= 0 && tm->tm_mon <= 11)
+                _append(s, max, &pos, _mon_abbr[tm->tm_mon]);
+            break;
+        case 'c':   /* locale date and time: "Sun Jan  1 00:00:00 1970" */
+            if (tm->tm_wday >= 0 && tm->tm_wday <= 6)
+                _append(s, max, &pos, _wday_abbr[tm->tm_wday]);
+            _append(s, max, &pos, " ");
+            if (tm->tm_mon >= 0 && tm->tm_mon <= 11)
+                _append(s, max, &pos, _mon_abbr[tm->tm_mon]);
+            _append(s, max, &pos, " ");
+            /* day of month, space-padded to 2 */
+            if (tm->tm_mday < 10) {
+                _append(s, max, &pos, " ");
+                _append_num(s, max, &pos, tm->tm_mday, 1);
+            } else {
+                _append_num(s, max, &pos, tm->tm_mday, 2);
+            }
+            _append(s, max, &pos, " ");
+            _append_num(s, max, &pos, tm->tm_hour, 2);
+            _append(s, max, &pos, ":");
+            _append_num(s, max, &pos, tm->tm_min, 2);
+            _append(s, max, &pos, ":");
+            _append_num(s, max, &pos, tm->tm_sec, 2);
+            _append(s, max, &pos, " ");
+            _append_num(s, max, &pos, tm->tm_year + 1900, 4);
+            break;
+        case 'p':   /* AM/PM */
+            _append(s, max, &pos, tm->tm_hour < 12 ? "AM" : "PM");
+            break;
+        case 'Z':   /* timezone name */
+            _append(s, max, &pos, "UTC");
+            break;
+        case 'j':   /* day of year 001-366 */
+            _append_num(s, max, &pos, tm->tm_yday + 1, 3);
+            break;
+        case 'n':   /* newline */
+            s[pos++] = '\n';
+            break;
+        case 't':   /* tab */
+            s[pos++] = '\t';
+            break;
+        case '%':   /* literal % */
+            s[pos++] = '%';
+            break;
+        case '\0':  /* trailing % at end of format string */
+            goto done;
+        default:    /* unknown specifier — output literally */
+            s[pos++] = '%';
+            if (pos + 1 < max)
+                s[pos++] = *fmt;
+            break;
+        }
+        fmt++;
+    }
+
+done:
+    s[pos] = '\0';
+    return pos;
+}
 
 /*
  * nanosleep() — sleep for at least the duration specified by *req.
@@ -20,7 +353,8 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
  * via SYS_clock_gettime (113).  Returns 0 on success, -1 on error.
  */
 int clock_gettime(int clk_id, struct timespec *tp) {
-    return (int)__syscall_ret(syscall(SYS_clock_gettime, clk_id, tp));
+    long ret = syscall(SYS_clock_gettime, clk_id, tp);
+    return (ret < 0) ? -1 : 0;
 }
 
 /*
@@ -58,293 +392,4 @@ int clock_nanosleep(int clockid, int flags,
     long ret = syscall(SYS_clock_nanosleep, clockid, flags, req, rem);
     if (ret < 0) { errno = (int)(-ret); return (int)(-ret); }
     return 0;
-}
-
-/* -----------------------------------------------------------------------
- * Time conversion utilities
- * ---------------------------------------------------------------------- */
-
-#include <string.h>
-#include <stddef.h>
-
-/* Days per month for non-leap and leap years */
-static const int days_in_month[2][12] = {
-    { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 },  /* normal */
-    { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 },  /* leap   */
-};
-
-static const char *wday_name[] = {
-    "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
-};
-
-static const char *mon_name[] = {
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-};
-
-static int is_leap_year(int year) {
-    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-}
-
-/*
- * gmtime() — convert time_t to struct tm in UTC.
- * Uses a static buffer (not thread-safe, but SBUnix is single-threaded).
- */
-struct tm *gmtime(const time_t *timer) {
-    static struct tm result;
-    time_t t = *timer;
-
-    /*
-     * Floor-divide time into days + remainder-of-day.
-     * C99 truncates toward zero, so for negative t we must adjust
-     * to get a non-negative remainder for hh:mm:ss.
-     */
-    long days = (long)(t / SECS_PER_DAY);
-    long rem  = (long)(t % SECS_PER_DAY);
-    if (rem < 0) {
-        rem += SECS_PER_DAY;
-        days--;
-    }
-
-    result.tm_sec  = (int)(rem % 60);
-    rem /= 60;
-    result.tm_min  = (int)(rem % 60);
-    rem /= 60;
-    result.tm_hour = (int)rem;
-
-    /* Day of week: Jan 1, 1970 was a Thursday (4) */
-    result.tm_wday = (int)((days + 4) % 7);
-    if (result.tm_wday < 0)
-        result.tm_wday += 7;
-
-    /* Compute year, month, day — handle dates before epoch */
-    int year = 1970;
-    if (days >= 0) {
-        while (1) {
-            int yday_max = is_leap_year(year) ? 366 : 365;
-            if (days < yday_max)
-                break;
-            days -= yday_max;
-            year++;
-        }
-    } else {
-        while (days < 0) {
-            year--;
-            days += is_leap_year(year) ? 366 : 365;
-        }
-    }
-
-    result.tm_year = year - 1900;
-    result.tm_yday = (int)days;
-    result.tm_isdst = 0;
-
-    int leap = is_leap_year(year);
-    int mon;
-    for (mon = 0; mon < 11; mon++) {
-        if (days < days_in_month[leap][mon])
-            break;
-        days -= days_in_month[leap][mon];
-    }
-    result.tm_mon  = mon;
-    result.tm_mday = (int)days + 1;
-
-    return &result;
-}
-
-/*
- * localtime() — same as gmtime (no timezone support in SBUnix).
- */
-struct tm *localtime(const time_t *timer) {
-    return gmtime(timer);
-}
-
-/*
- * mktime() — convert struct tm to time_t (assumes UTC).
- * Also normalizes the struct tm fields.
- */
-time_t mktime(struct tm *tm) {
-    int year = tm->tm_year + 1900;
-    int mon  = tm->tm_mon;
-    int mday = tm->tm_mday;
-
-    /* Normalize month */
-    while (mon < 0)  { mon += 12; year--; }
-    while (mon > 11) { mon -= 12; year++; }
-
-    /* Count days from epoch to start of this year */
-    long days = 0;
-    if (year >= 1970) {
-        for (int y = 1970; y < year; y++)
-            days += is_leap_year(y) ? 366 : 365;
-    } else {
-        for (int y = year; y < 1970; y++)
-            days -= is_leap_year(y) ? 366 : 365;
-    }
-
-    /* Add days for months */
-    int leap = is_leap_year(year);
-    for (int m = 0; m < mon; m++)
-        days += days_in_month[leap][m];
-
-    /* Add day of month (1-based) */
-    days += mday - 1;
-
-    time_t result = (time_t)days * SECS_PER_DAY
-                  + (time_t)tm->tm_hour * SECS_PER_HOUR
-                  + (time_t)tm->tm_min  * SECS_PER_MIN
-                  + (time_t)tm->tm_sec;
-
-    /* Normalize the struct tm */
-    struct tm *normalized = gmtime(&result);
-    *tm = *normalized;
-
-    return result;
-}
-
-/*
- * difftime() — return t1 - t0 as a long (no FPU, so we avoid double).
- */
-long difftime(time_t t1, time_t t0) {
-    return (long)(t1 - t0);
-}
-
-/* Helper: write a zero-padded decimal number into buf */
-static int fmt_num(char *buf, size_t remaining, int val, int width) {
-    char tmp[16];
-    int  len = 0;
-    int  neg = 0;
-    unsigned int uval;
-
-    if (val < 0) { neg = 1; uval = (unsigned int)(-val); }
-    else         { uval = (unsigned int)val; }
-
-    do {
-        tmp[len++] = '0' + (char)(uval % 10);
-        uval /= 10;
-    } while (uval > 0);
-
-    /* Pad with zeros */
-    while (len < width)
-        tmp[len++] = '0';
-    if (neg)
-        tmp[len++] = '-';
-
-    if ((size_t)len > remaining)
-        return 0;
-
-    /* Reverse into buf */
-    for (int i = 0; i < len; i++)
-        buf[i] = tmp[len - 1 - i];
-    return len;
-}
-
-/* Helper: copy a string into buf */
-static int fmt_str(char *buf, size_t remaining, const char *s) {
-    int len = 0;
-    while (s[len]) len++;
-    if ((size_t)len > remaining) return 0;
-    for (int i = 0; i < len; i++) buf[i] = s[i];
-    return len;
-}
-
-/*
- * strftime() — format a time string.
- * Supports: %Y %m %d %H %M %S %j %w %a %b %c %%
- */
-size_t strftime(char *s, size_t max, const char *format,
-                const struct tm *tm) {
-    size_t pos = 0;
-
-    for (const char *f = format; *f && pos < max - 1; f++) {
-        if (*f != '%') {
-            s[pos++] = *f;
-            continue;
-        }
-        f++;
-        if (!*f) break;
-
-        int n = 0;
-        size_t rem = max - 1 - pos;
-
-        switch (*f) {
-        case 'Y': /* 4-digit year */
-            n = fmt_num(s + pos, rem, tm->tm_year + 1900, 4);
-            break;
-        case 'm': /* month 01-12 */
-            n = fmt_num(s + pos, rem, tm->tm_mon + 1, 2);
-            break;
-        case 'd': /* day of month 01-31 */
-            n = fmt_num(s + pos, rem, tm->tm_mday, 2);
-            break;
-        case 'H': /* hour 00-23 */
-            n = fmt_num(s + pos, rem, tm->tm_hour, 2);
-            break;
-        case 'M': /* minute 00-59 */
-            n = fmt_num(s + pos, rem, tm->tm_min, 2);
-            break;
-        case 'S': /* second 00-60 */
-            n = fmt_num(s + pos, rem, tm->tm_sec, 2);
-            break;
-        case 'j': /* day of year 001-366 */
-            n = fmt_num(s + pos, rem, tm->tm_yday + 1, 3);
-            break;
-        case 'w': /* weekday 0-6 */
-            n = fmt_num(s + pos, rem, tm->tm_wday, 1);
-            break;
-        case 'a': /* abbreviated weekday name */
-            if (tm->tm_wday >= 0 && tm->tm_wday <= 6)
-                n = fmt_str(s + pos, rem, wday_name[tm->tm_wday]);
-            break;
-        case 'b': /* abbreviated month name */
-        case 'h': /* same as %b */
-            if (tm->tm_mon >= 0 && tm->tm_mon <= 11)
-                n = fmt_str(s + pos, rem, mon_name[tm->tm_mon]);
-            break;
-        case 'c': { /* date and time: "Sun Jan  1 00:00:00 1970" */
-            char tmp[64];
-            int tlen = 0;
-            if (tm->tm_wday >= 0 && tm->tm_wday <= 6 &&
-                tm->tm_mon >= 0 && tm->tm_mon <= 11) {
-                /* Build "Www Mmm DD HH:MM:SS YYYY" */
-                tlen += fmt_str(tmp + tlen, sizeof(tmp) - (size_t)tlen,
-                                wday_name[tm->tm_wday]);
-                tmp[tlen++] = ' ';
-                tlen += fmt_str(tmp + tlen, sizeof(tmp) - (size_t)tlen,
-                                mon_name[tm->tm_mon]);
-                tmp[tlen++] = ' ';
-                tlen += fmt_num(tmp + tlen, sizeof(tmp) - (size_t)tlen,
-                                tm->tm_mday, 2);
-                tmp[tlen++] = ' ';
-                tlen += fmt_num(tmp + tlen, sizeof(tmp) - (size_t)tlen,
-                                tm->tm_hour, 2);
-                tmp[tlen++] = ':';
-                tlen += fmt_num(tmp + tlen, sizeof(tmp) - (size_t)tlen,
-                                tm->tm_min, 2);
-                tmp[tlen++] = ':';
-                tlen += fmt_num(tmp + tlen, sizeof(tmp) - (size_t)tlen,
-                                tm->tm_sec, 2);
-                tmp[tlen++] = ' ';
-                tlen += fmt_num(tmp + tlen, sizeof(tmp) - (size_t)tlen,
-                                tm->tm_year + 1900, 4);
-            }
-            if ((size_t)tlen <= rem) {
-                for (int i = 0; i < tlen; i++)
-                    s[pos + i] = tmp[i];
-                n = tlen;
-            }
-            break;
-        }
-        case '%':
-            if (rem >= 1) { s[pos] = '%'; n = 1; }
-            break;
-        default:
-            /* Unknown specifier — copy literally */
-            if (rem >= 2) { s[pos] = '%'; s[pos+1] = *f; n = 2; }
-            break;
-        }
-        pos += (size_t)n;
-    }
-
-    s[pos] = '\0';
-    return pos;
 }

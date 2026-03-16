@@ -48,10 +48,8 @@ int     rmdir(const char *path);
 int     link(const char *oldpath, const char *newpath);
 int     rename(const char *oldpath, const char *newpath);
 int     access(const char *path, int mode);
-int     faccessat(int dirfd, const char *path, int mode, int flags);
 int     symlink(const char *target, const char *linkpath);
 ssize_t readlink(const char *path, char *buf, size_t bufsiz);
-ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz);
 
 /* Time */
 unsigned int sleep(unsigned int seconds);
@@ -81,11 +79,18 @@ int     fsync(int fd);
 /* Wait (convenience wrapper) */
 pid_t   wait(int *status);
 
-/* getopt — command-line option parsing */
+/* *at-style filesystem calls */
+int     faccessat(int dirfd, const char *path, int mode, int flags);
+ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz);
+
+/* ioctl */
+int     ioctl(int fd, unsigned long request, ...);
+
+/* getopt */
 extern char *optarg;
 extern int   optind;
 extern int   opterr;
 extern int   optopt;
-int getopt(int argc, char *const argv[], const char *optstring);
+int     getopt(int argc, char *const argv[], const char *optstring);
 
 #endif /* _UNISTD_H */

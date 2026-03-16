@@ -24,5 +24,6 @@
 | **API** | An (incompatible) API change |
 | **DEV** | Development tool or utility |
 | **REV** | Revert an earlier commit |
+| **MERGE**| Merging branches/histories |
 
 > **Note:** Breaking changes should be indicated with an exclamation mark before the colon (e.g., `ENH!: some breaking enhancement`).

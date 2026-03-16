@@ -45,9 +45,9 @@ static char *run_cmdsub(const char *cmd, char *dst, char *end) {
         sigaction(SIGTSTP, &sa, NULL);
         sigaction(SIGCHLD, &sa, NULL);
         /* Execute via the shell itself */
-        static char cmdbuf[MAX_LINE];
-        strncpy(cmdbuf, cmd, MAX_LINE - 1);
-        cmdbuf[MAX_LINE - 1] = '\0';
+        static char cmdbuf[256];
+        strncpy(cmdbuf, cmd, 255);
+        cmdbuf[255] = '\0';
         execute_line(cmdbuf);
         _exit(last_exit_status);
     }
@@ -71,9 +71,9 @@ static char *run_cmdsub(const char *cmd, char *dst, char *end) {
 /* $(cmd): src points past '('. Find matching ')' and run. */
 static char *expand_cmdsub(char **srcp, char *dst, char *end) {
     char *src = *srcp;
-    static char cs_buf[MAX_LINE];
+    static char cs_buf[512];
     int ci = 0, depth = 1;
-    while (*src && depth > 0 && ci < MAX_LINE - 1) {
+    while (*src && depth > 0 && ci < 511) {
         if (*src == '(') depth++;
         else if (*src == ')') { depth--; if (depth == 0) { src++; break; } }
         cs_buf[ci++] = *src++;
@@ -138,30 +138,6 @@ static long arith_factor(void) {
     }
     if (*arith_p >= '0' && *arith_p <= '9') {
         long v = 0;
-        if (*arith_p == '0' && (arith_p[1] == 'x' || arith_p[1] == 'X')) {
-            /* Hexadecimal: 0x... */
-            arith_p += 2;
-            while ((*arith_p >= '0' && *arith_p <= '9') ||
-                   (*arith_p >= 'a' && *arith_p <= 'f') ||
-                   (*arith_p >= 'A' && *arith_p <= 'F')) {
-                if (*arith_p >= '0' && *arith_p <= '9')
-                    v = v * 16 + (*arith_p - '0');
-                else if (*arith_p >= 'a' && *arith_p <= 'f')
-                    v = v * 16 + (*arith_p - 'a' + 10);
-                else
-                    v = v * 16 + (*arith_p - 'A' + 10);
-                arith_p++;
-            }
-            return v;
-        }
-        if (*arith_p == '0' && arith_p[1] >= '0' && arith_p[1] <= '7') {
-            /* Octal: 0... */
-            arith_p++;
-            while (*arith_p >= '0' && *arith_p <= '7')
-                v = v * 8 + (*arith_p++ - '0');
-            return v;
-        }
-        /* Decimal */
         while (*arith_p >= '0' && *arith_p <= '9')
             v = v * 10 + (*arith_p++ - '0');
         return v;
@@ -264,28 +240,8 @@ static long arith_bitor(void) {
     return v;
 }
 
-static long arith_logand(void) {
-    long v = arith_bitor();
-    while (1) {
-        arith_skip_ws();
-        if (arith_p[0] == '&' && arith_p[1] == '&') { arith_p += 2; long r = arith_bitor(); v = (v && r); }
-        else break;
-    }
-    return v;
-}
-
-static long arith_logor(void) {
-    long v = arith_logand();
-    while (1) {
-        arith_skip_ws();
-        if (arith_p[0] == '|' && arith_p[1] == '|') { arith_p += 2; long r = arith_logand(); v = (v || r); }
-        else break;
-    }
-    return v;
-}
-
 static long arith_ternary(void) {
-    long v = arith_logor();
+    long v = arith_bitor();
     arith_skip_ws();
     if (*arith_p == '?') {
         arith_p++;
@@ -411,14 +367,11 @@ static char *expand_braces(char **srcp, char *dst, char *end) {
                 dst = emit_str(dst, end, operand);
             return dst;
         } else if (op2 == '?') {
-            /* ${VAR:?message} — POSIX: exit non-interactive shell */
-            if (is_empty) {
+            /* ${VAR:?message} */
+            if (is_empty)
                 dprintf(2, "sbush: %s: %s\n", name,
                         oi ? operand : "parameter null or not set");
-                last_exit_status = 1;
-                if (!shell_interactive)
-                    _exit(1);
-            } else
+            else
                 dst = emit_str(dst, end, val);
             return dst;
         }
@@ -494,7 +447,7 @@ static char *expand_braces(char **srcp, char *dst, char *end) {
     return dst;
 }
 
-void expand_vars(char *line) {
+static void expand_vars(char *line) {
     char *src = line;
     char *dst = expand_buf;
     char *end = expand_buf + MAX_LINE - 1;
@@ -504,14 +457,6 @@ void expand_vars(char *line) {
         if (*src == '\'' ) {
             in_sq = !in_sq;
             *dst++ = *src++;
-        } else if (*src == '\\' && !in_sq) {
-            char next = *(src + 1);
-            if (next == '$' || next == '`' || next == '\\') {
-                src++;           /* skip backslash */
-                *dst++ = *src++; /* copy escaped char literally */
-            } else {
-                *dst++ = *src++; /* copy backslash literally */
-            }
         } else if (*src == '$' && !in_sq) {
             src++;
             if (*src == '?') {
@@ -534,17 +479,6 @@ void expand_vars(char *line) {
                 char tmp[16];
                 itoa((int)getpid(), tmp, 10);
                 for (char *v = tmp; *v && dst < end; )
-                    *dst++ = *v++;
-            } else if (*src == '-') {
-                /* $- -- current option flags */
-                src++;
-                char flags[8];
-                int fi = 0;
-                if (opt_errexit) flags[fi++] = 'e';
-                if (opt_xtrace)  flags[fi++] = 'x';
-                if (opt_nounset) flags[fi++] = 'u';
-                flags[fi] = '\0';
-                for (char *v = flags; *v && dst < end; )
                     *dst++ = *v++;
             } else if (*src == '#') {
                 /* $# -- positional parameter count */
@@ -597,18 +531,15 @@ void expand_vars(char *line) {
                 if (val) {
                     while (*val && dst < end)
                         *dst++ = *val++;
-                } else if (opt_nounset && i > 0) {
-                    dprintf(2, "sbush: %s: unbound variable\n", name);
-                    last_exit_status = 1;
                 }
             }
         } else if (*src == '`' && !in_sq) {
             /* `cmd` — backtick command substitution */
             src++; /* skip opening backtick */
             /* Find closing backtick and extract command */
-            static char bt_cmd[MAX_LINE];
+            static char bt_cmd[256];
             int bi = 0;
-            while (*src && *src != '`' && bi < MAX_LINE - 1)
+            while (*src && *src != '`' && bi < 255)
                 bt_cmd[bi++] = *src++;
             bt_cmd[bi] = '\0';
             if (*src == '`') src++;
@@ -639,7 +570,6 @@ void expand_vars(char *line) {
 
 static int tokenize(char *str, struct command *cmd) {
     cmd->argc = 0;
-    memset(cmd->quoted, 0, sizeof(cmd->quoted));
     char *p = str;
 
     while (*p) {
@@ -656,35 +586,34 @@ static int tokenize(char *str, struct command *cmd) {
             char *w = p;  /* in-place de-escape */
             while (*p && *p != '"') {
                 if (*p == '\\' && *(p + 1)) {
-                    p++;
-                    /* POSIX: only \\, \$, \`, \", and \<newline> are special
-                     * inside double quotes. All other backslashes are literal. */
-                    switch (*p) {
-                        case '\\': *w++ = '\\'; break;
-                        case '"':  *w++ = '"';  break;
-                        case '$':  *w++ = '$';  break;
-                        case '`':  *w++ = '`';  break;
-                        default:   *w++ = '\\'; *w++ = *p; break;
+                    /* POSIX: inside double quotes, only \\ \" \$ \` \newline are special */
+                    char next = *(p + 1);
+                    if (next == '\\' || next == '"' || next == '$' || next == '`' || next == '\n') {
+                        p++;
+                        if (*p == '\n') { p++; continue; } /* line continuation */
+                        *w++ = *p;
+                        p++;
+                    } else {
+                        *w++ = *p++;
                     }
-                    p++;
                 } else {
                     *w++ = *p++;
                 }
             }
+            /* p still points at the closing " (or \0 if unterminated).
+             * Advance past it before null-terminating so we don't lose
+             * whatever follows (e.g. " > file" after a quoted arg). */
             if (*p == '"') p++;
             *w = '\0';
-            cmd->quoted[cmd->argc] = 1; /* mark as quoted — suppress glob */
             cmd->argv[cmd->argc++] = start;
         } else if (*p == '\'') {
             p++;
-            cmd->quoted[cmd->argc] = 1; /* mark as quoted — suppress glob */
             cmd->argv[cmd->argc++] = p;
             while (*p && *p != '\'')
                 p++;
             if (*p == '\'')
                 *p++ = '\0';
         } else {
-            cmd->quoted[cmd->argc] = 0; /* unquoted — allow glob */
             cmd->argv[cmd->argc++] = p;
             while (*p && *p != ' ' && *p != '\t')
                 p++;
@@ -878,9 +807,7 @@ static void glob_expand_token(const char *token, struct command *cmd) {
 static void glob_expand_cmd(struct command *cmd) {
     int has_glob = 0;
     for (int i = 0; i < cmd->argc; i++) {
-        /* POSIX 2.6.6: only expand globs on unquoted tokens */
-        if (!cmd->quoted[i] &&
-            (strchr(cmd->argv[i], '*') || strchr(cmd->argv[i], '?') || strchr(cmd->argv[i], '['))) {
+        if (strchr(cmd->argv[i], '*') || strchr(cmd->argv[i], '?') || strchr(cmd->argv[i], '[')) {
             has_glob = 1;
             break;
         }
@@ -890,25 +817,13 @@ static void glob_expand_cmd(struct command *cmd) {
     glob_strbuf_pos = 0;
 
     static char *orig[MAX_ARGS];
-    static int  orig_quoted[MAX_ARGS];
     int norig = cmd->argc;
-    for (int i = 0; i < norig; i++) {
+    for (int i = 0; i < norig; i++)
         orig[i] = cmd->argv[i];
-        orig_quoted[i] = cmd->quoted[i];
-    }
 
     cmd->argc = 0;
-    for (int i = 0; i < norig; i++) {
-        if (orig_quoted[i]) {
-            /* Quoted token: add as-is without glob expansion */
-            if (cmd->argc < MAX_ARGS - 1) {
-                cmd->quoted[cmd->argc] = 1;
-                cmd->argv[cmd->argc++] = orig[i];
-            }
-        } else {
-            glob_expand_token(orig[i], cmd);
-        }
-    }
+    for (int i = 0; i < norig; i++)
+        glob_expand_token(orig[i], cmd);
 
     cmd->argv[cmd->argc] = NULL;
 }

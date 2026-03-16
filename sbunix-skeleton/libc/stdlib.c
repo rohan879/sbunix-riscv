@@ -7,6 +7,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <limits.h>
 
@@ -16,7 +17,9 @@
 
 /*
  * strtoul() — convert a string to an unsigned long.
- * Supports base 0 (auto-detect 0x/0 prefix), and bases 2–36.
+ * Supports base 0 (auto-detect 0x/0 prefix), and bases 2-36.
+ * Sets errno = ERANGE on overflow and returns ULONG_MAX.
+ * POSIX: a leading '-' negates the result (wraps unsigned).
  */
 unsigned long strtoul(const char *s, char **endptr, int base) {
     unsigned long result = 0;
@@ -28,7 +31,7 @@ unsigned long strtoul(const char *s, char **endptr, int base) {
            *s == '\r' || *s == '\f' || *s == '\v')
         s++;
 
-    /* Optional sign */
+    /* Optional sign — POSIX allows '-' for strtoul (negates result) */
     if (*s == '-') {
         neg = 1;
         s++;
@@ -51,8 +54,8 @@ unsigned long strtoul(const char *s, char **endptr, int base) {
         s += 2;
     }
 
-    unsigned long cutoff = ULONG_MAX / (unsigned long)base;
-    int cutlim = (int)(ULONG_MAX % (unsigned long)base);
+    const unsigned long cutoff = ULONG_MAX / (unsigned long)base;
+    const unsigned long cutlim = ULONG_MAX % (unsigned long)base;
 
     const char *start = s;
     while (*s) {
@@ -69,9 +72,9 @@ unsigned long strtoul(const char *s, char **endptr, int base) {
         if (digit >= base)
             break;
 
-        if (result > cutoff || (result == cutoff && digit > cutlim)) {
+        if (result > cutoff || (result == cutoff && (unsigned long)digit > cutlim))
             overflow = 1;
-        }
+
         result = result * base + digit;
         s++;
     }
@@ -101,39 +104,152 @@ long strtol(const char *s, char **endptr, int base) {
         s++;
     }
 
-    /* Use strtoul for digit parsing but suppress its errno so we can
-     * apply signed range checks ourselves */
+    /* Save errno; strtoul may set ERANGE for its own overflow */
     int saved_errno = errno;
     errno = 0;
     unsigned long val = strtoul(s, endptr, base);
+
     if (errno == ERANGE) {
-        /* strtoul already overflowed unsigned range */
+        /* strtoul itself overflowed — clamp to LONG_MAX / LONG_MIN */
         return neg ? LONG_MIN : LONG_MAX;
     }
-    errno = saved_errno;
 
     if (neg) {
+        /* The most negative value: -(unsigned long)LONG_MIN == LONG_MIN */
         if (val > (unsigned long)LONG_MAX + 1UL) {
             errno = ERANGE;
             return LONG_MIN;
         }
+        errno = saved_errno;
         return -(long)val;
     } else {
         if (val > (unsigned long)LONG_MAX) {
             errno = ERANGE;
             return LONG_MAX;
         }
+        errno = saved_errno;
         return (long)val;
     }
 }
 
-/* On LP64 (rv64), long and long long are both 64-bit. */
-long long strtoll(const char *s, char **endptr, int base) {
-    return (long long)strtol(s, endptr, base);
+/*
+ * strtoull() — convert a string to an unsigned long long.
+ * Supports base 0 (auto-detect 0x/0 prefix), and bases 2-36.
+ * Sets errno = ERANGE on overflow and returns ULLONG_MAX.
+ * POSIX: a leading '-' negates the result (wraps unsigned).
+ */
+unsigned long long strtoull(const char *s, char **endptr, int base) {
+    unsigned long long result = 0;
+    int neg = 0;
+    int overflow = 0;
+
+    /* Skip leading whitespace */
+    while (*s == ' ' || *s == '\t' || *s == '\n' ||
+           *s == '\r' || *s == '\f' || *s == '\v')
+        s++;
+
+    /* Optional sign — POSIX allows '-' for strtoull (negates result) */
+    if (*s == '-') {
+        neg = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+
+    /* Auto-detect base */
+    if (base == 0) {
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+            base = 16;
+            s += 2;
+        } else if (s[0] == '0') {
+            base = 8;
+            s++;
+        } else {
+            base = 10;
+        }
+    } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+    }
+
+    const unsigned long long cutoff = ULLONG_MAX / (unsigned long long)base;
+    const unsigned long long cutlim = ULLONG_MAX % (unsigned long long)base;
+
+    const char *start = s;
+    while (*s) {
+        int digit;
+        if (*s >= '0' && *s <= '9')
+            digit = *s - '0';
+        else if (*s >= 'a' && *s <= 'z')
+            digit = *s - 'a' + 10;
+        else if (*s >= 'A' && *s <= 'Z')
+            digit = *s - 'A' + 10;
+        else
+            break;
+
+        if (digit >= base)
+            break;
+
+        if (result > cutoff || (result == cutoff && (unsigned long long)digit > cutlim))
+            overflow = 1;
+
+        result = result * base + digit;
+        s++;
+    }
+
+    if (endptr)
+        *endptr = (char *)(s == start ? start : s);
+
+    if (overflow) {
+        errno = ERANGE;
+        return ULLONG_MAX;
+    }
+
+    return neg ? (unsigned long long)(-(long long)result) : result;
 }
 
-unsigned long long strtoull(const char *s, char **endptr, int base) {
-    return (unsigned long long)strtoul(s, endptr, base);
+/*
+ * strtoll() — convert a string to a long long.
+ * Sets errno = ERANGE on overflow and returns LLONG_MAX or LLONG_MIN.
+ */
+long long strtoll(const char *s, char **endptr, int base) {
+    /* Skip leading whitespace */
+    while (*s == ' ' || *s == '\t' || *s == '\n' ||
+           *s == '\r' || *s == '\f' || *s == '\v')
+        s++;
+
+    int neg = 0;
+    if (*s == '-') {
+        neg = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+
+    /* Save errno; strtoull may set ERANGE for its own overflow */
+    int saved_errno = errno;
+    errno = 0;
+    unsigned long long val = strtoull(s, endptr, base);
+
+    if (errno == ERANGE) {
+        /* strtoull itself overflowed — clamp to LLONG_MAX / LLONG_MIN */
+        return neg ? LLONG_MIN : LLONG_MAX;
+    }
+
+    if (neg) {
+        if (val > (unsigned long long)LLONG_MAX + 1ULL) {
+            errno = ERANGE;
+            return LLONG_MIN;
+        }
+        errno = saved_errno;
+        return -(long long)val;
+    } else {
+        if (val > (unsigned long long)LLONG_MAX) {
+            errno = ERANGE;
+            return LLONG_MAX;
+        }
+        errno = saved_errno;
+        return (long long)val;
+    }
 }
 
 int atoi(const char *s) {
@@ -211,11 +327,11 @@ void srand(unsigned int seed) {
  * ---------------------------------------------------------------------- */
 
 int abs(int x) {
-    return (int)(x < 0 ? -(unsigned int)x : (unsigned int)x);
+    return x < 0 ? -x : x;
 }
 
 long labs(long x) {
-    return (long)(x < 0 ? -(unsigned long)x : (unsigned long)x);
+    return x < 0 ? -x : x;
 }
 
 /* -----------------------------------------------------------------------
@@ -313,129 +429,6 @@ void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
     return (void *)0;
 }
 
-/* -----------------------------------------------------------------------
- * realpath() — resolve a pathname to an absolute path.
- * Handles . and .. components.  Does not follow symlinks beyond what
- * the kernel already resolves on stat().
- * ---------------------------------------------------------------------- */
-
-#include <sys/stat.h>
-#include <limits.h>
-#include <errno.h>
-
-char *realpath(const char *path, char *resolved_path) {
-    if (!path || !*path) {
-        errno = 22; /* EINVAL */
-        return (void *)0;
-    }
-
-    static char buf[PATH_MAX];
-    char *out = resolved_path ? resolved_path : buf;
-    char work[PATH_MAX];
-
-    /* Start with absolute path */
-    if (path[0] != '/') {
-        if (!getcwd(out, PATH_MAX))
-            return (void *)0;
-        size_t cwdlen = strlen(out);
-        if (cwdlen + 1 + strlen(path) >= PATH_MAX) {
-            errno = 36; /* ENAMETOOLONG */
-            return (void *)0;
-        }
-        out[cwdlen] = '/';
-        strcpy(out + cwdlen + 1, path);
-    } else {
-        if (strlen(path) >= PATH_MAX) {
-            errno = 36;
-            return (void *)0;
-        }
-        strcpy(out, path);
-    }
-
-    /* Normalize: resolve . and .. */
-    strcpy(work, out);
-    char *components[256];
-    int ncomp = 0;
-
-    char *p = work;
-    while (*p) {
-        while (*p == '/') p++;
-        if (!*p) break;
-        char *start = p;
-        while (*p && *p != '/') p++;
-        if (*p) *p++ = '\0';
-
-        if (strcmp(start, ".") == 0) {
-            continue;
-        } else if (strcmp(start, "..") == 0) {
-            if (ncomp > 0) ncomp--;
-        } else {
-            if (ncomp < 256)
-                components[ncomp++] = start;
-        }
-    }
-
-    /* Rebuild path with length tracking to prevent overflow */
-    out[0] = '/';
-    out[1] = '\0';
-    size_t outlen = 1;
-    for (int i = 0; i < ncomp; i++) {
-        size_t clen = strlen(components[i]);
-        size_t need = (i > 0 ? 1 : 0) + clen; /* separator + component */
-        if (outlen + need >= PATH_MAX) {
-            errno = 36; /* ENAMETOOLONG */
-            return (void *)0;
-        }
-        if (i > 0) {
-            out[outlen++] = '/';
-        } else {
-            outlen = 1; /* overwrite NUL after initial / */
-        }
-        memcpy(out + outlen, components[i], clen);
-        outlen += clen;
-        out[outlen] = '\0';
-    }
-
-    /* Verify the path exists */
-    struct stat st;
-    if (stat(out, &st) < 0)
-        return (void *)0;
-
-    return out;
-}
-
-/* -----------------------------------------------------------------------
- * system() — execute a command via the shell.
- * ---------------------------------------------------------------------- */
-
-#include <sys/wait.h>
-
-int system(const char *command) {
-    if (!command)
-        return 1; /* shell is available */
-
-    pid_t pid = fork();
-    if (pid < 0)
-        return -1;
-
-    if (pid == 0) {
-        /* child */
-        char *argv[4];
-        argv[0] = "sh";
-        argv[1] = "-c";
-        argv[2] = (char *)command;
-        argv[3] = (void *)0;
-        execve("/bin/sh", argv, environ);
-        _exit(127);
-    }
-
-    /* parent */
-    int status = 0;
-    if (waitpid(pid, &status, 0) < 0)
-        return -1;
-    return status;
-}
-
 /*
  * abort() — terminate the process abnormally.
  */
@@ -488,40 +481,31 @@ int setenv(const char *name, const char *value, int overwrite) {
         return -1;
     env_ensure_init();
     size_t nlen = strlen(name);
-    size_t vlen = strlen(value);
-
-    /* Allocate a new "NAME=VALUE" string */
-    char *entry = (char *)malloc(nlen + 1 + vlen + 1);
-    if (!entry)
-        return -1;
-    memcpy(entry, name, nlen);
-    entry[nlen] = '=';
-    memcpy(entry + nlen + 1, value, vlen);
-    entry[nlen + 1 + vlen] = '\0';
-
+    size_t vlen = value ? strlen(value) : 0;
     /* find existing */
     for (int i = 0; environ[i]; i++) {
         if (strncmp(environ[i], name, nlen) == 0 && environ[i][nlen] == '=') {
-            if (!overwrite) {
-                free(entry);
-                return 0;
-            }
-            /* Free the old malloc'd entry to avoid a leak.
-             * Only free if it points into heap (not the original envp). */
-            char *old = environ[i];
-            environ[i] = entry;
-            free(old);
+            if (!overwrite) return 0;
+            /* build new entry */
+            char *buf = malloc(nlen + 1 + vlen + 1);
+            if (!buf) return -1;
+            strcpy(buf, name);
+            strcat(buf, "=");
+            if (value) strcat(buf, value);
+            environ[i] = buf;
             return 0;
         }
     }
     /* add new */
     int count = 0;
     while (environ[count]) count++;
-    if (count >= MAX_ENV) {
-        free(entry);
-        return -1;
-    }
-    environ[count] = entry;
+    if (count >= MAX_ENV) return -1;
+    char *buf = malloc(nlen + 1 + vlen + 1);
+    if (!buf) return -1;
+    strcpy(buf, name);
+    strcat(buf, "=");
+    if (value) strcat(buf, value);
+    environ[count] = buf;
     environ[count + 1] = (void *)0;
     return 0;
 }
@@ -544,114 +528,6 @@ int unsetenv(const char *name) {
     return 0;
 }
 
-/* -----------------------------------------------------------------------
- * Temporary file creation: mkstemp / mktemp
- * ---------------------------------------------------------------------- */
-
-#include <fcntl.h>
-#include <errno.h>
-
-/* Forward declarations to avoid pulling in all of syscall.h (which
- * conflicts with sys/wait.h macros included later in this file). */
-#ifndef SYS_getrandom
-#define SYS_getrandom 278
-#endif
-long syscall(long num, ...);
-
-/*
- * _mktemp_fill() — fill trailing XXXXXX in template with pseudo-random
- * characters.  Uses SYS_getrandom if available, falls back to a mix of
- * getpid() and a counter.
- */
-static int _mktemp_fill(char *tmpl) {
-    static const char chars[] =
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    int len = strlen(tmpl);
-    if (len < 6) {
-        errno = EINVAL;
-        return -1;
-    }
-    /* Verify trailing XXXXXX */
-    for (int i = len - 6; i < len; i++) {
-        if (tmpl[i] != 'X') {
-            errno = EINVAL;
-            return -1;
-        }
-    }
-
-    /* Try to get randomness from the kernel */
-    unsigned char randbuf[6];
-    long ret = syscall(SYS_getrandom, randbuf, 6, 0);
-    if (ret == 6) {
-        for (int i = 0; i < 6; i++)
-            tmpl[len - 6 + i] = chars[randbuf[i] % 62];
-    } else {
-        /* Fallback: mix pid and a counter */
-        static unsigned int counter = 0;
-        unsigned int seed = (unsigned int)getpid() * 31u + counter++;
-        for (int i = 0; i < 6; i++) {
-            seed = seed * 1103515245u + 12345u;
-            tmpl[len - 6 + i] = chars[(seed >> 16) % 62];
-        }
-    }
-    return 0;
-}
-
-/*
- * mkstemp() — create and open a unique temporary file.
- * template must end with "XXXXXX".  Returns an open fd or -1.
- */
-int mkstemp(char *tmpl) {
-    for (int attempts = 0; attempts < 100; attempts++) {
-        /* Save the template suffix in case we need to retry */
-        char saved[7];
-        int len = strlen(tmpl);
-        if (len < 6) { errno = EINVAL; return -1; }
-        memcpy(saved, tmpl + len - 6, 6);
-        saved[6] = '\0';
-
-        if (_mktemp_fill(tmpl) < 0)
-            return -1;
-
-        int fd = open(tmpl, O_RDWR | O_CREAT | O_EXCL, 0600);
-        if (fd >= 0)
-            return fd;
-
-        if (errno != EEXIST)
-            return -1;
-
-        /* Restore XXXXXX for next attempt */
-        memcpy(tmpl + len - 6, saved, 6);
-    }
-
-    errno = EEXIST;
-    return -1;
-}
-
-/*
- * mktemp() — generate a unique temporary filename without opening it.
- * template must end with "XXXXXX".  Returns template or empty string on error.
- */
-char *mktemp(char *tmpl) {
-    if (_mktemp_fill(tmpl) < 0) {
-        tmpl[0] = '\0';
-        return tmpl;
-    }
-    return tmpl;
-}
-
-/*
- * remove() — delete a file or directory.
- * Try unlink first; if that fails with EISDIR, try rmdir.
- */
-int remove(const char *pathname) {
-    if (unlink(pathname) == 0)
-        return 0;
-    if (errno == EISDIR)
-        return rmdir(pathname);
-    return -1;
-}
-
 int putenv(char *string) {
     if (!string) return -1;
     env_ensure_init();
@@ -672,4 +548,240 @@ int putenv(char *string) {
     environ[count] = string;
     environ[count + 1] = (void *)0;
     return 0;
+}
+
+/*
+ * system() — execute a shell command.
+ */
+int system(const char *command) {
+    if (!command) return 1; /* shell available */
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char *argv[4];
+        argv[0] = "sh";
+        argv[1] = "-c";
+        argv[2] = (char *)command;
+        argv[3] = (void *)0;
+        execve("/bin/sh", argv, environ);
+        _exit(127);
+    }
+    int status;
+    while (waitpid(pid, &status, 0) < 0) ;
+    return status;
+}
+
+/*
+ * mkstemp() — create a temporary file with a unique name.
+ */
+int mkstemp(char *tmpl) {
+    int len = strlen(tmpl);
+    if (len < 6) return -1;
+    char *suffix = tmpl + len - 6;
+    static unsigned int counter = 0;
+    for (int tries = 0; tries < 100; tries++) {
+        unsigned int val = counter++ ^ (unsigned int)(long)tmpl;
+        for (int i = 0; i < 6; i++) {
+            int d = val % 36;
+            suffix[i] = d < 10 ? ('0' + d) : ('a' + d - 10);
+            val /= 36;
+        }
+        int fd = open(tmpl, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) return fd;
+    }
+    return -1;
+}
+
+/*
+ * remove() — remove a file or directory.
+ */
+int remove(const char *path) {
+    if (unlink(path) == 0) return 0;
+    return rmdir(path);
+}
+
+/*
+ * realpath() — resolve a path to its canonical, absolute form.
+ *
+ * Resolves:
+ *   - relative paths (prepends cwd)
+ *   - "." and ".." components
+ *   - symbolic links (via readlink)
+ *
+ * If resolved_path is NULL a static buffer is used.
+ * Returns NULL on error (sets errno).
+ */
+char *realpath(const char *path, char *resolved_path) {
+    static char static_buf[PATH_MAX];
+    char work[PATH_MAX];   /* working copy we walk through */
+    char result[PATH_MAX]; /* canonical result being built */
+    int  rlen = 0;         /* length of result so far */
+    int  symlinks = 0;     /* symlink recursion counter */
+
+    if (!path || !*path) {
+        errno = EINVAL;
+        return (void *)0;
+    }
+
+    if (!resolved_path)
+        resolved_path = static_buf;
+
+    /* Build an absolute working path */
+    if (path[0] != '/') {
+        if (!getcwd(work, sizeof(work)))
+            return (void *)0;
+        int wlen = strlen(work);
+        if (wlen + 1 + (int)strlen(path) + 1 > (int)sizeof(work)) {
+            errno = ENAMETOOLONG;
+            return (void *)0;
+        }
+        work[wlen] = '/';
+        strcpy(work + wlen + 1, path);
+    } else {
+        if ((int)strlen(path) >= (int)sizeof(work)) {
+            errno = ENAMETOOLONG;
+            return (void *)0;
+        }
+        strcpy(work, path);
+    }
+
+    /* result starts as "/" */
+    result[0] = '/';
+    result[1] = '\0';
+    rlen = 1;
+
+    char *p = work;
+    while (*p) {
+        /* Skip slashes */
+        while (*p == '/')
+            p++;
+        if (!*p)
+            break;
+
+        /* Extract the next component */
+        char *seg = p;
+        while (*p && *p != '/')
+            p++;
+        int slen = (int)(p - seg);
+
+        /* "." — skip */
+        if (slen == 1 && seg[0] == '.')
+            continue;
+
+        /* ".." — go up one directory */
+        if (slen == 2 && seg[0] == '.' && seg[1] == '.') {
+            /* Strip trailing component from result */
+            if (rlen > 1) {
+                rlen--; /* step back over trailing char */
+                while (rlen > 1 && result[rlen - 1] != '/')
+                    rlen--;
+            }
+            result[rlen] = '\0';
+            continue;
+        }
+
+        /* Append '/' if result doesn't already end with one */
+        if (rlen > 0 && result[rlen - 1] != '/') {
+            if (rlen + 1 >= (int)sizeof(result)) {
+                errno = ENAMETOOLONG;
+                return (void *)0;
+            }
+            result[rlen++] = '/';
+            result[rlen] = '\0';
+        }
+
+        /* Append the component */
+        if (rlen + slen >= (int)sizeof(result)) {
+            errno = ENAMETOOLONG;
+            return (void *)0;
+        }
+        memcpy(result + rlen, seg, slen);
+        rlen += slen;
+        result[rlen] = '\0';
+
+        /* Check if this path is a symlink */
+        char link_buf[PATH_MAX];
+        ssize_t llen = readlink(result, link_buf, sizeof(link_buf) - 1);
+        if (llen >= 0) {
+            /* It is a symlink */
+            if (++symlinks > 40) {
+                errno = ELOOP;
+                return (void *)0;
+            }
+            link_buf[llen] = '\0';
+
+            /* Build new working path: resolved_link + remaining */
+            char newwork[PATH_MAX];
+            int remaining_len = (int)strlen(p);
+
+            if (link_buf[0] == '/') {
+                /* Absolute symlink: restart from root */
+                if (llen + 1 + remaining_len + 1 > (int)sizeof(newwork)) {
+                    errno = ENAMETOOLONG;
+                    return (void *)0;
+                }
+                memcpy(newwork, link_buf, llen);
+                if (remaining_len > 0) {
+                    newwork[llen] = '/';
+                    memcpy(newwork + llen + 1, p, remaining_len + 1);
+                } else {
+                    newwork[llen] = '\0';
+                }
+                /* Reset result to root */
+                result[0] = '/';
+                result[1] = '\0';
+                rlen = 1;
+            } else {
+                /* Relative symlink: resolve relative to parent dir */
+                /* Strip the component we just appended from result */
+                if (rlen > 1) {
+                    rlen -= slen;
+                    result[rlen] = '\0';
+                }
+                /* Remove trailing '/' if result isn't just "/" */
+                if (rlen > 1 && result[rlen - 1] == '/') {
+                    rlen--;
+                    result[rlen] = '\0';
+                }
+
+                int parent_rlen = rlen; /* save for absolute prefix later */
+                (void)parent_rlen;
+
+                if (llen + 1 + remaining_len + 1 > (int)sizeof(newwork)) {
+                    errno = ENAMETOOLONG;
+                    return (void *)0;
+                }
+                memcpy(newwork, link_buf, llen);
+                if (remaining_len > 0) {
+                    newwork[llen] = '/';
+                    memcpy(newwork + llen + 1, p, remaining_len + 1);
+                } else {
+                    newwork[llen] = '\0';
+                }
+            }
+
+            /* Continue parsing from newwork */
+            if ((int)strlen(newwork) >= (int)sizeof(work)) {
+                errno = ENAMETOOLONG;
+                return (void *)0;
+            }
+            strcpy(work, newwork);
+            p = work;
+        }
+        /* Not a symlink — continue with next component */
+    }
+
+    /* Remove trailing '/' unless the result is just "/" */
+    if (rlen > 1 && result[rlen - 1] == '/') {
+        rlen--;
+        result[rlen] = '\0';
+    }
+
+    if (rlen >= (int)sizeof(result)) {
+        errno = ENAMETOOLONG;
+        return (void *)0;
+    }
+
+    memcpy(resolved_path, result, rlen + 1);
+    return resolved_path;
 }

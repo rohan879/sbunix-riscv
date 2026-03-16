@@ -2,71 +2,120 @@
 #define _MATH_H
 
 /*
- * Minimal math library for SBUnix.
+ * math.h — soft-float math library for SBUnix libc (rv64imac, lp64).
  *
- * On rv64imac (no F/D extensions), all floating-point operations use
- * GCC's soft-float routines from libgcc.  The functions below are
- * implemented in normal C with double/float types.
+ * All functions use double arithmetic.  On rv64imac the compiler
+ * emits soft-float library calls which are resolved by libgcc.
  */
 
-/* Special value macros — use GCC builtins */
-#define HUGE_VAL     __builtin_huge_val()
-#define HUGE_VALF    __builtin_huge_valf()
-#define INFINITY     __builtin_inf()
-#define NAN          __builtin_nan("")
+/* -------------------------------------------------------------------
+ * Special-value macros (constructed via integer bit patterns)
+ * ------------------------------------------------------------------- */
 
-/* Classification macros */
-#define isnan(x)      __builtin_isnan(x)
-#define isinf(x)      __builtin_isinf(x)
-#define isfinite(x)   __builtin_isfinite(x)
-#define signbit(x)    __builtin_signbit(x)
+/* Positive infinity */
+static inline double __math_inf(void)
+{
+    union { double d; unsigned long long u; } _u;
+    _u.u = 0x7FF0000000000000ULL;
+    return _u.d;
+}
 
-/* fpclassify support */
-#define FP_NAN       0
-#define FP_INFINITE  1
-#define FP_ZERO      2
-#define FP_SUBNORMAL 3
-#define FP_NORMAL    4
-#define fpclassify(x) __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, \
-                                            FP_SUBNORMAL, FP_ZERO, (x))
+/* Quiet NaN */
+static inline double __math_nan(void)
+{
+    union { double d; unsigned long long u; } _u;
+    _u.u = 0x7FF8000000000000ULL;
+    return _u.d;
+}
 
-/* Basic functions */
+/* Largest finite double */
+static inline double __math_huge_val(void)
+{
+    union { double d; unsigned long long u; } _u;
+    _u.u = 0x7FF0000000000000ULL;
+    return _u.d;
+}
+
+#define INFINITY  __math_inf()
+#define NAN       __math_nan()
+#define HUGE_VAL  __math_huge_val()
+
+#define M_PI      3.14159265358979323846
+#define M_PI_2    1.57079632679489661923
+#define M_PI_4    0.78539816339744830962
+#define M_E       2.71828182845904523536
+#define M_LN2     0.69314718055994530942
+#define M_LN10    2.30258509299404568402
+#define M_LOG2E   1.44269504088896340736
+#define M_LOG10E  0.43429448190325182765
+#define M_SQRT2   1.41421356237309504880
+
+/* -------------------------------------------------------------------
+ * Classification
+ * ------------------------------------------------------------------- */
+
+int    __math_isnan(double x);
+int    __math_isinf(double x);
+int    __math_isfinite(double x);
+
+#define isnan(x)      __math_isnan(x)
+#define isinf(x)      __math_isinf(x)
+#define isfinite(x)   __math_isfinite(x)
+
+/* -------------------------------------------------------------------
+ * Basic operations
+ * ------------------------------------------------------------------- */
+
 double fabs(double x);
-double floor(double x);
-double ceil(double x);
 double fmod(double x, double y);
+double copysign(double x, double y);
+double fmax(double x, double y);
+double fmin(double x, double y);
+
+/* -------------------------------------------------------------------
+ * Rounding
+ * ------------------------------------------------------------------- */
+
+double ceil(double x);
+double floor(double x);
+double round(double x);
+double trunc(double x);
+
+/* -------------------------------------------------------------------
+ * Decomposition
+ * ------------------------------------------------------------------- */
+
+double frexp(double x, int *exp);
+double ldexp(double x, int n);
+double modf(double x, double *iptr);
+
+/* -------------------------------------------------------------------
+ * Power / root / exponential / logarithm
+ * ------------------------------------------------------------------- */
+
 double sqrt(double x);
 double pow(double base, double exponent);
+double exp(double x);
 double log(double x);
 double log10(double x);
 double log2(double x);
-double exp(double x);
-double frexp(double x, int *exp);
-double ldexp(double x, int exp);
-double modf(double x, double *iptr);
-double round(double x);
-double trunc(double x);
-double copysign(double x, double y);
-double scalbn(double x, int n);
 
-/* Float versions */
-float fabsf(float x);
-float floorf(float x);
-float ceilf(float x);
-float sqrtf(float x);
-float fmodf(float x, float y);
-float roundf(float x);
-float truncf(float x);
-float copysignf(float x, float y);
+/* -------------------------------------------------------------------
+ * Trigonometric
+ * ------------------------------------------------------------------- */
 
-/* Trigonometric functions (basic approximations) */
 double sin(double x);
 double cos(double x);
 double tan(double x);
+double asin(double x);
+double acos(double x);
 double atan(double x);
 double atan2(double y, double x);
 
-/* Hyperbolic (stubs for link compatibility) */
+/* -------------------------------------------------------------------
+ * Hyperbolic
+ * ------------------------------------------------------------------- */
+
 double sinh(double x);
 double cosh(double x);
 double tanh(double x);

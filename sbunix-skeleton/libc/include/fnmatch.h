@@ -1,11 +1,10 @@
 #ifndef _FNMATCH_H
 #define _FNMATCH_H
 
-/* Flags for fnmatch() */
-#define FNM_PATHNAME  (1 << 0)  /* * and ? do not match / */
-#define FNM_PERIOD    (1 << 1)  /* leading . must be matched explicitly */
-#define FNM_NOESCAPE  (1 << 2)  /* disable backslash escaping */
-#define FNM_NOMATCH   1         /* return value: no match */
+#define FNM_NOMATCH  1
+#define FNM_PATHNAME 0x01
+#define FNM_NOESCAPE 0x02
+#define FNM_PERIOD   0x04
 
 int fnmatch(const char *pattern, const char *string, int flags);
 
