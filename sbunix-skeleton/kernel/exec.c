@@ -76,6 +76,21 @@ int exec(char *path) {
             if (phdr->p_flags & 0x1) pte_flags |= PTE_X;  /* PF_X */
             if(uvmalloc(pagetable, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz, pte_flags | PTE_W) == 0) goto bad;
             if(copyout(pagetable, phdr->p_vaddr, elf_data + phdr->p_offset, phdr->p_filesz) < 0) goto bad;
+
+            /* Remove PTE_W from read-only segments (e.g., text) after loading.
+             * This prevents text pages from being COW-marked during fork,
+             * which would allow COW resolution to make text writable and
+             * potentially corrupt code. */
+            if (!(phdr->p_flags & 0x2)) { /* PF_W not set — read-only segment */
+                uint64_t seg_start = PGROUNDDOWN(phdr->p_vaddr);
+                uint64_t seg_end_pg = PGROUNDUP(phdr->p_vaddr + phdr->p_memsz);
+                for (uint64_t a = seg_start; a < seg_end_pg; a += PAGE_SIZE) {
+                    pte_t *ppte = walk(pagetable, a, 0);
+                    if (ppte && (*ppte & PTE_V))
+                        *ppte = (*ppte & ~PTE_W);
+                }
+            }
+
             uint64_t seg_end = phdr->p_vaddr + phdr->p_memsz;
             if (seg_end > sz) sz = seg_end;
 
