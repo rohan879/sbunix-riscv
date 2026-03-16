@@ -7,6 +7,7 @@
 #define SYS_getcwd      17
 #define SYS_dup3        24
 #define SYS_chdir       49
+#define SYS_fchdir      50
 #define SYS_openat      56
 #define SYS_close       57
 #define SYS_pipe2       59

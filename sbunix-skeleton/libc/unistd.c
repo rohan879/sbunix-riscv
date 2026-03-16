@@ -349,10 +349,7 @@ int fchown(int fd, uid_t owner, gid_t group) {
 }
 
 int fchdir(int fd) {
-    /* Read path from fd — simplified: use /proc/self/fd if available */
-    (void)fd;
-    errno = ENOSYS;
-    return -1;
+    return (int)__syscall_ret(syscall(SYS_fchdir, fd));
 }
 
 unsigned int getpagesize(void) {

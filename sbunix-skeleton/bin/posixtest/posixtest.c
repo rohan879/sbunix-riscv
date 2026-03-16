@@ -741,6 +741,67 @@ static void test_realpath_extended(void) {
 }
 
 /* ===================================================================
+ * 24. fchdir — change directory by file descriptor
+ * =================================================================== */
+static void test_fchdir(void) {
+    /* Save original cwd */
+    char orig_cwd[256];
+    getcwd(orig_cwd, sizeof(orig_cwd));
+
+    /* Open /bin as a directory fd */
+    int fd = open("/bin", O_RDONLY);
+    CHECK("fchdir: open /bin", fd >= 0);
+    if (fd < 0) return;
+
+    /* fchdir to /bin */
+    int r = fchdir(fd);
+    CHECK("fchdir: returns 0", r == 0);
+
+    /* Verify cwd changed */
+    char new_cwd[256];
+    getcwd(new_cwd, sizeof(new_cwd));
+    CHECK("fchdir: cwd is /bin", strcmp(new_cwd, "/bin") == 0);
+    close(fd);
+
+    /* fchdir to /mnt */
+    fd = open("/mnt", O_RDONLY);
+    if (fd >= 0) {
+        r = fchdir(fd);
+        CHECK("fchdir: /mnt returns 0", r == 0);
+        getcwd(new_cwd, sizeof(new_cwd));
+        CHECK("fchdir: cwd is /mnt", strcmp(new_cwd, "/mnt") == 0);
+        close(fd);
+    }
+
+    /* fchdir with bad fd → EBADF */
+    errno = 0;
+    r = fchdir(999);
+    CHECK("fchdir: bad fd returns -1", r == -1);
+    CHECK("fchdir: bad fd errno EBADF", errno == 9);
+
+    /* fchdir on a regular file → ENOTDIR */
+    int ffd = open("/mnt/fchdir_tmp", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (ffd >= 0) {
+        write(ffd, "x", 1);
+        close(ffd);
+        ffd = open("/mnt/fchdir_tmp", O_RDONLY);
+        if (ffd >= 0) {
+            errno = 0;
+            r = fchdir(ffd);
+            CHECK("fchdir: file returns -1", r == -1);
+            CHECK("fchdir: file errno ENOTDIR", errno == 20);
+            close(ffd);
+        }
+        unlink("/mnt/fchdir_tmp");
+    }
+
+    /* Restore original directory */
+    chdir(orig_cwd);
+    getcwd(new_cwd, sizeof(new_cwd));
+    CHECK("fchdir: restored original cwd", strcmp(new_cwd, orig_cwd) == 0);
+}
+
+/* ===================================================================
  * main
  * =================================================================== */
 int main(void) {
@@ -768,6 +829,7 @@ int main(void) {
     test_glob_func();
     test_tmpfile();
     test_getopt();
+    test_fchdir();
 
     printf("=== posixtest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

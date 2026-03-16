@@ -1210,6 +1210,17 @@ static long sys_chdir_handler(struct trapframe *tf) {
     }
 }
 
+static long sys_fchdir_handler(struct trapframe *tf) {
+    int fd = (int)tf->a0;
+    struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
+    if (!f) return (long)-9; /* EBADF */
+    /* Use the stored path from the open file */
+    if (f->path[0] == '\0') return (long)-22; /* EINVAL — no path */
+    if (!vfs_is_dir(f->path)) return (long)-20; /* ENOTDIR */
+    memcpy(current_proc->cwd, f->path, sizeof(current_proc->cwd));
+    return (long)0;
+}
+
 static long sys_clone_handler(struct trapframe *tf) {
     (void)tf;
     pid_t child = sys_clone();
@@ -3101,6 +3112,7 @@ void syscall_init(void) {
     syscall_table[SYS_pipe2]           = sys_pipe2_handler;
     syscall_table[SYS_getcwd]          = sys_getcwd_handler;
     syscall_table[SYS_chdir]           = sys_chdir_handler;
+    syscall_table[SYS_fchdir]          = sys_fchdir_handler;
     syscall_table[SYS_clone]           = sys_clone_handler;
     syscall_table[SYS_execve]          = sys_execve_handler;
     syscall_table[SYS_wait4]           = sys_wait4_handler;
