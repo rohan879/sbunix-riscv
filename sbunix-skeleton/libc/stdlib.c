@@ -7,6 +7,9 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <limits.h>
 
 /* -----------------------------------------------------------------------
  * String-to-number conversions
@@ -14,19 +17,27 @@
 
 /*
  * strtoul() — convert a string to an unsigned long.
- * Supports base 0 (auto-detect 0x/0 prefix), and bases 2–36.
+ * Supports base 0 (auto-detect 0x/0 prefix), and bases 2-36.
+ * Sets errno = ERANGE on overflow and returns ULONG_MAX.
+ * POSIX: a leading '-' negates the result (wraps unsigned).
  */
 unsigned long strtoul(const char *s, char **endptr, int base) {
     unsigned long result = 0;
+    int neg = 0;
+    int overflow = 0;
 
     /* Skip leading whitespace */
     while (*s == ' ' || *s == '\t' || *s == '\n' ||
            *s == '\r' || *s == '\f' || *s == '\v')
         s++;
 
-    /* Optional sign (unsigned: '+' only) */
-    if (*s == '+')
+    /* Optional sign — POSIX allows '-' for strtoul (negates result) */
+    if (*s == '-') {
+        neg = 1;
         s++;
+    } else if (*s == '+') {
+        s++;
+    }
 
     /* Auto-detect base */
     if (base == 0) {
@@ -43,6 +54,9 @@ unsigned long strtoul(const char *s, char **endptr, int base) {
         s += 2;
     }
 
+    const unsigned long cutoff = ULONG_MAX / (unsigned long)base;
+    const unsigned long cutlim = ULONG_MAX % (unsigned long)base;
+
     const char *start = s;
     while (*s) {
         int digit;
@@ -58,6 +72,9 @@ unsigned long strtoul(const char *s, char **endptr, int base) {
         if (digit >= base)
             break;
 
+        if (result > cutoff || (result == cutoff && (unsigned long)digit > cutlim))
+            overflow = 1;
+
         result = result * base + digit;
         s++;
     }
@@ -65,7 +82,12 @@ unsigned long strtoul(const char *s, char **endptr, int base) {
     if (endptr)
         *endptr = (char *)(s == start ? start : s);
 
-    return result;
+    if (overflow) {
+        errno = ERANGE;
+        return ULONG_MAX;
+    }
+
+    return neg ? (unsigned long)(-(long)result) : result;
 }
 
 long strtol(const char *s, char **endptr, int base) {
@@ -82,8 +104,152 @@ long strtol(const char *s, char **endptr, int base) {
         s++;
     }
 
+    /* Save errno; strtoul may set ERANGE for its own overflow */
+    int saved_errno = errno;
+    errno = 0;
     unsigned long val = strtoul(s, endptr, base);
-    return neg ? -(long)val : (long)val;
+
+    if (errno == ERANGE) {
+        /* strtoul itself overflowed — clamp to LONG_MAX / LONG_MIN */
+        return neg ? LONG_MIN : LONG_MAX;
+    }
+
+    if (neg) {
+        /* The most negative value: -(unsigned long)LONG_MIN == LONG_MIN */
+        if (val > (unsigned long)LONG_MAX + 1UL) {
+            errno = ERANGE;
+            return LONG_MIN;
+        }
+        errno = saved_errno;
+        return -(long)val;
+    } else {
+        if (val > (unsigned long)LONG_MAX) {
+            errno = ERANGE;
+            return LONG_MAX;
+        }
+        errno = saved_errno;
+        return (long)val;
+    }
+}
+
+/*
+ * strtoull() — convert a string to an unsigned long long.
+ * Supports base 0 (auto-detect 0x/0 prefix), and bases 2-36.
+ * Sets errno = ERANGE on overflow and returns ULLONG_MAX.
+ * POSIX: a leading '-' negates the result (wraps unsigned).
+ */
+unsigned long long strtoull(const char *s, char **endptr, int base) {
+    unsigned long long result = 0;
+    int neg = 0;
+    int overflow = 0;
+
+    /* Skip leading whitespace */
+    while (*s == ' ' || *s == '\t' || *s == '\n' ||
+           *s == '\r' || *s == '\f' || *s == '\v')
+        s++;
+
+    /* Optional sign — POSIX allows '-' for strtoull (negates result) */
+    if (*s == '-') {
+        neg = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+
+    /* Auto-detect base */
+    if (base == 0) {
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+            base = 16;
+            s += 2;
+        } else if (s[0] == '0') {
+            base = 8;
+            s++;
+        } else {
+            base = 10;
+        }
+    } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+    }
+
+    const unsigned long long cutoff = ULLONG_MAX / (unsigned long long)base;
+    const unsigned long long cutlim = ULLONG_MAX % (unsigned long long)base;
+
+    const char *start = s;
+    while (*s) {
+        int digit;
+        if (*s >= '0' && *s <= '9')
+            digit = *s - '0';
+        else if (*s >= 'a' && *s <= 'z')
+            digit = *s - 'a' + 10;
+        else if (*s >= 'A' && *s <= 'Z')
+            digit = *s - 'A' + 10;
+        else
+            break;
+
+        if (digit >= base)
+            break;
+
+        if (result > cutoff || (result == cutoff && (unsigned long long)digit > cutlim))
+            overflow = 1;
+
+        result = result * base + digit;
+        s++;
+    }
+
+    if (endptr)
+        *endptr = (char *)(s == start ? start : s);
+
+    if (overflow) {
+        errno = ERANGE;
+        return ULLONG_MAX;
+    }
+
+    return neg ? (unsigned long long)(-(long long)result) : result;
+}
+
+/*
+ * strtoll() — convert a string to a long long.
+ * Sets errno = ERANGE on overflow and returns LLONG_MAX or LLONG_MIN.
+ */
+long long strtoll(const char *s, char **endptr, int base) {
+    /* Skip leading whitespace */
+    while (*s == ' ' || *s == '\t' || *s == '\n' ||
+           *s == '\r' || *s == '\f' || *s == '\v')
+        s++;
+
+    int neg = 0;
+    if (*s == '-') {
+        neg = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+
+    /* Save errno; strtoull may set ERANGE for its own overflow */
+    int saved_errno = errno;
+    errno = 0;
+    unsigned long long val = strtoull(s, endptr, base);
+
+    if (errno == ERANGE) {
+        /* strtoull itself overflowed — clamp to LLONG_MAX / LLONG_MIN */
+        return neg ? LLONG_MIN : LLONG_MAX;
+    }
+
+    if (neg) {
+        if (val > (unsigned long long)LLONG_MAX + 1ULL) {
+            errno = ERANGE;
+            return LLONG_MIN;
+        }
+        errno = saved_errno;
+        return -(long long)val;
+    } else {
+        if (val > (unsigned long long)LLONG_MAX) {
+            errno = ERANGE;
+            return LLONG_MAX;
+        }
+        errno = saved_errno;
+        return (long long)val;
+    }
 }
 
 int atoi(const char *s) {
@@ -315,15 +481,17 @@ int setenv(const char *name, const char *value, int overwrite) {
         return -1;
     env_ensure_init();
     size_t nlen = strlen(name);
+    size_t vlen = value ? strlen(value) : 0;
     /* find existing */
     for (int i = 0; environ[i]; i++) {
         if (strncmp(environ[i], name, nlen) == 0 && environ[i][nlen] == '=') {
             if (!overwrite) return 0;
             /* build new entry */
-            static char buf[320];
+            char *buf = malloc(nlen + 1 + vlen + 1);
+            if (!buf) return -1;
             strcpy(buf, name);
             strcat(buf, "=");
-            strcat(buf, value);
+            if (value) strcat(buf, value);
             environ[i] = buf;
             return 0;
         }
@@ -332,11 +500,12 @@ int setenv(const char *name, const char *value, int overwrite) {
     int count = 0;
     while (environ[count]) count++;
     if (count >= MAX_ENV) return -1;
-    static char newbuf[320];
-    strcpy(newbuf, name);
-    strcat(newbuf, "=");
-    strcat(newbuf, value);
-    environ[count] = newbuf;
+    char *buf = malloc(nlen + 1 + vlen + 1);
+    if (!buf) return -1;
+    strcpy(buf, name);
+    strcat(buf, "=");
+    if (value) strcat(buf, value);
+    environ[count] = buf;
     environ[count + 1] = (void *)0;
     return 0;
 }
@@ -379,4 +548,75 @@ int putenv(char *string) {
     environ[count] = string;
     environ[count + 1] = (void *)0;
     return 0;
+}
+
+/*
+ * system() — execute a shell command.
+ */
+int system(const char *command) {
+    if (!command) return 1; /* shell available */
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char *argv[4];
+        argv[0] = "sh";
+        argv[1] = "-c";
+        argv[2] = (char *)command;
+        argv[3] = (void *)0;
+        execve("/bin/sh", argv, environ);
+        _exit(127);
+    }
+    int status;
+    while (waitpid(pid, &status, 0) < 0) ;
+    return status;
+}
+
+/*
+ * mkstemp() — create a temporary file with a unique name.
+ */
+int mkstemp(char *tmpl) {
+    int len = strlen(tmpl);
+    if (len < 6) return -1;
+    char *suffix = tmpl + len - 6;
+    static unsigned int counter = 0;
+    for (int tries = 0; tries < 100; tries++) {
+        unsigned int val = counter++ ^ (unsigned int)(long)tmpl;
+        for (int i = 0; i < 6; i++) {
+            int d = val % 36;
+            suffix[i] = d < 10 ? ('0' + d) : ('a' + d - 10);
+            val /= 36;
+        }
+        int fd = open(tmpl, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) return fd;
+    }
+    return -1;
+}
+
+/*
+ * remove() — remove a file or directory.
+ */
+int remove(const char *path) {
+    if (unlink(path) == 0) return 0;
+    return rmdir(path);
+}
+
+/*
+ * realpath() — resolve a path to its canonical form.
+ * Simplified: just copies the path if absolute, or prepends cwd.
+ */
+char *realpath(const char *path, char *resolved_path) {
+    static char buf[256];
+    if (!resolved_path) resolved_path = buf;
+    if (path[0] == '/') {
+        strncpy(resolved_path, path, 255);
+        resolved_path[255] = '\0';
+    } else {
+        if (!getcwd(resolved_path, 240)) return (void *)0;
+        int clen = strlen(resolved_path);
+        if (clen > 0 && resolved_path[clen - 1] != '/')
+            resolved_path[clen++] = '/';
+        strncpy(resolved_path + clen, path, 255 - clen);
+        resolved_path[255] = '\0';
+    }
+    return resolved_path;
 }

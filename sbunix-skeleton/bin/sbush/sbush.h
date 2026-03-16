@@ -76,6 +76,7 @@ struct job *job_find(int id);
 struct job *job_find_pid(pid_t pid);
 void        job_list(void);
 void        job_reap(void);
+struct job *job_last(void);
 
 /* is_name_char: check if char is valid in a variable/function name */
 static inline int is_name_char(char c) {
@@ -154,6 +155,11 @@ void exec_reset_depth(void);
 
 /* trap.c (or inline trap support) */
 void trap_set(int sig, const char *action);
+
+/* set -e/-x/-u flags (exec.c) */
+extern int set_flag_e;
+extern int set_flag_x;
+extern int set_flag_u;
 
 /* signal globals (sbush.c) */
 extern volatile sig_atomic_t fg_pid;

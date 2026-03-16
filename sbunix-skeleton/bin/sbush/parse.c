@@ -586,16 +586,16 @@ static int tokenize(char *str, struct command *cmd) {
             char *w = p;  /* in-place de-escape */
             while (*p && *p != '"') {
                 if (*p == '\\' && *(p + 1)) {
-                    p++;
-                    switch (*p) {
-                        case 'n':  *w++ = '\n'; break;
-                        case 't':  *w++ = '\t'; break;
-                        case '\\': *w++ = '\\'; break;
-                        case '"':  *w++ = '"';  break;
-                        case '$':  *w++ = '$';  break;
-                        default:   *w++ = '\\'; *w++ = *p; break;
+                    /* POSIX: inside double quotes, only \\ \" \$ \` \newline are special */
+                    char next = *(p + 1);
+                    if (next == '\\' || next == '"' || next == '$' || next == '`' || next == '\n') {
+                        p++;
+                        if (*p == '\n') { p++; continue; } /* line continuation */
+                        *w++ = *p;
+                        p++;
+                    } else {
+                        *w++ = *p++;
                     }
-                    p++;
                 } else {
                     *w++ = *p++;
                 }

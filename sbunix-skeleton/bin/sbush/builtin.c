@@ -231,7 +231,12 @@ int is_builtin(const char *cmd) {
             strcmp(cmd, "alias") == 0 ||
             strcmp(cmd, "unalias") == 0 ||
             strcmp(cmd, "exec") == 0 ||
-            strcmp(cmd, "umask") == 0);
+            strcmp(cmd, "umask") == 0 ||
+            strcmp(cmd, "pwd") == 0 ||
+            strcmp(cmd, ":") == 0 ||
+            strcmp(cmd, "command") == 0 ||
+            strcmp(cmd, "wait") == 0 ||
+            strcmp(cmd, "type") == 0);
 }
 
 /* -----------------------------------------------------------------------
@@ -345,6 +350,18 @@ int run_builtin(struct command *cmd) {
     }
 
     if (strcmp(cmd->argv[0], "set") == 0) {
+        if (cmd->argc == 1) return 0;
+        /* Handle set -e/-x/-u/-- flags */
+        if (cmd->argv[1][0] == '-' || cmd->argv[1][0] == '+') {
+            int enable = (cmd->argv[1][0] == '-');
+            for (const char *p = cmd->argv[1] + 1; *p; p++) {
+                if (*p == 'e') set_flag_e = enable;
+                else if (*p == 'x') set_flag_x = enable;
+                else if (*p == 'u') set_flag_u = enable;
+                else if (*p == '-') break; /* -- */
+            }
+            return 0;
+        }
         if (cmd->argc == 3) {
             var_set(cmd->argv[1], cmd->argv[2]);
         }
@@ -378,16 +395,22 @@ int run_builtin(struct command *cmd) {
         return builtin_test(cmd);
 
     if (strcmp(cmd->argv[0], "echo") == 0) {
-        for (int i = 1; i < cmd->argc; i++) {
-            if (i > 1) write(STDOUT_FILENO, " ", 1);
+        int start = 1;
+        int no_newline = 0;
+        if (cmd->argc > 1 && strcmp(cmd->argv[1], "-n") == 0) {
+            no_newline = 1;
+            start = 2;
+        }
+        for (int i = start; i < cmd->argc; i++) {
+            if (i > start) write(STDOUT_FILENO, " ", 1);
             write(STDOUT_FILENO, cmd->argv[i], strlen(cmd->argv[i]));
         }
-        write(STDOUT_FILENO, "\n", 1);
+        if (!no_newline) write(STDOUT_FILENO, "\n", 1);
         return 0;
     }
 
     if (strcmp(cmd->argv[0], "exit") == 0) {
-        int code = 0;
+        int code = last_exit_status;
         if (cmd->argc > 1) {
             /* simple atoi */
             const char *s = cmd->argv[1];
@@ -407,7 +430,7 @@ int run_builtin(struct command *cmd) {
 
     if (strcmp(cmd->argv[0], "fg") == 0) {
         int id = cmd->argc > 1 ? atoi(cmd->argv[1]) : -1;
-        struct job *j = (id > 0) ? job_find(id) : NULL;
+        struct job *j = (id > 0) ? job_find(id) : job_last();
         if (!j) {
             printf("fg: no such job\n");
             return 1;
@@ -549,7 +572,7 @@ int run_builtin(struct command *cmd) {
 
     if (strcmp(cmd->argv[0], "bg") == 0) {
         int id = cmd->argc > 1 ? atoi(cmd->argv[1]) : -1;
-        struct job *j = (id > 0) ? job_find(id) : NULL;
+        struct job *j = (id > 0) ? job_find(id) : job_last();
         if (!j) {
             printf("bg: no such job\n");
             return 1;
@@ -624,6 +647,73 @@ int run_builtin(struct command *cmd) {
         }
         for (int i = 1; i < cmd->argc; i++)
             alias_unset(cmd->argv[i]);
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "pwd") == 0) {
+        char cwd[256];
+        if (getcwd(cwd, sizeof(cwd))) {
+            write(STDOUT_FILENO, cwd, strlen(cwd));
+            write(STDOUT_FILENO, "\n", 1);
+            return 0;
+        }
+        return 1;
+    }
+
+    if (strcmp(cmd->argv[0], ":") == 0) {
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "command") == 0) {
+        if (cmd->argc < 2) return 0;
+        /* Skip functions/aliases; execute external command directly */
+        char *path = resolve_path(cmd->argv[1]);
+        if (!path) {
+            dprintf(2, "%s: command not found\n", cmd->argv[1]);
+            return 127;
+        }
+        char **envp = build_environ();
+        pid_t pid = fork();
+        if (pid == 0) {
+            execve(path, cmd->argv + 1, envp);
+            _exit(127);
+        }
+        int status;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status)) return WEXITSTATUS(status);
+        return 1;
+    }
+
+    if (strcmp(cmd->argv[0], "wait") == 0) {
+        int status;
+        if (cmd->argc > 1) {
+            pid_t pid = (pid_t)atoi(cmd->argv[1]);
+            waitpid(pid, &status, 0);
+        } else {
+            /* Wait for all background children */
+            while (waitpid(-1, &status, 0) > 0)
+                ;
+        }
+        return 0;
+    }
+
+    if (strcmp(cmd->argv[0], "type") == 0) {
+        if (cmd->argc < 2) return 1;
+        for (int i = 1; i < cmd->argc; i++) {
+            if (is_builtin(cmd->argv[i]))
+                printf("%s is a shell builtin\n", cmd->argv[i]);
+            else if (func_find(cmd->argv[i]))
+                printf("%s is a function\n", cmd->argv[i]);
+            else {
+                char *path = resolve_path(cmd->argv[i]);
+                if (path)
+                    printf("%s is %s\n", cmd->argv[i], path);
+                else {
+                    dprintf(2, "type: %s: not found\n", cmd->argv[i]);
+                    return 1;
+                }
+            }
+        }
         return 0;
     }
 

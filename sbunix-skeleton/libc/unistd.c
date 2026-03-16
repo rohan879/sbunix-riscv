@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <errno.h>
 
@@ -106,7 +107,9 @@ gid_t getgid(void) {
 }
 
 int usleep(unsigned int usecs) {
-    unsigned long req[2] = { 0, (unsigned long)usecs * 1000UL };
+    unsigned long sec = usecs / 1000000;
+    unsigned long nsec = (usecs % 1000000) * 1000UL;
+    unsigned long req[2] = { sec, nsec };
     syscall(SYS_nanosleep, req, 0);
     return 0;
 }
@@ -137,8 +140,50 @@ int execv(const char *path, char *const argv[]) {
 }
 
 int execvp(const char *file, char *const argv[]) {
-    /* Simple implementation: only searches absolute/relative paths */
-    return execve(file, argv, environ);
+    /* If file contains '/', use it directly */
+    if (strchr(file, '/') != NULL)
+        return execve(file, argv, environ);
+
+    /* Search PATH for the executable */
+    const char *path = NULL;
+    if (environ) {
+        for (char **ep = environ; *ep; ep++) {
+            if (strncmp(*ep, "PATH=", 5) == 0) {
+                path = *ep + 5;
+                break;
+            }
+        }
+    }
+    if (!path)
+        path = "/bin:/usr/bin";
+
+    size_t filelen = strlen(file);
+    const char *p = path;
+    while (*p) {
+        const char *colon = strchr(p, ':');
+        size_t dirlen = colon ? (size_t)(colon - p) : strlen(p);
+
+        /* Build "dir/file" in buf; skip if it would overflow */
+        char buf[256];
+        if (dirlen + 1 + filelen + 1 <= sizeof(buf)) {
+            strncpy(buf, p, dirlen);
+            buf[dirlen] = '/';
+            strcpy(buf + dirlen + 1, file);
+
+            execve(buf, argv, environ);
+
+            /* ENOENT: file not in this dir, try next */
+            if (errno != 2)
+                return -1;
+        }
+
+        if (!colon)
+            break;
+        p = colon + 1;
+    }
+
+    errno = 2; /* ENOENT */
+    return -1;
 }
 
 int ioctl(int fd, unsigned long request, ...) {
@@ -222,4 +267,37 @@ int symlink(const char *target, const char *linkpath) {
 
 ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
     return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, AT_FDCWD, path, buf, bufsiz));
+}
+
+int openat(int dirfd, const char *path, int flags, ...) {
+    va_list ap;
+    va_start(ap, flags);
+    int mode = va_arg(ap, int);
+    va_end(ap);
+    long ret = syscall(SYS_openat, dirfd, path, flags, mode);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return (int)ret;
+}
+
+int creat(const char *path, mode_t mode) {
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+}
+
+int faccessat(int dirfd, const char *path, int mode, int flags) {
+    return (int)__syscall_ret(syscall(SYS_faccessat, dirfd, path, mode, flags));
+}
+
+ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+    return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, dirfd, path, buf, bufsiz));
+}
+
+int fcntl(int fd, int cmd, ...) {
+    va_list ap;
+    va_start(ap, cmd);
+    long arg = va_arg(ap, long);
+    va_end(ap);
+    return (int)__syscall_ret(syscall(SYS_fcntl, fd, cmd, arg));
 }

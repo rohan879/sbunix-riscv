@@ -64,6 +64,8 @@ int mappages(pagetable_t pagetable, uint64_t va, uint64_t size, uint64_t pa, int
     uint64_t a, last;
     pte_t *pte;
 
+    if (size == 0) return 0;
+
     a = PGROUNDDOWN(va);
     last = PGROUNDDOWN(va + size - 1);
     for(;;) {
@@ -438,6 +440,24 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
     pte_t *pte = walk_super(pagetable, dstva, &level);
     if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
       return -1;
+
+    /* Resolve COW page before writing */
+    if ((*pte & PTE_COW) && level == 0) {
+      uint64_t old_pa = PTE2PA(*pte);
+      int flags = PTE_FLAGS(*pte);
+      if (page_ref_get(old_pa) > 1) {
+        /* Shared: allocate new page and copy */
+        char *newpg = kalloc();
+        if (!newpg) return -1;
+        memcpy(newpg, (void *)old_pa, PAGE_SIZE);
+        page_ref_dec(old_pa);
+        *pte = PA2PTE((uint64_t)newpg) | (flags & ~PTE_COW) | PTE_W;
+      } else {
+        /* Last reference: just remove COW and add write */
+        *pte = (*pte & ~PTE_COW) | PTE_W;
+      }
+      sfence_vma();
+    }
 
     uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
     uint64_t va0 = (level == 1) ? SPGROUNDDOWN(dstva) : PGROUNDDOWN(dstva);

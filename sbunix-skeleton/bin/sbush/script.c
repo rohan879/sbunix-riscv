@@ -7,7 +7,7 @@ int run_script(const char *path) {
         return 1;
     }
 
-    char file_buf[4096];
+    char file_buf[65536];
     int total = 0;
     ssize_t n;
     while ((n = read(fd, file_buf + total, sizeof(file_buf) - total - 1)) > 0)
@@ -37,5 +37,5 @@ int run_script(const char *path) {
             execute_line(line);
     }
 
-    return 0;
+    return last_exit_status;
 }

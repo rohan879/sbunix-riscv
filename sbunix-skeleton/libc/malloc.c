@@ -131,6 +131,7 @@ void free(void *ptr) {
         return;
 
     block_hdr_t *hdr = (block_hdr_t *)((char *)ptr - HDR_SIZE);
+    if (hdr->free) return; /* double-free protection */
     hdr->free = 1;
     /* Prepend to free list */
     hdr->next = free_list;
@@ -138,6 +139,7 @@ void free(void *ptr) {
 }
 
 void *calloc(size_t nmemb, size_t size) {
+    if (nmemb && size > (size_t)-1 / nmemb) return (void *)0; /* overflow */
     size_t total = nmemb * size;
     void *ptr = malloc(total);
     if (ptr)

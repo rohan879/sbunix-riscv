@@ -4,6 +4,9 @@
 
 int last_exit_status = 0;
 pid_t last_bg_pid = 0;
+int set_flag_e = 0;
+int set_flag_x = 0;
+int set_flag_u = 0;
 
 /* Run one pipeline; return its exit status (last command's status).
  * For background pipelines returns 0 immediately. */

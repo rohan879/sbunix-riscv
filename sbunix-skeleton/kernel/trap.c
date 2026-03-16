@@ -981,7 +981,7 @@ static long sys_write_handler(struct trapframe *tf) {
         }
         return (long)total;
     } else {
-        return (long)-1;
+        return (long)-9; /* EBADF */
     }
 }
 
@@ -1034,7 +1034,7 @@ pipe_eof:
         }
         return (long)total;
     } else {
-        return (long)0;
+        return (long)-9; /* EBADF */
     }
 }
 
@@ -1065,11 +1065,11 @@ static long sys_openat_handler(struct trapframe *tf) {
     if (ret < 0) {
         return (long)ret;
     } else {
-        /* Reject opening a directory without O_DIRECTORY (EISDIR = -21) */
+        /* Reject non-directory with O_DIRECTORY (ENOTDIR = -20) */
 #define O_DIRECTORY 0200000
-        if (!(flags & O_DIRECTORY) && vfs_is_dir(resolved)) {
+        if ((flags & O_DIRECTORY) && !vfs_is_dir(resolved)) {
             if (ops->close) ops->close(priv);
-            return (long)-21;
+            return (long)-20;
         }
         struct open_file *f = vfs_alloc_file();
         if (!f) {
@@ -1104,7 +1104,7 @@ static long sys_close_handler(struct trapframe *tf) {
         close_ofile(current_proc, fd);
         return (long)0;
     } else {
-        return (long)-1;
+        return (long)-9; /* EBADF */
     }
 }
 
@@ -1549,35 +1549,41 @@ static long sys_lseek_handler(struct trapframe *tf) {
     long offset = (long)tf->a1;
     int whence  = (int)tf->a2;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
-    if (!f || f->is_pipe) {
-        return (long)-1;
-    } else {
-        int64_t cur = f->offset;
-        int64_t new_off;
-        if (whence == 0)       /* SEEK_SET */ new_off = (int64_t)offset;
-        else if (whence == 1)  /* SEEK_CUR */ new_off = cur + (int64_t)offset;
-        else if (whence == 2)  /* SEEK_END */ {
-            int64_t file_size = 0;
-            if (f->ops && f->ops->fstat) {
-                uint8_t stbuf[128];
-                if (f->ops->fstat(f->private, stbuf) == 0)
-                    memcpy(&file_size, stbuf + 48, 8);
-            }
-            new_off = file_size + (int64_t)offset;
-        }
-        else { return (long)-1; }
-        if (new_off < 0) new_off = 0;
-        f->offset = new_off;
-        return (long)new_off;
+    if (!f) {
+        return (long)-9; /* EBADF */
     }
+    if (f->is_pipe) {
+        return (long)-29; /* ESPIPE */
+    }
+    int64_t cur = f->offset;
+    int64_t new_off;
+    if (whence == 0)       /* SEEK_SET */ new_off = (int64_t)offset;
+    else if (whence == 1)  /* SEEK_CUR */ new_off = cur + (int64_t)offset;
+    else if (whence == 2)  /* SEEK_END */ {
+        int64_t file_size = 0;
+        if (f->ops && f->ops->fstat) {
+            uint8_t stbuf[128];
+            if (f->ops->fstat(f->private, stbuf) == 0)
+                memcpy(&file_size, stbuf + 48, 8);
+        }
+        new_off = file_size + (int64_t)offset;
+    }
+    else { return (long)-22; /* EINVAL */ }
+    if (new_off < 0) return (long)-22; /* EINVAL */
+    f->offset = new_off;
+    return (long)new_off;
 }
 
 static long sys_fstat_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
-    if (!tf->a1 || !f) {
-        return (long)-1;
-    } else if (f->is_pipe) {
+    if (!f) {
+        return (long)-9; /* EBADF */
+    }
+    if (!tf->a1) {
+        return (long)-14; /* EFAULT */
+    }
+    if (f->is_pipe) {
         uint8_t kstat[128];
         memset(kstat, 0, 128);
         uint32_t mode = 0x1000 | 0600;

@@ -54,6 +54,10 @@ void page_ref_set(uint64_t pa, int val) {
 void kfree(void *pa) {
     struct run *r;
 
+    if (!pa) return;
+    if ((uint64_t)pa % PAGE_SIZE != 0) return; /* alignment check */
+    if ((uint64_t)pa < 0x80000000UL || (uint64_t)pa >= PHYSTOP) return; /* range check */
+
     int idx = pa_to_index((uint64_t)pa);
     if (idx >= 0 && idx < MAX_PAGES) {
         if (page_refcount[idx] > 1) {

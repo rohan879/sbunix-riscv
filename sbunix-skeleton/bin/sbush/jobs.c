@@ -60,6 +60,18 @@ void job_list(void) {
     }
 }
 
+struct job *job_last(void) {
+    struct job *last = NULL;
+    int max_id = 0;
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (jobs[i].pid != 0 && jobs[i].id > max_id) {
+            max_id = jobs[i].id;
+            last = &jobs[i];
+        }
+    }
+    return last;
+}
+
 void job_reap(void) {
     for (int i = 0; i < MAX_JOBS; i++) {
         if (jobs[i].pid == 0) continue;

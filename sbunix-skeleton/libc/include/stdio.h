@@ -27,6 +27,8 @@ typedef struct _FILE {
     int buf_mode;                 /* _IONBF, _IOLBF, or _IOFBF */
     char wbuf[FILE_BUF_SIZE];    /* write buffer */
     int  wpos;                   /* current position in write buffer */
+    int  unget_char;             /* pushed-back character */
+    int  has_unget;              /* 1 if unget_char is valid */
 } FILE;
 
 extern FILE *stdin;
@@ -73,6 +75,10 @@ void setbuf(FILE *stream, char *buf);
 int ungetc(int c, FILE *stream);
 int getc(FILE *stream);
 int putc(int c, FILE *stream);
+FILE *fdopen(int fd, const char *mode);
+FILE *tmpfile(void);
+FILE *popen(const char *command, const char *type);
+int   pclose(FILE *stream);
 
 /* Basic I/O */
 int puts(const char *s);

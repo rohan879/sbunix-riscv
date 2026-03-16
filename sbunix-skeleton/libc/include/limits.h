@@ -17,13 +17,13 @@
 #define INT_MAX     2147483647
 #define UINT_MAX    4294967295U
 
-#define LONG_MIN    (-9223372036854775808L)
-#define LONG_MAX    9223372036854775807L
-#define ULONG_MAX   18446744073709551615UL
+#define LONG_MAX    0x7fffffffffffffffL
+#define LONG_MIN    (-LONG_MAX - 1L)
+#define ULONG_MAX   0xffffffffffffffffUL
 
-#define LLONG_MIN   LONG_MIN
-#define LLONG_MAX   LONG_MAX
-#define ULLONG_MAX  ULONG_MAX
+#define LLONG_MAX   0x7fffffffffffffffLL
+#define LLONG_MIN   (-LLONG_MAX - 1LL)
+#define ULLONG_MAX  0xffffffffffffffffULL
 
 /* POSIX path and name limits */
 #define PATH_MAX    4096  /* maximum bytes in a path name */

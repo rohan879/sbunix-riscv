@@ -79,4 +79,18 @@ int     fsync(int fd);
 /* Wait (convenience wrapper) */
 pid_t   wait(int *status);
 
+/* *at-style filesystem calls */
+int     faccessat(int dirfd, const char *path, int mode, int flags);
+ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz);
+
+/* ioctl */
+int     ioctl(int fd, unsigned long request, ...);
+
+/* getopt */
+extern char *optarg;
+extern int   optind;
+extern int   opterr;
+extern int   optopt;
+int     getopt(int argc, char *const argv[], const char *optstring);
+
 #endif /* _UNISTD_H */

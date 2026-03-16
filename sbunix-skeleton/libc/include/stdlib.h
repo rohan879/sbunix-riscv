@@ -6,6 +6,7 @@
 /* Process termination */
 void exit(int status) __attribute__((noreturn));
 void abort(void) __attribute__((noreturn));
+int  atexit(void (*func)(void));
 
 /* Memory allocation */
 void *malloc(size_t size);
@@ -14,10 +15,12 @@ void *realloc(void *ptr, size_t size);
 void  free(void *ptr);
 
 /* Number conversion */
-int           atoi(const char *s);
-long          atol(const char *s);
-long          strtol(const char *s, char **endptr, int base);
-unsigned long strtoul(const char *s, char **endptr, int base);
+int                atoi(const char *s);
+long               atol(const char *s);
+long               strtol(const char *s, char **endptr, int base);
+unsigned long      strtoul(const char *s, char **endptr, int base);
+long long          strtoll(const char *s, char **endptr, int base);
+unsigned long long strtoull(const char *s, char **endptr, int base);
 
 /* Integer to string */
 char *itoa(int value, char *buf, int base);
@@ -43,6 +46,22 @@ void  qsort(void *base, size_t nmemb, size_t size,
             int (*compar)(const void *, const void *));
 void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
               int (*compar)(const void *, const void *));
+
+/* Shell command execution */
+int system(const char *command);
+
+/* Temporary files */
+int mkstemp(char *tmpl);
+
+/* Path resolution */
+char *realpath(const char *path, char *resolved_path);
+
+/* File removal */
+int remove(const char *path);
+
+/* Memory management */
+void *sbrk(long increment);
+int brk(void *addr);
 
 /* Exit status codes */
 #define EXIT_SUCCESS 0

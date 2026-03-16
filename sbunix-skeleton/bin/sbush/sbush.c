@@ -144,6 +144,50 @@ void execute_line(char *line) {
     if (check_heredoc(line))
         return;
 
+    /* Standalone VAR=value assignment (no command follows) */
+    {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p && *p != '=' && is_name_char(*p)) {
+            char *s = p;
+            while (is_name_char(*s)) s++;
+            if (*s == '=' && s > p) {
+                /* Check that there's nothing after the value (simple assign) */
+                char *vstart = s + 1;
+                char *vend = vstart;
+                int in_sq = 0, in_dq = 0;
+                while (*vend) {
+                    if (*vend == '\'' && !in_dq) in_sq = !in_sq;
+                    else if (*vend == '"' && !in_sq) in_dq = !in_dq;
+                    else if ((*vend == ' ' || *vend == '\t') && !in_sq && !in_dq) break;
+                    vend++;
+                }
+                /* Skip trailing whitespace */
+                char *trail = vend;
+                while (*trail == ' ' || *trail == '\t') trail++;
+                if (*trail == '\0' || *trail == '#') {
+                    /* Pure assignment: NAME=VALUE */
+                    char name[128];
+                    int nlen = s - p;
+                    if (nlen > 127) nlen = 127;
+                    memcpy(name, p, nlen);
+                    name[nlen] = '\0';
+                    /* Strip quotes from value */
+                    char val[MAX_LINE];
+                    int vi = 0;
+                    char *vp = vstart;
+                    while (vp < vend && vi < MAX_LINE - 1) {
+                        if ((*vp == '\'' || *vp == '"')) { vp++; continue; }
+                        val[vi++] = *vp++;
+                    }
+                    val[vi] = '\0';
+                    var_set(name, val);
+                    return;
+                }
+            }
+        }
+    }
+
     if (exec_depth >= MAX_EXEC_DEPTH) {
         dprintf(2, "sbush: execution recursion limit reached\n");
         return;
@@ -337,8 +381,12 @@ int main(int argc, char *argv[], char *envp[]) {
     }
 
     /* script mode */
-    if (argc >= 2)
+    if (argc >= 2) {
+        positional_set_zero(argv[1]);
+        if (argc > 2)
+            positional_set_args(argc - 2, argv + 2);
         return run_script(argv[1]);
+    }
 
     /* interactive REPL */
     static char line[MAX_LINE];

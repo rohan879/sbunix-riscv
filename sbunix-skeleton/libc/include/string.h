@@ -4,7 +4,7 @@
 #include <sys/types.h>
 #include <stddef.h>
 
-int    strlen(const char *s);
+size_t strlen(const char *s);
 int    strcmp(const char *s1, const char *s2);
 int    strncmp(const char *s1, const char *s2, size_t n);
 char  *strcpy(char *dst, const char *src);
@@ -26,5 +26,7 @@ size_t strcspn(const char *s, const char *reject);
 char  *strpbrk(const char *s, const char *accept);
 char  *strtok(char *str, const char *delim);
 char  *strerror(int errnum);
+int    strcasecmp(const char *s1, const char *s2);
+int    strncasecmp(const char *s1, const char *s2, size_t n);
 
 #endif
