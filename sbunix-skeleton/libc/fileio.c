@@ -291,6 +291,98 @@ FILE *tmpfile(void) {
     return fp;
 }
 
+FILE *freopen(const char *path, const char *mode, FILE *stream) {
+    if (!stream) return (void *)0;
+    __fflush_stream(stream);
+    close(stream->fd);
+
+    int flags = 0;
+    if (mode[0] == 'r') {
+        if (mode[1] == '+') flags = O_RDWR;
+        else flags = O_RDONLY;
+    } else if (mode[0] == 'w') {
+        if (mode[1] == '+') flags = O_RDWR | O_CREAT | O_TRUNC;
+        else flags = O_WRONLY | O_CREAT | O_TRUNC;
+    } else if (mode[0] == 'a') {
+        if (mode[1] == '+') flags = O_RDWR | O_CREAT | O_APPEND;
+        else flags = O_WRONLY | O_CREAT | O_APPEND;
+    } else {
+        return (void *)0;
+    }
+
+    int fd;
+    if (path) {
+        fd = open(path, flags, 0666);
+    } else {
+        /* NULL path: reopen same fd with new mode (not fully supported) */
+        return (void *)0;
+    }
+    if (fd < 0) return (void *)0;
+
+    stream->fd = fd;
+    stream->eof = 0;
+    stream->error = 0;
+    stream->wpos = 0;
+    stream->has_unget = 0;
+    return stream;
+}
+
+ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
+    if (!lineptr || !n || !stream) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (*lineptr == (void *)0 || *n == 0) {
+        *n = 128;
+        *lineptr = malloc(*n);
+        if (!*lineptr) return -1;
+    }
+    size_t pos = 0;
+    int c;
+    while ((c = fgetc(stream)) != EOF) {
+        if (pos + 2 > *n) {
+            size_t newn = *n * 2;
+            char *newp = realloc(*lineptr, newn);
+            if (!newp) return -1;
+            *lineptr = newp;
+            *n = newn;
+        }
+        (*lineptr)[pos++] = (char)c;
+        if (c == '\n') break;
+    }
+    if (pos == 0) return -1;
+    (*lineptr)[pos] = '\0';
+    return (ssize_t)pos;
+}
+
+ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream) {
+    if (!lineptr || !n || !stream) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (*lineptr == (void *)0 || *n == 0) {
+        *n = 128;
+        *lineptr = malloc(*n);
+        if (!*lineptr) return -1;
+    }
+    size_t pos = 0;
+    int c;
+    while ((c = fgetc(stream)) != EOF) {
+        if (pos + 2 > *n) {
+            size_t newn = *n * 2;
+            char *newp = realloc(*lineptr, newn);
+            if (!newp) return -1;
+            *lineptr = newp;
+            *n = newn;
+        }
+        (*lineptr)[pos++] = (char)c;
+        if (c == delim) break;
+    }
+    if (pos == 0) return -1;
+    (*lineptr)[pos] = '\0';
+    return (ssize_t)pos;
+}
+
 int fclose(FILE *stream) {
     if (!stream) return EOF;
     __fflush_stream(stream);

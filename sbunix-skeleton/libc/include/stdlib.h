@@ -40,6 +40,14 @@ void srand(unsigned int seed);
 int  abs(int x);
 long labs(long x);
 
+/* Integer division */
+typedef struct { int quot; int rem; } div_t;
+typedef struct { long quot; long rem; } ldiv_t;
+typedef struct { long long quot; long long rem; } lldiv_t;
+div_t   div(int numer, int denom);
+ldiv_t  ldiv(long numer, long denom);
+lldiv_t lldiv(long long numer, long long denom);
+
 /* Environment */
 char *getenv(const char *name);
 int    setenv(const char *name, const char *value, int overwrite);
