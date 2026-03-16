@@ -174,6 +174,150 @@ echo INT4_${#msg}
 echo INT5_${msg%% *}
 echo === Integration Done ===
 
+echo === Utility Tests ===
+
+# --- grep ---
+echo "apple" > /mnt/grepfile
+echo "banana" >> /mnt/grepfile
+echo "cherry" >> /mnt/grepfile
+echo "Apple Pie" >> /mnt/grepfile
+
+set gout $(grep banana /mnt/grepfile)
+check "$gout" "banana" "grep: exact match"
+
+set gout $(grep -c a /mnt/grepfile)
+check "$gout" "2" "grep: -c count lowercase a"
+
+set gout $(grep -ic a /mnt/grepfile)
+check "$gout" "3" "grep: -ic count case insensitive"
+
+set gout $(echo testpipe | grep testpipe)
+check "$gout" "testpipe" "grep: stdin pipe"
+
+grep -q banana /mnt/grepfile
+set gq1 $?
+check "$gq1" "0" "grep: -q found returns 0"
+
+grep -q nonexistent /mnt/grepfile
+set gq2 $?
+check "$gq2" "1" "grep: -q not found returns 1"
+
+rm /mnt/grepfile
+
+# --- realpath ---
+set rpout $(/bin/realpath /bin/echo)
+check "$rpout" "/bin/echo" "realpath: absolute path"
+
+set rpout $(/bin/realpath /bin/../bin/echo)
+check "$rpout" "/bin/echo" "realpath: dotdot resolution"
+
+# --- cat ---
+echo "cattest" > /mnt/catfile
+set catout $(cat /mnt/catfile)
+check "$catout" "cattest" "cat: read file"
+rm /mnt/catfile
+
+# --- echo ---
+set eout $(echo helloworld)
+check "$eout" "helloworld" "echo: basic output"
+
+set eout $(echo -n no_nl)
+check "$eout" "no_nl" "echo: -n flag"
+
+# --- pwd ---
+set pout $(pwd)
+check "$pout" "/" "pwd: returns root"
+
+# --- ls ---
+ls /bin > /mnt/lsout
+if test -f /mnt/lsout; then echo LS_PASS; else echo LS_FAIL; fi
+rm /mnt/lsout
+
+# --- touch + rm ---
+touch /mnt/touchfile
+if test -f /mnt/touchfile; then echo TOUCH_PASS; else echo TOUCH_FAIL; fi
+rm /mnt/touchfile
+if test -f /mnt/touchfile; then echo RM_FAIL; else echo RM_PASS; fi
+
+# --- mkdir + rm -r ---
+mkdir /mnt/mkdirtest
+if test -d /mnt/mkdirtest; then echo MKDIR_PASS; else echo MKDIR_FAIL; fi
+rm -r /mnt/mkdirtest
+if test -d /mnt/mkdirtest; then echo RMDIR_FAIL; else echo RMDIR_PASS; fi
+
+# --- cp ---
+echo "cpdata" > /mnt/cpsrc
+cp /mnt/cpsrc /mnt/cpdst
+set cpout $(cat /mnt/cpdst)
+check "$cpout" "cpdata" "cp: copy file"
+rm /mnt/cpsrc
+rm /mnt/cpdst
+
+# --- mv ---
+echo "mvdata" > /mnt/mvsrc
+mv /mnt/mvsrc /mnt/mvdst
+set mvout $(cat /mnt/mvdst)
+check "$mvout" "mvdata" "mv: move file"
+if test -f /mnt/mvsrc; then echo MV_SRC_FAIL; else echo MV_SRC_PASS; fi
+rm /mnt/mvdst
+
+# --- uname ---
+uname > /mnt/unameout
+if test -f /mnt/unameout; then echo UNAME_PASS; else echo UNAME_FAIL; fi
+rm /mnt/unameout
+
+# --- sleep ---
+sleep 0
+echo SLEEP_PASS
+
+# --- kill binary exists ---
+if test -f /bin/kill; then echo KILL_PASS; else echo KILL_FAIL; fi
+
+echo === Utility Tests Done ===
+
+echo === Builtin Tests ===
+
+# --- pwd builtin ---
+set pout $(pwd)
+check "$pout" "/" "builtin_pwd: returns cwd"
+
+cd /bin
+set pout $(pwd)
+check "$pout" "/bin" "builtin_pwd: after cd"
+cd /
+
+# --- echo -n ---
+set enout $(echo -n hello)
+check "$enout" "hello" "builtin_echo_n: no newline"
+
+# --- colon (:) no-op ---
+:
+check "$?" "0" "builtin_colon: returns 0"
+
+# --- type ---
+type echo > /mnt/typeout
+if test -f /mnt/typeout; then echo TYPE_PASS; else echo TYPE_FAIL; fi
+rm /mnt/typeout
+
+# --- exit defaults to $? ---
+false
+set fs $?
+check "$fs" "1" "builtin_exit_status: false returns 1"
+
+true
+set ts $?
+check "$ts" "0" "builtin_exit_status: true returns 0"
+
+# --- set variable assignment ---
+set myvar testvalue
+check "$myvar" "testvalue" "builtin_set: variable assigned"
+
+# --- standalone VAR=value ---
+MYTEST=hello123
+check "$MYTEST" "hello123" "var_assign: standalone assignment"
+
+echo === Builtin Tests Done ===
+
 echo ""
 echo "=== Summary ==="
 echo "Passed: $PASS"
