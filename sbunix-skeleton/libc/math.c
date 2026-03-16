@@ -757,3 +757,68 @@ double tanh(double x)
     double e2x = exp(2.0 * x);
     return (e2x - 1.0) / (e2x + 1.0);
 }
+
+/* -----------------------------------------------------------------------
+ * Additional math functions for MicroPython / POSIX
+ * ---------------------------------------------------------------------- */
+
+double remainder(double x, double y) {
+    if (y == 0.0) return __math_nan();
+    double n = round(x / y);
+    return x - n * y;
+}
+
+double nearbyint(double x) {
+    return round(x);
+}
+
+double rint(double x) {
+    return round(x);
+}
+
+long lrint(double x) {
+    return (long)round(x);
+}
+
+long long llrint(double x) {
+    return (long long)round(x);
+}
+
+double scalbn(double x, int n) {
+    return ldexp(x, n);
+}
+
+double cbrt(double x) {
+    if (x == 0.0) return x;
+    int neg = (x < 0.0);
+    if (neg) x = -x;
+    /* Newton's method: y = x^(1/3) */
+    double y = (x > 1.0) ? x / 3.0 : x;
+    for (int i = 0; i < 60; i++) {
+        double y2 = y * y;
+        if (y2 == 0.0) break;
+        y = (2.0 * y + x / y2) / 3.0;
+    }
+    return neg ? -y : y;
+}
+
+double hypot(double x, double y) {
+    x = fabs(x);
+    y = fabs(y);
+    if (x < y) { double t = x; x = y; y = t; }
+    if (x == 0.0) return 0.0;
+    double r = y / x;
+    return x * sqrt(1.0 + r * r);
+}
+
+double expm1(double x) {
+    if (fabs(x) < 1e-5)
+        return x + 0.5 * x * x + x * x * x / 6.0;
+    return exp(x) - 1.0;
+}
+
+double log1p(double x) {
+    if (fabs(x) < 1e-5)
+        return x - 0.5 * x * x + x * x * x / 3.0;
+    return log(1.0 + x);
+}

@@ -7,6 +7,7 @@
 #define SYS_getcwd      17
 #define SYS_dup3        24
 #define SYS_chdir       49
+#define SYS_fchdir      50
 #define SYS_openat      56
 #define SYS_close       57
 #define SYS_pipe2       59
@@ -67,9 +68,11 @@
 #define SYS_setsid      157
 
 /* Signal */
+#define SYS_sigaltstack    132
+#define SYS_rt_sigsuspend  133
 #define SYS_rt_sigaction   134
 #define SYS_rt_sigprocmask 135
-#define SYS_sigaltstack 132
+#define SYS_rt_sigpending  136
 #define SYS_rt_sigreturn   139
 
 /* Time */
@@ -92,6 +95,8 @@
 
 /* Additional syscalls */
 #define SYS_ftruncate   46
+#define SYS_fchmod      52
+#define SYS_fchmodat    53
 #define SYS_fsync       82
 #define SYS_tgkill      131
 #define SYS_madvise     233

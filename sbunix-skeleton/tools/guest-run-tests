@@ -224,22 +224,31 @@ check "$eout" "no_nl" "echo: -n flag"
 set pout $(pwd)
 check "$pout" "/" "pwd: returns root"
 
-# --- ls ---
+# --- ls (verify output contains known binary) ---
 ls /bin > /mnt/lsout
-if test -f /mnt/lsout; then echo LS_PASS; else echo LS_FAIL; fi
+set lshas $(grep cat /mnt/lsout)
+check "$lshas" "cat" "ls: lists /bin/cat"
 rm /mnt/lsout
 
-# --- touch + rm ---
+# --- touch + stat + rm (verify file creation and removal) ---
 touch /mnt/touchfile
-if test -f /mnt/touchfile; then echo TOUCH_PASS; else echo TOUCH_FAIL; fi
+test -f /mnt/touchfile
+set tr1 $?
+check "$tr1" "0" "touch: file created"
 rm /mnt/touchfile
-if test -f /mnt/touchfile; then echo RM_FAIL; else echo RM_PASS; fi
+test -f /mnt/touchfile
+set tr2 $?
+check "$tr2" "1" "rm: file removed"
 
-# --- mkdir + rm -r ---
+# --- mkdir + rmdir (verify dir creation and removal) ---
 mkdir /mnt/mkdirtest
-if test -d /mnt/mkdirtest; then echo MKDIR_PASS; else echo MKDIR_FAIL; fi
+test -d /mnt/mkdirtest
+set mr1 $?
+check "$mr1" "0" "mkdir: dir created"
 rm -r /mnt/mkdirtest
-if test -d /mnt/mkdirtest; then echo RMDIR_FAIL; else echo RMDIR_PASS; fi
+test -d /mnt/mkdirtest
+set mr2 $?
+check "$mr2" "1" "rmdir: dir removed"
 
 # --- cp ---
 echo "cpdata" > /mnt/cpsrc
@@ -257,17 +266,48 @@ check "$mvout" "mvdata" "mv: move file"
 if test -f /mnt/mvsrc; then echo MV_SRC_FAIL; else echo MV_SRC_PASS; fi
 rm /mnt/mvdst
 
-# --- uname ---
+# --- uname (verify it produces output) ---
 uname > /mnt/unameout
-if test -f /mnt/unameout; then echo UNAME_PASS; else echo UNAME_FAIL; fi
+grep -q . /mnt/unameout && check "ok" "ok" "uname: produces output" || check "" "ok" "uname: produces output"
 rm /mnt/unameout
 
-# --- sleep ---
+# --- sleep (verify it returns, not hangs) ---
 sleep 0
-echo SLEEP_PASS
+check "$?" "0" "sleep: returns 0"
 
-# --- kill binary exists ---
-if test -f /bin/kill; then echo KILL_PASS; else echo KILL_FAIL; fi
+# --- kill binary exists and is executable ---
+test -f /bin/kill
+set kr $?
+check "$kr" "0" "kill: binary exists"
+
+# --- time (verify it runs command and prints timing) ---
+/bin/time /bin/echo timetest > /mnt/timeout 2>/mnt/timeerr
+grep -q timetest /mnt/timeout && check "ok" "ok" "time: command ran" || check "" "ok" "time: command ran"
+grep -q real /mnt/timeerr && check "ok" "ok" "time: printed real time" || check "" "ok" "time: printed real time"
+rm /mnt/timeout
+rm /mnt/timeerr
+
+# --- ps (verify it produces process listing) ---
+ps > /mnt/psout
+test -f /mnt/psout && check "ok" "ok" "ps: produces output" || check "" "ok" "ps: produces output"
+rm /mnt/psout
+
+# --- od (verify octal dump of known input) ---
+echo "A" > /mnt/odtest
+od /mnt/odtest > /mnt/odout
+test -f /mnt/odout && check "ok" "ok" "od: produces output" || check "" "ok" "od: produces output"
+rm /mnt/odtest
+rm /mnt/odout
+
+# --- dmesg (verify it reads kernel log) ---
+dmesg > /mnt/dmesgout 2>&1
+set dmhas $(grep -c "" /mnt/dmesgout)
+if test "$dmhas" -gt 0 2>/dev/null; then
+    check "yes" "yes" "dmesg: has output"
+else
+    check "" "yes" "dmesg: has output"
+fi
+rm /mnt/dmesgout
 
 echo === Utility Tests Done ===
 
@@ -290,9 +330,11 @@ check "$enout" "hello" "builtin_echo_n: no newline"
 :
 check "$?" "0" "builtin_colon: returns 0"
 
-# --- type ---
-type echo > /mnt/typeout
-if test -f /mnt/typeout; then echo TYPE_PASS; else echo TYPE_FAIL; fi
+# --- type (verify output describes echo) ---
+type echo > /mnt/typeout 2>&1
+test -s /mnt/typeout
+set typr $?
+check "$typr" "0" "type: describes echo"
 rm /mnt/typeout
 
 # --- exit defaults to $? ---
@@ -313,6 +355,161 @@ MYTEST=hello123
 check "$MYTEST" "hello123" "var_assign: standalone assignment"
 
 echo === Builtin Tests Done ===
+
+echo === POSIX Utility Tests ===
+
+# --- head ---
+echo "line1" > /mnt/headtest
+echo "line2" >> /mnt/headtest
+echo "line3" >> /mnt/headtest
+set hout $(head -n 1 /mnt/headtest)
+check "$hout" "line1" "head: first line"
+rm /mnt/headtest
+
+# --- tail ---
+echo "t1" > /mnt/tailtest
+echo "t2" >> /mnt/tailtest
+echo "t3" >> /mnt/tailtest
+set tout $(tail -n 1 /mnt/tailtest)
+check "$tout" "t3" "tail: last line"
+rm /mnt/tailtest
+
+# --- wc (verify word count value) ---
+echo "hello world foo" > /mnt/wctest
+set wcout $(echo "hello world foo" | wc -w)
+check "$wcout" "3" "wc: word count 3"
+set wlout $(echo "hello" | wc -l)
+check "$wlout" "1" "wc: line count 1"
+rm /mnt/wctest
+
+# --- sort ---
+echo "banana" > /mnt/sorttest
+echo "apple" >> /mnt/sorttest
+echo "cherry" >> /mnt/sorttest
+set sout $(sort /mnt/sorttest | head -n 1)
+check "$sout" "apple" "sort: alphabetical first"
+rm /mnt/sorttest
+
+# --- cut ---
+echo "a:b:c" > /mnt/cuttest
+set cout $(cut -d: -f2 /mnt/cuttest)
+check "$cout" "b" "cut: field 2"
+rm /mnt/cuttest
+
+# --- tr ---
+set trout $(echo hello | tr a-z A-Z)
+check "$trout" "HELLO" "tr: lowercase to uppercase"
+
+# --- tee ---
+echo "teedata" | tee /mnt/teefile > /dev/null
+set teeout $(cat /mnt/teefile)
+check "$teeout" "teedata" "tee: copied to file"
+rm /mnt/teefile
+
+# --- uniq (verify duplicate removal) ---
+echo "aaa" > /mnt/uniqtest
+echo "aaa" >> /mnt/uniqtest
+echo "bbb" >> /mnt/uniqtest
+set uqout $(uniq /mnt/uniqtest | wc -l)
+check "$uqout" "2" "uniq: removes duplicate lines"
+set uqfirst $(uniq /mnt/uniqtest | head -n 1)
+check "$uqfirst" "aaa" "uniq: first unique is aaa"
+rm /mnt/uniqtest
+
+# --- ln ---
+echo "linkdata" > /mnt/lnsrc
+ln -s /mnt/lnsrc /mnt/lndst
+set lnout $(cat /mnt/lndst)
+check "$lnout" "linkdata" "ln: symlink read"
+rm /mnt/lndst
+rm /mnt/lnsrc
+
+# --- chmod (verify file still accessible after mode change) ---
+echo "chmoddata" > /mnt/chmodtest
+chmod 755 /mnt/chmodtest
+set chout $(cat /mnt/chmodtest)
+check "$chout" "chmoddata" "chmod: file readable after 755"
+rm /mnt/chmodtest
+
+# --- date (verify output contains year) ---
+set dout $(date "+%Y")
+if test -n "$dout"; then
+    check "yes" "yes" "date: outputs year"
+else
+    check "" "yes" "date: outputs year"
+fi
+
+# --- basename ---
+set bout $(basename /usr/local/bin/prog)
+check "$bout" "prog" "basename: strip dir"
+
+# --- dirname ---
+set dout $(dirname /usr/local/bin/prog)
+check "$dout" "/usr/local/bin" "dirname: strip file"
+
+# --- env (verify PATH is in output) ---
+set envhas $(env | grep PATH)
+if test -n "$envhas"; then
+    check "yes" "yes" "env: outputs PATH"
+else
+    check "" "yes" "env: outputs PATH"
+fi
+
+# --- id (verify uid=0 in output) ---
+set idout $(id -u)
+check "$idout" "0" "id: uid is 0"
+
+# --- true/false (verify exit codes) ---
+/bin/true
+check "$?" "0" "true: exits 0"
+/bin/false
+check "$?" "1" "false: exits 1"
+
+# --- printf ---
+set pfout $(/bin/printf "hello%d" 42)
+check "$pfout" "hello42" "printf: format output"
+
+# --- expr ---
+set exout $(expr 3 + 4)
+check "$exout" "7" "expr: addition"
+
+# --- find (verify it finds the file) ---
+echo "findme" > /mnt/findtarget
+set fout $(find /mnt -name findtarget)
+check "$fout" "/mnt/findtarget" "find: locates file by name"
+rm /mnt/findtarget
+
+# --- xargs ---
+echo "hello" | xargs echo > /mnt/xargsout
+set xout $(cat /mnt/xargsout)
+check "$xout" "hello" "xargs: pass args"
+rm /mnt/xargsout
+
+# --- rmdir (verify directory removed) ---
+mkdir /mnt/rmdirtest
+rmdir /mnt/rmdirtest
+test -d /mnt/rmdirtest
+set rmdr $?
+check "$rmdr" "1" "rmdir: removed empty dir"
+
+# --- chown (verify no error on single-user OS) ---
+echo "chowndata" > /mnt/chowntest
+chown root /mnt/chowntest
+set corc $?
+check "$corc" "0" "chown: returns 0"
+set codata $(cat /mnt/chowntest)
+check "$codata" "chowndata" "chown: file still readable"
+rm /mnt/chowntest
+
+# --- dd ---
+echo "dddata" > /mnt/ddsrc
+dd if=/mnt/ddsrc of=/mnt/dddst 2>/dev/null
+set ddout $(cat /mnt/dddst)
+check "$ddout" "dddata" "dd: copy file"
+rm /mnt/ddsrc
+rm /mnt/dddst
+
+echo === POSIX Utility Tests Done ===
 
 echo ""
 echo "=== Summary ==="

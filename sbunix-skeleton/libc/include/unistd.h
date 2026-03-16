@@ -74,6 +74,7 @@ pid_t   getsid(pid_t pid);
 
 /* File operations */
 int     ftruncate(int fd, off_t length);
+int     truncate(const char *path, off_t length);
 int     fsync(int fd);
 
 /* Wait (convenience wrapper) */
@@ -92,5 +93,30 @@ extern int   optind;
 extern int   opterr;
 extern int   optopt;
 int     getopt(int argc, char *const argv[], const char *optstring);
+
+/* Terminal */
+char   *ttyname(int fd);
+int     ttyname_r(int fd, char *buf, size_t buflen);
+
+/* Process group / session */
+int     setreuid(uid_t ruid, uid_t euid);
+int     setregid(gid_t rgid, gid_t egid);
+
+/* Misc POSIX */
+long    sysconf(int name);
+int     chown(const char *path, uid_t owner, gid_t group);
+int     fchown(int fd, uid_t owner, gid_t group);
+int     fchdir(int fd);
+unsigned int getpagesize(void);
+char   *getlogin(void);
+int     nice(int inc);
+
+/* sysconf names */
+#define _SC_PAGESIZE       30
+#define _SC_PAGE_SIZE      30
+#define _SC_OPEN_MAX       4
+#define _SC_CLK_TCK        2
+#define _SC_ARG_MAX        0
+#define _SC_NGROUPS_MAX    3
 
 #endif /* _UNISTD_H */

@@ -18,6 +18,7 @@
 #define SYS_mount       40
 #define SYS_faccessat   48
 #define SYS_chdir       49
+#define SYS_fchdir      50
 #define SYS_openat      56
 #define SYS_close       57
 #define SYS_pipe2       59
@@ -39,10 +40,12 @@
 #define SYS_wait4       260
 
 /* Signals */
-#define SYS_kill        129
+#define SYS_kill          129
+#define SYS_sigaltstack   132
+#define SYS_rt_sigsuspend 133
 #define SYS_rt_sigaction  134
 #define SYS_rt_sigprocmask 135
-#define SYS_sigaltstack 132
+#define SYS_rt_sigpending 136
 
 /* Time */
 #define SYS_nanosleep   101
@@ -96,6 +99,8 @@
 #define SYS_getrandom   278
 
 /* Additional syscalls */
+#define SYS_fchmod      52
+#define SYS_fchmodat    53
 #define SYS_fsync       82
 #define SYS_ftruncate   46
 #define SYS_tgkill      131

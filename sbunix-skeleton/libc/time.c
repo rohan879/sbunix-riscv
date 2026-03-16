@@ -393,3 +393,17 @@ int clock_nanosleep(int clockid, int flags,
     if (ret < 0) { errno = (int)(-ret); return (int)(-ret); }
     return 0;
 }
+
+clock_t clock(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) < 0) {
+        /* Fallback to monotonic */
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
+            return (clock_t)-1;
+    }
+    return (clock_t)(ts.tv_sec * CLOCKS_PER_SEC + ts.tv_nsec / 1000);
+}
+
+double difftime(time_t time1, time_t time0) {
+    return (double)(time1 - time0);
+}

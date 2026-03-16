@@ -35,3 +35,11 @@ mode_t umask(mode_t mask) {
     /* SYS_umask = 166 */
     return (mode_t)syscall(166, mask);
 }
+
+int chmod(const char *path, mode_t mode) {
+    return (int)__syscall_ret(syscall(SYS_fchmodat, AT_FDCWD, path, mode, 0));
+}
+
+int fchmod(int fd, mode_t mode) {
+    return (int)__syscall_ret(syscall(SYS_fchmod, fd, mode));
+}

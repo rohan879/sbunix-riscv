@@ -80,9 +80,19 @@ FILE *tmpfile(void);
 FILE *popen(const char *command, const char *type);
 int   pclose(FILE *stream);
 
+/* Reopen */
+FILE *freopen(const char *path, const char *mode, FILE *stream);
+
+/* Line reading */
+ssize_t getline(char **lineptr, size_t *n, FILE *stream);
+ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream);
+
 /* Basic I/O */
 int puts(const char *s);
 int putchar(int c);
 int getchar(void);
+
+/* rename (also in unistd.h) */
+int rename(const char *oldpath, const char *newpath);
 
 #endif /* _STDIO_H */

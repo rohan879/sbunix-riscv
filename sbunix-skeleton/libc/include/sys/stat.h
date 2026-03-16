@@ -86,5 +86,7 @@ int lstat(const char *path, struct stat *buf);
 int mkdir(const char *path, mode_t mode);
 int mknod(const char *path, mode_t mode, dev_t dev);
 mode_t umask(mode_t mask);
+int chmod(const char *path, mode_t mode);
+int fchmod(int fd, mode_t mode);
 
 #endif /* _SYS_STAT_H */

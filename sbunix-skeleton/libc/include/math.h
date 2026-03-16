@@ -120,4 +120,19 @@ double sinh(double x);
 double cosh(double x);
 double tanh(double x);
 
+/* -------------------------------------------------------------------
+ * Additional POSIX / C99 math
+ * ------------------------------------------------------------------- */
+
+double remainder(double x, double y);
+double nearbyint(double x);
+double rint(double x);
+long   lrint(double x);
+long long llrint(double x);
+double scalbn(double x, int n);
+double cbrt(double x);
+double hypot(double x, double y);
+double expm1(double x);
+double log1p(double x);
+
 #endif /* _MATH_H */

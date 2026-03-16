@@ -90,4 +90,21 @@ speed_t cfgetospeed(const struct termios *termios_p);
 int cfsetispeed(struct termios *termios_p, speed_t speed);
 int cfsetospeed(struct termios *termios_p, speed_t speed);
 
+/* Flush / drain / flow control */
+int tcflush(int fd, int queue_selector);
+int tcdrain(int fd);
+int tcflow(int fd, int action);
+int tcsendbreak(int fd, int duration);
+
+/* Queue selector constants for tcflush */
+#define TCIFLUSH  0
+#define TCOFLUSH  1
+#define TCIOFLUSH 2
+
+/* Action constants for tcflow */
+#define TCOOFF    0
+#define TCOON     1
+#define TCIOFF    2
+#define TCION     3
+
 #endif /* _TERMIOS_H */

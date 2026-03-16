@@ -47,4 +47,12 @@ struct tm *localtime(const time_t *timep);
 time_t     mktime(struct tm *tm);
 size_t     strftime(char *s, size_t max, const char *fmt, const struct tm *tm);
 
+/* CPU time */
+typedef long clock_t;
+#define CLOCKS_PER_SEC 1000000L
+clock_t clock(void);
+
+/* difftime */
+double difftime(time_t time1, time_t time0);
+
 #endif /* _TIME_H */
