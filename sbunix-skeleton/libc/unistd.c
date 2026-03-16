@@ -301,3 +301,71 @@ int fcntl(int fd, int cmd, ...) {
     va_end(ap);
     return (int)__syscall_ret(syscall(SYS_fcntl, fd, cmd, arg));
 }
+
+char *ttyname(int fd) {
+    static char buf[32];
+    if (!isatty(fd)) return NULL;
+    /* SBUnix has a single console tty */
+    strcpy(buf, "/dev/console");
+    return buf;
+}
+
+int ttyname_r(int fd, char *buf, size_t buflen) {
+    if (!isatty(fd)) { errno = ENOTTY; return ENOTTY; }
+    const char *name = "/dev/console";
+    size_t len = strlen(name);
+    if (len + 1 > buflen) { errno = ERANGE; return ERANGE; }
+    strcpy(buf, name);
+    return 0;
+}
+
+long sysconf(int name) {
+    switch (name) {
+    case 30: return 4096;          /* _SC_PAGESIZE */
+    case 4:  return 64;            /* _SC_OPEN_MAX */
+    case 2:  return 100;           /* _SC_CLK_TCK */
+    case 0:  return 131072;        /* _SC_ARG_MAX */
+    case 3:  return 0;             /* _SC_NGROUPS_MAX */
+    default: errno = EINVAL; return -1;
+    }
+}
+
+int chown(const char *path, uid_t owner, gid_t group) {
+    (void)path; (void)owner; (void)group;
+    return 0; /* single-user OS: always succeeds */
+}
+
+int fchown(int fd, uid_t owner, gid_t group) {
+    (void)fd; (void)owner; (void)group;
+    return 0;
+}
+
+int fchdir(int fd) {
+    /* Read path from fd — simplified: use /proc/self/fd if available */
+    (void)fd;
+    errno = ENOSYS;
+    return -1;
+}
+
+unsigned int getpagesize(void) {
+    return 4096;
+}
+
+char *getlogin(void) {
+    return "root";
+}
+
+int nice(int inc) {
+    (void)inc;
+    return 0; /* single-process priority: no-op */
+}
+
+int setreuid(uid_t ruid, uid_t euid) {
+    (void)ruid; (void)euid;
+    return 0; /* single-user OS */
+}
+
+int setregid(gid_t rgid, gid_t egid) {
+    (void)rgid; (void)egid;
+    return 0;
+}

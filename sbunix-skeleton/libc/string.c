@@ -327,3 +327,89 @@ char *strerror(int errnum) {
     }
     }
 }
+
+size_t strnlen(const char *s, size_t maxlen) {
+    size_t i = 0;
+    while (i < maxlen && s[i])
+        i++;
+    return i;
+}
+
+char *stpcpy(char *dst, const char *src) {
+    while ((*dst = *src) != '\0') {
+        dst++;
+        src++;
+    }
+    return dst;
+}
+
+char *stpncpy(char *dst, const char *src, size_t n) {
+    size_t i;
+    for (i = 0; i < n && src[i]; i++)
+        dst[i] = src[i];
+    char *end = dst + i;
+    for (; i < n; i++)
+        dst[i] = '\0';
+    return end;
+}
+
+static const char *sig_names[] = {
+    [0]  = "Signal 0",
+    [1]  = "Hangup",
+    [2]  = "Interrupt",
+    [3]  = "Quit",
+    [4]  = "Illegal instruction",
+    [5]  = "Trace/breakpoint trap",
+    [6]  = "Aborted",
+    [7]  = "Bus error",
+    [8]  = "Floating point exception",
+    [9]  = "Killed",
+    [10] = "User defined signal 1",
+    [11] = "Segmentation fault",
+    [12] = "User defined signal 2",
+    [13] = "Broken pipe",
+    [14] = "Alarm clock",
+    [15] = "Terminated",
+    [17] = "Child exited",
+    [18] = "Continued",
+    [19] = "Stopped (signal)",
+    [20] = "Stopped",
+};
+
+char *strsignal(int sig) {
+    static char buf[32];
+    if (sig >= 0 && sig <= 20 && sig_names[sig])
+        return (char *)sig_names[sig];
+    char *p = buf;
+    char *prefix = "Signal ";
+    while (*prefix) *p++ = *prefix++;
+    if (sig < 0) { *p++ = '-'; sig = -sig; }
+    char tmp[16];
+    int i = 0;
+    if (sig == 0) { tmp[i++] = '0'; }
+    else { while (sig > 0) { tmp[i++] = '0' + sig % 10; sig /= 10; } }
+    while (i-- > 0) *p++ = tmp[i];
+    *p = '\0';
+    return buf;
+}
+
+char *strtok_r(char *str, const char *delim, char **saveptr) {
+    if (!str) str = *saveptr;
+    if (!str) return NULL;
+    /* Skip leading delimiters */
+    while (*str && strchr(delim, *str)) str++;
+    if (!*str) { *saveptr = NULL; return NULL; }
+    char *start = str;
+    while (*str && !strchr(delim, *str)) str++;
+    if (*str) { *str = '\0'; *saveptr = str + 1; }
+    else { *saveptr = NULL; }
+    return start;
+}
+
+int strerror_r(int errnum, char *buf, size_t buflen) {
+    char *msg = strerror(errnum);
+    size_t len = strlen(msg);
+    if (len >= buflen) { if (buflen > 0) { memcpy(buf, msg, buflen - 1); buf[buflen - 1] = '\0'; } return -1; }
+    memcpy(buf, msg, len + 1);
+    return 0;
+}
