@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -71,6 +73,81 @@ int main(void) {
     /* cleanup */
     unlink("/mnt/fdio_test");
     unlink("/mnt/fdio_dup");
+
+    /* ============================================================
+     * Error code tests — kernel must distinguish errors from empty
+     * results. A bogus fd must return -1/EBADF, not 0 (empty/EOF).
+     * ============================================================ */
+    int badfd = 999;
+
+    /* read(bad_fd) must return -1 with EBADF, not 0 (EOF) */
+    errno = 0;
+    ssize_t rr = read(badfd, buf, 1);
+    check(rr == -1, "err: read(bad_fd) returns -1");
+    check(errno == EBADF, "err: read(bad_fd) errno==EBADF");
+
+    /* write(bad_fd) must return -1 with EBADF */
+    errno = 0;
+    ssize_t wr = write(badfd, "x", 1);
+    check(wr == -1, "err: write(bad_fd) returns -1");
+    check(errno == EBADF, "err: write(bad_fd) errno==EBADF");
+
+    /* close(bad_fd) must return -1 with EBADF */
+    errno = 0;
+    int cr = close(badfd);
+    check(cr == -1, "err: close(bad_fd) returns -1");
+    check(errno == EBADF, "err: close(bad_fd) errno==EBADF");
+
+    /* lseek(bad_fd) must return -1 with EBADF */
+    errno = 0;
+    off_t lr = lseek(badfd, 0, SEEK_SET);
+    check(lr == (off_t)-1, "err: lseek(bad_fd) returns -1");
+    check(errno == EBADF, "err: lseek(bad_fd) errno==EBADF");
+
+    /* fstat(bad_fd) must return -1 with EBADF */
+    errno = 0;
+    struct stat st;
+    int sr = fstat(badfd, &st);
+    check(sr == -1, "err: fstat(bad_fd) returns -1");
+    check(errno == EBADF, "err: fstat(bad_fd) errno==EBADF");
+
+    /* lseek on pipe → ESPIPE (not EBADF or 0) */
+    pipe(pfd);
+    errno = 0;
+    lr = lseek(pfd[0], 0, SEEK_SET);
+    check(lr == (off_t)-1, "err: lseek(pipe) returns -1");
+    check(errno == ESPIPE, "err: lseek(pipe) errno==ESPIPE");
+    close(pfd[0]);
+    close(pfd[1]);
+
+    /* lseek with invalid whence → EINVAL */
+    fd = open("/mnt/fdio_err", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        errno = 0;
+        lr = lseek(fd, 0, 99);  /* whence=99 is invalid */
+        check(lr == (off_t)-1, "err: lseek(bad_whence) returns -1");
+        check(errno == EINVAL, "err: lseek(bad_whence) errno==EINVAL");
+
+        /* lseek to negative offset → EINVAL */
+        errno = 0;
+        lr = lseek(fd, -100, SEEK_SET);
+        check(lr == (off_t)-1, "err: lseek(neg_offset) returns -1");
+        check(errno == EINVAL, "err: lseek(neg_offset) errno==EINVAL");
+
+        close(fd);
+        unlink("/mnt/fdio_err");
+    }
+
+    /* Contrast: read 0 bytes from valid empty file is NOT an error */
+    fd = open("/mnt/fdio_empty", O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        errno = 0;
+        rr = read(fd, buf, 10);
+        check(rr == 0, "ok: read(empty_file) returns 0 (EOF)");
+        check(errno == 0, "ok: read(empty_file) no errno");
+        close(fd);
+        unlink("/mnt/fdio_empty");
+    }
 
     printf("fdiotest: %d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;
