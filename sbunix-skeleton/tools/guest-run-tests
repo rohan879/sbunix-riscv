@@ -314,6 +314,140 @@ check "$MYTEST" "hello123" "var_assign: standalone assignment"
 
 echo === Builtin Tests Done ===
 
+echo === POSIX Utility Tests ===
+
+# --- head ---
+echo "line1" > /mnt/headtest
+echo "line2" >> /mnt/headtest
+echo "line3" >> /mnt/headtest
+set hout $(head -n 1 /mnt/headtest)
+check "$hout" "line1" "head: first line"
+rm /mnt/headtest
+
+# --- tail ---
+echo "t1" > /mnt/tailtest
+echo "t2" >> /mnt/tailtest
+echo "t3" >> /mnt/tailtest
+set tout $(tail -n 1 /mnt/tailtest)
+check "$tout" "t3" "tail: last line"
+rm /mnt/tailtest
+
+# --- wc ---
+echo "hello world" > /mnt/wctest
+wc -w /mnt/wctest > /mnt/wcout
+if test -f /mnt/wcout; then echo WC_PASS; else echo WC_FAIL; fi
+rm /mnt/wctest
+rm /mnt/wcout
+
+# --- sort ---
+echo "banana" > /mnt/sorttest
+echo "apple" >> /mnt/sorttest
+echo "cherry" >> /mnt/sorttest
+set sout $(sort /mnt/sorttest | head -n 1)
+check "$sout" "apple" "sort: alphabetical first"
+rm /mnt/sorttest
+
+# --- cut ---
+echo "a:b:c" > /mnt/cuttest
+set cout $(cut -d: -f2 /mnt/cuttest)
+check "$cout" "b" "cut: field 2"
+rm /mnt/cuttest
+
+# --- tr ---
+set trout $(echo hello | tr a-z A-Z)
+check "$trout" "HELLO" "tr: lowercase to uppercase"
+
+# --- tee ---
+echo "teedata" | tee /mnt/teefile > /dev/null
+set teeout $(cat /mnt/teefile)
+check "$teeout" "teedata" "tee: copied to file"
+rm /mnt/teefile
+
+# --- uniq ---
+echo "aaa" > /mnt/uniqtest
+echo "aaa" >> /mnt/uniqtest
+echo "bbb" >> /mnt/uniqtest
+set uqout $(uniq /mnt/uniqtest | wc -l)
+if test -n "$uqout"; then echo UNIQ_PASS; else echo UNIQ_FAIL; fi
+rm /mnt/uniqtest
+
+# --- ln ---
+echo "linkdata" > /mnt/lnsrc
+ln -s /mnt/lnsrc /mnt/lndst
+set lnout $(cat /mnt/lndst)
+check "$lnout" "linkdata" "ln: symlink read"
+rm /mnt/lndst
+rm /mnt/lnsrc
+
+# --- chmod ---
+echo "data" > /mnt/chmodtest
+chmod 755 /mnt/chmodtest
+if test -f /mnt/chmodtest; then echo CHMOD_PASS; else echo CHMOD_FAIL; fi
+rm /mnt/chmodtest
+
+# --- date ---
+date > /mnt/dateout
+if test -f /mnt/dateout; then echo DATE_PASS; else echo DATE_FAIL; fi
+rm /mnt/dateout
+
+# --- basename ---
+set bout $(basename /usr/local/bin/prog)
+check "$bout" "prog" "basename: strip dir"
+
+# --- dirname ---
+set dout $(dirname /usr/local/bin/prog)
+check "$dout" "/usr/local/bin" "dirname: strip file"
+
+# --- env ---
+env > /mnt/envout
+if test -f /mnt/envout; then echo ENV_PASS; else echo ENV_FAIL; fi
+rm /mnt/envout
+
+# --- id ---
+id > /mnt/idout
+if test -f /mnt/idout; then echo ID_PASS; else echo ID_FAIL; fi
+rm /mnt/idout
+
+# --- true/false ---
+/bin/true && echo TRUE_PASS || echo TRUE_FAIL
+/bin/false && echo FALSE_FAIL || echo FALSE_PASS
+
+# --- printf ---
+set pfout $(/bin/printf "hello%d" 42)
+check "$pfout" "hello42" "printf: format output"
+
+# --- expr ---
+set exout $(expr 3 + 4)
+check "$exout" "7" "expr: addition"
+
+# --- find ---
+echo "findme" > /mnt/findtarget
+find /mnt -name findtarget > /mnt/findout
+if test -f /mnt/findout; then echo FIND_PASS; else echo FIND_FAIL; fi
+rm /mnt/findtarget
+rm /mnt/findout
+
+# --- xargs ---
+echo "hello" | xargs echo > /mnt/xargsout
+set xout $(cat /mnt/xargsout)
+check "$xout" "hello" "xargs: pass args"
+rm /mnt/xargsout
+
+# --- rmdir ---
+mkdir /mnt/rmdirtest
+rmdir /mnt/rmdirtest
+if test -d /mnt/rmdirtest; then echo RMDIR2_FAIL; else echo RMDIR2_PASS; fi
+
+# --- dd ---
+echo "dddata" > /mnt/ddsrc
+dd if=/mnt/ddsrc of=/mnt/dddst 2>/dev/null
+set ddout $(cat /mnt/dddst)
+check "$ddout" "dddata" "dd: copy file"
+rm /mnt/ddsrc
+rm /mnt/dddst
+
+echo === POSIX Utility Tests Done ===
+
 echo ""
 echo "=== Summary ==="
 echo "Passed: $PASS"
