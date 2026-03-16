@@ -50,3 +50,19 @@ int cfsetospeed(struct termios *termios_p, speed_t speed) {
     (void)termios_p; (void)speed;
     return 0;
 }
+
+int tcflush(int fd, int queue_selector) {
+    return ioctl(fd, 0x540B /* TCFLSH */, queue_selector);
+}
+
+int tcdrain(int fd) {
+    return ioctl(fd, 0x5409 /* TCSBRK */, 1);
+}
+
+int tcflow(int fd, int action) {
+    return ioctl(fd, 0x540A /* TCXONC */, action);
+}
+
+int tcsendbreak(int fd, int duration) {
+    return ioctl(fd, 0x5409 /* TCSBRK */, duration);
+}

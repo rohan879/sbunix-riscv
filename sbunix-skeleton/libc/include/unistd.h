@@ -74,6 +74,7 @@ pid_t   getsid(pid_t pid);
 
 /* File operations */
 int     ftruncate(int fd, off_t length);
+int     truncate(const char *path, off_t length);
 int     fsync(int fd);
 
 /* Wait (convenience wrapper) */

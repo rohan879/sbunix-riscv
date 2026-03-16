@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <syscall.h>
 #include <errno.h>
+#include <stddef.h>
 
 /*
  * kill() — send signal `sig` to process `pid`.
@@ -97,4 +98,53 @@ void (*signal(int signum, void (*handler)(int)))(int) {
 
 int sigaltstack(const stack_t *ss, stack_t *old_ss) {
     return (int)__syscall_ret(syscall(SYS_sigaltstack, ss, old_ss));
+}
+
+/*
+ * sigsuspend() — temporarily replace signal mask and suspend until
+ * a signal is delivered.  Always returns -1 with errno == EINTR.
+ */
+int sigsuspend(const sigset_t *mask) {
+    errno = EINTR; // always returns -1 with EINTR
+    return (int)__syscall_ret(syscall(133, mask, sizeof(sigset_t)));
+}
+
+/*
+ * sigpending() — get the set of pending signals.
+ */
+int sigpending(sigset_t *set) {
+    return (int)__syscall_ret(syscall(136, set, sizeof(sigset_t)));
+}
+
+/*
+ * pause() — suspend until a signal is delivered.
+ * Implemented as sigsuspend with the current mask.
+ */
+int pause(void) {
+    sigset_t mask;
+    sigprocmask(SIG_BLOCK, NULL, &mask); // get current mask
+    return sigsuspend(&mask);
+}
+
+/*
+ * sigwait() — wait for a signal in `set`.
+ * Simple implementation: loop checking sigpending, sigsuspend if none ready.
+ */
+int sigwait(const sigset_t *set, int *sig) {
+    sigset_t pending;
+    for (;;) {
+        sigpending(&pending);
+        for (int i = 1; i < 32; i++) {
+            if (sigismember(set, i) && sigismember(&pending, i)) {
+                *sig = i;
+                // Consume the signal
+                sigset_t block;
+                sigemptyset(&block);
+                sigaddset(&block, i);
+                sigprocmask(SIG_UNBLOCK, &block, NULL);
+                return 0;
+            }
+        }
+        sigsuspend(set);
+    }
 }

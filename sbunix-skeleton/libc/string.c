@@ -413,3 +413,15 @@ int strerror_r(int errnum, char *buf, size_t buflen) {
     memcpy(buf, msg, len + 1);
     return 0;
 }
+
+/* BSD compatibility functions (also declared in <strings.h>) */
+
+void bzero(void *s, size_t n) { memset(s, 0, n); }
+void bcopy(const void *src, void *dst, size_t n) { memmove(dst, src, n); }
+int bcmp(const void *s1, const void *s2, size_t n) { return memcmp(s1, s2, n); }
+int ffs(int i) {
+    if (i == 0) return 0;
+    int pos = 1;
+    while (!(i & 1)) { i >>= 1; pos++; }
+    return pos;
+}

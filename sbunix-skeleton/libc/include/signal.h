@@ -124,4 +124,10 @@ typedef struct {
 
 int sigaltstack(const stack_t *ss, stack_t *old_ss);
 
+/* Suspend / pending / wait */
+int sigsuspend(const sigset_t *mask);
+int sigpending(sigset_t *set);
+int pause(void);
+int sigwait(const sigset_t *set, int *sig);
+
 #endif /* _SIGNAL_H */

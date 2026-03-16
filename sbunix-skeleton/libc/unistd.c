@@ -241,6 +241,14 @@ int ftruncate(int fd, off_t length) {
     return (int)__syscall_ret(syscall(SYS_ftruncate, fd, length));
 }
 
+int truncate(const char *path, off_t length) {
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    int r = ftruncate(fd, length);
+    close(fd);
+    return r;
+}
+
 int fsync(int fd) {
     return (int)__syscall_ret(syscall(SYS_fsync, fd));
 }
