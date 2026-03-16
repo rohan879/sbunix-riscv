@@ -3241,6 +3241,18 @@ pagefault_kill:
             }
             while(1) {}
         }
+        /* Handle other user-mode exceptions by delivering a signal */
+        if (current_proc) {
+            int sig = SIGKILL;
+            if (cause == 2)                    sig = SIGILL;  /* Illegal instruction */
+            else if (cause == 0 || cause == 4 || cause == 6) sig = SIGBUS; /* Misaligned */
+            else if (cause == 5 || cause == 7) sig = SIGBUS;  /* Access fault */
+            printk("trap pid=%d scause=0x%lx epc=0x%lx stval=0x%lx -> sig %d\n",
+                   current_proc->pid, cause, tf->epc, stval, sig);
+            current_proc->sigpending |= signal_bit(sig);
+            deliver_signal(tf, current_proc);
+            return;
+        }
         printk("UNEXPECTED TRAP! scause: 0x%lx, epc: 0x%lx, tval: 0x%lx\n",
                cause, tf->epc, stval);
         while(1) {}
