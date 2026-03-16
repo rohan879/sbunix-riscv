@@ -459,15 +459,11 @@ fi
 set idout $(id -u)
 check "$idout" "0" "id: uid is 0"
 
-# --- true/false (verify exit codes via file creation) ---
-/bin/true && echo trueworks > /mnt/trueout
-set trr $(cat /mnt/trueout)
-check "$trr" "trueworks" "true: exits 0"
-rm /mnt/trueout
-/bin/false || echo falseworks > /mnt/falseout
-set frr $(cat /mnt/falseout)
-check "$frr" "falseworks" "false: exits 1"
-rm /mnt/falseout
+# --- true/false (verify exit codes) ---
+/bin/true
+check "$?" "0" "true: exits 0"
+/bin/false
+check "$?" "1" "false: exits 1"
 
 # --- printf ---
 set pfout $(/bin/printf "hello%d" 42)
