@@ -138,10 +138,11 @@ static void test_kill_sigstop_cont(void) {
     pid_t pid = fork();
     if (pid == 0) {
         close(pfd[0]);
-        /* Child: write "A", then keep running; after STOP+CONT write "B" */
+        /* Child: write "A" to signal readiness, then pause().
+         * pause() blocks until a signal is delivered.  SIGSTOP stops us,
+         * then SIGCONT resumes us; pause() returns -1 (EINTR). */
         write(pfd[1], "A", 1);
-        /* Busy-wait a bit, will be stopped and then continued */
-        for (volatile int i = 0; i < 5000000; i++);
+        pause();
         write(pfd[1], "B", 1);
         close(pfd[1]);
         _exit(0);

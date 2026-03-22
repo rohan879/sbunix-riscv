@@ -1713,6 +1713,12 @@ static long sys_getgid_handler(struct trapframe *tf) {
 
 /* Helper: deliver signal to a single process */
 static void kill_deliver(struct proc *target, int sig) {
+    /* Signals to zombie/unused processes are silently discarded.
+     * Without this guard, SIGSTOP's immediate-stop code would override
+     * the ZOMBIE state with SLEEPING, and a subsequent SIGCONT would
+     * make the scheduler resume the dead process in an infinite loop. */
+    if (target->state == ZOMBIE || target->state == UNUSED)
+        return;
     if (sig == 9) {
         target->exit_status = 128 + 9;
         target->killed_by_signal = 9;
