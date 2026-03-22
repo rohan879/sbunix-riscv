@@ -1416,6 +1416,19 @@ static long sys_execve_handler(struct trapframe *tf) {
         return SYSCALL_NORETURN;
     }
 
+    /* POSIX: close file descriptors marked with O_CLOEXEC (FD_CLOEXEC) */
+    {
+        #define KERN_O_CLOEXEC 02000000 /* matches libc O_CLOEXEC */
+        struct open_file **oft = proc_ofile(current_proc);
+        for (int fd = 0; fd < NOFILE; fd++) {
+            if (oft[fd] && (oft[fd]->flags & KERN_O_CLOEXEC))
+                close_ofile(current_proc, fd);
+        }
+    }
+
+    /* Mark that this process has exec'd (for POSIX setpgid restrictions) */
+    current_proc->has_execed = 1;
+
     {
         struct trapframe *newtf = current_proc->trapframe;
 

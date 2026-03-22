@@ -166,6 +166,7 @@ struct proc {
   /* stack bounds for auto-grow */
   uint64_t stack_top;            /* top of user stack (highest VA) */
   uint64_t stack_bottom;         /* lowest allocated stack page */
+  int has_execed;                           /* set to 1 after execve (for setpgid) */
   /* Clone/thread sharing state */
   int clone_flags;                          /* flags this proc was created with */
   struct shared_pagetable  *shared_pt;      /* non-NULL if CLONE_VM */
