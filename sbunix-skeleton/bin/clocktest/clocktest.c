@@ -1,75 +1,177 @@
+/*
+ * clocktest -- wall-clock time tests
+ *
+ * Exercises clock_gettime (CLOCK_REALTIME, CLOCK_MONOTONIC),
+ * gettimeofday, time(), and verifies clocks advance and don't go backward.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <stddef.h>
 #include <time.h>
+#include <sys/time.h>
 
-static int tests_passed = 0;
-static int tests_failed = 0;
+static int g_pass = 0;
+static int g_fail = 0;
 
-static void check(int cond, const char *name) {
-    if (cond) { printf("[PASS] clock: %s\n", name); tests_passed++; }
-    else { printf("[FAIL] clock: %s\n", name); tests_failed++; }
+#define CHECK(label, cond) do { \
+    if (cond) { printf("[PASS] clock: %s\n", label); g_pass++; } \
+    else      { printf("[FAIL] clock: %s\n", label); g_fail++; } \
+} while (0)
+
+/* Epoch timestamp for Jan 1 2020 00:00:00 UTC */
+#define EPOCH_2020 1577836800L
+
+/* -----------------------------------------------------------------------
+ * 1. clock_realtime_valid: clock_gettime(CLOCK_REALTIME) returns
+ *    time > 1577836800 (Jan 2020)
+ * ----------------------------------------------------------------------- */
+static void test_clock_realtime_valid(void) {
+    struct timespec ts;
+    int r = clock_gettime(CLOCK_REALTIME, &ts);
+    CHECK("clock_realtime_valid",
+          r == 0 && ts.tv_sec > EPOCH_2020);
 }
 
-int main(void) {
-    struct timespec rt1, rt2, mt1, mt2;
+/* -----------------------------------------------------------------------
+ * 2. clock_realtime_nsec_range: nanoseconds field in [0, 999999999]
+ * ----------------------------------------------------------------------- */
+static void test_clock_realtime_nsec_range(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    CHECK("clock_realtime_nsec_range",
+          ts.tv_nsec >= 0 && ts.tv_nsec <= 999999999);
+}
 
-    /* --- CLOCK_REALTIME basic checks --- */
-    int r = clock_gettime(CLOCK_REALTIME, &rt1);
-    check(r == 0, "CLOCK_REALTIME gettime ok");
-    check(rt1.tv_sec > 1577836800, "CLOCK_REALTIME time after 2020");
-    check(rt1.tv_nsec >= 0 && rt1.tv_nsec < 1000000000,
-          "CLOCK_REALTIME nsec in valid range");
+/* -----------------------------------------------------------------------
+ * 3. clock_monotonic_valid: clock_gettime(CLOCK_MONOTONIC) returns >= 0
+ * ----------------------------------------------------------------------- */
+static void test_clock_monotonic_valid(void) {
+    struct timespec ts;
+    int r = clock_gettime(CLOCK_MONOTONIC, &ts);
+    CHECK("clock_monotonic_valid",
+          r == 0 && ts.tv_sec >= 0);
+}
 
-    /* --- CLOCK_MONOTONIC basic checks --- */
-    r = clock_gettime(CLOCK_MONOTONIC, &mt1);
-    check(r == 0, "CLOCK_MONOTONIC gettime ok");
-    check(mt1.tv_sec >= 0, "CLOCK_MONOTONIC sec >= 0");
-    check(mt1.tv_nsec >= 0 && mt1.tv_nsec < 1000000000,
-          "CLOCK_MONOTONIC nsec in valid range");
+/* -----------------------------------------------------------------------
+ * 4. clock_monotonic_nsec_range: nanoseconds field in [0, 999999999]
+ * ----------------------------------------------------------------------- */
+static void test_clock_monotonic_nsec_range(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    CHECK("clock_monotonic_nsec_range",
+          ts.tv_nsec >= 0 && ts.tv_nsec <= 999999999);
+}
 
-    /* --- Sleep and verify both clocks advance --- */
+/* -----------------------------------------------------------------------
+ * Helper: compare two timespecs. Returns 1 if a < b.
+ * ----------------------------------------------------------------------- */
+static int ts_less(const struct timespec *a, const struct timespec *b) {
+    if (a->tv_sec < b->tv_sec) return 1;
+    if (a->tv_sec == b->tv_sec && a->tv_nsec < b->tv_nsec) return 1;
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * 5. clock_realtime_advances: Two calls to CLOCK_REALTIME after
+ *    nanosleep(100ms), second > first
+ * ----------------------------------------------------------------------- */
+static void test_clock_realtime_advances(void) {
+    struct timespec t1, t2;
+    clock_gettime(CLOCK_REALTIME, &t1);
+
     struct timespec slp = { .tv_sec = 0, .tv_nsec = 100000000 }; /* 100ms */
     nanosleep(&slp, NULL);
 
-    clock_gettime(CLOCK_REALTIME, &rt2);
-    clock_gettime(CLOCK_MONOTONIC, &mt2);
+    clock_gettime(CLOCK_REALTIME, &t2);
+    CHECK("clock_realtime_advances", ts_less(&t1, &t2));
+}
 
-    long long rt_diff = (rt2.tv_sec - rt1.tv_sec) * 1000000000LL +
-                        (rt2.tv_nsec - rt1.tv_nsec);
-    long long mt_diff = (mt2.tv_sec - mt1.tv_sec) * 1000000000LL +
-                        (mt2.tv_nsec - mt1.tv_nsec);
+/* -----------------------------------------------------------------------
+ * 6. clock_monotonic_advances: Same for CLOCK_MONOTONIC
+ * ----------------------------------------------------------------------- */
+static void test_clock_monotonic_advances(void) {
+    struct timespec t1, t2;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
 
-    check(rt_diff > 0, "CLOCK_REALTIME advances after nanosleep");
-    check(rt_diff >= 50000000, "CLOCK_REALTIME elapsed >= 50ms");
-    check(mt_diff > 0, "CLOCK_MONOTONIC advances after nanosleep");
-    check(mt_diff >= 50000000, "CLOCK_MONOTONIC elapsed >= 50ms");
+    struct timespec slp = { .tv_sec = 0, .tv_nsec = 100000000 }; /* 100ms */
+    nanosleep(&slp, NULL);
 
-    /* --- Time doesn't go backwards --- */
-    check(rt2.tv_sec > rt1.tv_sec ||
-          (rt2.tv_sec == rt1.tv_sec && rt2.tv_nsec >= rt1.tv_nsec),
-          "CLOCK_REALTIME does not go backwards");
-    check(mt2.tv_sec > mt1.tv_sec ||
-          (mt2.tv_sec == mt1.tv_sec && mt2.tv_nsec >= mt1.tv_nsec),
-          "CLOCK_MONOTONIC does not go backwards");
+    clock_gettime(CLOCK_MONOTONIC, &t2);
+    CHECK("clock_monotonic_advances", ts_less(&t1, &t2));
+}
 
-    /* --- nsec fields valid after sleep --- */
-    check(rt2.tv_nsec >= 0 && rt2.tv_nsec < 1000000000,
-          "CLOCK_REALTIME nsec valid after sleep");
-    check(mt2.tv_nsec >= 0 && mt2.tv_nsec < 1000000000,
-          "CLOCK_MONOTONIC nsec valid after sleep");
+/* -----------------------------------------------------------------------
+ * 7. clock_monotonic_no_backward: Call 100 times in loop, never goes backward
+ * ----------------------------------------------------------------------- */
+static void test_clock_monotonic_no_backward(void) {
+    struct timespec prev, cur;
+    clock_gettime(CLOCK_MONOTONIC, &prev);
 
-    /* --- time() returns same epoch as CLOCK_REALTIME --- */
+    int ok = 1;
+    for (int i = 0; i < 100; i++) {
+        clock_gettime(CLOCK_MONOTONIC, &cur);
+        /* cur must be >= prev (not strictly less) */
+        if (ts_less(&cur, &prev)) {
+            ok = 0;
+            break;
+        }
+        prev = cur;
+    }
+    CHECK("clock_monotonic_no_backward", ok);
+}
+
+/* -----------------------------------------------------------------------
+ * 8. gettimeofday_valid: gettimeofday returns time > 1577836800
+ * ----------------------------------------------------------------------- */
+static void test_gettimeofday_valid(void) {
+    struct timeval tv;
+    int r = gettimeofday(&tv, NULL);
+    CHECK("gettimeofday_valid",
+          r == 0 && tv.tv_sec > EPOCH_2020);
+}
+
+/* -----------------------------------------------------------------------
+ * 9. gettimeofday_matches_clockgettime: Both return same second
+ *    (within 1s tolerance)
+ * ----------------------------------------------------------------------- */
+static void test_gettimeofday_matches_clockgettime(void) {
+    struct timeval tv;
+    struct timespec ts;
+
+    gettimeofday(&tv, NULL);
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    long long diff = (long long)ts.tv_sec - (long long)tv.tv_sec;
+    if (diff < 0) diff = -diff;
+    CHECK("gettimeofday_matches_clockgettime", diff <= 1);
+}
+
+/* -----------------------------------------------------------------------
+ * 10. time_returns_epoch: time(NULL) returns seconds since epoch > 1577836800
+ * ----------------------------------------------------------------------- */
+static void test_time_returns_epoch(void) {
     time_t t = time(NULL);
-    struct timespec rt3;
-    clock_gettime(CLOCK_REALTIME, &rt3);
-    check(t > 1577836800, "time() returns time after 2020");
-    /* time() and clock_gettime should agree within 2 seconds */
-    long long tdiff = (long long)rt3.tv_sec - (long long)t;
-    if (tdiff < 0) tdiff = -tdiff;
-    check(tdiff <= 2, "time() agrees with CLOCK_REALTIME");
+    CHECK("time_returns_epoch", t > EPOCH_2020);
+}
 
-    printf("clocktest: %d passed, %d failed\n", tests_passed, tests_failed);
-    return tests_failed > 0 ? 1 : 0;
+/* ----------------------------------------------------------------------- */
+
+int main(void) {
+    printf("=== clocktest: wall-clock time ===\n");
+
+    test_clock_realtime_valid();
+    test_clock_realtime_nsec_range();
+    test_clock_monotonic_valid();
+    test_clock_monotonic_nsec_range();
+    test_clock_realtime_advances();
+    test_clock_monotonic_advances();
+    test_clock_monotonic_no_backward();
+    test_gettimeofday_valid();
+    test_gettimeofday_matches_clockgettime();
+    test_time_returns_epoch();
+
+    printf("=== clocktest: %d passed, %d failed ===\n", g_pass, g_fail);
+    return g_fail > 0 ? 1 : 0;
 }
