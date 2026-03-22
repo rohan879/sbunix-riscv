@@ -101,6 +101,7 @@
 /* Additional syscalls */
 #define SYS_fchmod      52
 #define SYS_fchmodat    53
+#define SYS_sync        81
 #define SYS_fsync       82
 #define SYS_ftruncate   46
 #define SYS_tgkill      131

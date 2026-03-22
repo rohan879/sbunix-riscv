@@ -1880,6 +1880,7 @@ static long sys_exit_handler(struct trapframe *tf) {
         current_proc->killed_by_signal = 0;
         cleanup_proc_resources(current_proc);
         if (current_proc->pid == 1) {
+            ext2_sync(); /* flush filesystem before halt */
             printk("\nSystem halted (init exited with status %d).\n", status);
             register unsigned long a0 asm("a0") = 0;
             register unsigned long a1 asm("a1") = 0;
@@ -1929,6 +1930,12 @@ static long sys_fsync_handler(struct trapframe *tf) {
     return 0;
 }
 
+static long sys_sync_handler(struct trapframe *tf) {
+    (void)tf;
+    ext2_sync();
+    return 0;
+}
+
 #define REBOOT_MAGIC1      0xfee1deadU
 #define REBOOT_MAGIC2      0x28121969U
 #define REBOOT_CMD_HALT    0xcdef0123U
@@ -1942,6 +1949,9 @@ static long sys_reboot_handler(struct trapframe *tf) {
 
     if (magic1 != REBOOT_MAGIC1 || magic2 != REBOOT_MAGIC2)
         return (long)-1; /* -EPERM */
+
+    /* Flush filesystem before reboot/shutdown */
+    ext2_sync();
 
     if (cmd == REBOOT_CMD_RESTART) {
         printk("\nSystem rebooting...\n");
@@ -3332,6 +3342,7 @@ void syscall_init(void) {
     syscall_table[SYS_mount]           = sys_mount_handler;
     syscall_table[SYS_umount2]         = sys_umount2_handler;
     syscall_table[SYS_reboot]          = sys_reboot_handler;
+    syscall_table[SYS_sync]            = sys_sync_handler;
     syscall_table[SYS_fsync]           = sys_fsync_handler;
 }
 
