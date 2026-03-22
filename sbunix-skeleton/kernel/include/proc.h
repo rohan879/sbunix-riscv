@@ -150,6 +150,7 @@ struct proc {
   int exit_status;             // exit status (for wait4)
   int killed_by_signal;        // signal number if killed by signal, 0 otherwise
   char cwd[256];               // current working directory
+  char exe_path[256];          // path of executable (set by exec)
   unsigned int umask_val;       // file creation mask
   struct open_file *ofile[NOFILE]; // open file descriptors (VFS)
   /* VMA list for tracking all user memory regions */

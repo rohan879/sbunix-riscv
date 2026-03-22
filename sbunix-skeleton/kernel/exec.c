@@ -159,6 +159,16 @@ int exec(char *path) {
         current_proc->name[ni] = '\0';
     }
 
+    /* Record executable path for /proc/<pid>/exe */
+    {
+        int ei = 0;
+        while (path[ei] && ei < (int)sizeof(current_proc->exe_path) - 1) {
+            current_proc->exe_path[ei] = path[ei];
+            ei++;
+        }
+        current_proc->exe_path[ei] = '\0';
+    }
+
     // Switch satp to the new page table BEFORE freeing the old one,
     // so the hardware page walker never touches freed memory.
     w_satp(MAKE_SATP(pagetable));

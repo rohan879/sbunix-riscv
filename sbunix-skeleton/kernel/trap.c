@@ -1074,7 +1074,7 @@ static long sys_openat_handler(struct trapframe *tf) {
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
     if (!ops) {
-        return (long)-1;
+        return (long)-2; /* -ENOENT */
     }
 
     void *priv = NULL;
@@ -1097,7 +1097,7 @@ static long sys_openat_handler(struct trapframe *tf) {
         if (fd < 0) {
             if (ops->close) ops->close(priv);
             vfs_free_file(f);
-            return (long)-1;
+            return (long)-24; /* -EMFILE: too many open files */
         }
         f->ops = ops;
         f->private = priv;
@@ -1198,18 +1198,18 @@ static long sys_pipe2_handler(struct trapframe *tf) {
 }
 
 static long sys_getcwd_handler(struct trapframe *tf) {
+    if (tf->a0 == 0) return (long)-14; /* -EFAULT: NULL buffer */
     size_t sz = (size_t)tf->a1;
     const char *cwd = current_proc->cwd;
     if (!cwd[0]) cwd = "/";
     int len = strlen(cwd);
-    if (tf->a0 && (size_t)(len + 1) <= sz) {
-        if (copyout(current_proc->pagetable, tf->a0, (void *)cwd, len + 1) < 0) {
-            return (long)-14;
-        }
-        return (long)tf->a0; /* return buf pointer */
-    } else {
-        return (long)0;
+    if ((size_t)(len + 1) > sz) {
+        return (long)-34; /* -ERANGE: buffer too small */
     }
+    if (copyout(current_proc->pagetable, tf->a0, (void *)cwd, len + 1) < 0) {
+        return (long)-14; /* -EFAULT */
+    }
+    return (long)tf->a0; /* return buf pointer */
 }
 
 static long sys_chdir_handler(struct trapframe *tf) {
@@ -1217,14 +1217,22 @@ static long sys_chdir_handler(struct trapframe *tf) {
     if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
         return (long)-14;
     }
+    /* Empty path is invalid */
+    if (kpath[0] == '\0') return (long)-2; /* -ENOENT */
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
-    if (vfs_is_dir(resolved)) {
-        memcpy(current_proc->cwd, resolved, sizeof(current_proc->cwd));
-        return (long)0;
-    } else {
-        return (long)-1;
-    }
+    /* Check if path exists by trying stat */
+    const char *relpath;
+    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    if (!ops) return (long)-2; /* -ENOENT */
+    uint8_t st[128];
+    if (ops->stat(relpath, st) != 0) return (long)-2; /* -ENOENT */
+    /* Path exists — check if it's a directory */
+    uint32_t mode;
+    memcpy(&mode, st + 16, 4);
+    if ((mode & 0xF000) != 0x4000) return (long)-20; /* -ENOTDIR */
+    memcpy(current_proc->cwd, resolved, sizeof(current_proc->cwd));
+    return (long)0;
 }
 
 static long sys_fchdir_handler(struct trapframe *tf) {
@@ -1519,7 +1527,7 @@ static long sys_kill_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
     if (target_pid <= 0) {
-        return (long)-1;
+        return (long)-3; /* -ESRCH: process group kills not supported */
     }
     struct proc *target = NULL;
     for (int i = 0; i < 64; i++) {
@@ -1555,21 +1563,31 @@ static long sys_kill_handler(struct trapframe *tf) {
 }
 
 static long sys_clock_gettime_handler(struct trapframe *tf) {
+    uint64_t clk_id   = tf->a0;
     uint64_t ts_uaddr = tf->a1;
-    if (ts_uaddr) {
+    if (!ts_uaddr)
+        return (long)-14; /* EFAULT */
+
+    struct { int64_t tv_sec; int64_t tv_nsec; } kts;
+
+    if (clk_id == 0) {
+        /* CLOCK_REALTIME: wall-clock time */
         int64_t sec, nsec;
         get_wall_time(&sec, &nsec);
-        struct { int64_t tv_sec; int64_t tv_nsec; } kts;
-        kts.tv_sec = sec;
+        kts.tv_sec  = sec;
         kts.tv_nsec = nsec;
-        if (copyout(current_proc->pagetable, ts_uaddr, &kts, 16) < 0) {
-            return (long)-14;
-        } else {
-            return (long)0;
-        }
+    } else if (clk_id == 1) {
+        /* CLOCK_MONOTONIC: time since boot */
+        uint64_t elapsed = r_time() - boot_time;
+        kts.tv_sec  = (int64_t)(elapsed / TIMER_FREQ);
+        kts.tv_nsec = (int64_t)((elapsed % TIMER_FREQ) * 100);
     } else {
-        return (long)-14;
+        return (long)-22; /* EINVAL */
     }
+
+    if (copyout(current_proc->pagetable, ts_uaddr, &kts, 16) < 0)
+        return (long)-14; /* EFAULT */
+    return (long)0;
 }
 
 static long sys_lseek_handler(struct trapframe *tf) {
