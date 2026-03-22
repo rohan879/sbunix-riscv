@@ -355,19 +355,29 @@ static void cleanup_proc_resources(struct proc *p) {
     if (p->shared_pt) {
         p->shared_pt->refcount--;
         if (p->shared_pt->refcount == 0) {
-            /* Last user: free VMAs (pagetable pages leak is pre-existing) */
+            /* Last user: switch to kernel PT, then reclaim everything */
+            pagetable_t old_pt = p->pagetable;
+            p->pagetable = kernel_pagetable;
+            w_satp(MAKE_SATP(kernel_pagetable));
+            sfence_vma();
             vma_free_all(p);
+            proc_freepagetable(old_pt);
             kmfree(p->shared_pt, sizeof(struct shared_pagetable));
         } else {
             /* Other threads still using the pagetable; just free our VMAs */
             vma_free_all(p);
         }
         p->shared_pt = NULL;
-        /* Point to kernel pagetable so scheduler doesn't use freed pt */
-        p->pagetable = kernel_pagetable;
+        if (p->pagetable != kernel_pagetable)
+            p->pagetable = kernel_pagetable;
     } else {
-        /* Traditional fork: free VMAs as before */
+        /* Traditional fork: switch to kernel PT, then reclaim everything */
+        pagetable_t old_pt = p->pagetable;
+        p->pagetable = kernel_pagetable;
+        w_satp(MAKE_SATP(kernel_pagetable));
+        sfence_vma();
         vma_free_all(p);
+        proc_freepagetable(old_pt);
     }
 
     /* ---- File descriptors ---- */

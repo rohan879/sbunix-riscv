@@ -427,6 +427,57 @@ void vma_free_all(struct proc *p) {
   p->vma_list = NULL;
 }
 
+/* Recursively free user-space page table pages and all mapped leaf pages.
+ * Only walks VPN[2] index 0 (user address space, VA 0..0x3FFFFFFF).
+ * Kernel identity-mapped entries (VPN[2] >= 2) are left untouched.
+ * Leaf pages are freed via kfree (which decrements refcount for COW). */
+static void freewalk_level(pagetable_t pt, int level) {
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pt[i];
+    if (!(pte & PTE_V) && !PTE_IS_SWAPPED(pte))
+      continue;
+    if (PTE_IS_SWAPPED(pte)) {
+      swap_free(PTE_SWAP_SLOT(pte));
+      pt[i] = 0;
+    } else if (!(pte & (PTE_R | PTE_W | PTE_X))) {
+      /* Non-leaf PTE: points to next-level page table page */
+      pagetable_t child = (pagetable_t)PTE2PA(pte);
+      if (level > 0)
+        freewalk_level(child, level - 1);
+      kfree((void *)child);
+      pt[i] = 0;
+    } else if (pte & PTE_U) {
+      /* User leaf PTE: free the physical page.
+       * Skip kernel-only leaves (UART/CLINT/PLIC/PCIe I/O pages mapped
+       * without PTE_U) — those are MMIO, not kalloc'd memory. */
+      uint64_t pa = PTE2PA(pte);
+      if (level == 1)
+        kfree_super((void *)pa);
+      else
+        kfree((void *)pa);
+      pt[i] = 0;
+    }
+    /* Kernel-only leaf entries (no PTE_U): leave them, they point to MMIO */
+  }
+}
+
+void proc_freepagetable(pagetable_t pagetable) {
+  if (!pagetable || pagetable == kernel_pagetable)
+    return;
+  /* Only walk user space: VPN[2] index 0 covers VA 0x00000000..0x3FFFFFFF */
+  pte_t pte0 = pagetable[0];
+  if (pte0 & PTE_V) {
+    if (!(pte0 & (PTE_R | PTE_W | PTE_X))) {
+      pagetable_t level1 = (pagetable_t)PTE2PA(pte0);
+      freewalk_level(level1, 1);
+      kfree((void *)level1);
+      pagetable[0] = 0;
+    }
+  }
+  /* Free the root page table page itself */
+  kfree((void *)pagetable);
+}
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.

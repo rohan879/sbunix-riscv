@@ -137,11 +137,7 @@ int exec(char *path) {
     uvmmap_sigtrampoline(pagetable);
 
     // 6. Update process state
-    /* Note: old pagetable is intentionally not freed here because it
-     * contains kernel identity maps sharing physical pages with the
-     * running kernel.  Freeing those would corrupt kernel memory.
-     * The first exec (init_starter) uses the kernel pagetable itself.
-     * This is a known, small leak per-exec. */
+    pagetable_t old_pt = current_proc->pagetable;
     current_proc->pagetable = pagetable;
     current_proc->sz = sz;
 
@@ -166,10 +162,14 @@ int exec(char *path) {
         current_proc->name[ni] = '\0';
     }
 
-    // Switch satp to the new page table immediately so that trap_restore's
-    // sret enters user mode with the correct address space.
+    // Switch satp to the new page table BEFORE freeing the old one,
+    // so the hardware page walker never touches freed memory.
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
+
+    // Reclaim old user pages + page table pages (skip kernel_pagetable).
+    if (old_pt != kernel_pagetable)
+        proc_freepagetable(old_pt);
 
     // 7. Initialize trapframe
     memset(tf, 0, sizeof(*tf));
