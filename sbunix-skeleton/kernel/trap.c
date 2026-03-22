@@ -1738,9 +1738,47 @@ static void kill_deliver(struct proc *target, int sig) {
         if (sig == SIGCONT) {
             /* SIGCONT: clear stopped state and wake process */
             target->stopped_signal = 0;
+            target->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
+                                    signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
         }
-        if (target->state == SLEEPING)
+        /* Stop-class signals: when the target is a different process and
+         * the signal will use the default stop action, immediately mark it
+         * as stopped so that a concurrent waitpid(WUNTRACED) in the parent
+         * sees the child as stopped even before the child's next scheduler
+         * timeslice runs deliver_signal.  On a single-hart system the
+         * target cannot be running while we are inside the sender's
+         * syscall context, so this is safe.  Clear the pending bit to
+         * prevent deliver_signal from processing the stop a second time.
+         *
+         * SIGSTOP cannot be caught, so always immediate-stop.
+         * SIGTSTP/SIGTTIN/SIGTTOU only immediate-stop when handler is
+         * SIG_DFL; if the process has a custom handler, leave the signal
+         * pending for deliver_signal.
+         *
+         * When the target IS the current process (self-stop via
+         * kill(getpid(),SIGSTOP)), leave the signal pending so that
+         * deliver_signal handles it at trap return with a proper swtch. */
+        if ((sig == SIGSTOP || sig == SIGTSTP ||
+             sig == SIGTTIN || sig == SIGTTOU) &&
+            target != current_proc &&
+            (sig == SIGSTOP ||
+             proc_sigactions(target)[sig].handler == 0)) {
+            target->sigpending &= ~signal_bit(sig);
+            target->stopped_signal = sig;
+            target->state = SLEEPING;
+            target->sigpending &= ~signal_bit(SIGCONT);
+            /* Notify parent (unless SA_NOCLDSTOP) */
+            if (target->parent) {
+                struct kern_sigaction *psa = proc_sigactions(target->parent);
+                if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
+                    target->parent->sigpending |= signal_bit(SIGCHLD);
+                    if (target->parent->state == SLEEPING)
+                        target->parent->state = RUNNABLE;
+                }
+            }
+        } else if (target->state == SLEEPING) {
             target->state = RUNNABLE;
+        }
     }
 }
 
@@ -2430,9 +2468,13 @@ static long sys_rt_sigsuspend_handler(struct trapframe *tf) {
         return -14; // EFAULT
     uint64_t old_mask = current_proc->sigmask;
     current_proc->sigmask = mask;
-    // Sleep until a signal is delivered
-    current_proc->state = SLEEPING;
-    swtch(&current_proc->context, &scheduler_context);
+    /* Sleep until a deliverable signal arrives.  Loop to handle spurious
+     * wakeups (e.g., from UART interrupts or process exits that wake all
+     * sleeping processes with waiting_for_uart == 0). */
+    while (!(current_proc->sigpending & ~current_proc->sigmask)) {
+        current_proc->state = SLEEPING;
+        swtch(&current_proc->context, &scheduler_context);
+    }
     // Restore old mask
     current_proc->sigmask = old_mask;
     return -4; // EINTR
