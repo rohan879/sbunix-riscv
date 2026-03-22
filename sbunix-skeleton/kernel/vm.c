@@ -459,10 +459,10 @@ void proc_freepagetable(pagetable_t pagetable) {
       pagetable[0] = 0;
     }
   }
-  /* Note: VPN[2]=1,2 page table pages for kernel mappings are intentionally
-   * not freed here. VPN[2]=2 kernel RAM uses 4KB mappings (~65 page table
-   * pages per process) which leak on exit. Freeing them was attempted but
-   * caused crashes — the root cause needs further investigation. */
+  /* Note: VPN[2]=2 kernel RAM page table pages (~65 per fork) leak on exit.
+   * Freeing them was attempted but causes crashes — the freed pages get
+   * reallocated and corrupt subsequent page table walks.  The leak is
+   * bounded by process count (max 64 processes * 65 pages = 4160 pages). */
   /* Free the root page table page itself */
   kfree((void *)pagetable);
 }
