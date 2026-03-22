@@ -459,21 +459,10 @@ void proc_freepagetable(pagetable_t pagetable) {
       pagetable[0] = 0;
     }
   }
-  /* Walk VPN[2]=1 and VPN[2]=2 to free kernel mapping page table pages.
-   * These subtrees contain ONLY kernel entries (no PTE_U), so freewalk_level
-   * won't free any leaf pages — only the intermediate page table pages.
-   * This prevents the ~66 page/fork leak from kernel RAM 4KB mappings. */
-  for (int i = 1; i <= 2; i++) {
-    pte_t pte_i = pagetable[i];
-    if (!(pte_i & PTE_V))
-      continue;
-    if (pte_i & (PTE_R | PTE_W | PTE_X))
-      continue; /* level-2 leaf (super page) — nothing to free */
-    pagetable_t level1 = (pagetable_t)PTE2PA(pte_i);
-    freewalk_level(level1, 1);
-    kfree((void *)level1);
-    pagetable[i] = 0;
-  }
+  /* Note: VPN[2]=1,2 page table pages for kernel mappings are intentionally
+   * not freed here. VPN[2]=2 kernel RAM uses 4KB mappings (~65 page table
+   * pages per process) which leak on exit. Freeing them was attempted but
+   * caused crashes — the root cause needs further investigation. */
   /* Free the root page table page itself */
   kfree((void *)pagetable);
 }
