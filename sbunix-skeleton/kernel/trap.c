@@ -810,9 +810,13 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
             p->state = SLEEPING;
             p->sigpending &= ~signal_bit(SIGCONT);
             if (p->parent) {
-                p->parent->sigpending |= signal_bit(SIGCHLD);
-                if (p->parent->state == SLEEPING)
-                    p->parent->state = RUNNABLE;
+                /* SA_NOCLDSTOP: don't send SIGCHLD on child stop */
+                struct kern_sigaction *psa = proc_sigactions(p->parent);
+                if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
+                    p->parent->sigpending |= signal_bit(SIGCHLD);
+                    if (p->parent->state == SLEEPING)
+                        p->parent->state = RUNNABLE;
+                }
             }
             swtch(&p->context, &scheduler_context);
             return;
@@ -887,6 +891,12 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     p->sigmask |= sa[signum].mask;
     if (!(sa[signum].flags & 0x40000000)) /* SA_NODEFER */
         p->sigmask |= signal_bit(signum);
+
+    /* SA_RESETHAND: reset handler to SIG_DFL after delivery */
+    if (sa[signum].flags & (int)0x80000000) { /* SA_RESETHAND */
+        sa[signum].handler = 0; /* SIG_DFL */
+        sa[signum].flags &= ~(int)0x80000000;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1823,11 +1833,22 @@ static long sys_exit_handler(struct trapframe *tf) {
             asm volatile("ecall" : : "r"(a0), "r"(a1), "r"(a7));
             while (1) {}
         }
-        current_proc->state = ZOMBIE;
         if (current_proc->parent) {
-            current_proc->parent->sigpending |= signal_bit(SIGCHLD);
-            if (current_proc->parent->state == SLEEPING)
-                current_proc->parent->state = RUNNABLE;
+            struct proc *par = current_proc->parent;
+            struct kern_sigaction *psa = proc_sigactions(par);
+            /* SA_NOCLDWAIT: auto-reap child instead of leaving zombie */
+            if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
+                current_proc->state = UNUSED;
+                current_proc->pid = 0;
+                current_proc->parent = NULL;
+            } else {
+                current_proc->state = ZOMBIE;
+            }
+            par->sigpending |= signal_bit(SIGCHLD);
+            if (par->state == SLEEPING)
+                par->state = RUNNABLE;
+        } else {
+            current_proc->state = ZOMBIE;
         }
         for (struct proc *p = proc; p < &proc[64]; p++) {
             if (p->state == SLEEPING && p != current_proc &&
