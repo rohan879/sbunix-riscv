@@ -449,10 +449,7 @@ static void freewalk_level(pagetable_t pt, int level) {
 void proc_freepagetable(pagetable_t pagetable) {
   if (!pagetable || pagetable == kernel_pagetable)
     return;
-  /* Only walk user space: VPN[2] index 0 covers VA 0x00000000..0x3FFFFFFF.
-   * Kernel identity-mapped entries (VPN[2] >= 1) are left intact — their
-   * page table pages leak, but freeing them would corrupt kernel MMIO
-   * mappings shared in the same level-0 tables. */
+  /* Walk user space VPN[2]=0 (has mixed user + kernel MMIO mappings) */
   pte_t pte0 = pagetable[0];
   if (pte0 & PTE_V) {
     if (!(pte0 & (PTE_R | PTE_W | PTE_X))) {
@@ -461,6 +458,21 @@ void proc_freepagetable(pagetable_t pagetable) {
       kfree((void *)level1);
       pagetable[0] = 0;
     }
+  }
+  /* Walk VPN[2]=1 and VPN[2]=2 to free kernel mapping page table pages.
+   * These subtrees contain ONLY kernel entries (no PTE_U), so freewalk_level
+   * won't free any leaf pages — only the intermediate page table pages.
+   * This prevents the ~66 page/fork leak from kernel RAM 4KB mappings. */
+  for (int i = 1; i <= 2; i++) {
+    pte_t pte_i = pagetable[i];
+    if (!(pte_i & PTE_V))
+      continue;
+    if (pte_i & (PTE_R | PTE_W | PTE_X))
+      continue; /* level-2 leaf (super page) — nothing to free */
+    pagetable_t level1 = (pagetable_t)PTE2PA(pte_i);
+    freewalk_level(level1, 1);
+    kfree((void *)level1);
+    pagetable[i] = 0;
   }
   /* Free the root page table page itself */
   kfree((void *)pagetable);
