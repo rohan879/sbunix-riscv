@@ -589,6 +589,15 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
                 p->parent = NULL;
                 return pid;
             }
+            /* WUNTRACED: report stopped children */
+            if ((options & 2) && p->stopped_signal) {
+                pid_t pid = p->pid;
+                if (wstatus)
+                    *wstatus = (p->stopped_signal << 8) | 0x7f;
+                /* Clear stopped_signal so we don't report it again */
+                p->stopped_signal = 0;
+                return pid;
+            }
         }
         if (!found_child) return -1;
         /* WNOHANG: don't block */
@@ -914,6 +923,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
 
         /* Continue: resume stopped process (or ignore if running) */
         if (signum == SIGCONT) {
+            p->stopped_signal = 0;
             p->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
                                signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
             return;
@@ -923,6 +933,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         if (signum == SIGSTOP || signum == SIGTSTP ||
             signum == SIGTTIN || signum == SIGTTOU) {
             p->exit_status = (signum << 8) | 0x7f;
+            p->stopped_signal = signum;
             p->state = SLEEPING;
             p->sigpending &= ~signal_bit(SIGCONT);
             if (p->parent) {
@@ -941,6 +952,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         /* Default: terminate process */
         p->exit_status = 128 + signum;
         p->killed_by_signal = signum;
+        p->stopped_signal = 0;
         cleanup_proc_resources(p);
         p->state = ZOMBIE;
         if (p->parent) {
@@ -1704,6 +1716,7 @@ static void kill_deliver(struct proc *target, int sig) {
     if (sig == 9) {
         target->exit_status = 128 + 9;
         target->killed_by_signal = 9;
+        target->stopped_signal = 0;
         /* cleanup_proc_resources switches satp to kernel_pagetable.
          * When called from the parent's syscall context (target != current_proc),
          * we must save and restore the caller's satp so the parent can
@@ -1722,10 +1735,11 @@ static void kill_deliver(struct proc *target, int sig) {
         }
     } else if (signal_is_valid(sig)) {
         target->sigpending |= signal_bit(sig);
+        if (sig == SIGCONT) {
+            /* SIGCONT: clear stopped state and wake process */
+            target->stopped_signal = 0;
+        }
         if (target->state == SLEEPING)
-            target->state = RUNNABLE;
-        /* SIGCONT: also wake stopped processes */
-        if (sig == SIGCONT && target->state == SLEEPING)
             target->state = RUNNABLE;
     }
 }
@@ -2030,6 +2044,7 @@ static long sys_exit_handler(struct trapframe *tf) {
     if (current_proc) {
         current_proc->exit_status = status;
         current_proc->killed_by_signal = 0;
+        current_proc->stopped_signal = 0;
         cleanup_proc_resources(current_proc);
         if (current_proc->pid == 1) {
             ext2_sync(); /* flush filesystem before halt */
@@ -3647,11 +3662,29 @@ void trap_handler(struct trapframe *tf) {
                             (fvma->prot & PROT_READ) && !(*pte & PTE_R))
                             need = 1;
                         if (need) {
-                            int perm = PTE_U;
-                            if (fvma->prot & PROT_READ)  perm |= PTE_R;
-                            if (fvma->prot & PROT_WRITE) perm |= PTE_W;
-                            if (fvma->prot & PROT_EXEC)  perm |= PTE_X;
-                            *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | perm;
+                            uint64_t rpa = PTE2PA(*pte);
+                            int rref = page_ref_get(rpa);
+                            if (rref > 1 && (cause == SCAUSE_STORE_PAGE_FAULT)) {
+                                /* Page is shared (ref > 1) but lost its
+                                 * PTE_COW flag (e.g., after swap round-trip).
+                                 * Must COW-copy before granting write. */
+                                char *cowpg = kalloc();
+                                if (!cowpg)
+                                    goto pagefault_kill;
+                                memcpy(cowpg, (void *)rpa, PAGE_SIZE);
+                                page_ref_dec(rpa);
+                                int perm = PTE_U;
+                                if (fvma->prot & PROT_READ)  perm |= PTE_R;
+                                if (fvma->prot & PROT_WRITE) perm |= PTE_W;
+                                if (fvma->prot & PROT_EXEC)  perm |= PTE_X;
+                                *pte = PA2PTE((uint64_t)cowpg) | perm | PTE_V;
+                            } else {
+                                int perm = PTE_U;
+                                if (fvma->prot & PROT_READ)  perm |= PTE_R;
+                                if (fvma->prot & PROT_WRITE) perm |= PTE_W;
+                                if (fvma->prot & PROT_EXEC)  perm |= PTE_X;
+                                *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | perm;
+                            }
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
                             return; /* resume */
                         }

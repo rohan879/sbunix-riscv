@@ -450,8 +450,9 @@ void proc_freepagetable(pagetable_t pagetable) {
   if (!pagetable || pagetable == kernel_pagetable)
     return;
   /* Only walk user space: VPN[2] index 0 covers VA 0x00000000..0x3FFFFFFF.
-   * Kernel identity-mapped entries (VPN[2] >= 2) use super pages at level-2
-   * and share physical RAM — must NOT be freed. */
+   * Kernel identity-mapped entries (VPN[2] >= 1) are left intact — their
+   * page table pages leak, but freeing them would corrupt kernel MMIO
+   * mappings shared in the same level-0 tables. */
   pte_t pte0 = pagetable[0];
   if (pte0 & PTE_V) {
     if (!(pte0 & (PTE_R | PTE_W | PTE_X))) {
@@ -479,23 +480,27 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
     if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
       return -1;
 
-    /* Resolve COW page before writing */
-    if ((*pte & PTE_COW) && level == 0) {
+    /* Resolve COW page before writing.  Also handle the case where
+     * PTE_COW was lost (e.g., after a swap round-trip) but the page
+     * is still shared (ref > 1): must copy before writing. */
+    if (level == 0) {
       uint64_t old_pa = PTE2PA(*pte);
-      int flags = PTE_FLAGS(*pte);
       int ref = page_ref_get(old_pa);
-      if (ref > 1) {
-        /* Shared: allocate new page and copy */
-        char *newpg = kalloc();
-        if (!newpg) return -1;
-        memcpy(newpg, (void *)old_pa, PAGE_SIZE);
-        page_ref_dec(old_pa);
-        *pte = PA2PTE((uint64_t)newpg) | (flags & ~PTE_COW) | PTE_W;
-      } else {
-        /* Last reference: just remove COW and add write */
-        *pte = (*pte & ~PTE_COW) | PTE_W;
+      if ((*pte & PTE_COW) || (ref > 1 && !(*pte & PTE_W))) {
+        int flags = PTE_FLAGS(*pte);
+        if (ref > 1) {
+          /* Shared: allocate new page and copy */
+          char *newpg = kalloc();
+          if (!newpg) return -1;
+          memcpy(newpg, (void *)old_pa, PAGE_SIZE);
+          page_ref_dec(old_pa);
+          *pte = PA2PTE((uint64_t)newpg) | (flags & ~PTE_COW) | PTE_W;
+        } else {
+          /* Last reference: just remove COW and add write */
+          *pte = (*pte & ~PTE_COW) | PTE_W;
+        }
+        sfence_vma();
       }
-      sfence_vma();
     }
 
     uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;

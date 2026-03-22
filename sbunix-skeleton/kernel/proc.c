@@ -148,6 +148,7 @@ found:
   p->sigpending = 0;
   p->alarm_ticks = 0;
   p->killed_by_signal = 0;
+  p->stopped_signal = 0;
 
   // Initialize exec tracking (for POSIX setpgid restrictions)
   p->has_execed = 0;
