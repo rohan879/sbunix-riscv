@@ -26,7 +26,7 @@ source tools/sourceme.sh
 
 # Build the kernel
 echo "==> Building kernel..."
-make clean && make BUILD_TESTS=1
+MAKEFLAGS= make clean && mkdir -p build/kernel build/libc build/rootfs/bin && MAKEFLAGS= make -j1 BUILD_TESTS=1
 if [ $? -ne 0 ]; then
     echo "FATAL: Kernel build failed"
     exit 1
