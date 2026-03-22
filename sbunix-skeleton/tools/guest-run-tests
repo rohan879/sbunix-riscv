@@ -21,7 +21,6 @@ echo === C Binary Tests ===
 /bin/sigpipetest
 /bin/fstest
 /bin/swaptest
-/bin/mmaptest
 /bin/libc-test
 /bin/alarmtest
 /bin/segvtest
@@ -38,6 +37,7 @@ echo === C Binary Tests ===
 /bin/exectest
 /bin/posixtest
 /bin/libxtest
+/bin/mmaptest
 echo === C Binary Tests Done ===
 
 echo === Task345 Test ===
