@@ -917,14 +917,23 @@ static long sys_brk_handler(struct trapframe *tf) {
     if (new_brk == 0) {
         return (long)cur_sz;
     } else if (new_brk < cur_sz) {
-        return (long)cur_sz;
+        /* Shrink: unmap pages and remove VMA coverage */
+        uint64_t new_rounded = PGROUNDUP(new_brk);
+        uint64_t old_rounded = PGROUNDUP(cur_sz);
+        if (new_rounded < old_rounded) {
+            uvmunmap(current_proc->pagetable, new_rounded, old_rounded - new_rounded);
+            vma_remove(current_proc, new_rounded, old_rounded);
+        }
+        current_proc->sz = new_brk;
+        return (long)new_brk;
     } else {
-        uint64_t heap_start = (cur_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-        uint64_t rounded    = (new_brk + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        /* Grow: lazy allocation -- just add a VMA, pages allocated on fault */
+        uint64_t heap_start = PGROUNDUP(cur_sz);
+        uint64_t rounded    = PGROUNDUP(new_brk);
         if (heap_start < rounded) {
-            if (uvmalloc(current_proc->pagetable, heap_start, rounded, PTE_R|PTE_W) == 0) {
-                return (long)cur_sz;
-            }
+            /* Add VMA for the new heap region; demand paging handles the rest */
+            vma_add(current_proc, heap_start, rounded,
+                    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
         }
         current_proc->sz = new_brk;
         return (long)new_brk;
