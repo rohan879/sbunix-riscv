@@ -1087,7 +1087,9 @@ static long sys_openat_handler(struct trapframe *tf) {
 
     /* Follow symlinks unless O_NOFOLLOW */
     if (!(flags & 0400000)) { /* O_NOFOLLOW = 0400000 */
-        follow_symlinks(resolved, 8);
+        int symret = follow_symlinks(resolved, 8);
+        if (symret == -40)
+            return (long)-40; /* -ELOOP */
     }
 
     const char *relpath;
@@ -1768,7 +1770,9 @@ static long sys_newfstatat_handler(struct trapframe *tf) {
     /* Follow symlinks unless AT_SYMLINK_NOFOLLOW */
     int at_flags = (int)tf->a3;
     if (!(at_flags & 0x100)) { /* AT_SYMLINK_NOFOLLOW = 0x100 */
-        follow_symlinks(resolved, 8);
+        int symret = follow_symlinks(resolved, 8);
+        if (symret == -40)
+            return (long)-40; /* -ELOOP */
     }
 
     const char *relpath;
