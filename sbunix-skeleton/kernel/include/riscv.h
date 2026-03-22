@@ -126,6 +126,13 @@ static inline void w_sstatus(unsigned long x) {
     asm volatile("csrw sstatus, %0" : : "r" (x));
 }
 
+// Read the SATP register
+static inline unsigned long r_satp() {
+    unsigned long x;
+    asm volatile("csrr %0, satp" : "=r" (x));
+    return x;
+}
+
 // Write the SATP register to enable paging
 static inline void w_satp(unsigned long x) {
     asm volatile("csrw satp, %0" : : "r" (x));

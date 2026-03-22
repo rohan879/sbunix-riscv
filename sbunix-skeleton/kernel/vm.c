@@ -412,9 +412,9 @@ void vma_free_all(struct proc *p) {
   p->vma_list = NULL;
 }
 
-/* Recursively free user-space page table pages and all mapped leaf pages.
- * Only walks VPN[2] index 0 (user address space, VA 0..0x3FFFFFFF).
- * Kernel identity-mapped entries (VPN[2] >= 2) are left untouched.
+/* Recursively free page-table pages and user leaf pages in a sub-tree.
+ * Kernel-only leaf entries (no PTE_U) are skipped so MMIO and kernel
+ * RAM are never kfree'd.  Page-table pages themselves are always freed.
  * Leaf pages are freed via kfree (which decrements refcount for COW). */
 static void freewalk_level(pagetable_t pt, int level) {
   for (int i = 0; i < 512; i++) {
@@ -449,7 +449,9 @@ static void freewalk_level(pagetable_t pt, int level) {
 void proc_freepagetable(pagetable_t pagetable) {
   if (!pagetable || pagetable == kernel_pagetable)
     return;
-  /* Only walk user space: VPN[2] index 0 covers VA 0x00000000..0x3FFFFFFF */
+  /* Only walk user space: VPN[2] index 0 covers VA 0x00000000..0x3FFFFFFF.
+   * Kernel identity-mapped entries (VPN[2] >= 2) use super pages at level-2
+   * and share physical RAM — must NOT be freed. */
   pte_t pte0 = pagetable[0];
   if (pte0 & PTE_V) {
     if (!(pte0 & (PTE_R | PTE_W | PTE_X))) {
@@ -492,8 +494,6 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
       } else {
         /* Last reference: just remove COW and add write */
         *pte = (*pte & ~PTE_COW) | PTE_W;
-        if (ref < 1)
-            page_ref_set(old_pa, 1);
       }
       sfence_vma();
     }

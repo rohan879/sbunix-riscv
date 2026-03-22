@@ -1704,7 +1704,16 @@ static void kill_deliver(struct proc *target, int sig) {
     if (sig == 9) {
         target->exit_status = 128 + 9;
         target->killed_by_signal = 9;
+        /* cleanup_proc_resources switches satp to kernel_pagetable.
+         * When called from the parent's syscall context (target != current_proc),
+         * we must save and restore the caller's satp so the parent can
+         * return to user mode with its own page table. */
+        uint64_t saved_satp = r_satp();
         cleanup_proc_resources(target);
+        if (target != current_proc) {
+            w_satp(saved_satp);
+            sfence_vma();
+        }
         target->state = ZOMBIE;
         if (target->parent) {
             target->parent->sigpending |= signal_bit(SIGCHLD);
@@ -3533,11 +3542,8 @@ void trap_handler(struct trapframe *tf) {
                     int ref = page_ref_get(pa);
 
                     if (ref <= 1) {
-                        /* Sole reference (or already freed): make writable */
+                        /* Sole reference: make writable in place */
                         *pte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
-                        /* Ensure refcount is exactly 1 for this live page */
-                        if (ref < 1)
-                            page_ref_set(pa, 1);
                     } else {
                         /* Multiple references: allocate new page and copy */
                         char *newpage = kalloc();
@@ -3607,6 +3613,7 @@ void trap_handler(struct trapframe *tf) {
                     /* Check if page is already mapped */
                     pte_t *pte = walk(current_proc->pagetable, va, 0);
                     if (!pte || !(*pte & PTE_V)) {
+                        /* Page not yet allocated — demand-page it */
                         char *pg = kalloc();
                         if (pg) {
                             memset(pg, 0, PAGE_SIZE);
@@ -3619,16 +3626,69 @@ void trap_handler(struct trapframe *tf) {
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
                             return; /* resume */
                         }
+                    } else if (!(*pte & PTE_COW)) {
+                        /* Page is mapped (non-COW) but may have stale
+                         * permissions.  This happens when mprotect updates
+                         * the VMA prot but the PTE was not updated (e.g.,
+                         * the page was demand-paged before mprotect, or the
+                         * TLB cached old permissions).  Reconcile PTE with
+                         * the current VMA prot to prevent infinite fault
+                         * loops (critical for JIT/W^X PROT_EXEC
+                         * transitions).  COW pages are excluded — they are
+                         * handled by the COW path above. */
+                        int need = 0;
+                        if ((cause == SCAUSE_INST_PAGE_FAULT) &&
+                            (fvma->prot & PROT_EXEC) && !(*pte & PTE_X))
+                            need = 1;
+                        if ((cause == SCAUSE_STORE_PAGE_FAULT) &&
+                            (fvma->prot & PROT_WRITE) && !(*pte & PTE_W))
+                            need = 1;
+                        if ((cause == SCAUSE_LOAD_PAGE_FAULT) &&
+                            (fvma->prot & PROT_READ) && !(*pte & PTE_R))
+                            need = 1;
+                        if (need) {
+                            int perm = PTE_U;
+                            if (fvma->prot & PROT_READ)  perm |= PTE_R;
+                            if (fvma->prot & PROT_WRITE) perm |= PTE_W;
+                            if (fvma->prot & PROT_EXEC)  perm |= PTE_X;
+                            *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | perm;
+                            asm volatile("sfence.vma %0, zero" : : "r"(va));
+                            return; /* resume */
+                        }
                     }
                 }
             }
 
 pagefault_kill:
             if (current_proc) {
-                /* Check if process has a SIGSEGV handler before printing */
+                /* Suppress page-fault noise when the fault is a side-effect of
+                 * an ongoing signal kill.  Check three conditions:
+                 *   1. Process has a SIGSEGV handler (it will handle the fault).
+                 *   2. Process was already killed by a signal (killed_by_signal
+                 *      set by deliver_signal or kill_deliver).
+                 *   3. Process has a pending unblocked fatal signal whose default
+                 *      action is terminate — the fault is just a consequence of
+                 *      that pending kill (e.g., SIGINT/SIGPIPE with SIG_DFL). */
                 struct kern_sigaction *sa = proc_sigactions(current_proc);
                 int has_handler = (sa[SIGSEGV].handler != 0 && sa[SIGSEGV].handler != 1);
-                if (!has_handler) {
+
+                int suppress = has_handler || current_proc->killed_by_signal;
+                if (!suppress) {
+                    /* Check for any pending unblocked fatal signal */
+                    uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                    /* Mask of signals whose default action is ignore or stop
+                     * (not terminate): SIGCHLD(17) SIGURG(23) SIGWINCH(28)
+                     * SIGCONT(18) SIGSTOP(19) SIGTSTP(20) SIGTTIN(21) SIGTTOU(22) */
+                    uint64_t non_fatal = signal_bit(SIGCHLD) | signal_bit(SIGURG) |
+                                         signal_bit(SIGWINCH) | signal_bit(SIGCONT) |
+                                         signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
+                                         signal_bit(SIGTTIN) | signal_bit(SIGTTOU);
+                    uint64_t fatal_pending = deliverable & ~non_fatal;
+                    if (fatal_pending)
+                        suppress = 1;
+                }
+
+                if (!suppress) {
                     printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
                            current_proc->pid, tf->epc, stval, cause);
                 }
