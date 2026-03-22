@@ -84,11 +84,11 @@ int sigaction(int signum, const struct sigaction *act,
     if (act) {
         kact = *act;
         kact.sa_restorer = (void *)__signal_restorer;
-        return (int)syscall(SYS_rt_sigaction, signum, &kact, oldact,
-                            sizeof(sigset_t));
+        return (int)__syscall_ret(syscall(SYS_rt_sigaction, signum, &kact, oldact,
+                            sizeof(sigset_t)));
     }
-    return (int)syscall(SYS_rt_sigaction, signum, act, oldact,
-                        sizeof(sigset_t));
+    return (int)__syscall_ret(syscall(SYS_rt_sigaction, signum, act, oldact,
+                        sizeof(sigset_t)));
 }
 
 /*

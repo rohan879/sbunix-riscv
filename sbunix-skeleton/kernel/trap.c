@@ -420,6 +420,7 @@ static pid_t sys_clone(void) {
     uint64_t flags    = current_proc->trapframe->a0;
     uint64_t child_sp = current_proc->trapframe->a1;
     int clone_flags   = (int)(flags & ~0xFFUL); /* mask out low-byte signal */
+    pagetable_t new_pt = 0; /* track COW child PT for cleanup on failure */
 
     /* CLONE_SIGHAND requires CLONE_VM (Linux semantics) */
     if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
@@ -472,7 +473,7 @@ static pid_t sys_clone(void) {
         vma_dup(current_proc, p);
     } else {
         /* Traditional COW fork: build independent child page table */
-        pagetable_t new_pt = uvmcreate();
+        new_pt = uvmcreate();
         if (!new_pt) goto bad;
 
         /* Identity map kernel RAM and I/O (same as exec) */
@@ -495,6 +496,7 @@ static pid_t sys_clone(void) {
             goto bad;
 
         p->pagetable = new_pt;
+        new_pt = 0; /* success — ownership transferred to p */
 
         /* Deep copy VMA list */
         vma_dup(current_proc, p);
@@ -549,6 +551,12 @@ static pid_t sys_clone(void) {
     return p->pid;
 
 bad:
+    /* Clean up partially-built child pagetable.  proc_freepagetable
+     * walks the user address space, freeing COW-shared pages (via
+     * kfree/refcount) AND any duplicated swap slots, preventing both
+     * memory leaks and swap-slot double-frees. */
+    if (new_pt)
+        proc_freepagetable(new_pt);
     p->state = UNUSED;
     return -1;
 }
@@ -766,6 +774,114 @@ static int follow_symlinks(char *resolved, int maxdepth) {
     return follow_symlinks(resolved, maxdepth - 1);
 }
 
+/* Walk a resolved path component-by-component, resolving symlinks at
+ * every intermediate directory.  The final component is also resolved
+ * unless resolve_final is 0.  After return, 'resolved' contains the
+ * fully-resolved path.
+ * Returns 0 on success, negative errno on failure (-40 = ELOOP). */
+static int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
+    if (maxdepth <= 0) return -40; /* ELOOP */
+
+    int rlen = strlen(resolved);
+    if (rlen == 0 || (rlen == 1 && resolved[0] == '/'))
+        return 0; /* root or empty — nothing to resolve */
+
+    /* Split into components */
+    char work[256];
+    if (rlen > 255) rlen = 255;
+    memcpy(work, resolved, rlen);
+    work[rlen] = '\0';
+
+    char built[256]; /* path built so far */
+    int bi = 0;
+
+    int wi = 0; /* index into work */
+
+    /* Handle leading slash */
+    if (work[0] == '/') {
+        built[bi++] = '/';
+        wi = 1;
+    }
+    built[bi] = '\0';
+
+    while (wi < rlen) {
+        /* Skip consecutive slashes */
+        while (wi < rlen && work[wi] == '/') wi++;
+        if (wi >= rlen) break;
+
+        /* Extract next component */
+        int comp_start = wi;
+        while (wi < rlen && work[wi] != '/') wi++;
+        int comp_len = wi - comp_start;
+
+        /* Check if there are more components after this one */
+        int tmp_wi = wi;
+        while (tmp_wi < rlen && work[tmp_wi] == '/') tmp_wi++;
+        int is_last = (tmp_wi >= rlen);
+
+        /* Append separator if needed */
+        if (bi > 0 && built[bi - 1] != '/') {
+            if (bi < 255) built[bi++] = '/';
+        }
+        if (bi + comp_len > 255)
+            return -36; /* ENAMETOOLONG */
+        memcpy(built + bi, work + comp_start, comp_len);
+        bi += comp_len;
+        built[bi] = '\0';
+
+        /* Skip symlink resolution for the final component when
+         * the caller asked us not to resolve it (O_NOFOLLOW, etc.) */
+        if (is_last && !resolve_final)
+            break;
+
+        /* Try to resolve this component as a symlink */
+        int old_bi = bi;
+        char before[256];
+        memcpy(before, built, bi + 1);
+
+        int sym_ret = follow_symlinks(built, maxdepth);
+        if (sym_ret == -40) return -40; /* ELOOP */
+
+        bi = strlen(built);
+
+        /* Check if follow_symlinks changed the path */
+        int changed = (bi != old_bi || memcmp(before, built, old_bi + 1) != 0);
+
+        /* If this was an intermediate component and it resolved to a
+         * different path, append the remaining components and recurse. */
+        if (!is_last && changed) {
+            /* Symlink was resolved; append remaining path */
+            int remaining = rlen - wi;
+            if (remaining > 0) {
+                if (bi > 0 && built[bi - 1] != '/' && work[wi] != '/') {
+                    if (bi < 255) built[bi++] = '/';
+                }
+                if (bi + remaining > 255) remaining = 255 - bi;
+                memcpy(built + bi, work + wi, remaining);
+                bi += remaining;
+                built[bi] = '\0';
+
+                /* Normalize the combined path */
+                char normalized[256];
+                resolve_path("/", built, normalized);
+                int nlen = strlen(normalized);
+                if (nlen > 255) nlen = 255;
+                memcpy(resolved, normalized, nlen);
+                resolved[nlen] = '\0';
+
+                /* Recurse to resolve any further symlinks */
+                return resolve_symlinks_in_path(resolved, maxdepth - 1, resolve_final);
+            }
+        }
+    }
+
+    /* Copy result back */
+    if (bi > 255) bi = 255;
+    memcpy(resolved, built, bi);
+    resolved[bi] = '\0';
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Signal delivery                                                      */
 /* ------------------------------------------------------------------ */
@@ -948,6 +1064,13 @@ static long sys_write_handler(struct trapframe *tf) {
 
     if (!f) return (long)-9; /* -EBADF */
 
+    /* Check file was opened for writing (skip for pipes — they use pipe_write flag) */
+    if (!f->is_pipe) {
+        int accmode = f->flags & 3; /* O_ACCMODE */
+        if (accmode == 0) /* O_RDONLY */
+            return (long)-9; /* -EBADF */
+    }
+
     if (f->is_pipe && f->pipe_write) {
         int pid = f->pipe_id;
         /* Check for broken pipe before writing */
@@ -1027,6 +1150,13 @@ static long sys_read_handler(struct trapframe *tf) {
 
     if (!f) return (long)-9; /* -EBADF */
 
+    /* Check file was opened for reading (skip for pipes — they use pipe_read flag) */
+    if (!f->is_pipe) {
+        int accmode = f->flags & 3; /* O_ACCMODE */
+        if (accmode == 1) /* O_WRONLY */
+            return (long)-9; /* -EBADF */
+    }
+
     if (f->is_pipe && f->pipe_read) {
         int pid = f->pipe_id;
         size_t read_bytes = 0;
@@ -1085,9 +1215,10 @@ static long sys_openat_handler(struct trapframe *tf) {
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
 
-    /* Follow symlinks unless O_NOFOLLOW */
-    if (!(flags & 0400000)) { /* O_NOFOLLOW = 0400000 */
-        int symret = follow_symlinks(resolved, 8);
+    /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
+    {
+        int nofollow = (flags & 0400000); /* O_NOFOLLOW = 0400000 */
+        int symret = resolve_symlinks_in_path(resolved, 8, !nofollow);
         if (symret == -40)
             return (long)-40; /* -ELOOP */
     }
@@ -1103,6 +1234,14 @@ static long sys_openat_handler(struct trapframe *tf) {
     if (ret < 0) {
         return (long)ret;
     } else {
+        /* Reject O_WRONLY/O_RDWR on directories */
+        if (vfs_is_dir(resolved)) {
+            int accmode = flags & 3;
+            if (accmode == 1 || accmode == 2) { /* O_WRONLY or O_RDWR */
+                if (ops->close) ops->close(priv);
+                return (long)-21; /* -EISDIR */
+            }
+        }
         /* Reject non-directory with O_DIRECTORY (ENOTDIR = -20) */
 #define O_DIRECTORY 0200000
         if ((flags & O_DIRECTORY) && !vfs_is_dir(resolved)) {
@@ -1187,6 +1326,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             rf->pipe_write = 0;
             rf->pipe_id = pipeid;
             rf->ops = NULL;
+            rf->flags = 0; /* O_RDONLY */
             ftab[rfd] = rf;
             if (wf) wfd = alloc_fd();
         }
@@ -1206,6 +1346,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             wf->pipe_write = 1;
             wf->pipe_id = pipeid;
             wf->ops = NULL;
+            wf->flags = 1; /* O_WRONLY */
             ftab[wfd] = wf;
             int kfds[2] = { rfd, wfd };
             if (copyout(current_proc->pagetable, tf->a0, kfds, sizeof(kfds)) < 0) {
@@ -1242,6 +1383,7 @@ static long sys_chdir_handler(struct trapframe *tf) {
     if (kpath[0] == '\0') return (long)-2; /* -ENOENT */
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
+    resolve_symlinks_in_path(resolved, 8, 1);
     /* Check if path exists by trying stat */
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
@@ -1288,7 +1430,7 @@ static long sys_execve_handler(struct trapframe *tf) {
 
     char *kstrbuf = (char *)kalloc();
     if (!kstrbuf) {
-        return (long)-1;
+        return (long)-12; /* -ENOMEM */
     }
 
     int kargc = 0;
@@ -1339,7 +1481,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     char resolved[256];
     char tarpath[256];
     resolve_path(current_proc->cwd, kpath, resolved);
-    follow_symlinks(resolved, 8);
+    resolve_symlinks_in_path(resolved, 8, 1);
     to_tarfs_path(resolved, tarpath);
 
     int ret = exec(tarpath);
@@ -1421,7 +1563,7 @@ static long sys_execve_handler(struct trapframe *tf) {
                     /* Now exec the interpreter (follow symlinks) */
                     char interp_resolved[256];
                     resolve_path("/", interp, interp_resolved);
-                    follow_symlinks(interp_resolved, 8);
+                    resolve_symlinks_in_path(interp_resolved, 8, 1);
                     char interp_tarpath[256];
                     to_tarfs_path(interp_resolved, interp_tarpath);
                     ret = exec(interp_tarpath);
@@ -1433,7 +1575,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     if (ret < 0) {
         kfree(kstrbuf);
         if (kenvbuf) kfree(kenvbuf);
-        tf->a0 = (uint64_t)-1;
+        tf->a0 = (uint64_t)(long)-2; /* -ENOENT: file not found */
         return SYSCALL_NORETURN;
     }
 
@@ -1767,10 +1909,11 @@ static long sys_newfstatat_handler(struct trapframe *tf) {
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
 
-    /* Follow symlinks unless AT_SYMLINK_NOFOLLOW */
+    /* Resolve symlinks: intermediate always, final unless AT_SYMLINK_NOFOLLOW */
     int at_flags = (int)tf->a3;
-    if (!(at_flags & 0x100)) { /* AT_SYMLINK_NOFOLLOW = 0x100 */
-        int symret = follow_symlinks(resolved, 8);
+    {
+        int nofollow = (at_flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
+        int symret = resolve_symlinks_in_path(resolved, 8, !nofollow);
         if (symret == -40)
             return (long)-40; /* -ELOOP */
     }
@@ -2343,6 +2486,7 @@ static long sys_faccessat_handler(struct trapframe *tf) {
 
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
+    resolve_symlinks_in_path(resolved, 8, 1);
 
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
@@ -2364,6 +2508,8 @@ static long sys_unlinkat_handler(struct trapframe *tf) {
     {
         char resolved[256];
         resolve_path(current_proc->cwd, kpath, resolved);
+        /* Resolve intermediate symlinks; do NOT follow final (unlink targets the link itself) */
+        resolve_symlinks_in_path(resolved, 8, 0);
         const char *relpath;
         struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
         if (flags & 0x200) {
@@ -2421,6 +2567,8 @@ static long sys_mkdirat_handler(struct trapframe *tf) {
     {
         char resolved[256];
         resolve_path(current_proc->cwd, kpath, resolved);
+        /* Resolve intermediate symlinks only (creating at final component) */
+        resolve_symlinks_in_path(resolved, 8, 0);
         const char *relpath;
         struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
         if (ops && ops->mkdir) {
@@ -3382,10 +3530,14 @@ void trap_handler(struct trapframe *tf) {
                 if (pte && (*pte & PTE_V) && (*pte & PTE_COW)) {
                     uint64_t pa = PTE2PA(*pte);
                     int flags = PTE_FLAGS(*pte);
+                    int ref = page_ref_get(pa);
 
-                    if (page_ref_get(pa) == 1) {
-                        /* Only reference: just make it writable again */
+                    if (ref <= 1) {
+                        /* Sole reference (or already freed): make writable */
                         *pte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
+                        /* Ensure refcount is exactly 1 for this live page */
+                        if (ref < 1)
+                            page_ref_set(pa, 1);
                     } else {
                         /* Multiple references: allocate new page and copy */
                         char *newpage = kalloc();
@@ -3393,7 +3545,7 @@ void trap_handler(struct trapframe *tf) {
                             goto pagefault_kill;
                         memcpy(newpage, (void *)pa, PAGE_SIZE);
                         *pte = PA2PTE((uint64_t)newpage) | ((flags & ~PTE_COW) | PTE_W);
-                        kfree((void *)pa); /* decrement refcount on old page */
+                        page_ref_dec(pa);
                     }
                     /* Flush TLB for this VA */
                     asm volatile("sfence.vma %0, zero" : : "r"(va));
@@ -3414,10 +3566,13 @@ void trap_handler(struct trapframe *tf) {
                         goto pagefault_kill;
 
                     swap_read(slot, newpage);
-                    swap_free(slot);
 
-                    /* Restore PTE with original permissions + PTE_V */
+                    /* Restore PTE with original permissions + PTE_V
+                     * BEFORE freeing the slot, so the PTE is never
+                     * left with a stale swap marker that freewalk_level
+                     * could double-free. */
                     *spte = PA2PTE((uint64_t)newpage) | sflags | PTE_V;
+                    swap_free(slot);
                     asm volatile("sfence.vma %0, zero" : : "r"(sva));
                     return; /* resume faulting instruction */
                 }
@@ -3469,14 +3624,21 @@ void trap_handler(struct trapframe *tf) {
             }
 
 pagefault_kill:
-            printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
-                   current_proc ? current_proc->pid : -1, tf->epc, stval, cause);
             if (current_proc) {
+                /* Check if process has a SIGSEGV handler before printing */
+                struct kern_sigaction *sa = proc_sigactions(current_proc);
+                int has_handler = (sa[SIGSEGV].handler != 0 && sa[SIGSEGV].handler != 1);
+                if (!has_handler) {
+                    printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
+                           current_proc->pid, tf->epc, stval, cause);
+                }
                 current_proc->sigpending |= signal_bit(SIGSEGV);
                 deliver_signal(tf, current_proc);
-                /* If deliver_signal returned (handler caught it), resume */
                 return;
             }
+            /* No process context — truly fatal */
+            printk("Page fault epc=0x%lx stval=0x%lx cause=%lu (no process)\n",
+                   tf->epc, stval, cause);
             while(1) {}
         }
         /* Handle other user-mode exceptions by delivering a signal */

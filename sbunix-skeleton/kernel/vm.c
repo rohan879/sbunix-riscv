@@ -481,7 +481,8 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
     if ((*pte & PTE_COW) && level == 0) {
       uint64_t old_pa = PTE2PA(*pte);
       int flags = PTE_FLAGS(*pte);
-      if (page_ref_get(old_pa) > 1) {
+      int ref = page_ref_get(old_pa);
+      if (ref > 1) {
         /* Shared: allocate new page and copy */
         char *newpg = kalloc();
         if (!newpg) return -1;
@@ -491,6 +492,8 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
       } else {
         /* Last reference: just remove COW and add write */
         *pte = (*pte & ~PTE_COW) | PTE_W;
+        if (ref < 1)
+            page_ref_set(old_pa, 1);
       }
       sfence_vma();
     }
