@@ -289,11 +289,25 @@ static void handle_timer_interrupt(void) {
 /* copy_pagetable_cow: COW-share user pages from src to dst           */
 /* ------------------------------------------------------------------ */
 static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
-    /* Walk through user virtual address space and COW-share PTE_U pages */
-    for (uint64_t va = 0; va < sz; va += PAGE_SIZE) {
+    /* Walk through user virtual address space and COW-share PTE_U pages.
+     * Super page PTEs (level-1 leaf, detected by PTE_IS_LEAF) are skipped
+     * by advancing VA to the next 2MB boundary instead of 4KB. */
+    for (uint64_t va = 0; va < sz; ) {
         pte_t *pte = walk(src, va, 0);
-        if (!pte)
+        if (!pte) {
+            va += PAGE_SIZE;
             continue;
+        }
+
+        /* Detect super page (level-1 leaf with R/W/X set).  These are
+         * kernel I/O or RAM mappings — skip the entire 2MB region.
+         * Without this, walk(dst, va, 1) would allocate level-0 page
+         * table pages INSIDE the child's super page region, corrupting
+         * the child's kernel mapping. */
+        if ((*pte & PTE_V) && PTE_IS_LEAF(*pte) && !(*pte & PTE_U)) {
+            va = (va & ~(SUPERPAGE_SIZE - 1)) + SUPERPAGE_SIZE;
+            continue;
+        }
 
         /* Handle swapped-out pages: duplicate the swap slot */
         if (PTE_IS_SWAPPED(*pte)) {
@@ -318,14 +332,19 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
                 return -1;
             }
             *cpte = child_pte;
+            va += PAGE_SIZE;
             continue;
         }
 
-        if (!(*pte & PTE_V))
+        if (!(*pte & PTE_V)) {
+            va += PAGE_SIZE;
             continue;
+        }
         /* Only share user-accessible pages */
-        if (!(*pte & PTE_U))
+        if (!(*pte & PTE_U)) {
+            va += PAGE_SIZE;
             continue;
+        }
 
         uint64_t pa = PTE2PA(*pte);
         int flags = PTE_FLAGS(*pte);
@@ -340,6 +359,7 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
         page_ref_inc(pa);
         if (mappages(dst, va, PAGE_SIZE, pa, flags) < 0)
             return -1;
+        va += PAGE_SIZE;
     }
     /* Flush TLB since we modified parent PTEs */
     sfence_vma();
