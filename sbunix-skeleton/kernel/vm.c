@@ -265,21 +265,6 @@ void superpage_split(pagetable_t pagetable, uint64_t va) {
     sfence_vma();
 }
 
-// Map the signal trampoline page into a user page table.
-extern char sigtrampoline[];
-extern char sigtrampoline_end[];
-
-void uvmmap_sigtrampoline(pagetable_t pagetable) {
-  char *pg = kalloc();
-  if (!pg) return;
-  memset(pg, 0, PAGE_SIZE);
-  uint64_t sz = (uint64_t)(sigtrampoline_end - sigtrampoline);
-  if (sz > PAGE_SIZE) sz = PAGE_SIZE;
-  memcpy(pg, sigtrampoline, sz);
-  mappages(pagetable, SIG_TRAMPOLINE_VA, PAGE_SIZE, (uint64_t)pg,
-           PTE_R | PTE_X | PTE_U);
-}
-
 /* ------------------------------------------------------------------ */
 /* VMA management functions                                             */
 /* ------------------------------------------------------------------ */

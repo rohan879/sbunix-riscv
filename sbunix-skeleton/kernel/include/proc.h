@@ -98,9 +98,6 @@ struct shared_sigactions {
   int                  refcount;    /* number of procs sharing */
 };
 
-/* Signal trampoline is mapped at this user VA in every process */
-#define SIG_TRAMPOLINE_VA  0x3FFFFFF000UL  /* just below top of Sv39 user space */
-
 /* Signal constants (POSIX + Linux) */
 #define SIGHUP     1
 #define SIGINT     2

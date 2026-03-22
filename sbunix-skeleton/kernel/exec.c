@@ -133,9 +133,6 @@ int exec(char *path) {
     if(mappages_super(pagetable, 0x30000000, 0x200000, 0x30000000, PTE_R | PTE_W) < 0) goto bad; // PCIe ECAM (first 2MB)
     if(mappages_super(pagetable, 0x40000000, 0x40000000, 0x40000000, PTE_R | PTE_W) < 0) goto bad; // PCIe MMIO BAR
 
-    // Map signal trampoline page
-    uvmmap_sigtrampoline(pagetable);
-
     // 6. Update process state
     pagetable_t old_pt = current_proc->pagetable;
     current_proc->pagetable = pagetable;

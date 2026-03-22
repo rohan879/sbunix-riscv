@@ -494,9 +494,6 @@ static pid_t sys_clone(void) {
         if (copy_pagetable_cow(new_pt, current_proc->pagetable, MAXVA) < 0)
             goto bad;
 
-        /* Map signal trampoline into child */
-        uvmmap_sigtrampoline(new_pt);
-
         p->pagetable = new_pt;
 
         /* Deep copy VMA list */
@@ -865,20 +862,26 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     if (copyout(p->pagetable, sp, &frame, sizeof(frame)) < 0)
         return; /* can't deliver signal -- just drop it */
 
-    /* Verify trampoline is mapped before directing handler return there */
-    {
-        pte_t *tpte = walk(p->pagetable, SIG_TRAMPOLINE_VA, 0);
-        if (!tpte || !(*tpte & PTE_V)) {
-            /* Trampoline not mapped — re-map it now */
-            uvmmap_sigtrampoline(p->pagetable);
+    /* Safety check: if no restorer provided, fall back to default (kill) */
+    if (sa[signum].restorer == 0) {
+        p->exit_status = 128 + signum;
+        p->killed_by_signal = signum;
+        cleanup_proc_resources(p);
+        p->state = ZOMBIE;
+        if (p->parent) {
+            p->parent->sigpending |= signal_bit(SIGCHLD);
+            if (p->parent->state == SLEEPING)
+                p->parent->state = RUNNABLE;
         }
+        swtch(&p->context, &scheduler_context);
+        return;
     }
 
-    /* Set up trapframe to call handler(signum) with return to trampoline */
+    /* Set up trapframe to call handler(signum) with return to restorer */
     tf->epc = handler;                   /* jump to signal handler */
     tf->a0 = (uint64_t)signum;           /* first arg: signal number */
     tf->sp = sp;                         /* stack points to saved trapframe */
-    tf->ra = SIG_TRAMPOLINE_VA;          /* return address -> trampoline -> sigreturn */
+    tf->ra = sa[signum].restorer;        /* return address -> libc restorer -> sigreturn */
 
     /* Block this signal during handler execution */
     p->sigmask |= sa[signum].mask;

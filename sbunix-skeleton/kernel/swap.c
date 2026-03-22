@@ -173,10 +173,6 @@ void swap_evict_pages(int n) {
       if (page_ref_get(pa) > 1)
         goto advance;
 
-      /* Skip signal trampoline page */
-      if (clock_va == SIG_TRAMPOLINE_VA)
-        goto advance;
-
       /* Second chance: check accessed bit (bit 6 in RISC-V Sv39) */
       if (*pte & (1L << 6)) {
         /* Clear accessed bit, give second chance */
