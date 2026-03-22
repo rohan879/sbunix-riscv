@@ -1555,12 +1555,72 @@ static long sys_getgid_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+/* Helper: deliver signal to a single process */
+static void kill_deliver(struct proc *target, int sig) {
+    if (sig == 9) {
+        target->exit_status = 128 + 9;
+        target->killed_by_signal = 9;
+        cleanup_proc_resources(target);
+        target->state = ZOMBIE;
+        if (target->parent) {
+            target->parent->sigpending |= signal_bit(SIGCHLD);
+            if (target->parent->state == SLEEPING)
+                target->parent->state = RUNNABLE;
+        }
+    } else if (signal_is_valid(sig)) {
+        target->sigpending |= signal_bit(sig);
+        if (target->state == SLEEPING)
+            target->state = RUNNABLE;
+        /* SIGCONT: also wake stopped processes */
+        if (sig == SIGCONT && target->state == SLEEPING)
+            target->state = RUNNABLE;
+    }
+}
+
 static long sys_kill_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
-    if (target_pid <= 0) {
-        return (long)-3; /* -ESRCH: process group kills not supported */
+
+    if (target_pid == 0) {
+        /* Send to all processes in caller's process group */
+        pid_t pgid = current_proc->pgid;
+        int found = 0;
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
+                proc[i].pgid == pgid) {
+                kill_deliver(&proc[i], sig);
+                found = 1;
+            }
+        }
+        return found ? 0 : (long)-3;
     }
+
+    if (target_pid < -1) {
+        /* Send to all processes in process group abs(target_pid) */
+        pid_t pgid = -target_pid;
+        int found = 0;
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
+                proc[i].pgid == pgid) {
+                kill_deliver(&proc[i], sig);
+                found = 1;
+            }
+        }
+        return found ? 0 : (long)-3;
+    }
+
+    if (target_pid == -1) {
+        /* Send to all processes except init (pid 1) and self */
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
+                proc[i].pid != 1 && &proc[i] != current_proc) {
+                kill_deliver(&proc[i], sig);
+            }
+        }
+        return 0;
+    }
+
+    /* Positive pid: send to specific process */
     struct proc *target = NULL;
     for (int i = 0; i < 64; i++) {
         if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
@@ -1568,30 +1628,11 @@ static long sys_kill_handler(struct trapframe *tf) {
             break;
         }
     }
-    if (!target) {
+    if (!target)
         return (long)-3; /* -ESRCH */
-    } else {
-        if (sig == 9) {
-            target->exit_status = 128 + 9;
-            target->killed_by_signal = 9;
-            cleanup_proc_resources(target);
-            target->state = ZOMBIE;
-            if (target->parent) {
-                target->parent->sigpending |= signal_bit(SIGCHLD);
-                if (target->parent->state == SLEEPING)
-                    target->parent->state = RUNNABLE;
-            }
-        } else if (signal_is_valid(sig)) {
-            target->sigpending |= signal_bit(sig);
-            if (target->state == SLEEPING)
-                target->state = RUNNABLE;
-            /* SIGCONT: also wake stopped processes */
-            if (sig == SIGCONT && target->state == SLEEPING) {
-                target->state = RUNNABLE;
-            }
-        }
-        return (long)0;
-    }
+
+    kill_deliver(target, sig);
+    return 0;
 }
 
 static long sys_clock_gettime_handler(struct trapframe *tf) {
@@ -2678,15 +2719,47 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     pid_t pgid = (pid_t)tf->a1;
     if (target == 0) target = current_proc->pid;
     if (pgid == 0) pgid = target;
-    long result = (long)-3;
+
+    /* Find target process */
+    struct proc *tp = NULL;
     for (struct proc *p = proc; p < &proc[64]; p++) {
         if (p->pid == target && p->state != UNUSED) {
-            p->pgid = pgid;
-            result = 0;
+            tp = p;
             break;
         }
     }
-    return result;
+    if (!tp) return (long)-3; /* ESRCH */
+
+    /* POSIX: must be self or direct child */
+    if (tp != current_proc && tp->parent != current_proc)
+        return (long)-1; /* EPERM */
+
+    /* POSIX: cannot change pgid of session leader (pid == sid) */
+    if (tp->pid == tp->sid)
+        return (long)-1; /* EPERM */
+
+    /* POSIX: child must not have exec'd (unless targeting self) */
+    if (tp != current_proc && tp->has_execed)
+        return (long)-22; /* EACCES mapped to EINVAL for simplicity */
+
+    /* POSIX: target and caller must be in same session */
+    if (tp->sid != current_proc->sid)
+        return (long)-1; /* EPERM */
+
+    /* Verify pgid target exists in the session (pgid == target is always OK) */
+    if (pgid != target) {
+        int found = 0;
+        for (struct proc *p = proc; p < &proc[64]; p++) {
+            if (p->state != UNUSED && p->pgid == pgid && p->sid == current_proc->sid) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) return (long)-1; /* EPERM: target pgid not in session */
+    }
+
+    tp->pgid = pgid;
+    return 0;
 }
 
 static long sys_setsid_handler(struct trapframe *tf) {
