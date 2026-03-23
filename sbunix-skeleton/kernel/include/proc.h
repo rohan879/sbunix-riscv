@@ -24,7 +24,9 @@ struct context {
   uint64_t s11;
 };
 
-// Trapframe matches the layout of registers saved on stack in trap.S
+// Trapframe: user registers + kernel scratch area for the trampoline.
+// The first 256 bytes hold saved user registers (offsets match trap.S).
+// Bytes 256-279 hold kernel values loaded by the trampoline on trap entry.
 struct trapframe {
   /*   0 */ uint64_t ra;
   /*   8 */ uint64_t t0;
@@ -58,6 +60,11 @@ struct trapframe {
   /* 232 */ uint64_t tp;
   /* 240 */ uint64_t sp;
   /* 248 */ uint64_t epc;
+  /* --- kernel scratch area (loaded by trampoline on trap entry) --- */
+  /* 256 */ uint64_t kernel_satp;
+  /* 264 */ uint64_t kernel_sp;     /* this process's kernel stack top */
+  /* 272 */ uint64_t kernel_trap;   /* address of trap_handler() */
+  /* 280 */ uint64_t kernel_trapframe_pa; /* physical addr of this trapframe */
 };
 
 struct signal_frame {

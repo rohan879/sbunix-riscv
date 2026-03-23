@@ -152,11 +152,31 @@ void kvminit(void) {
     kvmmap_super(0x80000000, 0x80000000, PHYSTOP - 0x80000000,
                  PTE_R | PTE_W | PTE_X);
 
+    // Map the trampoline page at TRAMPOLINE_VA in kernel page table
+    extern char _trampoline_start[];
+    kvmmap(TRAMPOLINE_VA, (uint64_t)_trampoline_start, PAGE_SIZE,
+           PTE_R | PTE_X);
+
     // Install the kernel page table (write to satp)
     w_satp(MAKE_SATP(kernel_pagetable));
     sfence_vma(); // flush TLB
 
     printk("kvminit: paging enabled (with 2MB super pages).\n");
+}
+
+/* Map the trampoline page and a process's trapframe page into a user
+ * page table.  The trampoline is at TRAMPOLINE_VA (read+exec, no PTE_U
+ * so only S-mode can execute it).  The trapframe is at TRAPFRAME_VA
+ * (read+write, no PTE_U — accessed by the trampoline in S-mode). */
+int uvmmap_trampoline(pagetable_t pt, struct trapframe *tf) {
+  extern char _trampoline_start[];
+  if (mappages(pt, TRAMPOLINE_VA, PAGE_SIZE,
+               (uint64_t)_trampoline_start, PTE_R | PTE_X) < 0)
+    return -1;
+  if (mappages(pt, TRAPFRAME_VA, PAGE_SIZE,
+               (uint64_t)tf, PTE_R | PTE_W) < 0)
+    return -1;
+  return 0;
 }
 
 // Create an empty user page table.

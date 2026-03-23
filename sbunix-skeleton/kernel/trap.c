@@ -17,6 +17,10 @@
 
 #define TIMER_FREQ 10000000UL  // 10 MHz timebase
 
+/* Forward declarations */
+void usertrapret(void);
+void usertrap(struct trapframe *tf);
+
 /* Goldfish RTC at 0x101000 (QEMU virt machine) */
 #define GOLDFISH_RTC_BASE 0x101000UL
 #define GOLDFISH_RTC_TIME_LOW  0x00
@@ -373,30 +377,24 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
 /* ------------------------------------------------------------------ */
 static void cleanup_proc_resources(struct proc *p) {
     /* ---- Pagetable / VMAs ---- */
+    /* Kernel is always on kernel_pagetable — no satp switch needed */
     if (p->shared_pt) {
         p->shared_pt->refcount--;
         if (p->shared_pt->refcount == 0) {
-            /* Last user: switch to kernel PT, then reclaim everything */
             pagetable_t old_pt = p->pagetable;
             p->pagetable = kernel_pagetable;
-            w_satp(MAKE_SATP(kernel_pagetable));
-            sfence_vma();
             vma_free_all(p);
             proc_freepagetable(old_pt);
             kmfree(p->shared_pt, sizeof(struct shared_pagetable));
         } else {
-            /* Other threads still using the pagetable; just free our VMAs */
             vma_free_all(p);
         }
         p->shared_pt = NULL;
         if (p->pagetable != kernel_pagetable)
             p->pagetable = kernel_pagetable;
     } else {
-        /* Traditional fork: switch to kernel PT, then reclaim everything */
         pagetable_t old_pt = p->pagetable;
         p->pagetable = kernel_pagetable;
-        w_satp(MAKE_SATP(kernel_pagetable));
-        sfence_vma();
         vma_free_all(p);
         proc_freepagetable(old_pt);
     }
@@ -455,9 +453,18 @@ static pid_t sys_clone(void) {
     p->umask_val = current_proc->umask_val;
     memcpy(p->name, current_proc->name, sizeof(p->name));
 
-    /* Copy trapframe -- child starts after the ecall just like parent */
+    /* Copy trapframe — child starts after the ecall just like parent */
     memcpy(p->trapframe, current_proc->trapframe, sizeof(struct trapframe));
     p->trapframe->a0 = 0; /* child returns 0 */
+
+    /* Set child's kernel scratch area for the trampoline */
+    p->trapframe->kernel_satp = MAKE_SATP(kernel_pagetable);
+    p->trapframe->kernel_sp = (uint64_t)p->kstack + PAGE_SIZE;
+    {
+        extern void usertrap(struct trapframe *);
+        p->trapframe->kernel_trap = (uint64_t)usertrap;
+        p->trapframe->kernel_trapframe_pa = (uint64_t)p->trapframe;
+    }
 
     /* Set child stack pointer if caller provided one */
     if (child_sp != 0)
@@ -493,28 +500,18 @@ static pid_t sys_clone(void) {
         /* Deep copy VMA list (Option A from design doc) */
         vma_dup(current_proc, p);
     } else {
-        /* Traditional COW fork: build independent child page table */
+        /* Traditional COW fork: build independent child page table.
+         * NO kernel identity mappings — the trampoline switches satp
+         * to kernel_pagetable on trap entry. */
         new_pt = uvmcreate();
         if (!new_pt) goto bad;
 
-        /* Identity map kernel RAM and I/O (same as exec) */
-        if (mappages(new_pt, 0x80000000, PHYSTOP - 0x80000000, 0x80000000,
-                     PTE_R | PTE_W | PTE_X) < 0) goto bad;
-        if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000,
-                     PTE_R | PTE_W) < 0) goto bad;
-        /* RTC (0x101000) NOT mapped — only used during kernel boot */
-        if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000,
-                     PTE_R | PTE_W) < 0) goto bad;
-        if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000,
-                     PTE_R | PTE_W) < 0) goto bad;
-        if (mappages_super(new_pt, 0x30000000, 0x200000, 0x30000000,
-                     PTE_R | PTE_W) < 0) goto bad;
-        if (mappages_super(new_pt, 0x40000000, 0x40000000, 0x40000000,
-                     PTE_R | PTE_W) < 0) goto bad;
+        /* Map trampoline + child's trapframe page */
+        if (uvmmap_trampoline(new_pt, p->trapframe) < 0) goto bad;
 
-        /* COW-share user pages */
+        /* COW-share user pages (only user VA range, not kernel) */
         if (copy_pagetable_cow(new_pt, current_proc->pagetable,
-                               0, MAXVA) < 0)
+                               0, TRAPFRAME_VA) < 0)
             goto bad;
 
         p->pagetable = new_pt;
@@ -1692,7 +1689,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     kfree(kstrbuf);
     if (kenvbuf) kfree(kenvbuf);
 
-    trap_restore(current_proc->trapframe);
+    usertrapret();
     /* never reached */
     return SYSCALL_NORETURN;
 }
@@ -3591,6 +3588,62 @@ void syscall_init(void) {
 /* ------------------------------------------------------------------ */
 /* Main trap handler                                                    */
 /* ------------------------------------------------------------------ */
+
+/* Return to user mode through the trampoline.  Called at the end of
+ * trap_handler (for user-mode traps) and from forkret. */
+void usertrapret(void) {
+    struct trapframe *tf = current_proc->trapframe;
+    {
+        unsigned long stvec_val;
+        asm volatile("csrr %0, stvec" : "=r" (stvec_val));
+        printk("[DBG usertrapret] pid=%d epc=0x%lx pt=%p stvec=0x%lx\n",
+               current_proc->pid, tf->epc, current_proc->pagetable, stvec_val);
+    }
+
+    /* Set stvec to the trampoline for the next user trap */
+    asm volatile("csrw stvec, %0" : : "r" (TRAMPOLINE_VA));
+
+    /* Update the trapframe's kernel scratch area */
+    tf->kernel_satp = MAKE_SATP(kernel_pagetable);
+    tf->kernel_sp = (uint64_t)current_proc->kstack + PAGE_SIZE;
+    tf->kernel_trap = (uint64_t)usertrap;
+    tf->kernel_trapframe_pa = (uint64_t)tf;
+
+    /* Set sscratch to TRAPFRAME_VA for the trampoline */
+    asm volatile("csrw sscratch, %0" : : "r" (TRAPFRAME_VA));
+
+    /* Set sstatus for user mode return */
+    unsigned long x = r_sstatus();
+    x &= ~SSTATUS_SPP;    /* return to user mode */
+    x |= SSTATUS_SPIE;    /* enable interrupts on sret */
+    w_sstatus(x);
+
+    /* Set sepc to the saved user PC */
+    asm volatile("csrw sepc, %0" : : "r" (tf->epc));
+
+    /* Call the userret trampoline: switches satp to user PT and does sret */
+    extern char uservec[], userret[];
+    uint64_t userret_va = TRAMPOLINE_VA + ((uint64_t)userret - (uint64_t)uservec);
+    uint64_t user_satp = MAKE_SATP(current_proc->pagetable);
+
+    ((void (*)(uint64_t, uint64_t))userret_va)(TRAPFRAME_VA, user_satp);
+}
+
+/* Entry point for user-mode traps (called from trampoline).
+ * Calls the main trap_handler then returns to user via usertrapret. */
+void usertrap(struct trapframe *tf) {
+    /* Point stvec to kernel_trap_handler for kernel-mode traps that
+     * may occur during trap processing (timer interrupts, etc.) */
+    extern char kernel_trap_handler[];
+    asm volatile("csrw stvec, %0" : : "r" (kernel_trap_handler));
+
+    printk("[DBG usertrap] pid=%d cause=0x%lx epc=0x%lx\n",
+           current_proc ? current_proc->pid : -1, r_scause(), tf->epc);
+
+    trap_handler(tf);
+    usertrapret();
+    /* never reached */
+}
 
 void trap_handler(struct trapframe *tf) {
     unsigned long cause = r_scause();

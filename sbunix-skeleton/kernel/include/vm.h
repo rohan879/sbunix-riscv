@@ -47,6 +47,8 @@ uint64_t uvmalloc(pagetable_t pagetable, uint64_t start_va, uint64_t end_va, int
 int uvmmap(pagetable_t pagetable, uint64_t va, uint64_t pa, uint64_t sz, int perm);
 void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len);
 void proc_freepagetable(pagetable_t pagetable);
+struct trapframe; /* forward declaration */
+int uvmmap_trampoline(pagetable_t pt, struct trapframe *tf);
 int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len);
 int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len);
 int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max);

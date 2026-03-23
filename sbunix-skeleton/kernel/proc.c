@@ -24,20 +24,9 @@ void procinit(void) {
 // A fork child's very first scheduling by scheduler()
 // will swtch to forkret.
 void forkret(void) {
-  // Before jumping to user mode, we MUST set satp to the process's page table
-  // and set sscratch to the kernel stack.
-  w_satp(MAKE_SATP(current_proc->pagetable));
-  sfence_vma();
-  
-  // Set sstatus for user mode
-  unsigned long x = r_sstatus();
-  x &= ~SSTATUS_SPP;
-  x |= SSTATUS_SPIE | SSTATUS_SUM;
-  w_sstatus(x);
-
-  asm volatile("csrw sscratch, %0" : : "r" ((char *)current_proc->kstack + PAGE_SIZE));
-
-  trap_restore(current_proc->trapframe);
+  // Return to user mode through the trampoline
+  extern void usertrapret(void);
+  usertrapret();
 }
 
 /* Open /dev/console via VFS and assign to the next free ofile slot.
@@ -219,26 +208,8 @@ void scheduler(void) {
          * from sstatus.SPIE when it actually returns to user mode. */
         w_sstatus(r_sstatus() & ~SSTATUS_SIE);
 
-        /* Always switch to this process's page table before resuming it.
-         * This is required for both new processes (which also go through
-         * forkret) and existing processes waking from a kernel sleep.
-         * Without this, satp may still point to the last process that
-         * ran through forkret (e.g. a forked child), causing the resumed
-         * process to execute with the wrong address space. */
-        w_satp(MAKE_SATP(p->pagetable));
-        sfence_vma();
-
-        /* Point sscratch at this process's kernel stack top so that
-         * trap.S can correctly identify user-mode vs kernel-mode traps. */
-        asm volatile("csrw sscratch, %0"
-                     : : "r" ((char *)p->kstack + PAGE_SIZE));
-
-        /* Ensure SUM is set so kernel can access user-mapped pages. */
-        unsigned long s = r_sstatus();
-        s |= SSTATUS_SUM;
-        s &= ~SSTATUS_SPP;   /* return to user mode on sret */
-        s |= SSTATUS_SPIE;   /* enable interrupts on sret */
-        w_sstatus(s);
+        /* Kernel stays on kernel_pagetable. The trampoline handles
+         * satp switching to/from user page table on trap exit/entry. */
 
         swtch(&scheduler_context, &p->context);
 
