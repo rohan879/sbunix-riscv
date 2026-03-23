@@ -288,11 +288,12 @@ static void handle_timer_interrupt(void) {
 /* ------------------------------------------------------------------ */
 /* copy_pagetable_cow: COW-share user pages from src to dst           */
 /* ------------------------------------------------------------------ */
-static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
-    /* Walk through user virtual address space and COW-share PTE_U pages.
+static int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
+                              uint64_t start, uint64_t end) {
+    /* Walk a specific VA range and COW-share PTE_U pages.
      * Super page PTEs (level-1 leaf, detected by PTE_IS_LEAF) are skipped
      * by advancing VA to the next 2MB boundary instead of 4KB. */
-    for (uint64_t va = 0; va < sz; ) {
+    for (uint64_t va = start; va < end; ) {
         pte_t *pte = walk(src, va, 0);
         if (!pte) {
             va += PAGE_SIZE;
@@ -512,7 +513,8 @@ static pid_t sys_clone(void) {
                      PTE_R | PTE_W) < 0) goto bad;
 
         /* COW-share user pages */
-        if (copy_pagetable_cow(new_pt, current_proc->pagetable, MAXVA) < 0)
+        if (copy_pagetable_cow(new_pt, current_proc->pagetable,
+                               0, MAXVA) < 0)
             goto bad;
 
         p->pagetable = new_pt;
