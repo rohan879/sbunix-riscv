@@ -138,8 +138,11 @@ void kvminit(void) {
     // Goldfish RTC at 0x101000 (one 4KB page)
     kvmmap(0x101000, 0x101000, PAGE_SIZE, PTE_R | PTE_W);
 
-    // PCIe ECAM config space (0x30000000, 256 MiB) -- 2MB-aligned
-    kvmmap_super(0x30000000, 0x30000000, 0x10000000, PTE_R | PTE_W);
+    // PCIe ECAM config space (0x30000000, 254 MiB) -- 2MB-aligned
+    // Reduced by 2MB to free VPN[1]=511 for TRAMPOLINE_VA mapping
+    // (the last 2MB at 0x3FE00000-0x3FFFFFFF conflicts with TRAMPOLINE_VA's
+    // level-1 page table index, and super page leaf PTEs prevent 4KB entries)
+    kvmmap_super(0x30000000, 0x30000000, 0x0FE00000, PTE_R | PTE_W);
 
     // PCIe MMIO BAR window (0x40000000 - 0x80000000, 1 GiB) -- 2MB-aligned
     kvmmap_super(0x40000000, 0x40000000, 0x40000000, PTE_R | PTE_W);
@@ -469,20 +472,11 @@ static void freewalk_level(pagetable_t pt, int level) {
 void proc_freepagetable(pagetable_t pagetable) {
   if (!pagetable || pagetable == kernel_pagetable)
     return;
-  /* Walk user space VPN[2]=0 (has mixed user + kernel MMIO mappings) */
-  pte_t pte0 = pagetable[0];
-  if (pte0 & PTE_V) {
-    if (!(pte0 & (PTE_R | PTE_W | PTE_X))) {
-      pagetable_t level1 = (pagetable_t)PTE2PA(pte0);
-      freewalk_level(level1, 1);
-      kfree((void *)level1);
-      pagetable[0] = 0;
-    }
-  }
-  /* Note: VPN[2]=2 kernel RAM page table pages (~65 per fork) leak on exit.
-   * Freeing them was attempted but causes crashes — the freed pages get
-   * reallocated and corrupt subsequent page table walks.  The leak is
-   * bounded by process count (max 64 processes * 65 pages = 4160 pages). */
+  /* User page tables no longer contain kernel identity mappings (Approach 4:
+   * shared kernel page table with trap trampoline).  The only non-PTE_U
+   * entries are the trampoline (PTE_R|PTE_X) and trapframe (PTE_R|PTE_W)
+   * pages, which freewalk_level skips.  Walk the full root page table. */
+  freewalk_level(pagetable, 2);
   /* Free the root page table page itself */
   kfree((void *)pagetable);
 }

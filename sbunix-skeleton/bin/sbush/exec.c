@@ -255,6 +255,12 @@ int execute_pipeline(struct pipeline *pl) {
     /* Track foreground PID for signal forwarding */
     fg_pid = pgid;
 
+    /* Block SIGCHLD so our waitpid gets the status before any handler */
+    sigset_t block_chld, saved_mask;
+    sigemptyset(&block_chld);
+    sigaddset(&block_chld, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &block_chld, &saved_mask);
+
     /* wait for all processes; return exit status of last */
     int last_status = 0;
     for (int i = 0; i < pl->ncmds; i++) {
@@ -294,6 +300,9 @@ int execute_pipeline(struct pipeline *pl) {
     /* Reclaim terminal for the shell */
     fg_pid = 0;
     tcsetpgrp(STDIN_FILENO, getpgrp());
+
+    /* Unblock SIGCHLD */
+    sigprocmask(SIG_SETMASK, &saved_mask, NULL);
 
     return last_status;
 }

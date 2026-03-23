@@ -1526,6 +1526,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     }
 
     /* Shebang (#!) handling: if exec failed, check if file is a script */
+    int shebang_file_found = 0;
     if (ret < 0) {
         char first_bytes[256];
         int got = 0;
@@ -1541,6 +1542,32 @@ static long sys_execve_handler(struct trapframe *tf) {
                 first_bytes[got++] = data[j];
             first_bytes[got] = '\0';
         }
+        /* VFS fallback: read first line from ext2 or other mounted fs */
+        if (got == 0) {
+            const char *vfs_relpath;
+            struct vfs_ops *vops = vfs_lookup_mount(resolved, &vfs_relpath);
+            if (vops && vops->open) {
+                void *vpriv = NULL;
+                if (vops->open(vfs_relpath, 0, &vpriv) >= 0) {
+                    int64_t voff = 0;
+                    if (vops->read) {
+                        int64_t nr = vops->read(vpriv, first_bytes, 255, &voff);
+                        if (nr > 0) {
+                            for (int j = 0; j < (int)nr; j++) {
+                                if (first_bytes[j] == '\n' || first_bytes[j] == '\0') {
+                                    got = j;
+                                    break;
+                                }
+                            }
+                            if (got == 0 && nr > 0) got = (nr > 255) ? 255 : (int)nr;
+                        }
+                    }
+                    first_bytes[got] = '\0';
+                    if (vops->close) vops->close(vpriv);
+                }
+            }
+        }
+        if (got > 0) shebang_file_found = 1;
         if (got >= 2 && first_bytes[0] == '#' && first_bytes[1] == '!') {
             /* Parse interpreter path */
             char interp[256];
@@ -1606,8 +1633,8 @@ static long sys_execve_handler(struct trapframe *tf) {
     if (ret < 0) {
         kfree(kstrbuf);
         if (kenvbuf) kfree(kenvbuf);
-        tf->a0 = (uint64_t)(long)-2; /* -ENOENT: file not found */
-        return SYSCALL_NORETURN;
+        /* Return ENOEXEC if file was found but not executable, else ENOENT */
+        return (long)(shebang_file_found ? -8 : -2);
     }
 
     /* POSIX: close file descriptors marked with O_CLOEXEC (FD_CLOEXEC) */
@@ -1632,7 +1659,7 @@ static long sys_execve_handler(struct trapframe *tf) {
         int total        = header + argv_ptrs_sz + envp_ptrs_sz + kstroff + kenvoff;
         total = (total + 15) & ~15;
 
-        uint64_t sp            = MAXVA - 32 - total;
+        uint64_t sp            = TRAPFRAME_VA - 32 - total;
         uint64_t argv_ptr_base = sp + header;
         uint64_t envp_ptr_base = sp + header + argv_ptrs_sz;
         uint64_t argv_str_base = sp + header + argv_ptrs_sz + envp_ptrs_sz;
@@ -2556,8 +2583,12 @@ static long sys_fcntl_handler(struct trapframe *tf) {
         }
         return (long)-24; /* EMFILE */
     } else if (cmd == 1) { /* F_GETFD */
-        return (long)0;
+        return (ftab[fd]->flags & 02000000) ? 1 : 0; /* FD_CLOEXEC */
     } else if (cmd == 2) { /* F_SETFD */
+        if ((int)tf->a2 & 1) /* FD_CLOEXEC */
+            ftab[fd]->flags |= 02000000; /* O_CLOEXEC */
+        else
+            ftab[fd]->flags &= ~02000000;
         return (long)0;
     } else if (cmd == 3) { /* F_GETFL */
         return (long)ftab[fd]->flags;
@@ -3593,12 +3624,7 @@ void syscall_init(void) {
  * trap_handler (for user-mode traps) and from forkret. */
 void usertrapret(void) {
     struct trapframe *tf = current_proc->trapframe;
-    {
-        unsigned long stvec_val;
-        asm volatile("csrr %0, stvec" : "=r" (stvec_val));
-        printk("[DBG usertrapret] pid=%d epc=0x%lx pt=%p stvec=0x%lx\n",
-               current_proc->pid, tf->epc, current_proc->pagetable, stvec_val);
-    }
+    /* (debug removed) */
 
     /* Set stvec to the trampoline for the next user trap */
     asm volatile("csrw stvec, %0" : : "r" (TRAMPOLINE_VA));
@@ -3621,24 +3647,36 @@ void usertrapret(void) {
     /* Set sepc to the saved user PC */
     asm volatile("csrw sepc, %0" : : "r" (tf->epc));
 
-    /* Call the userret trampoline: switches satp to user PT and does sret */
+    /* Jump to userret in the trampoline page to switch satp and sret.
+     * userret expects a0=TRAPFRAME_VA, a1=user_satp. */
     extern char uservec[], userret[];
-    uint64_t userret_va = TRAMPOLINE_VA + ((uint64_t)userret - (uint64_t)uservec);
+    uint64_t fn = TRAMPOLINE_VA + ((uint64_t)userret - (uint64_t)uservec);
     uint64_t user_satp = MAKE_SATP(current_proc->pagetable);
 
-    ((void (*)(uint64_t, uint64_t))userret_va)(TRAPFRAME_VA, user_satp);
+    /* Jump to userret at TRAMPOLINE_VA.  After the satp switch inside
+     * userret, the trampoline page is accessible at the same VA from
+     * the user page table, so execution continues seamlessly. */
+    asm volatile(
+        "mv a0, %0\n"
+        "mv a1, %1\n"
+        "jr %2\n"
+        : : "r" ((uint64_t)TRAPFRAME_VA), "r" (user_satp), "r" (fn)
+        : "a0", "a1", "memory"
+    );
+    __builtin_unreachable();
 }
 
 /* Entry point for user-mode traps (called from trampoline).
  * Calls the main trap_handler then returns to user via usertrapret. */
 void usertrap(struct trapframe *tf) {
+    /* Clear sscratch so kernel_trap_handler identifies kernel-mode traps
+     * correctly (it checks sscratch == 0 to distinguish kernel vs user). */
+    asm volatile("csrw sscratch, zero");
+
     /* Point stvec to kernel_trap_handler for kernel-mode traps that
      * may occur during trap processing (timer interrupts, etc.) */
     extern char kernel_trap_handler[];
     asm volatile("csrw stvec, %0" : : "r" (kernel_trap_handler));
-
-    printk("[DBG usertrap] pid=%d cause=0x%lx epc=0x%lx\n",
-           current_proc ? current_proc->pid : -1, r_scause(), tf->epc);
 
     trap_handler(tf);
     usertrapret();
@@ -3875,10 +3913,8 @@ pagefault_kill:
     }
 
     /* ---- ecall from user ---- */
-    /* Advance past the ecall instruction */
-    uint16_t *instr = (uint16_t *)tf->epc;
-    int size = ((*instr & 0x3) == 0x3) ? 4 : 2;
-    tf->epc += size;
+    /* Advance past the ecall instruction (always 4 bytes in RISC-V) */
+    tf->epc += 4;
 
     long sysnum = (long)tf->a7;
 

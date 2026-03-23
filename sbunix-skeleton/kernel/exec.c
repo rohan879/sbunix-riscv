@@ -131,7 +131,7 @@ int exec(char *path) {
     current_proc->sz = sz;
 
     // Initialize stack bounds for auto-grow
-    current_proc->stack_top = MAXVA;
+    current_proc->stack_top = TRAPFRAME_VA;
     current_proc->stack_bottom = stack_va;
 
     /* Update process name from the last component of the path */

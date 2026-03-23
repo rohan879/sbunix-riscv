@@ -34,9 +34,9 @@ static void wc_fd(int fd, const char *name, long *tl, long *tw, long *tb) {
         }
     }
 
-    if (opt_lines) printf("%7ld", lines);
-    if (opt_words) printf("%7ld", words);
-    if (opt_bytes) printf("%7ld", bytes);
+    if (opt_lines) printf("%ld", lines);
+    if (opt_words) printf("%ld", words);
+    if (opt_bytes) printf("%ld", bytes);
     if (name)
         printf(" %s", name);
     printf("\n");
@@ -82,9 +82,9 @@ int main(int argc, char *argv[]) {
     }
 
     if (nfiles > 1) {
-        if (opt_lines) printf("%7ld", tl);
-        if (opt_words) printf("%7ld", tw);
-        if (opt_bytes) printf("%7ld", tb);
+        if (opt_lines) printf("%ld", tl);
+        if (opt_words) printf("%ld", tw);
+        if (opt_bytes) printf("%ld", tb);
         printf(" total\n");
     }
     return 0;

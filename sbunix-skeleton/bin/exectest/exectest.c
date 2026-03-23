@@ -114,12 +114,11 @@ static int run_subtest(int argc, char *argv[], char *envp[])
         return 0;
     }
 
-    /* --subtest fd_check <fdnum>: try to read 1 byte from given fd */
+    /* --subtest fd_check <fdnum>: check if fd is valid via fcntl */
     if (strcmp(name, "fd_check") == 0 && argc >= 4) {
         int fd = atoi(argv[3]);
-        char buf[1];
         errno = 0;
-        ssize_t r = read(fd, buf, 1);
+        int r = fcntl(fd, 1 /* F_GETFD */);
         if (r < 0 && errno == EBADF)
             printf("CLOSED\n");
         else

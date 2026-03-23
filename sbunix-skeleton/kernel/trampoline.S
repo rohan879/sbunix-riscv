@@ -87,8 +87,8 @@ userret:
     #   a0 = TRAPFRAME_VA (user-space address of this process's trapframe)
     #   a1 = user page table satp value
     # We are currently running on kernel page table.
-    # Switch to user page table, then restore registers and sret.
 
+    # Switch to user page table, then restore registers and sret.
     csrw satp, a1
     sfence.vma zero, zero
 
@@ -130,6 +130,15 @@ userret:
     # Restore sepc
     ld t0, 248(a0)
     csrw sepc, t0
+
+    # Set stvec to uservec (TRAMPOLINE_VA) for the next user trap.
+    # We compute it as: current PC (via auipc) adjusted to page start.
+    # Since trampoline is page-aligned and uservec is at offset 0:
+    auipc t0, 0          # t0 = current PC
+    # Round down to page boundary to get TRAMPOLINE_VA
+    srli t0, t0, 12
+    slli t0, t0, 12
+    csrw stvec, t0
 
     # Restore a0 last
     ld a0, 64(a0)
