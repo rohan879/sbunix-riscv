@@ -324,6 +324,19 @@ int run_builtin(struct command *cmd) {
         const char *dir = cmd->argc > 1 ? cmd->argv[1] : var_get("HOME");
         if (!dir)
             dir = "/";
+        /* Handle "cd -": switch to OLDPWD */
+        if (strcmp(dir, "-") == 0) {
+            dir = var_get("OLDPWD");
+            if (!dir) {
+                printf("cd: OLDPWD not set\n");
+                return 1;
+            }
+            printf("%s\n", dir);
+        }
+        /* Save current directory as OLDPWD before changing */
+        char oldcwd[256];
+        if (getcwd(oldcwd, sizeof(oldcwd)))
+            var_set("OLDPWD", oldcwd);
         if (chdir(dir) < 0) {
             printf("cd: %s: No such file or directory\n", dir);
             return 1;
