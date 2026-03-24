@@ -4,7 +4,7 @@
  * Probes the exact code paths that caused intermittent failures:
  * 1. Rapid fork+exit cycles (stresses freewalk_level page table cleanup)
  * 2. Fork+exec+exit cycles (stresses exec page table replacement + cleanup)
- * 3. Fork with file I/O on ext2 (stresses COW + VFS interaction)
+ * 3. Fork with file I/O on ramfs (stresses COW + VFS interaction)
  * 4. Nested fork chains (stresses deep COW page table trees)
  * 5. Fork+pipe+exit (stresses pipe fd cleanup during process exit)
  */
@@ -84,7 +84,7 @@ static void test_fork_ext2_io(void)
         if (pid < 0) { ok = 0; break; }
         if (pid == 0) {
             char path[64];
-            snprintf(path, sizeof(path), "/mnt/cowtest_%d", i);
+            snprintf(path, sizeof(path), "/tmp/cowtest_%d", i);
             int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
             if (fd < 0) _exit(1);
             write(fd, "test_data\n", 10);
@@ -107,7 +107,7 @@ static void test_fork_ext2_io(void)
             break;
         }
     }
-    CHECK("cow_stress: 5 fork+ext2_io cycles", ok);
+    CHECK("cow_stress: 5 fork+file_io cycles", ok);
 }
 
 /* -----------------------------------------------------------------------
