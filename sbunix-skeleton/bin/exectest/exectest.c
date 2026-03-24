@@ -114,15 +114,16 @@ static int run_subtest(int argc, char *argv[], char *envp[])
         return 0;
     }
 
-    /* --subtest fd_check <fdnum>: check if fd is valid via fcntl */
+    /* --subtest fd_check <fdnum>: check if fd is valid via dup */
     if (strcmp(name, "fd_check") == 0 && argc >= 4) {
         int fd = atoi(argv[3]);
-        errno = 0;
-        int r = fcntl(fd, 1 /* F_GETFD */);
-        if (r < 0 && errno == EBADF)
-            printf("CLOSED\n");
-        else
+        int newfd = dup(fd);
+        if (newfd >= 0) {
+            close(newfd);
             printf("OPEN\n");
+        } else {
+            printf("CLOSED\n");
+        }
         return 0;
     }
 
