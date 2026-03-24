@@ -60,11 +60,6 @@ struct trapframe {
   /* 232 */ uint64_t tp;
   /* 240 */ uint64_t sp;
   /* 248 */ uint64_t epc;
-  /* --- kernel scratch area (loaded by trampoline on trap entry) --- */
-  /* 256 */ uint64_t kernel_satp;
-  /* 264 */ uint64_t kernel_sp;     /* this process's kernel stack top */
-  /* 272 */ uint64_t kernel_trap;   /* address of trap_handler() */
-  /* 280 */ uint64_t kernel_trapframe_pa; /* physical addr of this trapframe */
 };
 
 struct signal_frame {

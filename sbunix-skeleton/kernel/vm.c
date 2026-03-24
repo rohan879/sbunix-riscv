@@ -155,11 +155,6 @@ void kvminit(void) {
     kvmmap_super(0x80000000, 0x80000000, PHYSTOP - 0x80000000,
                  PTE_R | PTE_W | PTE_X);
 
-    // Map the trampoline page at TRAMPOLINE_VA in kernel page table
-    extern char _trampoline_start[];
-    kvmmap(TRAMPOLINE_VA, (uint64_t)_trampoline_start, PAGE_SIZE,
-           PTE_R | PTE_X);
-
     // Install the kernel page table (write to satp)
     w_satp(MAKE_SATP(kernel_pagetable));
     sfence_vma(); // flush TLB
@@ -167,18 +162,30 @@ void kvminit(void) {
     printk("kvminit: paging enabled (with 2MB super pages).\n");
 }
 
-/* Map the trampoline page and a process's trapframe page into a user
- * page table.  The trampoline is at TRAMPOLINE_VA (read+exec, no PTE_U
- * so only S-mode can execute it).  The trapframe is at TRAPFRAME_VA
- * (read+write, no PTE_U — accessed by the trampoline in S-mode). */
-int uvmmap_trampoline(pagetable_t pt, struct trapframe *tf) {
-  extern char _trampoline_start[];
-  if (mappages(pt, TRAMPOLINE_VA, PAGE_SIZE,
-               (uint64_t)_trampoline_start, PTE_R | PTE_X) < 0)
-    return -1;
-  if (mappages(pt, TRAPFRAME_VA, PAGE_SIZE,
-               (uint64_t)tf, PTE_R | PTE_W) < 0)
-    return -1;
+/* Map kernel page table entries into a user page table by sharing
+ * references (not copying page table pages).  This avoids the ~65
+ * page table page leak that occurred when kernel entries were
+ * duplicated per-process. */
+int uvmmap_kernel(pagetable_t pt) {
+  /* Share VPN[2]=1..511: these root entries cover kernel RAM, PCIe MMIO BAR,
+   * and other regions entirely above user space. */
+  for (int i = 1; i < 512; i++)
+    pt[i] = kernel_pagetable[i];
+
+  /* VPN[2]=0: user and kernel MMIO share this region.  The user already
+   * has its own level-1 table (created by mappages for code/stack).
+   * Copy kernel MMIO level-1 entries into empty slots of that table. */
+  pte_t kpte0 = kernel_pagetable[0];
+  pte_t upte0 = pt[0];
+  if (!(kpte0 & PTE_V) || !(upte0 & PTE_V))
+    return 0; /* nothing to share */
+
+  pagetable_t kernel_L1 = (pagetable_t)PTE2PA(kpte0);
+  pagetable_t user_L1   = (pagetable_t)PTE2PA(upte0);
+  for (int j = 0; j < 512; j++) {
+    if ((kernel_L1[j] & PTE_V) && !(user_L1[j] & PTE_V))
+      user_L1[j] = kernel_L1[j];
+  }
   return 0;
 }
 
@@ -474,11 +481,45 @@ static void freewalk_level(pagetable_t pt, int level) {
 void proc_freepagetable(pagetable_t pagetable) {
   if (!pagetable || pagetable == kernel_pagetable)
     return;
-  /* User page tables no longer contain kernel identity mappings (Approach 4:
-   * shared kernel page table with trap trampoline).  The only non-PTE_U
-   * entries are the trampoline (PTE_R|PTE_X) and trapframe (PTE_R|PTE_W)
-   * pages, which freewalk_level skips.  Walk the full root page table. */
-  freewalk_level(pagetable, 2);
+
+  /* VPN[2]=1..511: shared kernel entries — detach without freeing */
+  for (int i = 1; i < 512; i++)
+    pagetable[i] = 0;
+
+  /* VPN[2]=0: user owns this level-1 table, but some entries are
+   * shared kernel MMIO.  Compare against kernel's level-1 to identify. */
+  pte_t kpte0 = kernel_pagetable[0];
+  pte_t upte0 = pagetable[0];
+  if ((upte0 & PTE_V) && !(upte0 & (PTE_R | PTE_W | PTE_X))) {
+    pagetable_t user_L1 = (pagetable_t)PTE2PA(upte0);
+    pagetable_t kernel_L1 = (kpte0 & PTE_V) ? (pagetable_t)PTE2PA(kpte0) : 0;
+    for (int j = 0; j < 512; j++) {
+      if (kernel_L1 && user_L1[j] == kernel_L1[j]) {
+        user_L1[j] = 0; /* shared MMIO — detach */
+      } else if (user_L1[j] & PTE_V) {
+        /* User-owned entry — free recursively */
+        if (!(user_L1[j] & (PTE_R | PTE_W | PTE_X))) {
+          /* Non-leaf: recurse into level-0 table */
+          pagetable_t child = (pagetable_t)PTE2PA(user_L1[j]);
+          if (child) {
+            freewalk_level(child, 0);
+            kfree((void *)child);
+          }
+        } else if (user_L1[j] & PTE_U) {
+          /* User leaf (super page) */
+          uint64_t pa = PTE2PA(user_L1[j]);
+          if (pa) kfree_super((void *)pa);
+        }
+        user_L1[j] = 0;
+      } else if (PTE_IS_SWAPPED(user_L1[j])) {
+        swap_free(PTE_SWAP_SLOT(user_L1[j]));
+        user_L1[j] = 0;
+      }
+    }
+    kfree((void *)user_L1);
+    pagetable[0] = 0;
+  }
+
   /* Free the root page table page itself */
   kfree((void *)pagetable);
 }

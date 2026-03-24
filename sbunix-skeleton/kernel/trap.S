@@ -66,6 +66,10 @@ _got_user_sp:
   csrr t0, sepc
   sd t0, 248(sp)
 
+  # Clear sscratch so nested kernel traps are detected correctly.
+  # sscratch=0 means "in kernel mode" for kernel_trap_handler.
+  csrw sscratch, zero
+
   # Call C handler
   mv a0, sp
   call trap_handler
@@ -125,8 +129,16 @@ _ret_kernel:
   sret
 
 _ret_user:
-  # Restore sscratch and swap
-  csrw sscratch, t0
-  addi sp, sp, 256
-  csrrw sp, sscratch, sp
+  # t0 = saved user sp from trapframe[240].
+  # sscratch must hold kernel stack top for next user trap.
+  # For normal trap returns: sscratch was cleared to 0 by _save_all, so
+  # we must set it here from the on-stack trapframe base.
+  # For forkret: scheduler already set sscratch to kstack + PAGE_SIZE.
+  # We use a uniform approach: always compute from sp (trapframe base).
+  # For normal traps, sp = on-stack tf (within kstack) → sp+256 = kstack top. ✓
+  # For forkret, sp = kalloc'd tf page → sp+256 = wrong address.
+  # Fix: forkret must set sscratch itself before calling trap_restore.
+  addi t1, sp, 256
+  csrw sscratch, t1
+  mv sp, t0
   sret
