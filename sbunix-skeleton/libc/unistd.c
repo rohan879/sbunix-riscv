@@ -253,6 +253,10 @@ int fsync(int fd) {
     return (int)__syscall_ret(syscall(SYS_fsync, fd));
 }
 
+void sync(void) {
+    syscall(SYS_sync);
+}
+
 uid_t geteuid(void) {
     return (uid_t)syscall(SYS_geteuid);
 }

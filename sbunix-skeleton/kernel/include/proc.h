@@ -24,7 +24,9 @@ struct context {
   uint64_t s11;
 };
 
-// Trapframe matches the layout of registers saved on stack in trap.S
+// Trapframe: user registers + kernel scratch area for the trampoline.
+// The first 256 bytes hold saved user registers (offsets match trap.S).
+// Bytes 256-279 hold kernel values loaded by the trampoline on trap entry.
 struct trapframe {
   /*   0 */ uint64_t ra;
   /*   8 */ uint64_t t0;
@@ -58,6 +60,11 @@ struct trapframe {
   /* 232 */ uint64_t tp;
   /* 240 */ uint64_t sp;
   /* 248 */ uint64_t epc;
+  /* --- kernel scratch area (loaded by trampoline on trap entry) --- */
+  /* 256 */ uint64_t kernel_satp;
+  /* 264 */ uint64_t kernel_sp;     /* this process's kernel stack top */
+  /* 272 */ uint64_t kernel_trap;   /* address of trap_handler() */
+  /* 280 */ uint64_t kernel_trapframe_pa; /* physical addr of this trapframe */
 };
 
 struct signal_frame {
@@ -97,9 +104,6 @@ struct shared_sigactions {
   struct kern_sigaction actions[32]; /* one per signal */
   int                  refcount;    /* number of procs sharing */
 };
-
-/* Signal trampoline is mapped at this user VA in every process */
-#define SIG_TRAMPOLINE_VA  0x3FFFFFF000UL  /* just below top of Sv39 user space */
 
 /* Signal constants (POSIX + Linux) */
 #define SIGHUP     1
@@ -153,6 +157,7 @@ struct proc {
   int exit_status;             // exit status (for wait4)
   int killed_by_signal;        // signal number if killed by signal, 0 otherwise
   char cwd[256];               // current working directory
+  char exe_path[256];          // path of executable (set by exec)
   unsigned int umask_val;       // file creation mask
   struct open_file *ofile[NOFILE]; // open file descriptors (VFS)
   /* VMA list for tracking all user memory regions */
@@ -168,6 +173,8 @@ struct proc {
   /* stack bounds for auto-grow */
   uint64_t stack_top;            /* top of user stack (highest VA) */
   uint64_t stack_bottom;         /* lowest allocated stack page */
+  int has_execed;                           /* set to 1 after execve (for setpgid) */
+  int stopped_signal;                       /* non-zero if stopped by signal (for WUNTRACED) */
   /* Clone/thread sharing state */
   int clone_flags;                          /* flags this proc was created with */
   struct shared_pagetable  *shared_pt;      /* non-NULL if CLONE_VM */

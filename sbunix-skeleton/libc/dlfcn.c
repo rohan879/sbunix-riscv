@@ -89,7 +89,7 @@ static const struct dl_symbol dl_symtab[] = {
     SYM(unlink), SYM(rmdir), SYM(link), SYM(rename),
     SYM(access), SYM(isatty), SYM(sleep), SYM(usleep),
     SYM(readlink), SYM(symlink),
-    SYM(ftruncate), SYM(fsync),
+    SYM(ftruncate), SYM(fsync), SYM(sync),
     SYM(waitpid), SYM(wait), SYM(_exit),
     SYM(setsid), SYM(setpgid), SYM(getpgrp),
 

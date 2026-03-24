@@ -84,16 +84,16 @@ int swap_alloc(void) {
   return -1;
 }
 
-/* Free a swap slot, marking it available for reuse. */
+/* Free a swap slot, marking it available for reuse.
+ * Idempotent: silently ignores already-free slots to tolerate
+ * process-exit paths that may race with swap-in. */
 void swap_free(int slot) {
   if (slot < 0 || slot >= SWAP_NSLOTS)
     return;
   int w = slot / 64;
   int bit = slot % 64;
-  if (!(swap_bitmap[w] & (1UL << bit))) {
-    printk("swap_free: double free of slot %d\n", slot);
-    return;
-  }
+  if (!(swap_bitmap[w] & (1UL << bit)))
+    return; /* already free — nothing to do */
   swap_bitmap[w] &= ~(1UL << bit);
   swap_used_count--;
 }
@@ -171,10 +171,6 @@ void swap_evict_pages(int n) {
 
       /* Skip COW-shared pages (refcount > 1) */
       if (page_ref_get(pa) > 1)
-        goto advance;
-
-      /* Skip signal trampoline page */
-      if (clock_va == SIG_TRAMPOLINE_VA)
         goto advance;
 
       /* Second chance: check accessed bit (bit 6 in RISC-V Sv39) */

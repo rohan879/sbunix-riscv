@@ -26,7 +26,7 @@ source tools/sourceme.sh
 
 # Build the kernel
 echo "==> Building kernel..."
-make clean && make BUILD_TESTS=1
+MAKEFLAGS= make clean && mkdir -p build/kernel build/libc build/rootfs/bin && MAKEFLAGS= make -j1 BUILD_TESTS=1
 if [ $? -ne 0 ]; then
     echo "FATAL: Kernel build failed"
     exit 1
@@ -86,10 +86,16 @@ fail_count=0
 failed_tests=()
 
 while IFS= read -r line; do
-    # Extract test name: everything after [PASS] or [FAIL]
-    if [[ "$line" =~ \[PASS\](.*) ]]; then
+    # Strip carriage returns
+    line="${line//$'\r'/}"
+    # Skip lines containing non-printable/non-ASCII characters (garbled UART)
+    case "$line" in
+        *[^$'\t'$'\n'\ -~]*) continue ;;
+    esac
+    # Require test name to start with a word character (rejects garbled fragments)
+    if [[ "$line" =~ \[PASS\]\ ([a-zA-Z_].+) ]]; then
         pass_count=$((pass_count + 1))
-    elif [[ "$line" =~ \[FAIL\](.*) ]]; then
+    elif [[ "$line" =~ \[FAIL\]\ ([a-zA-Z_].+) ]]; then
         fail_count=$((fail_count + 1))
         test_name="${BASH_REMATCH[1]}"
         test_name="$(echo "$test_name" | sed 's/^[[:space:]]*//')"

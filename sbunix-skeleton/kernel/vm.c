@@ -138,8 +138,11 @@ void kvminit(void) {
     // Goldfish RTC at 0x101000 (one 4KB page)
     kvmmap(0x101000, 0x101000, PAGE_SIZE, PTE_R | PTE_W);
 
-    // PCIe ECAM config space (0x30000000, 256 MiB) -- 2MB-aligned
-    kvmmap_super(0x30000000, 0x30000000, 0x10000000, PTE_R | PTE_W);
+    // PCIe ECAM config space (0x30000000, 254 MiB) -- 2MB-aligned
+    // Reduced by 2MB to free VPN[1]=511 for TRAMPOLINE_VA mapping
+    // (the last 2MB at 0x3FE00000-0x3FFFFFFF conflicts with TRAMPOLINE_VA's
+    // level-1 page table index, and super page leaf PTEs prevent 4KB entries)
+    kvmmap_super(0x30000000, 0x30000000, 0x0FE00000, PTE_R | PTE_W);
 
     // PCIe MMIO BAR window (0x40000000 - 0x80000000, 1 GiB) -- 2MB-aligned
     kvmmap_super(0x40000000, 0x40000000, 0x40000000, PTE_R | PTE_W);
@@ -152,11 +155,31 @@ void kvminit(void) {
     kvmmap_super(0x80000000, 0x80000000, PHYSTOP - 0x80000000,
                  PTE_R | PTE_W | PTE_X);
 
+    // Map the trampoline page at TRAMPOLINE_VA in kernel page table
+    extern char _trampoline_start[];
+    kvmmap(TRAMPOLINE_VA, (uint64_t)_trampoline_start, PAGE_SIZE,
+           PTE_R | PTE_X);
+
     // Install the kernel page table (write to satp)
     w_satp(MAKE_SATP(kernel_pagetable));
     sfence_vma(); // flush TLB
 
     printk("kvminit: paging enabled (with 2MB super pages).\n");
+}
+
+/* Map the trampoline page and a process's trapframe page into a user
+ * page table.  The trampoline is at TRAMPOLINE_VA (read+exec, no PTE_U
+ * so only S-mode can execute it).  The trapframe is at TRAPFRAME_VA
+ * (read+write, no PTE_U — accessed by the trampoline in S-mode). */
+int uvmmap_trampoline(pagetable_t pt, struct trapframe *tf) {
+  extern char _trampoline_start[];
+  if (mappages(pt, TRAMPOLINE_VA, PAGE_SIZE,
+               (uint64_t)_trampoline_start, PTE_R | PTE_X) < 0)
+    return -1;
+  if (mappages(pt, TRAPFRAME_VA, PAGE_SIZE,
+               (uint64_t)tf, PTE_R | PTE_W) < 0)
+    return -1;
+  return 0;
 }
 
 // Create an empty user page table.
@@ -263,21 +286,6 @@ void superpage_split(pagetable_t pagetable, uint64_t va) {
         mappages(pagetable, sub_va, PAGE_SIZE, sub_pa, flags);
     }
     sfence_vma();
-}
-
-// Map the signal trampoline page into a user page table.
-extern char sigtrampoline[];
-extern char sigtrampoline_end[];
-
-void uvmmap_sigtrampoline(pagetable_t pagetable) {
-  char *pg = kalloc();
-  if (!pg) return;
-  memset(pg, 0, PAGE_SIZE);
-  uint64_t sz = (uint64_t)(sigtrampoline_end - sigtrampoline);
-  if (sz > PAGE_SIZE) sz = PAGE_SIZE;
-  memcpy(pg, sigtrampoline, sz);
-  mappages(pagetable, SIG_TRAMPOLINE_VA, PAGE_SIZE, (uint64_t)pg,
-           PTE_R | PTE_X | PTE_U);
 }
 
 /* ------------------------------------------------------------------ */
@@ -427,6 +435,54 @@ void vma_free_all(struct proc *p) {
   p->vma_list = NULL;
 }
 
+/* Recursively free page-table pages and user leaf pages in a sub-tree.
+ * Kernel-only leaf entries (no PTE_U) are skipped so MMIO and kernel
+ * RAM are never kfree'd.  Page-table pages themselves are always freed.
+ * Leaf pages are freed via kfree (which decrements refcount for COW). */
+static void freewalk_level(pagetable_t pt, int level) {
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pt[i];
+    if (!(pte & PTE_V) && !PTE_IS_SWAPPED(pte))
+      continue;
+    if (PTE_IS_SWAPPED(pte)) {
+      swap_free(PTE_SWAP_SLOT(pte));
+      pt[i] = 0;
+    } else if (!(pte & (PTE_R | PTE_W | PTE_X))) {
+      /* Non-leaf PTE: points to next-level page table page */
+      pagetable_t child = (pagetable_t)PTE2PA(pte);
+      if (!child) { pt[i] = 0; continue; } /* guard against corrupt PPN=0 */
+      if (level > 0)
+        freewalk_level(child, level - 1);
+      kfree((void *)child);
+      pt[i] = 0;
+    } else if (pte & PTE_U) {
+      /* User leaf PTE: free the physical page.
+       * Skip kernel-only leaves (UART/CLINT/PLIC/PCIe I/O pages mapped
+       * without PTE_U) — those are MMIO, not kalloc'd memory. */
+      uint64_t pa = PTE2PA(pte);
+      if (!pa) { pt[i] = 0; continue; } /* guard against corrupt PPN=0 */
+      if (level == 1)
+        kfree_super((void *)pa);
+      else
+        kfree((void *)pa);
+      pt[i] = 0;
+    }
+    /* Kernel-only leaf entries (no PTE_U): leave them, they point to MMIO */
+  }
+}
+
+void proc_freepagetable(pagetable_t pagetable) {
+  if (!pagetable || pagetable == kernel_pagetable)
+    return;
+  /* User page tables no longer contain kernel identity mappings (Approach 4:
+   * shared kernel page table with trap trampoline).  The only non-PTE_U
+   * entries are the trampoline (PTE_R|PTE_X) and trapframe (PTE_R|PTE_W)
+   * pages, which freewalk_level skips.  Walk the full root page table. */
+  freewalk_level(pagetable, 2);
+  /* Free the root page table page itself */
+  kfree((void *)pagetable);
+}
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
@@ -441,22 +497,27 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
     if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
       return -1;
 
-    /* Resolve COW page before writing */
-    if ((*pte & PTE_COW) && level == 0) {
+    /* Resolve COW page before writing.  Also handle the case where
+     * PTE_COW was lost (e.g., after a swap round-trip) but the page
+     * is still shared (ref > 1): must copy before writing. */
+    if (level == 0) {
       uint64_t old_pa = PTE2PA(*pte);
-      int flags = PTE_FLAGS(*pte);
-      if (page_ref_get(old_pa) > 1) {
-        /* Shared: allocate new page and copy */
-        char *newpg = kalloc();
-        if (!newpg) return -1;
-        memcpy(newpg, (void *)old_pa, PAGE_SIZE);
-        page_ref_dec(old_pa);
-        *pte = PA2PTE((uint64_t)newpg) | (flags & ~PTE_COW) | PTE_W;
-      } else {
-        /* Last reference: just remove COW and add write */
-        *pte = (*pte & ~PTE_COW) | PTE_W;
+      int ref = page_ref_get(old_pa);
+      if ((*pte & PTE_COW) || (ref > 1 && !(*pte & PTE_W))) {
+        int flags = PTE_FLAGS(*pte);
+        if (ref > 1) {
+          /* Shared: allocate new page and copy */
+          char *newpg = kalloc();
+          if (!newpg) return -1;
+          memcpy(newpg, (void *)old_pa, PAGE_SIZE);
+          page_ref_dec(old_pa);
+          *pte = PA2PTE((uint64_t)newpg) | (flags & ~PTE_COW) | PTE_W;
+        } else {
+          /* Last reference: just remove COW and add write */
+          *pte = (*pte & ~PTE_COW) | PTE_W;
+        }
+        sfence_vma();
       }
-      sfence_vma();
     }
 
     uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;

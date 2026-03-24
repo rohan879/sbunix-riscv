@@ -57,6 +57,10 @@ typedef int            pid_t;
 // Set to 1GB to stay safely below kernel space (0x80000000).
 #define MAXVA 0x40000000L
 
+/* Trampoline page: mapped at top of user VA space in both user and kernel PTs */
+#define TRAMPOLINE_VA  (MAXVA - PAGE_SIZE)            /* 0x3FFFF000 */
+#define TRAPFRAME_VA   (MAXVA - 2 * PAGE_SIZE)        /* 0x3FFFE000 */
+
 typedef uint64_t pte_t;
 typedef uint64_t *pagetable_t; // 512 PTEs
 
@@ -124,6 +128,13 @@ static inline unsigned long r_sstatus() {
 
 static inline void w_sstatus(unsigned long x) {
     asm volatile("csrw sstatus, %0" : : "r" (x));
+}
+
+// Read the SATP register
+static inline unsigned long r_satp() {
+    unsigned long x;
+    asm volatile("csrr %0, satp" : "=r" (x));
+    return x;
 }
 
 // Write the SATP register to enable paging

@@ -44,6 +44,10 @@ static char *run_cmdsub(const char *cmd, char *dst, char *end) {
         sigaction(SIGINT, &sa, NULL);
         sigaction(SIGTSTP, &sa, NULL);
         sigaction(SIGCHLD, &sa, NULL);
+        /* Unblock all signals in child */
+        sigset_t empty_mask;
+        sigemptyset(&empty_mask);
+        sigprocmask(SIG_SETMASK, &empty_mask, NULL);
         /* Execute via the shell itself */
         static char cmdbuf[256];
         strncpy(cmdbuf, cmd, 255);

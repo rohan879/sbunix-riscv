@@ -13,6 +13,11 @@
 #include <errno.h>
 #include <stddef.h>
 
+__attribute__((naked, used))
+void __signal_restorer(void) {
+    asm volatile("li a7, 139\n ecall\n");
+}
+
 /*
  * kill() — send signal `sig` to process `pid`.
  * Uses SYS_kill (129) which matches the Linux RISC-V ABI.
@@ -75,8 +80,15 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
  */
 int sigaction(int signum, const struct sigaction *act,
               struct sigaction *oldact) {
-    return (int)syscall(SYS_rt_sigaction, signum, act, oldact,
-                        sizeof(sigset_t));
+    struct sigaction kact;
+    if (act) {
+        kact = *act;
+        kact.sa_restorer = (void *)__signal_restorer;
+        return (int)__syscall_ret(syscall(SYS_rt_sigaction, signum, &kact, oldact,
+                            sizeof(sigset_t)));
+    }
+    return (int)__syscall_ret(syscall(SYS_rt_sigaction, signum, act, oldact,
+                        sizeof(sigset_t)));
 }
 
 /*
@@ -89,7 +101,7 @@ void (*signal(int signum, void (*handler)(int)))(int) {
     sigemptyset(&sa.sa_mask);
     sa.sa_handler = handler;
     sa.sa_flags   = SA_RESTART;
-    sa.sa_restorer = (void *)0;
+    sa.sa_restorer = (void *)__signal_restorer;
 
     if (sigaction(signum, &sa, &old) < 0)
         return SIG_ERR;

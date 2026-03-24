@@ -28,6 +28,7 @@ int main(void) {
     "TERM=vt100",
     "HOSTNAME=sbunix",
     "PS1=sbush$ ",
+    "SHELL=/bin/sbush",
     (char *)0
   };
 

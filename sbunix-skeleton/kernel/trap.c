@@ -17,6 +17,10 @@
 
 #define TIMER_FREQ 10000000UL  // 10 MHz timebase
 
+/* Forward declarations */
+void usertrapret(void);
+void usertrap(struct trapframe *tf);
+
 /* Goldfish RTC at 0x101000 (QEMU virt machine) */
 #define GOLDFISH_RTC_BASE 0x101000UL
 #define GOLDFISH_RTC_TIME_LOW  0x00
@@ -288,12 +292,27 @@ static void handle_timer_interrupt(void) {
 /* ------------------------------------------------------------------ */
 /* copy_pagetable_cow: COW-share user pages from src to dst           */
 /* ------------------------------------------------------------------ */
-static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
-    /* Walk through user virtual address space and COW-share PTE_U pages */
-    for (uint64_t va = 0; va < sz; va += PAGE_SIZE) {
+static int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
+                              uint64_t start, uint64_t end) {
+    /* Walk a specific VA range and COW-share PTE_U pages.
+     * Super page PTEs (level-1 leaf, detected by PTE_IS_LEAF) are skipped
+     * by advancing VA to the next 2MB boundary instead of 4KB. */
+    for (uint64_t va = start; va < end; ) {
         pte_t *pte = walk(src, va, 0);
-        if (!pte)
+        if (!pte) {
+            va += PAGE_SIZE;
             continue;
+        }
+
+        /* Detect super page (level-1 leaf with R/W/X set).  These are
+         * kernel I/O or RAM mappings — skip the entire 2MB region.
+         * Without this, walk(dst, va, 1) would allocate level-0 page
+         * table pages INSIDE the child's super page region, corrupting
+         * the child's kernel mapping. */
+        if ((*pte & PTE_V) && PTE_IS_LEAF(*pte) && !(*pte & PTE_U)) {
+            va = (va & ~(SUPERPAGE_SIZE - 1)) + SUPERPAGE_SIZE;
+            continue;
+        }
 
         /* Handle swapped-out pages: duplicate the swap slot */
         if (PTE_IS_SWAPPED(*pte)) {
@@ -318,14 +337,19 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
                 return -1;
             }
             *cpte = child_pte;
+            va += PAGE_SIZE;
             continue;
         }
 
-        if (!(*pte & PTE_V))
+        if (!(*pte & PTE_V)) {
+            va += PAGE_SIZE;
             continue;
+        }
         /* Only share user-accessible pages */
-        if (!(*pte & PTE_U))
+        if (!(*pte & PTE_U)) {
+            va += PAGE_SIZE;
             continue;
+        }
 
         uint64_t pa = PTE2PA(*pte);
         int flags = PTE_FLAGS(*pte);
@@ -340,6 +364,7 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
         page_ref_inc(pa);
         if (mappages(dst, va, PAGE_SIZE, pa, flags) < 0)
             return -1;
+        va += PAGE_SIZE;
     }
     /* Flush TLB since we modified parent PTEs */
     sfence_vma();
@@ -352,22 +377,26 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src, uint64_t sz) {
 /* ------------------------------------------------------------------ */
 static void cleanup_proc_resources(struct proc *p) {
     /* ---- Pagetable / VMAs ---- */
+    /* Kernel is always on kernel_pagetable — no satp switch needed */
     if (p->shared_pt) {
         p->shared_pt->refcount--;
         if (p->shared_pt->refcount == 0) {
-            /* Last user: free VMAs (pagetable pages leak is pre-existing) */
+            pagetable_t old_pt = p->pagetable;
+            p->pagetable = kernel_pagetable;
             vma_free_all(p);
+            proc_freepagetable(old_pt);
             kmfree(p->shared_pt, sizeof(struct shared_pagetable));
         } else {
-            /* Other threads still using the pagetable; just free our VMAs */
             vma_free_all(p);
         }
         p->shared_pt = NULL;
-        /* Point to kernel pagetable so scheduler doesn't use freed pt */
-        p->pagetable = kernel_pagetable;
+        if (p->pagetable != kernel_pagetable)
+            p->pagetable = kernel_pagetable;
     } else {
-        /* Traditional fork: free VMAs as before */
+        pagetable_t old_pt = p->pagetable;
+        p->pagetable = kernel_pagetable;
         vma_free_all(p);
+        proc_freepagetable(old_pt);
     }
 
     /* ---- File descriptors ---- */
@@ -410,6 +439,7 @@ static pid_t sys_clone(void) {
     uint64_t flags    = current_proc->trapframe->a0;
     uint64_t child_sp = current_proc->trapframe->a1;
     int clone_flags   = (int)(flags & ~0xFFUL); /* mask out low-byte signal */
+    pagetable_t new_pt = 0; /* track COW child PT for cleanup on failure */
 
     /* CLONE_SIGHAND requires CLONE_VM (Linux semantics) */
     if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
@@ -423,9 +453,18 @@ static pid_t sys_clone(void) {
     p->umask_val = current_proc->umask_val;
     memcpy(p->name, current_proc->name, sizeof(p->name));
 
-    /* Copy trapframe -- child starts after the ecall just like parent */
+    /* Copy trapframe — child starts after the ecall just like parent */
     memcpy(p->trapframe, current_proc->trapframe, sizeof(struct trapframe));
     p->trapframe->a0 = 0; /* child returns 0 */
+
+    /* Set child's kernel scratch area for the trampoline */
+    p->trapframe->kernel_satp = MAKE_SATP(kernel_pagetable);
+    p->trapframe->kernel_sp = (uint64_t)p->kstack + PAGE_SIZE;
+    {
+        extern void usertrap(struct trapframe *);
+        p->trapframe->kernel_trap = (uint64_t)usertrap;
+        p->trapframe->kernel_trapframe_pa = (uint64_t)p->trapframe;
+    }
 
     /* Set child stack pointer if caller provided one */
     if (child_sp != 0)
@@ -461,33 +500,22 @@ static pid_t sys_clone(void) {
         /* Deep copy VMA list (Option A from design doc) */
         vma_dup(current_proc, p);
     } else {
-        /* Traditional COW fork: build independent child page table */
-        pagetable_t new_pt = uvmcreate();
+        /* Traditional COW fork: build independent child page table.
+         * NO kernel identity mappings — the trampoline switches satp
+         * to kernel_pagetable on trap entry. */
+        new_pt = uvmcreate();
         if (!new_pt) goto bad;
 
-        /* Identity map kernel RAM and I/O (same as exec) */
-        if (mappages(new_pt, 0x80000000, PHYSTOP - 0x80000000, 0x80000000,
-                     PTE_R | PTE_W | PTE_X) < 0) goto bad;
-        if (mappages(new_pt, 0x10000000, PAGE_SIZE, 0x10000000,
-                     PTE_R | PTE_W) < 0) goto bad;
-        /* RTC (0x101000) NOT mapped — only used during kernel boot */
-        if (mappages(new_pt, 0x2000000, 0x10000, 0x2000000,
-                     PTE_R | PTE_W) < 0) goto bad;
-        if (mappages(new_pt, 0x0c000000, 0x400000, 0x0c000000,
-                     PTE_R | PTE_W) < 0) goto bad;
-        if (mappages_super(new_pt, 0x30000000, 0x200000, 0x30000000,
-                     PTE_R | PTE_W) < 0) goto bad;
-        if (mappages_super(new_pt, 0x40000000, 0x40000000, 0x40000000,
-                     PTE_R | PTE_W) < 0) goto bad;
+        /* Map trampoline + child's trapframe page */
+        if (uvmmap_trampoline(new_pt, p->trapframe) < 0) goto bad;
 
-        /* COW-share user pages */
-        if (copy_pagetable_cow(new_pt, current_proc->pagetable, MAXVA) < 0)
+        /* COW-share user pages (only user VA range, not kernel) */
+        if (copy_pagetable_cow(new_pt, current_proc->pagetable,
+                               0, TRAPFRAME_VA) < 0)
             goto bad;
 
-        /* Map signal trampoline into child */
-        uvmmap_sigtrampoline(new_pt);
-
         p->pagetable = new_pt;
+        new_pt = 0; /* success — ownership transferred to p */
 
         /* Deep copy VMA list */
         vma_dup(current_proc, p);
@@ -542,6 +570,12 @@ static pid_t sys_clone(void) {
     return p->pid;
 
 bad:
+    /* Clean up partially-built child pagetable.  proc_freepagetable
+     * walks the user address space, freeing COW-shared pages (via
+     * kfree/refcount) AND any duplicated swap slots, preventing both
+     * memory leaks and swap-slot double-frees. */
+    if (new_pt)
+        proc_freepagetable(new_pt);
     p->state = UNUSED;
     return -1;
 }
@@ -572,6 +606,15 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
                 p->state = UNUSED;
                 p->pid = 0;
                 p->parent = NULL;
+                return pid;
+            }
+            /* WUNTRACED: report stopped children */
+            if ((options & 2) && p->stopped_signal) {
+                pid_t pid = p->pid;
+                if (wstatus)
+                    *wstatus = (p->stopped_signal << 8) | 0x7f;
+                /* Clear stopped_signal so we don't report it again */
+                p->stopped_signal = 0;
                 return pid;
             }
         }
@@ -759,6 +802,114 @@ static int follow_symlinks(char *resolved, int maxdepth) {
     return follow_symlinks(resolved, maxdepth - 1);
 }
 
+/* Walk a resolved path component-by-component, resolving symlinks at
+ * every intermediate directory.  The final component is also resolved
+ * unless resolve_final is 0.  After return, 'resolved' contains the
+ * fully-resolved path.
+ * Returns 0 on success, negative errno on failure (-40 = ELOOP). */
+static int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
+    if (maxdepth <= 0) return -40; /* ELOOP */
+
+    int rlen = strlen(resolved);
+    if (rlen == 0 || (rlen == 1 && resolved[0] == '/'))
+        return 0; /* root or empty — nothing to resolve */
+
+    /* Split into components */
+    char work[256];
+    if (rlen > 255) rlen = 255;
+    memcpy(work, resolved, rlen);
+    work[rlen] = '\0';
+
+    char built[256]; /* path built so far */
+    int bi = 0;
+
+    int wi = 0; /* index into work */
+
+    /* Handle leading slash */
+    if (work[0] == '/') {
+        built[bi++] = '/';
+        wi = 1;
+    }
+    built[bi] = '\0';
+
+    while (wi < rlen) {
+        /* Skip consecutive slashes */
+        while (wi < rlen && work[wi] == '/') wi++;
+        if (wi >= rlen) break;
+
+        /* Extract next component */
+        int comp_start = wi;
+        while (wi < rlen && work[wi] != '/') wi++;
+        int comp_len = wi - comp_start;
+
+        /* Check if there are more components after this one */
+        int tmp_wi = wi;
+        while (tmp_wi < rlen && work[tmp_wi] == '/') tmp_wi++;
+        int is_last = (tmp_wi >= rlen);
+
+        /* Append separator if needed */
+        if (bi > 0 && built[bi - 1] != '/') {
+            if (bi < 255) built[bi++] = '/';
+        }
+        if (bi + comp_len > 255)
+            return -36; /* ENAMETOOLONG */
+        memcpy(built + bi, work + comp_start, comp_len);
+        bi += comp_len;
+        built[bi] = '\0';
+
+        /* Skip symlink resolution for the final component when
+         * the caller asked us not to resolve it (O_NOFOLLOW, etc.) */
+        if (is_last && !resolve_final)
+            break;
+
+        /* Try to resolve this component as a symlink */
+        int old_bi = bi;
+        char before[256];
+        memcpy(before, built, bi + 1);
+
+        int sym_ret = follow_symlinks(built, maxdepth);
+        if (sym_ret == -40) return -40; /* ELOOP */
+
+        bi = strlen(built);
+
+        /* Check if follow_symlinks changed the path */
+        int changed = (bi != old_bi || memcmp(before, built, old_bi + 1) != 0);
+
+        /* If this was an intermediate component and it resolved to a
+         * different path, append the remaining components and recurse. */
+        if (!is_last && changed) {
+            /* Symlink was resolved; append remaining path */
+            int remaining = rlen - wi;
+            if (remaining > 0) {
+                if (bi > 0 && built[bi - 1] != '/' && work[wi] != '/') {
+                    if (bi < 255) built[bi++] = '/';
+                }
+                if (bi + remaining > 255) remaining = 255 - bi;
+                memcpy(built + bi, work + wi, remaining);
+                bi += remaining;
+                built[bi] = '\0';
+
+                /* Normalize the combined path */
+                char normalized[256];
+                resolve_path("/", built, normalized);
+                int nlen = strlen(normalized);
+                if (nlen > 255) nlen = 255;
+                memcpy(resolved, normalized, nlen);
+                resolved[nlen] = '\0';
+
+                /* Recurse to resolve any further symlinks */
+                return resolve_symlinks_in_path(resolved, maxdepth - 1, resolve_final);
+            }
+        }
+    }
+
+    /* Copy result back */
+    if (bi > 255) bi = 255;
+    memcpy(resolved, built, bi);
+    resolved[bi] = '\0';
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Signal delivery                                                      */
 /* ------------------------------------------------------------------ */
@@ -791,6 +942,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
 
         /* Continue: resume stopped process (or ignore if running) */
         if (signum == SIGCONT) {
+            p->stopped_signal = 0;
             p->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
                                signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
             return;
@@ -800,12 +952,17 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         if (signum == SIGSTOP || signum == SIGTSTP ||
             signum == SIGTTIN || signum == SIGTTOU) {
             p->exit_status = (signum << 8) | 0x7f;
+            p->stopped_signal = signum;
             p->state = SLEEPING;
             p->sigpending &= ~signal_bit(SIGCONT);
             if (p->parent) {
-                p->parent->sigpending |= signal_bit(SIGCHLD);
-                if (p->parent->state == SLEEPING)
-                    p->parent->state = RUNNABLE;
+                /* SA_NOCLDSTOP: don't send SIGCHLD on child stop */
+                struct kern_sigaction *psa = proc_sigactions(p->parent);
+                if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
+                    p->parent->sigpending |= signal_bit(SIGCHLD);
+                    if (p->parent->state == SLEEPING)
+                        p->parent->state = RUNNABLE;
+                }
             }
             swtch(&p->context, &scheduler_context);
             return;
@@ -814,6 +971,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         /* Default: terminate process */
         p->exit_status = 128 + signum;
         p->killed_by_signal = signum;
+        p->stopped_signal = 0;
         cleanup_proc_resources(p);
         p->state = ZOMBIE;
         if (p->parent) {
@@ -855,25 +1013,37 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     if (copyout(p->pagetable, sp, &frame, sizeof(frame)) < 0)
         return; /* can't deliver signal -- just drop it */
 
-    /* Verify trampoline is mapped before directing handler return there */
-    {
-        pte_t *tpte = walk(p->pagetable, SIG_TRAMPOLINE_VA, 0);
-        if (!tpte || !(*tpte & PTE_V)) {
-            /* Trampoline not mapped — re-map it now */
-            uvmmap_sigtrampoline(p->pagetable);
+    /* Safety check: if no restorer provided, fall back to default (kill) */
+    if (sa[signum].restorer == 0) {
+        p->exit_status = 128 + signum;
+        p->killed_by_signal = signum;
+        cleanup_proc_resources(p);
+        p->state = ZOMBIE;
+        if (p->parent) {
+            p->parent->sigpending |= signal_bit(SIGCHLD);
+            if (p->parent->state == SLEEPING)
+                p->parent->state = RUNNABLE;
         }
+        swtch(&p->context, &scheduler_context);
+        return;
     }
 
-    /* Set up trapframe to call handler(signum) with return to trampoline */
+    /* Set up trapframe to call handler(signum) with return to restorer */
     tf->epc = handler;                   /* jump to signal handler */
     tf->a0 = (uint64_t)signum;           /* first arg: signal number */
     tf->sp = sp;                         /* stack points to saved trapframe */
-    tf->ra = SIG_TRAMPOLINE_VA;          /* return address -> trampoline -> sigreturn */
+    tf->ra = sa[signum].restorer;        /* return address -> libc restorer -> sigreturn */
 
     /* Block this signal during handler execution */
     p->sigmask |= sa[signum].mask;
     if (!(sa[signum].flags & 0x40000000)) /* SA_NODEFER */
         p->sigmask |= signal_bit(signum);
+
+    /* SA_RESETHAND: reset handler to SIG_DFL after delivery */
+    if (sa[signum].flags & (int)0x80000000) { /* SA_RESETHAND */
+        sa[signum].handler = 0; /* SIG_DFL */
+        sa[signum].flags &= ~(int)0x80000000;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -894,14 +1064,23 @@ static long sys_brk_handler(struct trapframe *tf) {
     if (new_brk == 0) {
         return (long)cur_sz;
     } else if (new_brk < cur_sz) {
-        return (long)cur_sz;
+        /* Shrink: unmap pages and remove VMA coverage */
+        uint64_t new_rounded = PGROUNDUP(new_brk);
+        uint64_t old_rounded = PGROUNDUP(cur_sz);
+        if (new_rounded < old_rounded) {
+            uvmunmap(current_proc->pagetable, new_rounded, old_rounded - new_rounded);
+            vma_remove(current_proc, new_rounded, old_rounded);
+        }
+        current_proc->sz = new_brk;
+        return (long)new_brk;
     } else {
-        uint64_t heap_start = (cur_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-        uint64_t rounded    = (new_brk + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        /* Grow: lazy allocation -- just add a VMA, pages allocated on fault */
+        uint64_t heap_start = PGROUNDUP(cur_sz);
+        uint64_t rounded    = PGROUNDUP(new_brk);
         if (heap_start < rounded) {
-            if (uvmalloc(current_proc->pagetable, heap_start, rounded, PTE_R|PTE_W) == 0) {
-                return (long)cur_sz;
-            }
+            /* Add VMA for the new heap region; demand paging handles the rest */
+            vma_add(current_proc, heap_start, rounded,
+                    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
         }
         current_proc->sz = new_brk;
         return (long)new_brk;
@@ -915,6 +1094,13 @@ static long sys_write_handler(struct trapframe *tf) {
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
     if (!f) return (long)-9; /* -EBADF */
+
+    /* Check file was opened for writing (skip for pipes — they use pipe_write flag) */
+    if (!f->is_pipe) {
+        int accmode = f->flags & 3; /* O_ACCMODE */
+        if (accmode == 0) /* O_RDONLY */
+            return (long)-9; /* -EBADF */
+    }
 
     if (f->is_pipe && f->pipe_write) {
         int pid = f->pipe_id;
@@ -995,6 +1181,13 @@ static long sys_read_handler(struct trapframe *tf) {
 
     if (!f) return (long)-9; /* -EBADF */
 
+    /* Check file was opened for reading (skip for pipes — they use pipe_read flag) */
+    if (!f->is_pipe) {
+        int accmode = f->flags & 3; /* O_ACCMODE */
+        if (accmode == 1) /* O_WRONLY */
+            return (long)-9; /* -EBADF */
+    }
+
     if (f->is_pipe && f->pipe_read) {
         int pid = f->pipe_id;
         size_t read_bytes = 0;
@@ -1053,15 +1246,18 @@ static long sys_openat_handler(struct trapframe *tf) {
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
 
-    /* Follow symlinks unless O_NOFOLLOW */
-    if (!(flags & 0400000)) { /* O_NOFOLLOW = 0400000 */
-        follow_symlinks(resolved, 8);
+    /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
+    {
+        int nofollow = (flags & 0400000); /* O_NOFOLLOW = 0400000 */
+        int symret = resolve_symlinks_in_path(resolved, 8, !nofollow);
+        if (symret == -40)
+            return (long)-40; /* -ELOOP */
     }
 
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
     if (!ops) {
-        return (long)-1;
+        return (long)-2; /* -ENOENT */
     }
 
     void *priv = NULL;
@@ -1069,6 +1265,14 @@ static long sys_openat_handler(struct trapframe *tf) {
     if (ret < 0) {
         return (long)ret;
     } else {
+        /* Reject O_WRONLY/O_RDWR on directories */
+        if (vfs_is_dir(resolved)) {
+            int accmode = flags & 3;
+            if (accmode == 1 || accmode == 2) { /* O_WRONLY or O_RDWR */
+                if (ops->close) ops->close(priv);
+                return (long)-21; /* -EISDIR */
+            }
+        }
         /* Reject non-directory with O_DIRECTORY (ENOTDIR = -20) */
 #define O_DIRECTORY 0200000
         if ((flags & O_DIRECTORY) && !vfs_is_dir(resolved)) {
@@ -1084,7 +1288,7 @@ static long sys_openat_handler(struct trapframe *tf) {
         if (fd < 0) {
             if (ops->close) ops->close(priv);
             vfs_free_file(f);
-            return (long)-1;
+            return (long)-24; /* -EMFILE: too many open files */
         }
         f->ops = ops;
         f->private = priv;
@@ -1153,6 +1357,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             rf->pipe_write = 0;
             rf->pipe_id = pipeid;
             rf->ops = NULL;
+            rf->flags = 0; /* O_RDONLY */
             ftab[rfd] = rf;
             if (wf) wfd = alloc_fd();
         }
@@ -1172,6 +1377,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             wf->pipe_write = 1;
             wf->pipe_id = pipeid;
             wf->ops = NULL;
+            wf->flags = 1; /* O_WRONLY */
             ftab[wfd] = wf;
             int kfds[2] = { rfd, wfd };
             if (copyout(current_proc->pagetable, tf->a0, kfds, sizeof(kfds)) < 0) {
@@ -1185,18 +1391,18 @@ static long sys_pipe2_handler(struct trapframe *tf) {
 }
 
 static long sys_getcwd_handler(struct trapframe *tf) {
+    if (tf->a0 == 0) return (long)-14; /* -EFAULT: NULL buffer */
     size_t sz = (size_t)tf->a1;
     const char *cwd = current_proc->cwd;
     if (!cwd[0]) cwd = "/";
     int len = strlen(cwd);
-    if (tf->a0 && (size_t)(len + 1) <= sz) {
-        if (copyout(current_proc->pagetable, tf->a0, (void *)cwd, len + 1) < 0) {
-            return (long)-14;
-        }
-        return (long)tf->a0; /* return buf pointer */
-    } else {
-        return (long)0;
+    if ((size_t)(len + 1) > sz) {
+        return (long)-34; /* -ERANGE: buffer too small */
     }
+    if (copyout(current_proc->pagetable, tf->a0, (void *)cwd, len + 1) < 0) {
+        return (long)-14; /* -EFAULT */
+    }
+    return (long)tf->a0; /* return buf pointer */
 }
 
 static long sys_chdir_handler(struct trapframe *tf) {
@@ -1204,14 +1410,23 @@ static long sys_chdir_handler(struct trapframe *tf) {
     if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
         return (long)-14;
     }
+    /* Empty path is invalid */
+    if (kpath[0] == '\0') return (long)-2; /* -ENOENT */
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
-    if (vfs_is_dir(resolved)) {
-        memcpy(current_proc->cwd, resolved, sizeof(current_proc->cwd));
-        return (long)0;
-    } else {
-        return (long)-1;
-    }
+    resolve_symlinks_in_path(resolved, 8, 1);
+    /* Check if path exists by trying stat */
+    const char *relpath;
+    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    if (!ops) return (long)-2; /* -ENOENT */
+    uint8_t st[128];
+    if (ops->stat(relpath, st) != 0) return (long)-2; /* -ENOENT */
+    /* Path exists — check if it's a directory */
+    uint32_t mode;
+    memcpy(&mode, st + 16, 4);
+    if ((mode & 0xF000) != 0x4000) return (long)-20; /* -ENOTDIR */
+    memcpy(current_proc->cwd, resolved, sizeof(current_proc->cwd));
+    return (long)0;
 }
 
 static long sys_fchdir_handler(struct trapframe *tf) {
@@ -1246,7 +1461,7 @@ static long sys_execve_handler(struct trapframe *tf) {
 
     char *kstrbuf = (char *)kalloc();
     if (!kstrbuf) {
-        return (long)-1;
+        return (long)-12; /* -ENOMEM */
     }
 
     int kargc = 0;
@@ -1297,7 +1512,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     char resolved[256];
     char tarpath[256];
     resolve_path(current_proc->cwd, kpath, resolved);
-    follow_symlinks(resolved, 8);
+    resolve_symlinks_in_path(resolved, 8, 1);
     to_tarfs_path(resolved, tarpath);
 
     int ret = exec(tarpath);
@@ -1311,6 +1526,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     }
 
     /* Shebang (#!) handling: if exec failed, check if file is a script */
+    int shebang_file_found = 0;
     if (ret < 0) {
         char first_bytes[256];
         int got = 0;
@@ -1326,6 +1542,34 @@ static long sys_execve_handler(struct trapframe *tf) {
                 first_bytes[got++] = data[j];
             first_bytes[got] = '\0';
         }
+        /* VFS fallback: read first line from ext2 or other mounted fs */
+        if (got == 0) {
+            const char *vfs_relpath;
+            struct vfs_ops *vops = vfs_lookup_mount(resolved, &vfs_relpath);
+            if (vops && vops->open) {
+                void *vpriv = NULL;
+                if (vops->open(vfs_relpath, 0, &vpriv) >= 0) {
+                    /* File exists on VFS — mark as found even if read fails */
+                    shebang_file_found = 1;
+                    int64_t voff = 0;
+                    if (vops->read) {
+                        int64_t nr = vops->read(vpriv, first_bytes, 255, &voff);
+                        if (nr > 0) {
+                            for (int j = 0; j < (int)nr; j++) {
+                                if (first_bytes[j] == '\n' || first_bytes[j] == '\0') {
+                                    got = j;
+                                    break;
+                                }
+                            }
+                            if (got == 0 && nr > 0) got = (nr > 255) ? 255 : (int)nr;
+                        }
+                    }
+                    first_bytes[got] = '\0';
+                    if (vops->close) vops->close(vpriv);
+                }
+            }
+        }
+        if (got > 0) shebang_file_found = 1;
         if (got >= 2 && first_bytes[0] == '#' && first_bytes[1] == '!') {
             /* Parse interpreter path */
             char interp[256];
@@ -1379,7 +1623,7 @@ static long sys_execve_handler(struct trapframe *tf) {
                     /* Now exec the interpreter (follow symlinks) */
                     char interp_resolved[256];
                     resolve_path("/", interp, interp_resolved);
-                    follow_symlinks(interp_resolved, 8);
+                    resolve_symlinks_in_path(interp_resolved, 8, 1);
                     char interp_tarpath[256];
                     to_tarfs_path(interp_resolved, interp_tarpath);
                     ret = exec(interp_tarpath);
@@ -1391,9 +1635,22 @@ static long sys_execve_handler(struct trapframe *tf) {
     if (ret < 0) {
         kfree(kstrbuf);
         if (kenvbuf) kfree(kenvbuf);
-        tf->a0 = (uint64_t)-1;
-        return SYSCALL_NORETURN;
+        /* Return ENOEXEC if file was found but not executable, else ENOENT */
+        return (long)(shebang_file_found ? -8 : -2);
     }
+
+    /* POSIX: close file descriptors marked with O_CLOEXEC (FD_CLOEXEC) */
+    {
+        #define KERN_O_CLOEXEC 02000000 /* matches libc O_CLOEXEC */
+        struct open_file **oft = proc_ofile(current_proc);
+        for (int fd = 0; fd < NOFILE; fd++) {
+            if (oft[fd] && (oft[fd]->flags & KERN_O_CLOEXEC))
+                close_ofile(current_proc, fd);
+        }
+    }
+
+    /* Mark that this process has exec'd (for POSIX setpgid restrictions) */
+    current_proc->has_execed = 1;
 
     {
         struct trapframe *newtf = current_proc->trapframe;
@@ -1404,7 +1661,7 @@ static long sys_execve_handler(struct trapframe *tf) {
         int total        = header + argv_ptrs_sz + envp_ptrs_sz + kstroff + kenvoff;
         total = (total + 15) & ~15;
 
-        uint64_t sp            = MAXVA - 32 - total;
+        uint64_t sp            = TRAPFRAME_VA - 32 - total;
         uint64_t argv_ptr_base = sp + header;
         uint64_t envp_ptr_base = sp + header + argv_ptrs_sz;
         uint64_t argv_str_base = sp + header + argv_ptrs_sz + envp_ptrs_sz;
@@ -1461,7 +1718,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     kfree(kstrbuf);
     if (kenvbuf) kfree(kenvbuf);
 
-    trap_restore(current_proc->trapframe);
+    usertrapret();
     /* never reached */
     return SYSCALL_NORETURN;
 }
@@ -1502,12 +1759,127 @@ static long sys_getgid_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+/* Helper: deliver signal to a single process */
+static void kill_deliver(struct proc *target, int sig) {
+    /* Signals to zombie/unused processes are silently discarded.
+     * Without this guard, SIGSTOP's immediate-stop code would override
+     * the ZOMBIE state with SLEEPING, and a subsequent SIGCONT would
+     * make the scheduler resume the dead process in an infinite loop. */
+    if (target->state == ZOMBIE || target->state == UNUSED)
+        return;
+    if (sig == 9) {
+        target->exit_status = 128 + 9;
+        target->killed_by_signal = 9;
+        target->stopped_signal = 0;
+        /* cleanup_proc_resources switches satp to kernel_pagetable.
+         * When called from the parent's syscall context (target != current_proc),
+         * we must save and restore the caller's satp so the parent can
+         * return to user mode with its own page table. */
+        uint64_t saved_satp = r_satp();
+        cleanup_proc_resources(target);
+        if (target != current_proc) {
+            w_satp(saved_satp);
+            sfence_vma();
+        }
+        target->state = ZOMBIE;
+        if (target->parent) {
+            target->parent->sigpending |= signal_bit(SIGCHLD);
+            if (target->parent->state == SLEEPING)
+                target->parent->state = RUNNABLE;
+        }
+    } else if (signal_is_valid(sig)) {
+        target->sigpending |= signal_bit(sig);
+        if (sig == SIGCONT) {
+            /* SIGCONT: clear stopped state and wake process */
+            target->stopped_signal = 0;
+            target->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
+                                    signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
+        }
+        /* Stop-class signals: when the target is a different process and
+         * the signal will use the default stop action, immediately mark it
+         * as stopped so that a concurrent waitpid(WUNTRACED) in the parent
+         * sees the child as stopped even before the child's next scheduler
+         * timeslice runs deliver_signal.  On a single-hart system the
+         * target cannot be running while we are inside the sender's
+         * syscall context, so this is safe.  Clear the pending bit to
+         * prevent deliver_signal from processing the stop a second time.
+         *
+         * SIGSTOP cannot be caught, so always immediate-stop.
+         * SIGTSTP/SIGTTIN/SIGTTOU only immediate-stop when handler is
+         * SIG_DFL; if the process has a custom handler, leave the signal
+         * pending for deliver_signal.
+         *
+         * When the target IS the current process (self-stop via
+         * kill(getpid(),SIGSTOP)), leave the signal pending so that
+         * deliver_signal handles it at trap return with a proper swtch. */
+        if ((sig == SIGSTOP || sig == SIGTSTP ||
+             sig == SIGTTIN || sig == SIGTTOU) &&
+            target != current_proc &&
+            (sig == SIGSTOP ||
+             proc_sigactions(target)[sig].handler == 0)) {
+            target->sigpending &= ~signal_bit(sig);
+            target->stopped_signal = sig;
+            target->state = SLEEPING;
+            target->sigpending &= ~signal_bit(SIGCONT);
+            /* Notify parent (unless SA_NOCLDSTOP) */
+            if (target->parent) {
+                struct kern_sigaction *psa = proc_sigactions(target->parent);
+                if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
+                    target->parent->sigpending |= signal_bit(SIGCHLD);
+                    if (target->parent->state == SLEEPING)
+                        target->parent->state = RUNNABLE;
+                }
+            }
+        } else if (target->state == SLEEPING) {
+            target->state = RUNNABLE;
+        }
+    }
+}
+
 static long sys_kill_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
-    if (target_pid <= 0) {
-        return (long)-1;
+
+    if (target_pid == 0) {
+        /* Send to all processes in caller's process group */
+        pid_t pgid = current_proc->pgid;
+        int found = 0;
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
+                proc[i].pgid == pgid) {
+                kill_deliver(&proc[i], sig);
+                found = 1;
+            }
+        }
+        return found ? 0 : (long)-3;
     }
+
+    if (target_pid < -1) {
+        /* Send to all processes in process group abs(target_pid) */
+        pid_t pgid = -target_pid;
+        int found = 0;
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
+                proc[i].pgid == pgid) {
+                kill_deliver(&proc[i], sig);
+                found = 1;
+            }
+        }
+        return found ? 0 : (long)-3;
+    }
+
+    if (target_pid == -1) {
+        /* Send to all processes except init (pid 1) and self */
+        for (int i = 0; i < 64; i++) {
+            if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
+                proc[i].pid != 1 && &proc[i] != current_proc) {
+                kill_deliver(&proc[i], sig);
+            }
+        }
+        return 0;
+    }
+
+    /* Positive pid: send to specific process */
     struct proc *target = NULL;
     for (int i = 0; i < 64; i++) {
         if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
@@ -1515,48 +1887,39 @@ static long sys_kill_handler(struct trapframe *tf) {
             break;
         }
     }
-    if (!target) {
+    if (!target)
         return (long)-3; /* -ESRCH */
-    } else {
-        if (sig == 9) {
-            target->exit_status = 128 + 9;
-            target->killed_by_signal = 9;
-            cleanup_proc_resources(target);
-            target->state = ZOMBIE;
-            if (target->parent) {
-                target->parent->sigpending |= signal_bit(SIGCHLD);
-                if (target->parent->state == SLEEPING)
-                    target->parent->state = RUNNABLE;
-            }
-        } else if (signal_is_valid(sig)) {
-            target->sigpending |= signal_bit(sig);
-            if (target->state == SLEEPING)
-                target->state = RUNNABLE;
-            /* SIGCONT: also wake stopped processes */
-            if (sig == SIGCONT && target->state == SLEEPING) {
-                target->state = RUNNABLE;
-            }
-        }
-        return (long)0;
-    }
+
+    kill_deliver(target, sig);
+    return 0;
 }
 
 static long sys_clock_gettime_handler(struct trapframe *tf) {
+    uint64_t clk_id   = tf->a0;
     uint64_t ts_uaddr = tf->a1;
-    if (ts_uaddr) {
+    if (!ts_uaddr)
+        return (long)-14; /* EFAULT */
+
+    struct { int64_t tv_sec; int64_t tv_nsec; } kts;
+
+    if (clk_id == 0) {
+        /* CLOCK_REALTIME: wall-clock time */
         int64_t sec, nsec;
         get_wall_time(&sec, &nsec);
-        struct { int64_t tv_sec; int64_t tv_nsec; } kts;
-        kts.tv_sec = sec;
+        kts.tv_sec  = sec;
         kts.tv_nsec = nsec;
-        if (copyout(current_proc->pagetable, ts_uaddr, &kts, 16) < 0) {
-            return (long)-14;
-        } else {
-            return (long)0;
-        }
+    } else if (clk_id == 1) {
+        /* CLOCK_MONOTONIC: time since boot */
+        uint64_t elapsed = r_time() - boot_time;
+        kts.tv_sec  = (int64_t)(elapsed / TIMER_FREQ);
+        kts.tv_nsec = (int64_t)((elapsed % TIMER_FREQ) * 100);
     } else {
-        return (long)-14;
+        return (long)-22; /* EINVAL */
     }
+
+    if (copyout(current_proc->pagetable, ts_uaddr, &kts, 16) < 0)
+        return (long)-14; /* EFAULT */
+    return (long)0;
 }
 
 static long sys_lseek_handler(struct trapframe *tf) {
@@ -1661,10 +2024,13 @@ static long sys_newfstatat_handler(struct trapframe *tf) {
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
 
-    /* Follow symlinks unless AT_SYMLINK_NOFOLLOW */
+    /* Resolve symlinks: intermediate always, final unless AT_SYMLINK_NOFOLLOW */
     int at_flags = (int)tf->a3;
-    if (!(at_flags & 0x100)) { /* AT_SYMLINK_NOFOLLOW = 0x100 */
-        follow_symlinks(resolved, 8);
+    {
+        int nofollow = (at_flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
+        int symret = resolve_symlinks_in_path(resolved, 8, !nofollow);
+        if (symret == -40)
+            return (long)-40; /* -ELOOP */
     }
 
     const char *relpath;
@@ -1770,8 +2136,10 @@ static long sys_exit_handler(struct trapframe *tf) {
     if (current_proc) {
         current_proc->exit_status = status;
         current_proc->killed_by_signal = 0;
+        current_proc->stopped_signal = 0;
         cleanup_proc_resources(current_proc);
         if (current_proc->pid == 1) {
+            ext2_sync(); /* flush filesystem before halt */
             printk("\nSystem halted (init exited with status %d).\n", status);
             register unsigned long a0 asm("a0") = 0;
             register unsigned long a1 asm("a1") = 0;
@@ -1779,11 +2147,22 @@ static long sys_exit_handler(struct trapframe *tf) {
             asm volatile("ecall" : : "r"(a0), "r"(a1), "r"(a7));
             while (1) {}
         }
-        current_proc->state = ZOMBIE;
         if (current_proc->parent) {
-            current_proc->parent->sigpending |= signal_bit(SIGCHLD);
-            if (current_proc->parent->state == SLEEPING)
-                current_proc->parent->state = RUNNABLE;
+            struct proc *par = current_proc->parent;
+            struct kern_sigaction *psa = proc_sigactions(par);
+            /* SA_NOCLDWAIT: auto-reap child instead of leaving zombie */
+            if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
+                current_proc->state = UNUSED;
+                current_proc->pid = 0;
+                current_proc->parent = NULL;
+            } else {
+                current_proc->state = ZOMBIE;
+            }
+            par->sigpending |= signal_bit(SIGCHLD);
+            if (par->state == SLEEPING)
+                par->state = RUNNABLE;
+        } else {
+            current_proc->state = ZOMBIE;
         }
         for (struct proc *p = proc; p < &proc[64]; p++) {
             if (p->state == SLEEPING && p != current_proc &&
@@ -1810,6 +2189,12 @@ static long sys_fsync_handler(struct trapframe *tf) {
     return 0;
 }
 
+static long sys_sync_handler(struct trapframe *tf) {
+    (void)tf;
+    ext2_sync();
+    return 0;
+}
+
 #define REBOOT_MAGIC1      0xfee1deadU
 #define REBOOT_MAGIC2      0x28121969U
 #define REBOOT_CMD_HALT    0xcdef0123U
@@ -1823,6 +2208,9 @@ static long sys_reboot_handler(struct trapframe *tf) {
 
     if (magic1 != REBOOT_MAGIC1 || magic2 != REBOOT_MAGIC2)
         return (long)-1; /* -EPERM */
+
+    /* Flush filesystem before reboot/shutdown */
+    ext2_sync();
 
     if (cmd == REBOOT_CMD_RESTART) {
         printk("\nSystem rebooting...\n");
@@ -2134,9 +2522,13 @@ static long sys_rt_sigsuspend_handler(struct trapframe *tf) {
         return -14; // EFAULT
     uint64_t old_mask = current_proc->sigmask;
     current_proc->sigmask = mask;
-    // Sleep until a signal is delivered
-    current_proc->state = SLEEPING;
-    swtch(&current_proc->context, &scheduler_context);
+    /* Sleep until a deliverable signal arrives.  Loop to handle spurious
+     * wakeups (e.g., from UART interrupts or process exits that wake all
+     * sleeping processes with waiting_for_uart == 0). */
+    while (!(current_proc->sigpending & ~current_proc->sigmask)) {
+        current_proc->state = SLEEPING;
+        swtch(&current_proc->context, &scheduler_context);
+    }
     // Restore old mask
     current_proc->sigmask = old_mask;
     return -4; // EINTR
@@ -2193,8 +2585,12 @@ static long sys_fcntl_handler(struct trapframe *tf) {
         }
         return (long)-24; /* EMFILE */
     } else if (cmd == 1) { /* F_GETFD */
-        return (long)0;
+        return (ftab[fd]->flags & 02000000) ? 1 : 0; /* FD_CLOEXEC */
     } else if (cmd == 2) { /* F_SETFD */
+        if ((int)tf->a2 & 1) /* FD_CLOEXEC */
+            ftab[fd]->flags |= 02000000; /* O_CLOEXEC */
+        else
+            ftab[fd]->flags &= ~02000000;
         return (long)0;
     } else if (cmd == 3) { /* F_GETFL */
         return (long)ftab[fd]->flags;
@@ -2214,6 +2610,7 @@ static long sys_faccessat_handler(struct trapframe *tf) {
 
     char resolved[256];
     resolve_path(current_proc->cwd, kpath, resolved);
+    resolve_symlinks_in_path(resolved, 8, 1);
 
     const char *relpath;
     struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
@@ -2235,6 +2632,8 @@ static long sys_unlinkat_handler(struct trapframe *tf) {
     {
         char resolved[256];
         resolve_path(current_proc->cwd, kpath, resolved);
+        /* Resolve intermediate symlinks; do NOT follow final (unlink targets the link itself) */
+        resolve_symlinks_in_path(resolved, 8, 0);
         const char *relpath;
         struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
         if (flags & 0x200) {
@@ -2292,6 +2691,8 @@ static long sys_mkdirat_handler(struct trapframe *tf) {
     {
         char resolved[256];
         resolve_path(current_proc->cwd, kpath, resolved);
+        /* Resolve intermediate symlinks only (creating at final component) */
+        resolve_symlinks_in_path(resolved, 8, 0);
         const char *relpath;
         struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
         if (ops && ops->mkdir) {
@@ -2604,15 +3005,47 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     pid_t pgid = (pid_t)tf->a1;
     if (target == 0) target = current_proc->pid;
     if (pgid == 0) pgid = target;
-    long result = (long)-3;
+
+    /* Find target process */
+    struct proc *tp = NULL;
     for (struct proc *p = proc; p < &proc[64]; p++) {
         if (p->pid == target && p->state != UNUSED) {
-            p->pgid = pgid;
-            result = 0;
+            tp = p;
             break;
         }
     }
-    return result;
+    if (!tp) return (long)-3; /* ESRCH */
+
+    /* POSIX: must be self or direct child */
+    if (tp != current_proc && tp->parent != current_proc)
+        return (long)-1; /* EPERM */
+
+    /* POSIX: cannot change pgid of session leader (pid == sid) */
+    if (tp->pid == tp->sid)
+        return (long)-1; /* EPERM */
+
+    /* POSIX: child must not have exec'd (unless targeting self) */
+    if (tp != current_proc && tp->has_execed)
+        return (long)-22; /* EACCES mapped to EINVAL for simplicity */
+
+    /* POSIX: target and caller must be in same session */
+    if (tp->sid != current_proc->sid)
+        return (long)-1; /* EPERM */
+
+    /* Verify pgid target exists in the session (pgid == target is always OK) */
+    if (pgid != target) {
+        int found = 0;
+        for (struct proc *p = proc; p < &proc[64]; p++) {
+            if (p->state != UNUSED && p->pgid == pgid && p->sid == current_proc->sid) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) return (long)-1; /* EPERM: target pgid not in session */
+    }
+
+    tp->pgid = pgid;
+    return 0;
 }
 
 static long sys_setsid_handler(struct trapframe *tf) {
@@ -3181,12 +3614,76 @@ void syscall_init(void) {
     syscall_table[SYS_mount]           = sys_mount_handler;
     syscall_table[SYS_umount2]         = sys_umount2_handler;
     syscall_table[SYS_reboot]          = sys_reboot_handler;
+    syscall_table[SYS_sync]            = sys_sync_handler;
     syscall_table[SYS_fsync]           = sys_fsync_handler;
 }
 
 /* ------------------------------------------------------------------ */
 /* Main trap handler                                                    */
 /* ------------------------------------------------------------------ */
+
+/* Return to user mode through the trampoline.  Called at the end of
+ * trap_handler (for user-mode traps) and from forkret. */
+void usertrapret(void) {
+    struct trapframe *tf = current_proc->trapframe;
+    /* (debug removed) */
+
+    /* Set stvec to the trampoline for the next user trap */
+    asm volatile("csrw stvec, %0" : : "r" (TRAMPOLINE_VA));
+
+    /* Update the trapframe's kernel scratch area */
+    tf->kernel_satp = MAKE_SATP(kernel_pagetable);
+    tf->kernel_sp = (uint64_t)current_proc->kstack + PAGE_SIZE;
+    tf->kernel_trap = (uint64_t)usertrap;
+    tf->kernel_trapframe_pa = (uint64_t)tf;
+
+    /* Set sscratch to TRAPFRAME_VA for the trampoline */
+    asm volatile("csrw sscratch, %0" : : "r" (TRAPFRAME_VA));
+
+    /* Set sstatus for user mode return */
+    unsigned long x = r_sstatus();
+    x &= ~SSTATUS_SPP;    /* return to user mode */
+    x |= SSTATUS_SPIE;    /* enable interrupts on sret */
+    w_sstatus(x);
+
+    /* Set sepc to the saved user PC */
+    asm volatile("csrw sepc, %0" : : "r" (tf->epc));
+
+    /* Jump to userret in the trampoline page to switch satp and sret.
+     * userret expects a0=TRAPFRAME_VA, a1=user_satp. */
+    extern char uservec[], userret[];
+    uint64_t fn = TRAMPOLINE_VA + ((uint64_t)userret - (uint64_t)uservec);
+    uint64_t user_satp = MAKE_SATP(current_proc->pagetable);
+
+    /* Jump to userret at TRAMPOLINE_VA.  After the satp switch inside
+     * userret, the trampoline page is accessible at the same VA from
+     * the user page table, so execution continues seamlessly. */
+    asm volatile(
+        "mv a0, %0\n"
+        "mv a1, %1\n"
+        "jr %2\n"
+        : : "r" ((uint64_t)TRAPFRAME_VA), "r" (user_satp), "r" (fn)
+        : "a0", "a1", "memory"
+    );
+    __builtin_unreachable();
+}
+
+/* Entry point for user-mode traps (called from trampoline).
+ * Calls the main trap_handler then returns to user via usertrapret. */
+void usertrap(struct trapframe *tf) {
+    /* Clear sscratch so kernel_trap_handler identifies kernel-mode traps
+     * correctly (it checks sscratch == 0 to distinguish kernel vs user). */
+    asm volatile("csrw sscratch, zero");
+
+    /* Point stvec to kernel_trap_handler for kernel-mode traps that
+     * may occur during trap processing (timer interrupts, etc.) */
+    extern char kernel_trap_handler[];
+    asm volatile("csrw stvec, %0" : : "r" (kernel_trap_handler));
+
+    trap_handler(tf);
+    usertrapret();
+    /* never reached */
+}
 
 void trap_handler(struct trapframe *tf) {
     unsigned long cause = r_scause();
@@ -3220,9 +3717,10 @@ void trap_handler(struct trapframe *tf) {
                 if (pte && (*pte & PTE_V) && (*pte & PTE_COW)) {
                     uint64_t pa = PTE2PA(*pte);
                     int flags = PTE_FLAGS(*pte);
+                    int ref = page_ref_get(pa);
 
-                    if (page_ref_get(pa) == 1) {
-                        /* Only reference: just make it writable again */
+                    if (ref <= 1) {
+                        /* Sole reference: make writable in place */
                         *pte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
                     } else {
                         /* Multiple references: allocate new page and copy */
@@ -3231,7 +3729,7 @@ void trap_handler(struct trapframe *tf) {
                             goto pagefault_kill;
                         memcpy(newpage, (void *)pa, PAGE_SIZE);
                         *pte = PA2PTE((uint64_t)newpage) | ((flags & ~PTE_COW) | PTE_W);
-                        kfree((void *)pa); /* decrement refcount on old page */
+                        page_ref_dec(pa);
                     }
                     /* Flush TLB for this VA */
                     asm volatile("sfence.vma %0, zero" : : "r"(va));
@@ -3252,10 +3750,13 @@ void trap_handler(struct trapframe *tf) {
                         goto pagefault_kill;
 
                     swap_read(slot, newpage);
-                    swap_free(slot);
 
-                    /* Restore PTE with original permissions + PTE_V */
+                    /* Restore PTE with original permissions + PTE_V
+                     * BEFORE freeing the slot, so the PTE is never
+                     * left with a stale swap marker that freewalk_level
+                     * could double-free. */
                     *spte = PA2PTE((uint64_t)newpage) | sflags | PTE_V;
+                    swap_free(slot);
                     asm volatile("sfence.vma %0, zero" : : "r"(sva));
                     return; /* resume faulting instruction */
                 }
@@ -3290,6 +3791,7 @@ void trap_handler(struct trapframe *tf) {
                     /* Check if page is already mapped */
                     pte_t *pte = walk(current_proc->pagetable, va, 0);
                     if (!pte || !(*pte & PTE_V)) {
+                        /* Page not yet allocated — demand-page it */
                         char *pg = kalloc();
                         if (pg) {
                             memset(pg, 0, PAGE_SIZE);
@@ -3302,19 +3804,97 @@ void trap_handler(struct trapframe *tf) {
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
                             return; /* resume */
                         }
+                    } else if (!(*pte & PTE_COW)) {
+                        /* Page is mapped (non-COW) but may have stale
+                         * permissions.  This happens when mprotect updates
+                         * the VMA prot but the PTE was not updated (e.g.,
+                         * the page was demand-paged before mprotect, or the
+                         * TLB cached old permissions).  Reconcile PTE with
+                         * the current VMA prot to prevent infinite fault
+                         * loops (critical for JIT/W^X PROT_EXEC
+                         * transitions).  COW pages are excluded — they are
+                         * handled by the COW path above. */
+                        int need = 0;
+                        if ((cause == SCAUSE_INST_PAGE_FAULT) &&
+                            (fvma->prot & PROT_EXEC) && !(*pte & PTE_X))
+                            need = 1;
+                        if ((cause == SCAUSE_STORE_PAGE_FAULT) &&
+                            (fvma->prot & PROT_WRITE) && !(*pte & PTE_W))
+                            need = 1;
+                        if ((cause == SCAUSE_LOAD_PAGE_FAULT) &&
+                            (fvma->prot & PROT_READ) && !(*pte & PTE_R))
+                            need = 1;
+                        if (need) {
+                            uint64_t rpa = PTE2PA(*pte);
+                            int rref = page_ref_get(rpa);
+                            if (rref > 1 && (cause == SCAUSE_STORE_PAGE_FAULT)) {
+                                /* Page is shared (ref > 1) but lost its
+                                 * PTE_COW flag (e.g., after swap round-trip).
+                                 * Must COW-copy before granting write. */
+                                char *cowpg = kalloc();
+                                if (!cowpg)
+                                    goto pagefault_kill;
+                                memcpy(cowpg, (void *)rpa, PAGE_SIZE);
+                                page_ref_dec(rpa);
+                                int perm = PTE_U;
+                                if (fvma->prot & PROT_READ)  perm |= PTE_R;
+                                if (fvma->prot & PROT_WRITE) perm |= PTE_W;
+                                if (fvma->prot & PROT_EXEC)  perm |= PTE_X;
+                                *pte = PA2PTE((uint64_t)cowpg) | perm | PTE_V;
+                            } else {
+                                int perm = PTE_U;
+                                if (fvma->prot & PROT_READ)  perm |= PTE_R;
+                                if (fvma->prot & PROT_WRITE) perm |= PTE_W;
+                                if (fvma->prot & PROT_EXEC)  perm |= PTE_X;
+                                *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | perm;
+                            }
+                            asm volatile("sfence.vma %0, zero" : : "r"(va));
+                            return; /* resume */
+                        }
                     }
                 }
             }
 
 pagefault_kill:
-            printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
-                   current_proc ? current_proc->pid : -1, tf->epc, stval, cause);
             if (current_proc) {
+                /* Suppress page-fault noise when the fault is a side-effect of
+                 * an ongoing signal kill.  Check three conditions:
+                 *   1. Process has a SIGSEGV handler (it will handle the fault).
+                 *   2. Process was already killed by a signal (killed_by_signal
+                 *      set by deliver_signal or kill_deliver).
+                 *   3. Process has a pending unblocked fatal signal whose default
+                 *      action is terminate — the fault is just a consequence of
+                 *      that pending kill (e.g., SIGINT/SIGPIPE with SIG_DFL). */
+                struct kern_sigaction *sa = proc_sigactions(current_proc);
+                int has_handler = (sa[SIGSEGV].handler != 0 && sa[SIGSEGV].handler != 1);
+
+                int suppress = has_handler || current_proc->killed_by_signal;
+                if (!suppress) {
+                    /* Check for any pending unblocked fatal signal */
+                    uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                    /* Mask of signals whose default action is ignore or stop
+                     * (not terminate): SIGCHLD(17) SIGURG(23) SIGWINCH(28)
+                     * SIGCONT(18) SIGSTOP(19) SIGTSTP(20) SIGTTIN(21) SIGTTOU(22) */
+                    uint64_t non_fatal = signal_bit(SIGCHLD) | signal_bit(SIGURG) |
+                                         signal_bit(SIGWINCH) | signal_bit(SIGCONT) |
+                                         signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
+                                         signal_bit(SIGTTIN) | signal_bit(SIGTTOU);
+                    uint64_t fatal_pending = deliverable & ~non_fatal;
+                    if (fatal_pending)
+                        suppress = 1;
+                }
+
+                if (!suppress) {
+                    printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
+                           current_proc->pid, tf->epc, stval, cause);
+                }
                 current_proc->sigpending |= signal_bit(SIGSEGV);
                 deliver_signal(tf, current_proc);
-                /* If deliver_signal returned (handler caught it), resume */
                 return;
             }
+            /* No process context — truly fatal */
+            printk("Page fault epc=0x%lx stval=0x%lx cause=%lu (no process)\n",
+                   tf->epc, stval, cause);
             while(1) {}
         }
         /* Handle other user-mode exceptions by delivering a signal */
@@ -3335,10 +3915,8 @@ pagefault_kill:
     }
 
     /* ---- ecall from user ---- */
-    /* Advance past the ecall instruction */
-    uint16_t *instr = (uint16_t *)tf->epc;
-    int size = ((*instr & 0x3) == 0x3) ? 4 : 2;
-    tf->epc += size;
+    /* Advance past the ecall instruction (always 4 bytes in RISC-V) */
+    tf->epc += 4;
 
     long sysnum = (long)tf->a7;
 

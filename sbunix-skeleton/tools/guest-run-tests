@@ -21,7 +21,6 @@ echo === C Binary Tests ===
 /bin/sigpipetest
 /bin/fstest
 /bin/swaptest
-/bin/mmaptest
 /bin/libc-test
 /bin/alarmtest
 /bin/segvtest
@@ -38,6 +37,9 @@ echo === C Binary Tests ===
 /bin/exectest
 /bin/posixtest
 /bin/libxtest
+/bin/persisttest
+/bin/mmaptest
+/bin/cowstresstest
 echo === C Binary Tests Done ===
 
 echo === Task345 Test ===
@@ -454,6 +456,9 @@ if test -n "$envhas"; then
 else
     check "" "yes" "env: outputs PATH"
 fi
+
+# --- SHELL variable (must be set by init) ---
+check "$SHELL" "/bin/sbush" "env: SHELL is /bin/sbush"
 
 # --- id (verify uid=0 in output) ---
 set idout $(id -u)
