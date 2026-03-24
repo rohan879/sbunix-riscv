@@ -103,6 +103,11 @@
 #define SYS_madvise     233
 #define SYS_uname       160
 
+/* Ownership / credentials (stubs for single-user OS) */
+#define SYS_fchownat    55
+#define SYS_setgid      144
+#define SYS_setuid      146
+
 /* Custom / simple-OS extensions */
 #define SYS_alarm       200   /* alarm(seconds) — one-shot SIGALRM */
 #define SYS_ps          500   /* snapshot process table */
