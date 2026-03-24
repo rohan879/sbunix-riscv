@@ -53,14 +53,23 @@ static char *run_cmdsub(const char *cmd, char *dst, char *end) {
         strncpy(cmdbuf, cmd, 255);
         cmdbuf[255] = '\0';
         execute_line(cmdbuf);
+        fflush(stdout); /* flush any buffered output before exit */
         _exit(last_exit_status);
     }
 
-    /* Parent: read child's stdout */
+    /* Parent: read child's stdout, retrying on EINTR */
     close(pfd[1]);
     char ch;
-    while (dst < end && read(pfd[0], &ch, 1) == 1) {
-        *dst++ = ch;
+    ssize_t rr;
+    while (dst < end) {
+        rr = read(pfd[0], &ch, 1);
+        if (rr == 1) {
+            *dst++ = ch;
+        } else if (rr == 0) {
+            break; /* EOF */
+        } else {
+            continue; /* EINTR or transient error: retry */
+        }
     }
     close(pfd[0]);
     waitpid(pid, NULL, 0);
