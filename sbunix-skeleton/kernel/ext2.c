@@ -1888,6 +1888,30 @@ int ext2_mounted_flag(void) {
   return ext2_mounted;
 }
 
+/* ext2_ftruncate_ino -- set file size by inode number */
+int ext2_ftruncate_ino(uint32_t ino, uint64_t length) {
+  if (!ext2_mounted) return -30; /* EROFS */
+  struct ext2_inode_mem *ip = icache_get(ino);
+  if (!ip) return -1;
+  ip->size = (uint32_t)length;
+  ip->dirty = 1;
+  icache_writeback(ip);
+  icache_release(ip);
+  return 0;
+}
+
+/* ext2_fchmod_ino -- set file mode by inode number */
+int ext2_fchmod_ino(uint32_t ino, uint32_t mode) {
+  if (!ext2_mounted) return -30; /* EROFS */
+  struct ext2_inode_mem *ip = icache_get(ino);
+  if (!ip) return -1;
+  ip->mode = mode & 07777;
+  ip->dirty = 1;
+  icache_writeback(ip);
+  icache_release(ip);
+  return 0;
+}
+
 void ext2_sync(void) {
   if (!ext2_mounted) return;
 

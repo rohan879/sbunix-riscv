@@ -3140,22 +3140,50 @@ static long sys_fchmodat_handler(struct trapframe *tf) {
     } else {
         return (long)-2; /* ENOENT */
     }
-    /* No VFS chmod op — tarfs is read-only, ext2 mode set at open time */
+    /* ext2: actually set the mode on disk */
+    if (ops == &ext2_ops && ops->open) {
+        void *priv = NULL;
+        if (ops->open(relpath, 0, &priv) >= 0) {
+            struct ext2_open_private *ep = (struct ext2_open_private *)priv;
+            ext2_fchmod_ino(ep->ino, (uint32_t)tf->a2);
+            if (ops->close) ops->close(priv);
+        }
+    }
     return 0;
 }
 
 static long sys_fchmod_handler(struct trapframe *tf) {
-    /* a0 = fd, a1 = mode */
     int fd = (int)tf->a0;
-    if (fd < 0 || fd >= 64 || !current_proc->ofile[fd])
+    uint32_t mode = (uint32_t)tf->a1;
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (fd < 0 || fd >= NOFILE || !ftab[fd])
         return (long)-9; /* EBADF */
-    /* No-op: mode already stored in inode from open/create */
-    return 0;
+    struct open_file *f = ftab[fd];
+    if (f->is_pipe) return (long)-22; /* EINVAL */
+    /* ext2 files: update inode mode on disk */
+    if (f->ops == &ext2_ops && f->private) {
+        struct ext2_open_private *priv = (struct ext2_open_private *)f->private;
+        return (long)ext2_fchmod_ino(priv->ino, mode);
+    }
+    return 0; /* other filesystems: no-op */
 }
 
 static long sys_ftruncate_handler(struct trapframe *tf) {
-    (void)tf;
-    return (long)-30;
+    int fd = (int)tf->a0;
+    uint64_t length = (uint64_t)tf->a1;
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (fd < 0 || fd >= NOFILE || !ftab[fd])
+        return (long)-9; /* EBADF */
+    struct open_file *f = ftab[fd];
+    if (f->is_pipe) return (long)-22; /* EINVAL */
+    int accmode = f->flags & 3;
+    if (accmode == 0) return (long)-9; /* EBADF: read-only fd */
+    /* ext2 files: update inode size on disk */
+    if (f->ops == &ext2_ops && f->private) {
+        struct ext2_open_private *priv = (struct ext2_open_private *)f->private;
+        return (long)ext2_ftruncate_ino(priv->ino, length);
+    }
+    return (long)-30; /* EROFS: tarfs and other read-only filesystems */
 }
 
 static long sys_tgkill_handler(struct trapframe *tf) {
