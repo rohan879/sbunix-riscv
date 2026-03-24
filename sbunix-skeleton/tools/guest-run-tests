@@ -39,6 +39,7 @@ echo === C Binary Tests ===
 /bin/libxtest
 /bin/persisttest
 /bin/mmaptest
+/bin/cowstresstest
 echo === C Binary Tests Done ===
 
 echo === Task345 Test ===
