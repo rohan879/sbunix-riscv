@@ -358,7 +358,7 @@ static void test_exec_preserves_fd(const char *self)
         close(pfd[0]);
         dup2(outpfd[1], STDOUT_FILENO);
         close(outpfd[1]);
-        char *argv[] = {(char *)self, "--subtest", "fd_open_check", fdstr, NULL};
+        char *argv[] = {(char *)self, "--subtest", "fd_check", fdstr, NULL};
         char *envp[] = {NULL};
         execve(self, argv, envp);
         _exit(127);

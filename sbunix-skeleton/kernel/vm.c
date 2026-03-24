@@ -450,6 +450,7 @@ static void freewalk_level(pagetable_t pt, int level) {
     } else if (!(pte & (PTE_R | PTE_W | PTE_X))) {
       /* Non-leaf PTE: points to next-level page table page */
       pagetable_t child = (pagetable_t)PTE2PA(pte);
+      if (!child) { pt[i] = 0; continue; } /* guard against corrupt PPN=0 */
       if (level > 0)
         freewalk_level(child, level - 1);
       kfree((void *)child);
@@ -459,6 +460,7 @@ static void freewalk_level(pagetable_t pt, int level) {
        * Skip kernel-only leaves (UART/CLINT/PLIC/PCIe I/O pages mapped
        * without PTE_U) — those are MMIO, not kalloc'd memory. */
       uint64_t pa = PTE2PA(pte);
+      if (!pa) { pt[i] = 0; continue; } /* guard against corrupt PPN=0 */
       if (level == 1)
         kfree_super((void *)pa);
       else
