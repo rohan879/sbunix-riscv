@@ -13,5 +13,11 @@ fi
 
 # Run test suite only if test runner is present (test builds only)
 if test -f /bin/run-tests; then
-    run-tests
+    if test -f /mnt/.persist_sentinel; then
+        # Boot 2: persistence verify phase only, then poweroff
+        /bin/persisttest
+        /bin/poweroff
+    else
+        run-tests
+    fi
 fi

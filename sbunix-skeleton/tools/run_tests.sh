@@ -1,6 +1,8 @@
 #!/bin/bash
 # SBUnix host-side test runner
 # Builds the kernel, launches QEMU with a timeout, and parses test results.
+# Supports two-boot persistence testing: Boot 1 runs all tests + persist write
+# (which calls poweroff), Boot 2 runs persist verify only.
 
 set -euo pipefail
 
@@ -40,47 +42,62 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Launch QEMU in background, capturing serial output
-echo "==> Launching QEMU (timeout: ${TIMEOUT}s)..."
-qemu-system-riscv64 -machine virt -bios default -kernel build/kernel.elf \
-    -drive file=build/disk.img,format=raw,if=none,id=hd0 \
-    -device virtio-blk-pci-non-transitional,drive=hd0 \
-    -device virtio-gpu-pci \
-    -device virtio-net-pci-non-transitional,netdev=net0 \
-    -netdev user,id=net0 \
-    -nographic \
-    > "$OUTPUT_FILE" 2>&1 &
-QEMU_PID=$!
+# --- Helper: run one QEMU boot, appending output to OUTPUT_FILE ---
+run_qemu_boot() {
+    local label="$1"
+    local check_prompt="$2"  # "yes" or "no"
+    local start_size
+    start_size=$(wc -c < "$OUTPUT_FILE" 2>/dev/null || echo 0)
 
-# Monitor output: kill QEMU early when the shell prompt appears after tests
-# (the "sbush$ " prompt means rc script finished and shell is idle)
-ELAPSED=0
-while kill -0 "$QEMU_PID" 2>/dev/null; do
-    sleep 5
-    ELAPSED=$((ELAPSED + 5))
-    # Check for test completion markers
-    if grep -q 'sbush\$' "$OUTPUT_FILE" 2>/dev/null; then
-        # Tests finished, shell prompt appeared — give 5s for final output
+    echo "==> Launching QEMU ($label, timeout: ${TIMEOUT}s)..."
+    qemu-system-riscv64 -machine virt -bios default -kernel build/kernel.elf \
+        -drive file=build/disk.img,format=raw,if=none,id=hd0 \
+        -device virtio-blk-pci-non-transitional,drive=hd0 \
+        -device virtio-gpu-pci \
+        -device virtio-net-pci-non-transitional,netdev=net0 \
+        -netdev user,id=net0 \
+        -nographic \
+        >> "$OUTPUT_FILE" 2>&1 &
+    QEMU_PID=$!
+
+    ELAPSED=0
+    while kill -0 "$QEMU_PID" 2>/dev/null; do
         sleep 5
-        echo "==> Tests completed, stopping QEMU..."
-        kill "$QEMU_PID" 2>/dev/null || true
-        wait "$QEMU_PID" 2>/dev/null || true
-        QEMU_PID=""
-        break
-    fi
-    if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-        echo "==> Timeout reached (${TIMEOUT}s), stopping QEMU..."
-        kill "$QEMU_PID" 2>/dev/null || true
-        wait "$QEMU_PID" 2>/dev/null || true
-        QEMU_PID=""
-        break
-    fi
-done
+        ELAPSED=$((ELAPSED + 5))
+        if [ "$check_prompt" = "yes" ]; then
+            # Only check NEW output for the shell prompt (avoid matching Boot 1 output)
+            if tail -c +"$((start_size + 1))" "$OUTPUT_FILE" 2>/dev/null | grep -q 'sbush\$'; then
+                sleep 5
+                echo "==> $label: tests completed, stopping QEMU..."
+                kill "$QEMU_PID" 2>/dev/null || true
+                wait "$QEMU_PID" 2>/dev/null || true
+                QEMU_PID=""
+                break
+            fi
+        fi
+        if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+            echo "==> $label: timeout reached (${TIMEOUT}s), stopping QEMU..."
+            kill "$QEMU_PID" 2>/dev/null || true
+            wait "$QEMU_PID" 2>/dev/null || true
+            QEMU_PID=""
+            break
+        fi
+    done
+    # QEMU may have exited on its own (poweroff)
+    wait "$QEMU_PID" 2>/dev/null || true
+    QEMU_PID=""
+}
+
+# Boot 1: run all tests; persisttest write phase calls poweroff at end
+run_qemu_boot "Boot 1: tests + persist write" "yes"
+
+# Boot 2: persist verify only (rc detects sentinel, runs persisttest, poweroffs)
+run_qemu_boot "Boot 2: persist verify" "no"
 
 echo "==> QEMU exited, parsing results..."
 echo ""
 
-# Parse [PASS] and [FAIL] lines
+# Parse [PASS] and [FAIL] lines from combined output of both boots
 pass_count=0
 fail_count=0
 failed_tests=()

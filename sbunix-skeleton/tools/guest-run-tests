@@ -37,7 +37,6 @@ echo === C Binary Tests ===
 /bin/exectest
 /bin/posixtest
 /bin/libxtest
-/bin/persisttest
 /bin/mmaptest
 /bin/cowstresstest
 echo === C Binary Tests Done ===
@@ -520,6 +519,10 @@ echo ""
 echo "=== Summary ==="
 echo "Passed: $PASS"
 echo "Failed: $FAIL"
+
+# --- Persistence test: MUST be last (calls poweroff after write phase) ---
+/bin/persisttest
+
 if test $FAIL -gt 0; then
     exit 1
 fi

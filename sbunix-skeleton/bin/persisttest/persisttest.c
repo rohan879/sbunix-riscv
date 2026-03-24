@@ -143,6 +143,12 @@ write_mkdir:
     /* Final sync to flush everything to disk */
     sync();
     printf("persist: write phase complete, reboot to verify\n");
+
+    /* Shut down QEMU so the host runner can launch a second boot for verify */
+    char *argv[] = {"/bin/poweroff", (char *)0};
+    char *envp[] = {(char *)0};
+    execve("/bin/poweroff", argv, envp);
+    /* If execve fails, fall through and exit normally */
 }
 
 /* -----------------------------------------------------------------------
