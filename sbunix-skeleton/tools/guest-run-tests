@@ -16,30 +16,55 @@ check() {
 }
 
 echo === C Binary Tests ===
+echo "=== Running proctest ==="
 /bin/proctest
+echo "=== Running schedtest ==="
 /bin/schedtest
+echo "=== Running sigpipetest ==="
 /bin/sigpipetest
+echo "=== Running fstest ==="
 /bin/fstest
+echo "=== Running swaptest ==="
 /bin/swaptest
+echo "=== Running libc-test ==="
 /bin/libc-test
+echo "=== Running alarmtest ==="
 /bin/alarmtest
+echo "=== Running segvtest ==="
 /bin/segvtest
+echo "=== Running fdiotest ==="
 /bin/fdiotest
+echo "=== Running sigtest ==="
 /bin/sigtest
+echo "=== Running sighandtest ==="
 /bin/sighandtest
+echo "=== Running dirtest ==="
 /bin/dirtest
+echo "=== Running procfstest ==="
 /bin/procfstest
+echo "=== Running cowtest ==="
 /bin/cowtest
+echo "=== Running lazytest ==="
 /bin/lazytest
+echo "=== Running pgrptest ==="
 /bin/pgrptest
+echo "=== Running symlinktest ==="
 /bin/symlinktest
+echo "=== Running clocktest ==="
 /bin/clocktest
+echo "=== Running exectest ==="
 /bin/exectest
+echo "=== Running posixtest ==="
 /bin/posixtest
+echo "=== Running libxtest ==="
 /bin/libxtest
+echo "=== Running mmaptest ==="
 /bin/mmaptest
+echo "=== Running cowstresstest ==="
 /bin/cowstresstest
 echo === C Binary Tests Done ===
+
+echo "=== Shell Regression Tests ==="
 
 echo === Task345 Test ===
 if true; then echo IF1_PASS; fi
@@ -521,6 +546,7 @@ echo "Passed: $PASS"
 echo "Failed: $FAIL"
 
 # --- Persistence test: MUST be last (calls poweroff after write phase) ---
+echo "=== Running persisttest ==="
 /bin/persisttest
 
 if test $FAIL -gt 0; then
