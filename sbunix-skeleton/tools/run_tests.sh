@@ -86,12 +86,16 @@ fail_count=0
 failed_tests=()
 
 while IFS= read -r line; do
-    # Skip lines with non-printable characters (garbled UART output)
-    cleaned=$(printf '%s' "$line" | tr -d '\r' | LC_ALL=C sed 's/[^[:print:][:space:]]//g')
-    # Extract test name: everything after [PASS] or [FAIL]
-    if [[ "$cleaned" =~ \[PASS\]\ (.+) ]]; then
+    # Strip carriage returns
+    line="${line//$'\r'/}"
+    # Skip lines containing non-printable/non-ASCII characters (garbled UART)
+    case "$line" in
+        *[^$'\t'$'\n'\ -~]*) continue ;;
+    esac
+    # Require test name to start with a word character (rejects garbled fragments)
+    if [[ "$line" =~ \[PASS\]\ ([a-zA-Z_].+) ]]; then
         pass_count=$((pass_count + 1))
-    elif [[ "$cleaned" =~ \[FAIL\]\ (.+) ]]; then
+    elif [[ "$line" =~ \[FAIL\]\ ([a-zA-Z_].+) ]]; then
         fail_count=$((fail_count + 1))
         test_name="${BASH_REMATCH[1]}"
         test_name="$(echo "$test_name" | sed 's/^[[:space:]]*//')"
