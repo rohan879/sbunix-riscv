@@ -109,6 +109,11 @@
 #define SYS_madvise     233
 #define SYS_uname       160
 
+/* Ownership / credentials (stubs for single-user OS) */
+#define SYS_fchownat    55
+#define SYS_setgid      144
+#define SYS_setuid      146
+
 /* Flags & constants (kept here for backward compatibility) */
 #define O_RDONLY  0
 #define O_WRONLY  1

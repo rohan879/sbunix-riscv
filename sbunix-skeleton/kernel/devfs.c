@@ -52,8 +52,9 @@ static struct device devices[MAX_DEVICES] = {
   { "null",    devnull_read,    devnull_write,    0 },
   { "zero",    devzero_read,    devzero_write,    0 },
   { "console", devconsole_read, devconsole_write, 1 },
+  { "tty",     devconsole_read, devconsole_write, 1 },
 };
-static int num_devices = 3;
+static int num_devices = 4;
 
 /* ------------------------------------------------------------------ */
 /* devfs private data                                                   */

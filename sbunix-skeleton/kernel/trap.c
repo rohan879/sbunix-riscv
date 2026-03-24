@@ -3104,6 +3104,22 @@ static long sys_madvise_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+/* Ownership/credential stubs — single-user OS, always uid/gid 0 */
+static long sys_fchownat_handler(struct trapframe *tf) {
+    (void)tf;
+    return (long)0;
+}
+
+static long sys_setuid_handler(struct trapframe *tf) {
+    (void)tf;
+    return (long)0;
+}
+
+static long sys_setgid_handler(struct trapframe *tf) {
+    (void)tf;
+    return (long)0;
+}
+
 static long sys_fchmodat_handler(struct trapframe *tf) {
     /* a0 = dirfd (AT_FDCWD), a1 = user path, a2 = mode, a3 = flags */
     char kpath[256];
@@ -3616,6 +3632,9 @@ void syscall_init(void) {
     syscall_table[SYS_reboot]          = sys_reboot_handler;
     syscall_table[SYS_sync]            = sys_sync_handler;
     syscall_table[SYS_fsync]           = sys_fsync_handler;
+    syscall_table[SYS_fchownat]        = sys_fchownat_handler;
+    syscall_table[SYS_setuid]          = sys_setuid_handler;
+    syscall_table[SYS_setgid]          = sys_setgid_handler;
 }
 
 /* ------------------------------------------------------------------ */
