@@ -457,6 +457,9 @@ else
     check "" "yes" "env: outputs PATH"
 fi
 
+# --- SHELL variable (must be set by init) ---
+check "$SHELL" "/bin/sbush" "env: SHELL is /bin/sbush"
+
 # --- id (verify uid=0 in output) ---
 set idout $(id -u)
 check "$idout" "0" "id: uid is 0"
