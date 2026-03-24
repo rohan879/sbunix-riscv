@@ -112,11 +112,19 @@ int execute_pipeline(struct pipeline *pl) {
     int prev_fd = -1;
     pid_t pgid = 0;  /* process group for this pipeline */
 
+    /* Block SIGCHLD before forking so the handler can't reap children
+     * before our foreground waitpid loop captures the status. */
+    sigset_t block_chld, saved_mask;
+    sigemptyset(&block_chld);
+    sigaddset(&block_chld, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &block_chld, &saved_mask);
+
     for (int i = 0; i < pl->ncmds; i++) {
         int pipefd[2] = {-1, -1};
         if (i < pl->ncmds - 1) {
             if (pipe(pipefd) < 0) {
                 dprintf(2, "sbush: pipe failed\n");
+                if (prev_fd >= 0) close(prev_fd);
                 return 1;
             }
         }
@@ -124,6 +132,9 @@ int execute_pipeline(struct pipeline *pl) {
         pid_t pid = fork();
         if (pid < 0) {
             dprintf(2, "sbush: fork failed\n");
+            if (pipefd[0] >= 0) close(pipefd[0]);
+            if (pipefd[1] >= 0) close(pipefd[1]);
+            if (prev_fd >= 0) close(prev_fd);
             return 1;
         }
 
@@ -131,7 +142,7 @@ int execute_pipeline(struct pipeline *pl) {
             /* child: join (or create) the pipeline's process group */
             setpgid(0, pgid);  /* pgid==0 for first child creates new group */
 
-            /* Restore default signal dispositions in children */
+            /* Restore default signal dispositions and mask in children */
             struct sigaction sa;
             sa.sa_handler = SIG_DFL;
             sa.sa_mask = 0;
@@ -140,6 +151,11 @@ int execute_pipeline(struct pipeline *pl) {
             sigaction(SIGINT, &sa, NULL);
             sigaction(SIGTSTP, &sa, NULL);
             sigaction(SIGCHLD, &sa, NULL);
+
+            /* Unblock all signals so exec'd program starts clean */
+            sigset_t empty_mask;
+            sigemptyset(&empty_mask);
+            sigprocmask(SIG_SETMASK, &empty_mask, NULL);
 
             if (prev_fd >= 0) {
                 dup2(prev_fd, STDIN_FILENO);
@@ -246,6 +262,7 @@ int execute_pipeline(struct pipeline *pl) {
         int jid = job_add(last_bg_pid, jobcmd);
         printf("[%d] %d\n", jid, (int)last_bg_pid);
         if (prev_fd >= 0) close(prev_fd);
+        sigprocmask(SIG_SETMASK, &saved_mask, NULL);
         return 0;
     }
 
@@ -254,12 +271,6 @@ int execute_pipeline(struct pipeline *pl) {
 
     /* Track foreground PID for signal forwarding */
     fg_pid = pgid;
-
-    /* Block SIGCHLD so our waitpid gets the status before any handler */
-    sigset_t block_chld, saved_mask;
-    sigemptyset(&block_chld);
-    sigaddset(&block_chld, SIGCHLD);
-    sigprocmask(SIG_BLOCK, &block_chld, &saved_mask);
 
     /* wait for all processes; return exit status of last */
     int last_status = 0;

@@ -1549,6 +1549,8 @@ static long sys_execve_handler(struct trapframe *tf) {
             if (vops && vops->open) {
                 void *vpriv = NULL;
                 if (vops->open(vfs_relpath, 0, &vpriv) >= 0) {
+                    /* File exists on VFS — mark as found even if read fails */
+                    shebang_file_found = 1;
                     int64_t voff = 0;
                     if (vops->read) {
                         int64_t nr = vops->read(vpriv, first_bytes, 255, &voff);
