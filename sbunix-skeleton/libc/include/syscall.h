@@ -108,6 +108,7 @@
 #define SYS_rt_sigreturn 139
 #define SYS_madvise     233
 #define SYS_msync       227
+#define SYS_futex       98
 #define SYS_uname       160
 
 /* Filesystem metadata */

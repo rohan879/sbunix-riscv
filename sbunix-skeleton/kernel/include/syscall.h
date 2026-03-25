@@ -111,6 +111,9 @@
 /* Memory sync */
 #define SYS_msync       227
 
+/* Threading */
+#define SYS_futex       98
+
 /* Ownership / credentials (stubs for single-user OS) */
 #define SYS_fchownat    55
 #define SYS_setgid      144

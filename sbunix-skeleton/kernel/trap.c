@@ -1046,9 +1046,40 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         return;
     }
 
-    /* Set up trapframe to call handler(signum) with return to restorer */
+    /* SA_SIGINFO: push siginfo_t onto stack and pass as second arg */
+    uint64_t siginfo_uaddr = 0;
+    if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
+        /* siginfo_t: { int si_signo, si_errno, si_code; pid_t si_pid; uid_t si_uid; ... }
+         * Minimal: 128 bytes (Linux RISC-V siginfo_t is 128 bytes) */
+        uint8_t ksi[128];
+        memset(ksi, 0, sizeof(ksi));
+        /* si_signo at offset 0 (int32) */
+        int32_t si_signo = (int32_t)signum;
+        memcpy(ksi + 0, &si_signo, 4);
+        /* si_errno at offset 4 (int32) */
+        /* si_code at offset 8 (int32) — SI_USER=0 for kill(), SI_KERNEL=128 */
+        int32_t si_code = 0; /* SI_USER */
+        memcpy(ksi + 8, &si_code, 4);
+        /* si_pid at offset 16 (int32 on RISC-V LP64) */
+        int32_t si_pid = current_proc ? (int32_t)current_proc->pid : 0;
+        memcpy(ksi + 16, &si_pid, 4);
+        /* si_uid at offset 20 (uint32) */
+        /* (uid=0, already zeroed) */
+
+        sp -= 128;
+        sp &= ~15UL;
+        siginfo_uaddr = sp;
+        if (copyout(p->pagetable, sp, ksi, 128) < 0)
+            return;
+    }
+
+    /* Set up trapframe to call handler(signum[, siginfo, ucontext]) */
     tf->epc = handler;                   /* jump to signal handler */
     tf->a0 = (uint64_t)signum;           /* first arg: signal number */
+    if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
+        tf->a1 = siginfo_uaddr;         /* second arg: siginfo_t * */
+        tf->a2 = 0;                     /* third arg: ucontext_t * (NULL) */
+    }
     tf->sp = sp;                         /* stack points to saved trapframe */
     tf->ra = sa[signum].restorer;        /* return address -> libc restorer -> sigreturn */
 
@@ -3219,6 +3250,58 @@ static long sys_madvise_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+/* futex — basic FUTEX_WAIT and FUTEX_WAKE for thread synchronization */
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1
+#define FUTEX_PRIVATE_FLAG 128
+
+static long sys_futex_handler(struct trapframe *tf) {
+    uint64_t uaddr = tf->a0;
+    int op = (int)tf->a1 & ~FUTEX_PRIVATE_FLAG; /* strip FUTEX_PRIVATE */
+    uint32_t val = (uint32_t)tf->a2;
+
+    if (op == FUTEX_WAIT) {
+        /* Read the current value at uaddr */
+        uint32_t curval;
+        if (copyin(current_proc->pagetable, &curval, uaddr, sizeof(curval)) < 0)
+            return (long)-14; /* EFAULT */
+        /* If value changed, return EAGAIN */
+        if (curval != val)
+            return (long)-11; /* EAGAIN */
+        /* Sleep on this address */
+        current_proc->futex_addr = uaddr;
+        current_proc->state = SLEEPING;
+        swtch(&current_proc->context, &scheduler_context);
+        current_proc->futex_addr = 0;
+        /* Check for signal interruption */
+        if (current_proc->sigpending & ~current_proc->sigmask) {
+            struct kern_sigaction *ksa = proc_sigactions(current_proc);
+            for (int s = 1; s < 32; s++) {
+                if ((current_proc->sigpending & signal_bit(s)) &&
+                    ~(current_proc->sigmask & signal_bit(s)) &&
+                    ksa[s].handler > 1)
+                    return (long)-4; /* EINTR */
+            }
+        }
+        return 0;
+    } else if (op == FUTEX_WAKE) {
+        /* Wake up to val processes sleeping on uaddr */
+        int woken = 0;
+        uint32_t max_wake = val;
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+            if (p->state == SLEEPING && p->futex_addr == uaddr) {
+                p->state = RUNNABLE;
+                p->futex_addr = 0;
+                woken++;
+                if ((uint32_t)woken >= max_wake)
+                    break;
+            }
+        }
+        return (long)woken;
+    }
+    return (long)-22; /* EINVAL: unsupported futex op */
+}
+
 /* msync — flush MAP_SHARED pages back to file */
 static long sys_msync_handler(struct trapframe *tf) {
     uint64_t addr = tf->a0 & ~(uint64_t)(PAGE_SIZE - 1);
@@ -3894,6 +3977,7 @@ void syscall_init(void) {
     syscall_table[SYS_statfs]          = sys_statfs_handler;
     syscall_table[SYS_fstatfs]         = sys_fstatfs_handler;
     syscall_table[SYS_msync]           = sys_msync_handler;
+    syscall_table[SYS_futex]           = sys_futex_handler;
 }
 
 /* ------------------------------------------------------------------ */

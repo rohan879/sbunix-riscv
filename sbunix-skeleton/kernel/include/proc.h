@@ -175,6 +175,8 @@ struct proc {
   struct shared_pagetable  *shared_pt;      /* non-NULL if CLONE_VM */
   struct shared_ftable     *shared_ft;      /* non-NULL if CLONE_FILES */
   struct shared_sigactions *shared_sa;      /* non-NULL if CLONE_SIGHAND */
+  /* futex support */
+  uint64_t futex_addr;          /* VA being waited on (0 = not waiting) */
   /* SA_RESTART support: saved syscall args for restart after signal */
   int in_syscall;               /* 1 while inside a blocking syscall */
   uint64_t saved_a0;
