@@ -65,6 +65,16 @@ static int append_str(char *buf, int bufsz, int pos, const char *s) {
   return pos;
 }
 
+/* Helper: write a 64-bit value as 16 hex digits (Linux SigPnd/SigBlk format) */
+static int append_hex16(char *buf, int bufsz, int pos, uint64_t v) {
+  static const char hex[] = "0123456789abcdef";
+  for (int i = 15; i >= 0; i--) {
+    if (pos < bufsz)
+      buf[pos++] = hex[(v >> (i * 4)) & 0xF];
+  }
+  return pos;
+}
+
 /* Helper: parse a decimal PID from a string. Returns -1 on failure. */
 static int parse_pid(const char *s) {
   if (!s || !*s) return -1;
@@ -127,11 +137,32 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   pos = append_str(buf, bufsz, pos, " kB\n");
 
   pos = append_str(buf, bufsz, pos, "SigPnd:\t");
-  pos = append_int(buf, bufsz, pos, (long)p->sigpending);
+  pos = append_hex16(buf, bufsz, pos, p->sigpending);
   if (pos < bufsz) buf[pos++] = '\n';
 
   pos = append_str(buf, bufsz, pos, "SigBlk:\t");
-  pos = append_int(buf, bufsz, pos, (long)p->sigmask);
+  pos = append_hex16(buf, bufsz, pos, p->sigmask);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  /* SigIgn and SigCgt for Linux compatibility */
+  pos = append_str(buf, bufsz, pos, "SigIgn:\t");
+  {
+    uint64_t sig_ign = 0;
+    struct kern_sigaction *sa = proc_sigactions(p);
+    for (int s = 1; s < 32; s++)
+      if (sa[s].handler == 1) sig_ign |= signal_bit(s); /* SIG_IGN = 1 */
+    pos = append_hex16(buf, bufsz, pos, sig_ign);
+  }
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "SigCgt:\t");
+  {
+    uint64_t sig_cgt = 0;
+    struct kern_sigaction *sa = proc_sigactions(p);
+    for (int s = 1; s < 32; s++)
+      if (sa[s].handler > 1) sig_cgt |= signal_bit(s); /* user handler */
+    pos = append_hex16(buf, bufsz, pos, sig_cgt);
+  }
   if (pos < bufsz) buf[pos++] = '\n';
 
   return pos;
@@ -180,9 +211,20 @@ static int procfs_render_stat_file(char *buf, int bufsz, struct proc *p) {
   pos = append_int(buf, bufsz, pos, p->sid);
   if (pos < bufsz) buf[pos++] = ' ';
 
-  /* tty_nr tpgid flags minflt + 30 zeros */
+  /* Fields 7-52 (46 fields): tty_nr(7) tpgid(8) flags(9) minflt(10) cminflt(11)
+   * majflt(12) cmajflt(13) utime(14) stime(15) cutime(16) cstime(17) priority(18)
+   * nice(19) num_threads(20) itrealvalue(21) starttime(22) vsize(23) rss(24)
+   * rsslim(25) startcode(26) endcode(27) startstack(28) kstkesp(29) kstkeip(30)
+   * signal(31) blocked(32) sigignore(33) sigcatch(34) wchan(35) nswap(36)
+   * cnswap(37) exit_signal(38) processor(39) rt_priority(40) policy(41)
+   * delayacct_blkio_ticks(42) guest_time(43) cguest_time(44) start_data(45)
+   * end_data(46) start_brk(47) arg_start(48) arg_end(49) env_start(50)
+   * env_end(51) exit_code(52) */
   pos = append_str(buf, bufsz, pos,
-    "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+    "0 0 0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 0 ");
+  pos = append_int(buf, bufsz, pos, (long)(p->sz)); /* vsize */
+  pos = append_str(buf, bufsz, pos,
+    " 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
 
   return pos;
 }
