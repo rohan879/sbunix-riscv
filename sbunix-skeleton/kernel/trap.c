@@ -1553,6 +1553,10 @@ static long sys_execve_handler(struct trapframe *tf) {
     if (ret < 0) {
         ret = exec(kpath);
     }
+    /* Try loading ELF from VFS (ext2 or other mounted filesystem) */
+    if (ret < 0) {
+        ret = exec_vfs(resolved);
+    }
 
     /* Shebang (#!) handling: if exec failed, check if file is a script */
     int shebang_file_found = 0;
