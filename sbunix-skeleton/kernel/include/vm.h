@@ -13,12 +13,17 @@
 #define MAP_ANON      0x20
 
 /* Virtual memory area descriptor */
+struct open_file; /* forward declaration */
+
 struct vm_area {
   uint64_t start;       /* page-aligned start address */
   uint64_t end;         /* page-aligned end address (exclusive) */
   int prot;             /* PROT_READ | PROT_WRITE | PROT_EXEC */
   int flags;            /* MAP_PRIVATE | MAP_ANONYMOUS */
   struct vm_area *next; /* sorted linked list by start addr */
+  /* File-backed mapping (NULL for anonymous) */
+  struct open_file *file; /* backing file (refcount'd) */
+  uint64_t file_offset;   /* offset within file for start of mapping */
 };
 
 struct proc; /* forward declaration */

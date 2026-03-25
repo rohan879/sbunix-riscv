@@ -436,6 +436,11 @@ void vma_free_all(struct proc *p) {
   struct vm_area *v = p->vma_list;
   while (v) {
     struct vm_area *nxt = v->next;
+    /* Release file reference for file-backed mappings */
+    if (v->file) {
+      vfs_free_file(v->file);
+      v->file = NULL;
+    }
     kmfree(v, sizeof(struct vm_area));
     v = nxt;
   }

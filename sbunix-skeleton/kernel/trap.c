@@ -2281,6 +2281,8 @@ static long sys_mmap_handler(struct trapframe *tf) {
     uint64_t len   = tf->a1;
     int      prot  = (int)tf->a2;
     int      flags = (int)tf->a3;
+    int      fd    = (int)tf->a4;
+    uint64_t offset = tf->a5;
 
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (len == 0) {
@@ -2303,10 +2305,20 @@ static long sys_mmap_handler(struct trapframe *tf) {
     if (prot & PROT_EXEC)  pte_flags |= PTE_X;
     if (pte_flags == 0) pte_flags = PTE_R; /* minimum readable */
 
-    /* Register VMA only — pages allocated lazily on first access via
-     * the demand paging path in the page fault handler. */
+    /* Register VMA — pages allocated lazily on first access. */
     if (vma_add(current_proc, va, va + len, prot, flags) < 0) {
         return (long)-1;
+    }
+
+    /* File-backed mapping: store file reference in VMA for demand paging */
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (!(flags & MAP_ANONYMOUS) && fd >= 0 && fd < NOFILE && ftab[fd]) {
+        struct vm_area *vma = vma_find(current_proc, va);
+        if (vma) {
+            vma->file = ftab[fd];
+            vma->file_offset = offset;
+            ftab[fd]->refcount++; /* keep file open even if userspace closes fd */
+        }
     }
 
     return (long)va;
@@ -3957,6 +3969,15 @@ void trap_handler(struct trapframe *tf) {
                         char *pg = kalloc();
                         if (pg) {
                             memset(pg, 0, PAGE_SIZE);
+
+                            /* File-backed VMA: read page content from file */
+                            if (fvma->file && fvma->file->ops && fvma->file->ops->read) {
+                                uint64_t file_off = fvma->file_offset + (va - fvma->start);
+                                int64_t foff = (int64_t)file_off;
+                                fvma->file->ops->read(fvma->file->private, pg, PAGE_SIZE, &foff);
+                                /* Short reads are OK — remaining bytes stay zero */
+                            }
+
                             int perm = PTE_U;
                             if (fvma->prot & PROT_READ)  perm |= PTE_R;
                             if (fvma->prot & PROT_WRITE) perm |= PTE_W;
