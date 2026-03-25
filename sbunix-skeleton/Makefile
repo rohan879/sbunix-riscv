@@ -11,12 +11,11 @@ CFLAGS  := -Wall -Werror -Os -ffreestanding -fno-builtin -nostdlib -nostdinc -is
 KERN_ASM := $(patsubst %,build/%.o,$(wildcard kernel/*.S))
 LIBC_OBJ := $(patsubst %,build/%.o,$(filter-out libc/crt.S,$(wildcard libc/*.c libc/*.S)))
 # Split user binaries: test binaries only included in test builds
-ALL_BIN_DIRS := $(wildcard bin/*)
-TEST_BIN_DIRS := $(filter %test,$(ALL_BIN_DIRS))
-UTIL_BIN_DIRS := $(filter-out %test,$(ALL_BIN_DIRS))
+UTIL_BIN_DIRS := $(wildcard bin/*)
+TEST_SRC_DIRS := $(wildcard tests/*)
 USER_BIN := $(patsubst bin/%,build/rootfs/bin/%,$(UTIL_BIN_DIRS))
 ifdef BUILD_TESTS
-USER_BIN += $(patsubst bin/%,build/rootfs/bin/%,$(TEST_BIN_DIRS))
+  USER_BIN += $(patsubst tests/%,build/rootfs/bin/%,$(TEST_SRC_DIRS))
 endif
 
 TIMEOUT ?= 600
@@ -58,16 +57,21 @@ build/rust/riscv64imac-unknown-none-elf/debug/libsbunix.a: $(wildcard kernel/*.r
 zig-out/lib/libsbunix.a: $(wildcard kernel/*.zig) build.zig
 	zig build -Doptimize=ReleaseSafe
 
-.SECONDEXPANSION:
-build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
+UTIL_TARGETS := $(patsubst bin/%,build/rootfs/bin/%,$(UTIL_BIN_DIRS))
+TEST_TARGETS := $(patsubst tests/%,build/rootfs/bin/%,$(TEST_SRC_DIRS))
+
+$(UTIL_TARGETS): build/rootfs/bin/%: build/libc/crt.S.o build/libc.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o bin/$*/*.c build/libc.a -Wl,--gc-sections -o $@
+
+$(TEST_TARGETS): build/rootfs/bin/%: build/libc/crt.S.o build/libc.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 
 build/tarfs.o: $(USER_BIN)
 	cp -a rootfs/. build/rootfs/
 	ln -sf sbush build/rootfs/bin/sh
-	ln -sf tst build/rootfs/bin/test
-	ln -sf tst build/rootfs/bin/[
+	ln -sf test build/rootfs/bin/[
 ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests
 endif
@@ -117,7 +121,7 @@ submit:
 	rsync -a \
 		--exclude='.git' --exclude='build/' --exclude='zig-out/' \
 		--exclude='.zig-cache/' --exclude='.claude/' --exclude='thirdparty/' \
-		--max-size=120K \
+		--max-size=175K \
 		. "$$STMP/"; \
 	cd "$$STMP"; \
 	git init -q; \

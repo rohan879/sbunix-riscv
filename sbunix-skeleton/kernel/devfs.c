@@ -48,12 +48,39 @@ static int64_t devconsole_write(const char *buf, uint64_t count) {
   return (int64_t)count;
 }
 
+/* /dev/urandom — PCG-based pseudorandom bytes */
+static uint64_t urandom_state;
+static int urandom_seeded;
+
+static int64_t devurandom_read(char *buf, uint64_t count) {
+  if (!urandom_seeded) {
+    /* Seed from RISC-V cycle counter */
+    asm volatile("rdtime %0" : "=r"(urandom_state));
+    urandom_seeded = 1;
+  }
+  for (uint64_t i = 0; i < count; i++) {
+    urandom_state = urandom_state * 6364136223846793005ULL + 1442695040888963407ULL;
+    buf[i] = (char)(urandom_state >> 33);
+  }
+  return (int64_t)count;
+}
+
+static int64_t devurandom_write(const char *buf, uint64_t count) {
+  /* Writing to urandom mixes in entropy (just XOR into state) */
+  for (uint64_t i = 0; i < count; i++)
+    urandom_state ^= (uint64_t)buf[i] << ((i % 8) * 8);
+  return (int64_t)count;
+}
+
 static struct device devices[MAX_DEVICES] = {
   { "null",    devnull_read,    devnull_write,    0 },
   { "zero",    devzero_read,    devzero_write,    0 },
   { "console", devconsole_read, devconsole_write, 1 },
+  { "tty",     devconsole_read, devconsole_write, 1 },
+  { "urandom", devurandom_read, devurandom_write, 0 },
+  { "random",  devurandom_read, devurandom_write, 0 },
 };
-static int num_devices = 3;
+static int num_devices = 6;
 
 /* ------------------------------------------------------------------ */
 /* devfs private data                                                   */

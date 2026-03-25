@@ -1888,6 +1888,83 @@ int ext2_mounted_flag(void) {
   return ext2_mounted;
 }
 
+/* ext2_ftruncate_ino -- set file size by inode number */
+int ext2_ftruncate_ino(uint32_t ino, uint64_t length) {
+  if (!ext2_mounted) return -30; /* EROFS */
+  struct ext2_inode_mem *ip = icache_get(ino);
+  if (!ip) return -1;
+  ip->size = (uint32_t)length;
+  ip->dirty = 1;
+  icache_writeback(ip);
+  icache_release(ip);
+  return 0;
+}
+
+/* ext2_fchmod_ino -- set file mode by inode number */
+int ext2_fchmod_ino(uint32_t ino, uint32_t mode) {
+  if (!ext2_mounted) return -30; /* EROFS */
+  struct ext2_inode_mem *ip = icache_get(ino);
+  if (!ip) return -1;
+  ip->mode = mode & 07777;
+  ip->dirty = 1;
+  icache_writeback(ip);
+  icache_release(ip);
+  return 0;
+}
+
+/* ext2_hardlink -- create a hard link: add dirent for existing inode */
+int ext2_hardlink(const char *newpath, uint32_t src_ino) {
+  if (!ext2_mounted) return -30; /* EROFS */
+
+  while (*newpath == '/') newpath++;
+
+  char parent_path[256];
+  const char *basename = path_parent(newpath, parent_path, sizeof(parent_path));
+  if (basename[0] == '\0') return -1;
+
+  struct ext2_inode_mem *parent = ext2_namei(parent_path);
+  if (!parent) return -2; /* ENOENT */
+  if (parent->type != EXT2_TYPE_DIR) {
+    icache_release(parent);
+    return -20; /* ENOTDIR */
+  }
+
+  /* Check name doesn't already exist */
+  uint32_t existing;
+  if (ext2_dir_lookup(parent, basename, &existing) == 0) {
+    icache_release(parent);
+    return -17; /* EEXIST */
+  }
+
+  /* Get source inode to determine file type for dirent */
+  struct ext2_inode_mem *src = icache_get(src_ino);
+  if (!src) {
+    icache_release(parent);
+    return -2;
+  }
+
+  uint8_t ftype = EXT2_FT_FILE;
+  if (src->type == EXT2_TYPE_DIR) ftype = EXT2_FT_DIR;
+  else if (src->type == EXT2_TYPE_SYMLINK) ftype = EXT2_FT_SYMLINK;
+
+  /* Add directory entry pointing to existing inode */
+  int ret = ext2_dir_add(parent, basename, src_ino, ftype);
+  if (ret < 0) {
+    icache_release(src);
+    icache_release(parent);
+    return ret;
+  }
+
+  /* Increment link count on source inode */
+  src->link_count++;
+  src->dirty = 1;
+  icache_writeback(src);
+
+  icache_release(src);
+  icache_release(parent);
+  return 0;
+}
+
 void ext2_sync(void) {
   if (!ext2_mounted) return;
 

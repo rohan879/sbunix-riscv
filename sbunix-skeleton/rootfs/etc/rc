@@ -2,7 +2,9 @@
 
 echo SBUnix booting...
 
-/bin/badfd
+if test -f /bin/badfd; then
+    /bin/badfd
+fi
 
 # Verify /bin/sh exists (POSIX compliance)
 if test -f /bin/sh; then
@@ -13,5 +15,11 @@ fi
 
 # Run test suite only if test runner is present (test builds only)
 if test -f /bin/run-tests; then
-    run-tests
+    if test -f /mnt/.persist_sentinel; then
+        # Boot 2: persistence verify phase only, then poweroff
+        /bin/persisttest
+        /bin/poweroff
+    else
+        run-tests
+    fi
 fi

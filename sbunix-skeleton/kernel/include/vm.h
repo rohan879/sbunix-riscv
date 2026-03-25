@@ -13,12 +13,17 @@
 #define MAP_ANON      0x20
 
 /* Virtual memory area descriptor */
+struct open_file; /* forward declaration */
+
 struct vm_area {
   uint64_t start;       /* page-aligned start address */
   uint64_t end;         /* page-aligned end address (exclusive) */
   int prot;             /* PROT_READ | PROT_WRITE | PROT_EXEC */
   int flags;            /* MAP_PRIVATE | MAP_ANONYMOUS */
   struct vm_area *next; /* sorted linked list by start addr */
+  /* File-backed mapping (NULL for anonymous) */
+  struct open_file *file; /* backing file (refcount'd) */
+  uint64_t file_offset;   /* offset within file for start of mapping */
 };
 
 struct proc; /* forward declaration */
@@ -47,8 +52,7 @@ uint64_t uvmalloc(pagetable_t pagetable, uint64_t start_va, uint64_t end_va, int
 int uvmmap(pagetable_t pagetable, uint64_t va, uint64_t pa, uint64_t sz, int perm);
 void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len);
 void proc_freepagetable(pagetable_t pagetable);
-struct trapframe; /* forward declaration */
-int uvmmap_trampoline(pagetable_t pt, struct trapframe *tf);
+int uvmmap_kernel(pagetable_t pt);
 int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len);
 int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len);
 int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max);

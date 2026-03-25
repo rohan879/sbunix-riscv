@@ -107,7 +107,34 @@
 #define SYS_tgkill      131
 #define SYS_rt_sigreturn 139
 #define SYS_madvise     233
+#define SYS_msync       227
+#define SYS_futex       98
+#define SYS_sched_yield 124
+#define SYS_gettid      178
+#define SYS_pread64     67
+#define SYS_pwrite64    68
+#define SYS_mremap      216
+#define SYS_getrusage   165
+#define SYS_epoll_create1 20
+#define SYS_epoll_ctl     21
+#define SYS_epoll_pwait   22
+#define SYS_timerfd_create  85
+#define SYS_timerfd_settime 86
+#define SYS_timerfd_gettime 87
+#define SYS_inotify_init1     26
+#define SYS_inotify_add_watch 27
+#define SYS_inotify_rm_watch  28
 #define SYS_uname       160
+
+/* Filesystem metadata */
+#define SYS_statfs      43
+#define SYS_fstatfs     44
+#define SYS_utimensat   88
+
+/* Ownership / credentials (stubs for single-user OS) */
+#define SYS_fchownat    55
+#define SYS_setgid      144
+#define SYS_setuid      146
 
 /* Flags & constants (kept here for backward compatibility) */
 #define O_RDONLY  0

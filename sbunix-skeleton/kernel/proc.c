@@ -7,7 +7,7 @@
 #include <printk.h>
 #include <exec.h>
 
-struct proc proc[64];
+struct proc proc[NPROC];
 struct proc *current_proc = NULL;
 struct context scheduler_context;
 
@@ -15,7 +15,7 @@ int nextpid = 1;
 
 void procinit(void) {
   struct proc *p;
-  for(p = proc; p < &proc[64]; p++) {
+  for(p = proc; p < &proc[NPROC]; p++) {
       p->state = UNUSED;
       p->kstack = NULL;
   }
@@ -24,9 +24,22 @@ void procinit(void) {
 // A fork child's very first scheduling by scheduler()
 // will swtch to forkret.
 void forkret(void) {
-  // Return to user mode through the trampoline
-  extern void usertrapret(void);
-  usertrapret();
+    /* Set stvec to kernel_trap_handler for traps during kernel execution */
+    extern char kernel_trap_handler[];
+    asm volatile("csrw stvec, %0" : : "r"(kernel_trap_handler));
+
+    /* Set sstatus: clear SPP (return to user mode), set SPIE (enable interrupts) */
+    unsigned long x = r_sstatus();
+    x &= ~SSTATUS_SPP;
+    x |= SSTATUS_SPIE;
+    w_sstatus(x);
+
+    /* Copy trapframe onto the kernel stack so trap_restore's _ret_user
+     * can compute sscratch = sp + 256 = kernel stack top correctly.
+     * (The persistent trapframe page is separate from the kernel stack.) */
+    struct trapframe kstack_tf;
+    memcpy(&kstack_tf, current_proc->trapframe, sizeof(struct trapframe));
+    trap_restore(&kstack_tf);
 }
 
 /* Open /dev/console via VFS and assign to the next free ofile slot.
@@ -87,7 +100,7 @@ void init_starter(void) {
 struct proc* allocproc(void) {
   struct proc *p;
 
-  for(p = proc; p < &proc[64]; p++) {
+  for(p = proc; p < &proc[NPROC]; p++) {
     if(p->state == UNUSED) {
       goto found;
     }
@@ -172,7 +185,7 @@ void userinit(void) {
 // Do NOT wake timed-sleep processes (waiting_for_uart==2).
 void uart_wakeup(void) {
   struct proc *p;
-  for (p = proc; p < &proc[64]; p++) {
+  for (p = proc; p < &proc[NPROC]; p++) {
     if (p->state == SLEEPING && p->waiting_for_uart == 1) {
       p->waiting_for_uart = 0;
       p->state = RUNNABLE;
@@ -195,7 +208,7 @@ void scheduler(void) {
     w_sstatus(r_sstatus() | SSTATUS_SIE);
 
     int found = 0;
-    for(p = proc; p < &proc[64]; p++) {
+    for(p = proc; p < &proc[NPROC]; p++) {
       if(p->state == RUNNABLE) {
         found = 1;
         p->state = RUNNING;
@@ -208,10 +221,18 @@ void scheduler(void) {
          * from sstatus.SPIE when it actually returns to user mode. */
         w_sstatus(r_sstatus() & ~SSTATUS_SIE);
 
-        /* Kernel stays on kernel_pagetable. The trampoline handles
-         * satp switching to/from user page table on trap exit/entry. */
+        /* Set sscratch and switch to process page table */
+                asm volatile("csrw sscratch, %0" : : "r"((uint64_t)p->kstack + PAGE_SIZE));
+                if (p->pagetable != kernel_pagetable) {
+                    w_satp(MAKE_SATP(p->pagetable));
+                    sfence_vma();
+                }
 
         swtch(&scheduler_context, &p->context);
+
+                /* Switch back to kernel page table */
+                w_satp(MAKE_SATP(kernel_pagetable));
+                sfence_vma();
 
         current_proc = 0;
 

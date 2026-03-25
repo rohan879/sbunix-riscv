@@ -146,5 +146,8 @@ struct ext2_open_private {
 int  ext2_init(void);
 void ext2_sync(void);
 int  ext2_mknod(const char *path, uint32_t mode, uint32_t rdev);
+int  ext2_ftruncate_ino(uint32_t ino, uint64_t length);
+int  ext2_fchmod_ino(uint32_t ino, uint32_t mode);
+int  ext2_hardlink(const char *newpath, uint32_t src_ino);
 
 #endif

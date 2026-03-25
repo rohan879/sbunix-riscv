@@ -7,12 +7,6 @@ PHDRS {
 SECTIONS {
 	. = 0x80200000;
 	.text   : { *(.text.init) *(.text) } :text
-	/* Trampoline page — page-aligned, symbols for runtime mapping */
-	. = ALIGN(4096);
-	_trampoline_start = .;
-	.text.trampoline : { *(.text.trampoline) } :text
-	. = ALIGN(4096);
-	_trampoline_end = .;
 	.text.rest : { *(.text.*) } :text
 	.rodata : { *(.rodata) *(.rodata.*) } :text
 	.data   : { *(.data) *(.data.*) } :data

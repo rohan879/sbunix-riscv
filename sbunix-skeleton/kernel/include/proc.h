@@ -60,11 +60,6 @@ struct trapframe {
   /* 232 */ uint64_t tp;
   /* 240 */ uint64_t sp;
   /* 248 */ uint64_t epc;
-  /* --- kernel scratch area (loaded by trampoline on trap entry) --- */
-  /* 256 */ uint64_t kernel_satp;
-  /* 264 */ uint64_t kernel_sp;     /* this process's kernel stack top */
-  /* 272 */ uint64_t kernel_trap;   /* address of trap_handler() */
-  /* 280 */ uint64_t kernel_trapframe_pa; /* physical addr of this trapframe */
 };
 
 struct signal_frame {
@@ -75,7 +70,7 @@ struct signal_frame {
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 /* Maximum open file descriptors per process */
-#define NOFILE 16
+#define NOFILE 64
 
 /* Forward declarations */
 struct vm_area;
@@ -180,6 +175,16 @@ struct proc {
   struct shared_pagetable  *shared_pt;      /* non-NULL if CLONE_VM */
   struct shared_ftable     *shared_ft;      /* non-NULL if CLONE_FILES */
   struct shared_sigactions *shared_sa;      /* non-NULL if CLONE_SIGHAND */
+  /* futex support */
+  uint64_t futex_addr;          /* VA being waited on (0 = not waiting) */
+  /* SA_RESTART support: saved syscall args for restart after signal */
+  int in_syscall;               /* 1 while inside a blocking syscall */
+  uint64_t saved_a0;
+  uint64_t saved_a1;
+  uint64_t saved_a2;
+  uint64_t saved_a3;
+  uint64_t saved_a4;
+  uint64_t saved_a5;
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,
@@ -209,8 +214,10 @@ void            swtch(struct context*, struct context*);
 void            trap_restore(struct trapframe*);
 void            uart_wakeup(void);
 
+#define NPROC 128
+
 extern struct proc *current_proc;
-extern struct proc proc[64];
+extern struct proc proc[NPROC];
 extern struct context scheduler_context;
 
 #endif
