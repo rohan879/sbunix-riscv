@@ -113,6 +113,33 @@
 
 /* Threading */
 #define SYS_futex       98
+#define SYS_sched_yield 124
+#define SYS_gettid      178
+
+/* Positional I/O */
+#define SYS_pread64     67
+#define SYS_pwrite64    68
+
+/* Memory */
+#define SYS_mremap      216
+
+/* Resource */
+#define SYS_getrusage   165
+
+/* epoll */
+#define SYS_epoll_create1 20
+#define SYS_epoll_ctl     21
+#define SYS_epoll_pwait   22
+
+/* timerfd */
+#define SYS_timerfd_create  85
+#define SYS_timerfd_settime 86
+#define SYS_timerfd_gettime 87
+
+/* inotify */
+#define SYS_inotify_init1     26
+#define SYS_inotify_add_watch 27
+#define SYS_inotify_rm_watch  28
 
 /* Ownership / credentials (stubs for single-user OS) */
 #define SYS_fchownat    55

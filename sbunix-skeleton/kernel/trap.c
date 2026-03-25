@@ -597,6 +597,8 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
                     }
                 }
                 /* free child resources */
+                if (p->kstack) { kfree(p->kstack); p->kstack = NULL; }
+                if (p->trapframe) { kfree(p->trapframe); p->trapframe = NULL; }
                 p->state = UNUSED;
                 p->pid = 0;
                 p->parent = NULL;
@@ -1908,7 +1910,7 @@ static long sys_kill_handler(struct trapframe *tf) {
         /* Send to all processes in caller's process group */
         pid_t pgid = current_proc->pgid;
         int found = 0;
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pgid == pgid) {
                 kill_deliver(&proc[i], sig);
@@ -1922,7 +1924,7 @@ static long sys_kill_handler(struct trapframe *tf) {
         /* Send to all processes in process group abs(target_pid) */
         pid_t pgid = -target_pid;
         int found = 0;
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pgid == pgid) {
                 kill_deliver(&proc[i], sig);
@@ -1934,7 +1936,7 @@ static long sys_kill_handler(struct trapframe *tf) {
 
     if (target_pid == -1) {
         /* Send to all processes except init (pid 1) and self */
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pid != 1 && &proc[i] != current_proc) {
                 kill_deliver(&proc[i], sig);
@@ -1945,7 +1947,7 @@ static long sys_kill_handler(struct trapframe *tf) {
 
     /* Positive pid: send to specific process */
     struct proc *target = NULL;
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < NPROC; i++) {
         if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
             target = &proc[i];
             break;
@@ -2222,6 +2224,8 @@ static long sys_exit_handler(struct trapframe *tf) {
             struct kern_sigaction *psa = proc_sigactions(par);
             /* SA_NOCLDWAIT: auto-reap child instead of leaving zombie */
             if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
+                if (current_proc->kstack) { kfree(current_proc->kstack); current_proc->kstack = NULL; }
+                if (current_proc->trapframe) { kfree(current_proc->trapframe); current_proc->trapframe = NULL; }
                 current_proc->state = UNUSED;
                 current_proc->pid = 0;
                 current_proc->parent = NULL;
@@ -2234,6 +2238,20 @@ static long sys_exit_handler(struct trapframe *tf) {
         } else {
             current_proc->state = ZOMBIE;
         }
+        /* Reparent orphan children to init (pid 1) */
+        struct proc *initproc = NULL;
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+            if (p->pid == 1 && p->state != UNUSED) { initproc = p; break; }
+        }
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+            if (p->parent == current_proc && p != current_proc) {
+                p->parent = initproc;
+                /* Wake init if it's sleeping in wait4 */
+                if (initproc && initproc->state == SLEEPING)
+                    initproc->state = RUNNABLE;
+            }
+        }
+
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == SLEEPING && p != current_proc &&
                 p->waiting_for_uart == 0)
@@ -3313,6 +3331,419 @@ static long sys_msync_handler(struct trapframe *tf) {
     return 0;
 }
 
+/* gettid — return thread/process ID */
+static long sys_gettid_handler(struct trapframe *tf) {
+    (void)tf;
+    return current_proc ? (long)current_proc->pid : 0;
+}
+
+/* sched_yield — voluntarily yield the CPU */
+static long sys_sched_yield_handler(struct trapframe *tf) {
+    (void)tf;
+    if (current_proc && current_proc->state == RUNNING) {
+        current_proc->state = RUNNABLE;
+        swtch(&current_proc->context, &scheduler_context);
+    }
+    return 0;
+}
+
+/* pread64 — read at offset without changing file position */
+static long sys_pread64_handler(struct trapframe *tf) {
+    int fd = (int)tf->a0;
+    uint64_t ubuf = tf->a1;
+    size_t count = (size_t)tf->a2;
+    int64_t offset = (int64_t)tf->a3;
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (fd < 0 || fd >= NOFILE || !ftab[fd]) return (long)-9;
+    struct open_file *f = ftab[fd];
+    if (f->is_pipe) return (long)-29; /* ESPIPE */
+    if (!f->ops || !f->ops->read) return (long)-9;
+    char kbuf[512];
+    size_t total = 0;
+    int64_t off = offset;
+    while (total < count) {
+        size_t chunk = count - total;
+        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+        int64_t nr = f->ops->read(f->private, kbuf, chunk, &off);
+        if (nr <= 0) break;
+        if (copyout(current_proc->pagetable, ubuf + total, kbuf, (uint64_t)nr) < 0)
+            return total > 0 ? (long)total : (long)-14;
+        total += (size_t)nr;
+        if ((size_t)nr < chunk) break;
+    }
+    return (long)total;
+}
+
+/* pwrite64 — write at offset without changing file position */
+static long sys_pwrite64_handler(struct trapframe *tf) {
+    int fd = (int)tf->a0;
+    uint64_t ubuf = tf->a1;
+    size_t count = (size_t)tf->a2;
+    int64_t offset = (int64_t)tf->a3;
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (fd < 0 || fd >= NOFILE || !ftab[fd]) return (long)-9;
+    struct open_file *f = ftab[fd];
+    if (f->is_pipe) return (long)-29;
+    if (!f->ops || !f->ops->write) return (long)-9;
+    char kbuf[512];
+    size_t total = 0;
+    int64_t off = offset;
+    while (total < count) {
+        size_t chunk = count - total;
+        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+        if (copyin(current_proc->pagetable, kbuf, ubuf + total, chunk) < 0)
+            return total > 0 ? (long)total : (long)-14;
+        int64_t nw = f->ops->write(f->private, kbuf, chunk, &off);
+        if (nw <= 0) break;
+        total += (size_t)nw;
+        if ((size_t)nw < chunk) break;
+    }
+    return (long)total;
+}
+
+/* mremap — grow or shrink an existing mapping */
+static long sys_mremap_handler(struct trapframe *tf) {
+    uint64_t old_addr = tf->a0 & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t old_size = tf->a1;
+    uint64_t new_size = tf->a2;
+    int flags = (int)tf->a3;
+    old_size = PGROUNDUP(old_size);
+    new_size = PGROUNDUP(new_size);
+    if (new_size == old_size) return (long)old_addr;
+    if (new_size < old_size) {
+        /* Shrink: unmap tail */
+        uvmunmap(current_proc->pagetable, old_addr + new_size, old_size - new_size);
+        sfence_vma();
+        /* Update VMA */
+        struct vm_area *v = vma_find(current_proc, old_addr);
+        if (v) v->end = old_addr + new_size;
+        return (long)old_addr;
+    }
+    /* Grow: try to expand in place (check if space after is unmapped) */
+    int can_expand = 1;
+    for (uint64_t va = old_addr + old_size; va < old_addr + new_size; va += PAGE_SIZE) {
+        struct vm_area *existing = vma_find(current_proc, va);
+        if (existing) { can_expand = 0; break; }
+    }
+    if (can_expand) {
+        struct vm_area *v = vma_find(current_proc, old_addr);
+        if (v) v->end = old_addr + new_size;
+        return (long)old_addr;
+    }
+    /* Cannot expand in place; if MREMAP_MAYMOVE, allocate new region + copy */
+    if (flags & 1) { /* MREMAP_MAYMOVE */
+        uint64_t new_va = current_proc->mmap_base;
+        current_proc->mmap_base += new_size;
+        vma_add(current_proc, new_va, new_va + new_size, 3 /* RW */, 0x22 /* PRIVATE|ANON */);
+        /* Copy old pages to new location */
+        for (uint64_t off = 0; off < old_size; off += PAGE_SIZE) {
+            pte_t *pte = walk(current_proc->pagetable, old_addr + off, 0);
+            if (pte && (*pte & PTE_V)) {
+                uint64_t pa = PTE2PA(*pte);
+                char *newpg = kalloc();
+                if (!newpg) return (long)-12; /* ENOMEM */
+                memcpy(newpg, (void *)pa, PAGE_SIZE);
+                mappages(current_proc->pagetable, new_va + off, PAGE_SIZE,
+                         (uint64_t)newpg, PTE_R | PTE_W | PTE_U);
+            }
+        }
+        uvmunmap(current_proc->pagetable, old_addr, old_size);
+        sfence_vma();
+        vma_remove(current_proc, old_addr, old_addr + old_size);
+        return (long)new_va;
+    }
+    return (long)-12; /* ENOMEM */
+}
+
+/* getrusage — resource usage statistics */
+static long sys_getrusage_handler(struct trapframe *tf) {
+    /* a0 = who (RUSAGE_SELF=0, RUSAGE_CHILDREN=-1), a1 = rusage buf */
+    uint64_t uaddr = tf->a1;
+    /* struct rusage is 128 bytes on RISC-V LP64 (two timeval + 14 longs) */
+    uint8_t kru[128];
+    memset(kru, 0, sizeof(kru));
+    /* Approximate user time from elapsed ticks */
+    uint64_t elapsed = r_time() - boot_time;
+    int64_t sec = (int64_t)(elapsed / TIMER_FREQ);
+    int64_t usec = (int64_t)((elapsed % TIMER_FREQ) / 10);
+    memcpy(kru + 0, &sec, 8);   /* ru_utime.tv_sec */
+    memcpy(kru + 8, &usec, 8);  /* ru_utime.tv_usec */
+    if (copyout(current_proc->pagetable, uaddr, kru, 128) < 0)
+        return (long)-14;
+    return 0;
+}
+
+/* epoll — I/O event notification */
+#define MAX_EPOLL_ENTRIES 64
+struct epoll_entry {
+    int fd;
+    uint32_t events;
+    uint64_t data;
+};
+struct epoll_private {
+    struct epoll_entry entries[MAX_EPOLL_ENTRIES];
+    int count;
+};
+
+static long sys_epoll_create1_handler(struct trapframe *tf) {
+    (void)tf;
+    struct open_file **ftab = proc_ofile(current_proc);
+    int efd = alloc_fd();
+    if (efd < 0) return (long)-24; /* EMFILE */
+    struct open_file *f = vfs_alloc_file();
+    if (!f) return (long)-24;
+    f->is_pipe = 0;
+    f->ops = NULL;
+    f->flags = 0;
+    /* Allocate epoll private data */
+    struct epoll_private *ep = (struct epoll_private *)kmalloc(sizeof(struct epoll_private));
+    if (!ep) { vfs_free_file(f); return (long)-12; }
+    memset(ep, 0, sizeof(*ep));
+    f->private = ep;
+    ftab[efd] = f;
+    return (long)efd;
+}
+
+static long sys_epoll_ctl_handler(struct trapframe *tf) {
+    int epfd = (int)tf->a0;
+    int op = (int)tf->a1;
+    int fd = (int)tf->a2;
+    uint64_t event_uva = tf->a3;
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (epfd < 0 || epfd >= NOFILE || !ftab[epfd]) return (long)-9;
+    struct epoll_private *ep = (struct epoll_private *)ftab[epfd]->private;
+    if (!ep) return (long)-22;
+    /* Read epoll_event from user: {uint32_t events, uint64_t data} = 12 bytes */
+    uint8_t kevt[16];
+    if (event_uva && copyin(current_proc->pagetable, kevt, event_uva, 12) < 0)
+        return (long)-14;
+    uint32_t events = 0;
+    uint64_t data = 0;
+    if (event_uva) {
+        memcpy(&events, kevt, 4);
+        memcpy(&data, kevt + 4, 8);
+    }
+    if (op == 1) { /* EPOLL_CTL_ADD */
+        if (ep->count >= MAX_EPOLL_ENTRIES) return (long)-28; /* ENOSPC */
+        ep->entries[ep->count].fd = fd;
+        ep->entries[ep->count].events = events;
+        ep->entries[ep->count].data = data;
+        ep->count++;
+    } else if (op == 2) { /* EPOLL_CTL_DEL */
+        for (int i = 0; i < ep->count; i++) {
+            if (ep->entries[i].fd == fd) {
+                ep->entries[i] = ep->entries[ep->count - 1];
+                ep->count--;
+                break;
+            }
+        }
+    } else if (op == 3) { /* EPOLL_CTL_MOD */
+        for (int i = 0; i < ep->count; i++) {
+            if (ep->entries[i].fd == fd) {
+                ep->entries[i].events = events;
+                ep->entries[i].data = data;
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+static long sys_epoll_pwait_handler(struct trapframe *tf) {
+    int epfd = (int)tf->a0;
+    uint64_t events_uva = tf->a1;
+    int maxevents = (int)tf->a2;
+    int timeout_ms = (int)tf->a3;
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (epfd < 0 || epfd >= NOFILE || !ftab[epfd]) return (long)-9;
+    struct epoll_private *ep = (struct epoll_private *)ftab[epfd]->private;
+    if (!ep) return (long)-22;
+    /* Check readiness of each registered fd */
+    int nready = 0;
+    for (int i = 0; i < ep->count && nready < maxevents; i++) {
+        int fd = ep->entries[i].fd;
+        if (fd < 0 || fd >= NOFILE || !ftab[fd]) continue;
+        struct open_file *f = ftab[fd];
+        int ready = 0;
+        if (f->is_pipe && f->pipe_read) {
+            int pid = f->pipe_id;
+            if (pipe_avail(pid) > 0 || pipes[pid].write_open <= 0) ready = 1;
+        } else if (f->is_pipe && f->pipe_write) {
+            int pid = f->pipe_id;
+            if (pipe_avail(pid) < PIPE_BUF) ready = 1;
+        } else {
+            ready = 1; /* regular files are always ready */
+        }
+        if (ready) {
+            uint8_t kevt[12];
+            uint32_t revents = ep->entries[i].events & 0x01; /* EPOLLIN */
+            if (f->is_pipe && f->pipe_write) revents = ep->entries[i].events & 0x04; /* EPOLLOUT */
+            memcpy(kevt, &revents, 4);
+            memcpy(kevt + 4, &ep->entries[i].data, 8);
+            if (copyout(current_proc->pagetable, events_uva + (uint64_t)nready * 12, kevt, 12) < 0)
+                return (long)-14;
+            nready++;
+        }
+    }
+    if (nready == 0 && timeout_ms != 0) {
+        /* Sleep and retry once */
+        current_proc->state = SLEEPING;
+        swtch(&current_proc->context, &scheduler_context);
+        /* After wake, re-check (simplified: return 0 if still nothing) */
+        return 0;
+    }
+    return (long)nready;
+}
+
+/* timerfd — timer that delivers expiry via file descriptor */
+struct timerfd_private {
+    uint64_t expiry_ticks; /* absolute tick count when timer fires (0=disarmed) */
+    uint64_t interval;     /* for repeating timers (ticks between expirations) */
+    uint64_t expirations;  /* count of expirations since last read */
+};
+
+static long sys_timerfd_create_handler(struct trapframe *tf) {
+    (void)tf;
+    struct open_file **ftab = proc_ofile(current_proc);
+    int tfd = alloc_fd();
+    if (tfd < 0) return (long)-24;
+    struct open_file *f = vfs_alloc_file();
+    if (!f) return (long)-24;
+    f->is_pipe = 0;
+    f->ops = NULL;
+    f->flags = 0;
+    struct timerfd_private *tp = (struct timerfd_private *)kmalloc(sizeof(struct timerfd_private));
+    if (!tp) { vfs_free_file(f); return (long)-12; }
+    memset(tp, 0, sizeof(*tp));
+    f->private = tp;
+    ftab[tfd] = f;
+    return (long)tfd;
+}
+
+static long sys_timerfd_settime_handler(struct trapframe *tf) {
+    int tfd = (int)tf->a0;
+    uint64_t new_uva = tf->a2;
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (tfd < 0 || tfd >= NOFILE || !ftab[tfd]) return (long)-9;
+    struct timerfd_private *tp = (struct timerfd_private *)ftab[tfd]->private;
+    if (!tp) return (long)-22;
+    /* Read struct itimerspec: {interval{sec,nsec}, value{sec,nsec}} = 32 bytes */
+    uint8_t kits[32];
+    if (copyin(current_proc->pagetable, kits, new_uva, 32) < 0) return (long)-14;
+    int64_t val_sec, val_nsec, int_sec, int_nsec;
+    memcpy(&int_sec, kits, 8);
+    memcpy(&int_nsec, kits + 8, 8);
+    memcpy(&val_sec, kits + 16, 8);
+    memcpy(&val_nsec, kits + 24, 8);
+    uint64_t now = r_time();
+    if (val_sec > 0 || val_nsec > 0) {
+        tp->expiry_ticks = now + (uint64_t)val_sec * TIMER_FREQ +
+                           (uint64_t)val_nsec / 100;
+    } else {
+        tp->expiry_ticks = 0; /* disarm */
+    }
+    tp->interval = (uint64_t)int_sec * TIMER_FREQ + (uint64_t)int_nsec / 100;
+    tp->expirations = 0;
+    return 0;
+}
+
+static long sys_timerfd_gettime_handler(struct trapframe *tf) {
+    int tfd = (int)tf->a0;
+    uint64_t out_uva = tf->a1;
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (tfd < 0 || tfd >= NOFILE || !ftab[tfd]) return (long)-9;
+    struct timerfd_private *tp = (struct timerfd_private *)ftab[tfd]->private;
+    if (!tp) return (long)-22;
+    uint8_t kits[32];
+    memset(kits, 0, 32);
+    int64_t int_sec = (int64_t)(tp->interval / TIMER_FREQ);
+    int64_t int_nsec = (int64_t)((tp->interval % TIMER_FREQ) * 100);
+    memcpy(kits, &int_sec, 8);
+    memcpy(kits + 8, &int_nsec, 8);
+    if (tp->expiry_ticks > 0) {
+        uint64_t now = r_time();
+        int64_t remaining = (int64_t)(tp->expiry_ticks - now);
+        if (remaining < 0) remaining = 0;
+        int64_t rem_sec = remaining / (int64_t)TIMER_FREQ;
+        int64_t rem_nsec = (remaining % (int64_t)TIMER_FREQ) * 100;
+        memcpy(kits + 16, &rem_sec, 8);
+        memcpy(kits + 24, &rem_nsec, 8);
+    }
+    if (copyout(current_proc->pagetable, out_uva, kits, 32) < 0) return (long)-14;
+    return 0;
+}
+
+/* inotify — filesystem event monitoring */
+#define MAX_INOTIFY_WATCHES 32
+struct inotify_watch {
+    char path[128];
+    uint32_t mask;
+    int wd; /* watch descriptor */
+};
+struct inotify_private {
+    struct inotify_watch watches[MAX_INOTIFY_WATCHES];
+    int count;
+    int next_wd;
+};
+
+static long sys_inotify_init1_handler(struct trapframe *tf) {
+    (void)tf;
+    struct open_file **ftab = proc_ofile(current_proc);
+    int ifd = alloc_fd();
+    if (ifd < 0) return (long)-24;
+    struct open_file *f = vfs_alloc_file();
+    if (!f) return (long)-24;
+    f->is_pipe = 0;
+    f->ops = NULL;
+    f->flags = 0;
+    struct inotify_private *ip = (struct inotify_private *)kmalloc(sizeof(struct inotify_private));
+    if (!ip) { vfs_free_file(f); return (long)-12; }
+    memset(ip, 0, sizeof(*ip));
+    ip->next_wd = 1;
+    f->private = ip;
+    ftab[ifd] = f;
+    return (long)ifd;
+}
+
+static long sys_inotify_add_watch_handler(struct trapframe *tf) {
+    int ifd = (int)tf->a0;
+    uint64_t path_uva = tf->a1;
+    uint32_t mask = (uint32_t)tf->a2;
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (ifd < 0 || ifd >= NOFILE || !ftab[ifd]) return (long)-9;
+    struct inotify_private *ip = (struct inotify_private *)ftab[ifd]->private;
+    if (!ip || ip->count >= MAX_INOTIFY_WATCHES) return (long)-28;
+    char kpath[128];
+    if (copyinstr(current_proc->pagetable, kpath, path_uva, sizeof(kpath)) < 0)
+        return (long)-14;
+    int wd = ip->next_wd++;
+    struct inotify_watch *w = &ip->watches[ip->count++];
+    int len = strlen(kpath);
+    if (len >= 127) len = 127;
+    memcpy(w->path, kpath, len);
+    w->path[len] = '\0';
+    w->mask = mask;
+    w->wd = wd;
+    return (long)wd;
+}
+
+static long sys_inotify_rm_watch_handler(struct trapframe *tf) {
+    int ifd = (int)tf->a0;
+    int wd = (int)tf->a1;
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (ifd < 0 || ifd >= NOFILE || !ftab[ifd]) return (long)-9;
+    struct inotify_private *ip = (struct inotify_private *)ftab[ifd]->private;
+    if (!ip) return (long)-22;
+    for (int i = 0; i < ip->count; i++) {
+        if (ip->watches[i].wd == wd) {
+            ip->watches[i] = ip->watches[ip->count - 1];
+            ip->count--;
+            return 0;
+        }
+    }
+    return (long)-22; /* EINVAL */
+}
+
 /* utimensat — update file timestamps (ext2 mtime) */
 static long sys_utimensat_handler(struct trapframe *tf) {
     /* a0 = dirfd (AT_FDCWD), a1 = path (NULL = use fd), a2 = times, a3 = flags */
@@ -3978,6 +4409,21 @@ void syscall_init(void) {
     syscall_table[SYS_fstatfs]         = sys_fstatfs_handler;
     syscall_table[SYS_msync]           = sys_msync_handler;
     syscall_table[SYS_futex]           = sys_futex_handler;
+    syscall_table[SYS_gettid]          = sys_gettid_handler;
+    syscall_table[SYS_sched_yield]     = sys_sched_yield_handler;
+    syscall_table[SYS_pread64]         = sys_pread64_handler;
+    syscall_table[SYS_pwrite64]        = sys_pwrite64_handler;
+    syscall_table[SYS_mremap]          = sys_mremap_handler;
+    syscall_table[SYS_getrusage]       = sys_getrusage_handler;
+    syscall_table[SYS_epoll_create1]   = sys_epoll_create1_handler;
+    syscall_table[SYS_epoll_ctl]       = sys_epoll_ctl_handler;
+    syscall_table[SYS_epoll_pwait]     = sys_epoll_pwait_handler;
+    syscall_table[SYS_timerfd_create]  = sys_timerfd_create_handler;
+    syscall_table[SYS_timerfd_settime] = sys_timerfd_settime_handler;
+    syscall_table[SYS_timerfd_gettime] = sys_timerfd_gettime_handler;
+    syscall_table[SYS_inotify_init1]   = sys_inotify_init1_handler;
+    syscall_table[SYS_inotify_add_watch] = sys_inotify_add_watch_handler;
+    syscall_table[SYS_inotify_rm_watch]  = sys_inotify_rm_watch_handler;
 }
 
 /* ------------------------------------------------------------------ */

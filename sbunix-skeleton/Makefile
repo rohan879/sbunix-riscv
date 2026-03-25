@@ -121,7 +121,7 @@ submit:
 	rsync -a \
 		--exclude='.git' --exclude='build/' --exclude='zig-out/' \
 		--exclude='.zig-cache/' --exclude='.claude/' --exclude='thirdparty/' \
-		--max-size=150K \
+		--max-size=175K \
 		. "$$STMP/"; \
 	cd "$$STMP"; \
 	git init -q; \
