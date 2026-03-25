@@ -47,7 +47,7 @@ struct mount {
 };
 
 /* Maximum open file descriptions system-wide */
-#define NFILE 128
+#define NFILE 512
 
 /* VFS functions */
 struct open_file *vfs_alloc_file(void);

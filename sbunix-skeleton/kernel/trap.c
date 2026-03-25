@@ -3042,6 +3042,9 @@ static long sys_setpgid_handler(struct trapframe *tf) {
 
 static long sys_setsid_handler(struct trapframe *tf) {
     (void)tf;
+    /* POSIX: setsid fails with EPERM if caller is already a process group leader */
+    if (current_proc->pid == current_proc->pgid)
+        return (long)-1; /* -EPERM */
     current_proc->sid = current_proc->pid;
     current_proc->pgid = current_proc->pid;
     return (long)current_proc->pid;

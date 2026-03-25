@@ -70,7 +70,7 @@ struct signal_frame {
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 /* Maximum open file descriptors per process */
-#define NOFILE 16
+#define NOFILE 64
 
 /* Forward declarations */
 struct vm_area;
