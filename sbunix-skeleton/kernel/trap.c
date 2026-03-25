@@ -620,6 +620,15 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
             current_proc->waiting_for_uart = 0;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* Return EINTR only if a user handler signal is pending */
+            {
+                uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                struct kern_sigaction *ksa = proc_sigactions(current_proc);
+                for (int s = 1; s < 32 && deliverable; s++) {
+                    if ((deliverable & signal_bit(s)) && ksa[s].handler > 1)
+                        return -4; /* -EINTR */
+                }
+            }
         }
     }
 }
@@ -1003,6 +1012,21 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     frame.saved_sigmask = p->sigmask;
     memcpy(&frame.saved_tf, tf, sizeof(frame.saved_tf));
 
+    /* SA_RESTART: if the process was in a blocking syscall that returned
+     * -EINTR, and the handler has SA_RESTART, rewind epc to re-execute
+     * the ecall with original args after the handler returns via sigreturn. */
+    if ((sa[signum].flags & 0x10000000) &&  /* SA_RESTART */
+        p->in_syscall &&
+        (int64_t)tf->a0 == -4) {            /* -EINTR */
+        frame.saved_tf.epc -= 4;            /* back to ecall instruction */
+        frame.saved_tf.a0 = p->saved_a0;
+        frame.saved_tf.a1 = p->saved_a1;
+        frame.saved_tf.a2 = p->saved_a2;
+        frame.saved_tf.a3 = p->saved_a3;
+        frame.saved_tf.a4 = p->saved_a4;
+        frame.saved_tf.a5 = p->saved_a5;
+    }
+
     /* Copy signal frame to user stack via copyout */
     if (copyout(p->pagetable, sp, &frame, sizeof(frame)) < 0)
         return; /* can't deliver signal -- just drop it */
@@ -1190,6 +1214,18 @@ static long sys_read_handler(struct trapframe *tf) {
             if (pipes[pid].write_open == 0) goto pipe_eof;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* Return EINTR only if a signal with a USER HANDLER is pending
+             * (not SIG_DFL/SIG_IGN — those don't interrupt syscalls). */
+            {
+                uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                struct kern_sigaction *sa = proc_sigactions(current_proc);
+                for (int s = 1; s < 32 && deliverable; s++) {
+                    if (deliverable & signal_bit(s)) {
+                        if (sa[s].handler > 1) /* user handler (not SIG_DFL=0 or SIG_IGN=1) */
+                            return (long)-4; /* -EINTR */
+                    }
+                }
+            }
         }
         /* Drain all available bytes (up to len) without re-blocking */
         while (read_bytes < len && pipe_avail(pid) > 0) {
@@ -4003,6 +4039,17 @@ pagefault_kill:
 
     long sysnum = (long)tf->a7;
 
+    /* Save original syscall arguments for SA_RESTART */
+    if (current_proc) {
+        current_proc->saved_a0 = tf->a0;
+        current_proc->saved_a1 = tf->a1;
+        current_proc->saved_a2 = tf->a2;
+        current_proc->saved_a3 = tf->a3;
+        current_proc->saved_a4 = tf->a4;
+        current_proc->saved_a5 = tf->a5;
+        current_proc->in_syscall = 1;
+    }
+
     if (sysnum >= 0 && sysnum < NSYSCALLS && syscall_table[sysnum]) {
         long ret = syscall_table[sysnum](tf);
         if (ret != SYSCALL_NORETURN)
@@ -4011,6 +4058,8 @@ pagefault_kill:
         printk("Unknown syscall %ld from pid %d\n", sysnum, current_proc ? current_proc->pid : -1);
         tf->a0 = (uint64_t)-38; /* -ENOSYS */
     }
+
+    if (current_proc) current_proc->in_syscall = 0;
 
     /* Deliver pending signals before returning to user mode */
     if (current_proc && (current_proc->sigpending & ~current_proc->sigmask))
