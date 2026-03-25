@@ -55,8 +55,8 @@ static void get_wall_time(int64_t *sec, int64_t *nsec) {
 /* ------------------------------------------------------------------ */
 /* Kernel pipe table                                                    */
 /* ------------------------------------------------------------------ */
-#define NPIPES 16
-#define PIPE_BUF 4096
+#define NPIPES 64
+#define PIPE_BUF 65536
 
 struct kpipe {
   int used;
@@ -135,7 +135,7 @@ static void close_ofile(struct proc *p, int fd) {
       if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
         pipes[pid].used = 0;
       /* Wake any sleeping pipe readers/writers */
-      for (struct proc *pp = proc; pp < &proc[64]; pp++) {
+      for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
         if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
           pp->state = RUNNABLE;
       }
@@ -144,7 +144,7 @@ static void close_ofile(struct proc *p, int fd) {
       pipes[pid].write_open--;
       if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
         pipes[pid].used = 0;
-      for (struct proc *pp = proc; pp < &proc[64]; pp++) {
+      for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
         if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
           pp->state = RUNNABLE;
       }
@@ -241,7 +241,7 @@ static void handle_external_interrupt(void) {
          * Only wake waitpid sleepers (waiting_for_uart==0); do NOT wake
          * timed sleeps (waiting_for_uart==2) or UART-input sleeps (==1,
          * already handled by uart_wakeup above). */
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == SLEEPING && p->waiting_for_uart == 0)
                 p->state = RUNNABLE;
         }
@@ -261,7 +261,7 @@ static void handle_timer_interrupt(void) {
     #endif
     timer_set_next();
     /* Wake processes whose timed sleep has expired */
-    for (struct proc *p = proc; p < &proc[64]; p++) {
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
             r_time() >= p->sleep_until) {
             p->waiting_for_uart = 0;
@@ -269,7 +269,7 @@ static void handle_timer_interrupt(void) {
         }
     }
     /* Check for expired alarms and deliver SIGALRM */
-    for (struct proc *p = proc; p < &proc[64]; p++) {
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state != UNUSED && p->state != ZOMBIE &&
             p->alarm_ticks > 0 && ticks >= p->alarm_ticks) {
             p->alarm_ticks = 0;  /* one-shot */
@@ -580,7 +580,7 @@ bad:
 static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
     for (;;) {
         int found_child = 0;
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == UNUSED) continue;
             if (p->parent != current_proc) continue;
             if (wpid > 0 && p->pid != wpid) continue;
@@ -1155,7 +1155,7 @@ static long sys_write_handler(struct trapframe *tf) {
                 written += chunk;
                 n -= chunk;
             }
-            for (struct proc *p = proc; p < &proc[64]; p++) {
+            for (struct proc *p = proc; p < &proc[NPROC]; p++) {
                 if (p->state == SLEEPING && p != current_proc &&
                     p->waiting_for_uart != 2)
                     p->state = RUNNABLE;
@@ -1237,7 +1237,7 @@ static long sys_read_handler(struct trapframe *tf) {
             read_bytes++;
         }
         /* Wake any blocked pipe writers since we freed buffer space */
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == SLEEPING && p != current_proc &&
                 p->waiting_for_uart != 2)
                 p->state = RUNNABLE;
@@ -1372,6 +1372,7 @@ static long sys_dup3_handler(struct trapframe *tf) {
 }
 
 static long sys_pipe2_handler(struct trapframe *tf) {
+    int pipe_flags = (int)tf->a1;
     int pipeid = alloc_pipe();
     if (pipeid < 0) {
         return (long)-1;
@@ -1387,7 +1388,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             rf->pipe_write = 0;
             rf->pipe_id = pipeid;
             rf->ops = NULL;
-            rf->flags = 0; /* O_RDONLY */
+            rf->flags = (pipe_flags & 02000000) ? 02000000 : 0; /* O_CLOEXEC */
             ftab[rfd] = rf;
             if (wf) wfd = alloc_fd();
         }
@@ -1407,7 +1408,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             wf->pipe_write = 1;
             wf->pipe_id = pipeid;
             wf->ops = NULL;
-            wf->flags = 1; /* O_WRONLY */
+            wf->flags = (pipe_flags & 02000000) ? (1 | 02000000) : 1; /* O_WRONLY + O_CLOEXEC */
             ftab[wfd] = wf;
             int kfds[2] = { rfd, wfd };
             if (copyout(current_proc->pagetable, tf->a0, kfds, sizeof(kfds)) < 0) {
@@ -1945,6 +1946,12 @@ static long sys_clock_gettime_handler(struct trapframe *tf) {
         uint64_t elapsed = r_time() - boot_time;
         kts.tv_sec  = (int64_t)(elapsed / TIMER_FREQ);
         kts.tv_nsec = (int64_t)((elapsed % TIMER_FREQ) * 100);
+    } else if (clk_id == 2 || clk_id == 3) {
+        /* CLOCK_PROCESS_CPUTIME_ID (2) / CLOCK_THREAD_CPUTIME_ID (3):
+         * approximate with monotonic time since boot (single-hart CPU) */
+        uint64_t elapsed = r_time() - boot_time;
+        kts.tv_sec  = (int64_t)(elapsed / TIMER_FREQ);
+        kts.tv_nsec = (int64_t)((elapsed % TIMER_FREQ) * 100);
     } else {
         return (long)-22; /* EINVAL */
     }
@@ -2196,7 +2203,7 @@ static long sys_exit_handler(struct trapframe *tf) {
         } else {
             current_proc->state = ZOMBIE;
         }
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == SLEEPING && p != current_proc &&
                 p->waiting_for_uart == 0)
                 p->state = RUNNABLE;
@@ -2376,7 +2383,7 @@ static long sys_ps_handler(struct trapframe *tf) {
     int      written  = 0;
     if (tf->a0 && maxn > 0) {
         uint8_t kps[64 * 24];
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == UNUSED) continue;
             if (written >= maxn) break;
             char st;
@@ -2687,8 +2694,40 @@ static long sys_unlinkat_handler(struct trapframe *tf) {
 }
 
 static long sys_linkat_handler(struct trapframe *tf) {
-    (void)tf;
-    return (long)-30;
+    /* a0 = olddirfd (AT_FDCWD), a1 = oldpath, a2 = newdirfd, a3 = newpath, a4 = flags */
+    char kold[256], knew[256];
+    if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
+        return (long)-14;
+    if (copyinstr(current_proc->pagetable, knew, tf->a3, sizeof(knew)) < 0)
+        return (long)-14;
+
+    char old_resolved[256], new_resolved[256];
+    resolve_path(current_proc->cwd, kold, old_resolved);
+    resolve_path(current_proc->cwd, knew, new_resolved);
+
+    /* Both paths must be on ext2 (same filesystem) */
+    const char *old_rel, *new_rel;
+    struct vfs_ops *old_ops = vfs_lookup_mount(old_resolved, &old_rel);
+    struct vfs_ops *new_ops = vfs_lookup_mount(new_resolved, &new_rel);
+    if (old_ops != new_ops)
+        return (long)-18; /* EXDEV: cross-device link */
+    if (old_ops != &ext2_ops)
+        return (long)-30; /* EROFS: read-only filesystem */
+
+    /* Get the source inode number by opening the old path */
+    void *priv = NULL;
+    if (old_ops->open(old_rel, 0, &priv) < 0)
+        return (long)-2; /* ENOENT */
+    struct ext2_open_private *ep = (struct ext2_open_private *)priv;
+    uint32_t src_ino = ep->ino;
+    if (old_ops->close) old_ops->close(priv);
+
+    /* Create a new directory entry pointing to the same inode.
+     * Use ext2_mknod-style approach: create entry in parent dir + increment link_count.
+     * For simplicity, use the kernel's ext2 internal functions via a helper. */
+    extern int ext2_hardlink(const char *newpath, uint32_t ino);
+    int ret = ext2_hardlink(new_rel, src_ino);
+    return (long)ret;
 }
 
 static long sys_renameat2_handler(struct trapframe *tf) {
@@ -3040,7 +3079,7 @@ static long sys_setpgid_handler(struct trapframe *tf) {
 
     /* Find target process */
     struct proc *tp = NULL;
-    for (struct proc *p = proc; p < &proc[64]; p++) {
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->pid == target && p->state != UNUSED) {
             tp = p;
             break;
@@ -3067,7 +3106,7 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     /* Verify pgid target exists in the session (pgid == target is always OK) */
     if (pgid != target) {
         int found = 0;
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state != UNUSED && p->pgid == pgid && p->sid == current_proc->sid) {
                 found = 1;
                 break;
@@ -3096,7 +3135,7 @@ static long sys_getpgid_handler(struct trapframe *tf) {
         return (long)current_proc->pgid;
     } else {
         long result = (long)-3;
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->pid == target && p->state != UNUSED) {
                 result = (long)p->pgid;
                 break;
@@ -3112,7 +3151,7 @@ static long sys_getsid_handler(struct trapframe *tf) {
         return (long)current_proc->sid;
     } else {
         long result = (long)-3;
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->pid == target && p->state != UNUSED) {
                 result = (long)p->sid;
                 break;
@@ -3329,7 +3368,7 @@ static long sys_tgkill_handler(struct trapframe *tf) {
         return (long)0;
     } else if (signal_is_valid(sig)) {
         long result = (long)-3;
-        for (struct proc *p = proc; p < &proc[64]; p++) {
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->pid == tid && p->state != UNUSED) {
                 p->sigpending |= signal_bit(sig);
                 if (p->state == SLEEPING)

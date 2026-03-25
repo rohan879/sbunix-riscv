@@ -212,8 +212,10 @@ void            swtch(struct context*, struct context*);
 void            trap_restore(struct trapframe*);
 void            uart_wakeup(void);
 
+#define NPROC 128
+
 extern struct proc *current_proc;
-extern struct proc proc[64];
+extern struct proc proc[NPROC];
 extern struct context scheduler_context;
 
 #endif

@@ -79,7 +79,7 @@ static int parse_pid(const char *s) {
 
 /* Helper: find a process by PID */
 static struct proc *find_proc(pid_t pid) {
-  for (struct proc *p = proc; p < &proc[64]; p++) {
+  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
     if (p->pid == pid && p->state != UNUSED)
       return p;
   }
@@ -756,7 +756,7 @@ static int procfs_readdir(void *private, char *ubuf, unsigned int count, int64_t
     /* /proc/self as a symlink entry */
     EMIT_DIRENT("self", 207, 10); /* DT_LNK */
 
-    for (struct proc *p = proc; p < &proc[64]; p++) {
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
       if (p->state != UNUSED) {
         char pidname[12];
         int ni = 0;
