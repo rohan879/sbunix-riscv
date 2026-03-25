@@ -108,6 +108,9 @@
 #define SYS_fstatfs     44
 #define SYS_utimensat   88
 
+/* Memory sync */
+#define SYS_msync       227
+
 /* Ownership / credentials (stubs for single-user OS) */
 #define SYS_fchownat    55
 #define SYS_setgid      144

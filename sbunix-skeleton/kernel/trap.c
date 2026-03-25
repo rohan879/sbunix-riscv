@@ -2324,6 +2324,32 @@ static long sys_mmap_handler(struct trapframe *tf) {
     return (long)va;
 }
 
+/* Write back dirty MAP_SHARED pages to the backing file before unmapping */
+static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) {
+    struct vm_area *v = p->vma_list;
+    while (v) {
+        if (v->file && (v->flags & 0x01) /* MAP_SHARED */ &&
+            v->start < end && v->end > start) {
+            /* Writeback overlapping pages */
+            uint64_t wb_start = (start > v->start) ? start : v->start;
+            uint64_t wb_end = (end < v->end) ? end : v->end;
+            for (uint64_t va = wb_start; va < wb_end; va += PAGE_SIZE) {
+                pte_t *pte = walk(p->pagetable, va, 0);
+                if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
+                    uint64_t pa = PTE2PA(*pte);
+                    uint64_t file_off = v->file_offset + (va - v->start);
+                    int64_t foff = (int64_t)file_off;
+                    if (v->file->ops && v->file->ops->write) {
+                        v->file->ops->write(v->file->private,
+                                            (char *)pa, PAGE_SIZE, &foff);
+                    }
+                }
+            }
+        }
+        v = v->next;
+    }
+}
+
 static long sys_munmap_handler(struct trapframe *tf) {
     uint64_t addr = tf->a0 & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t len  = tf->a1;
@@ -2331,6 +2357,9 @@ static long sys_munmap_handler(struct trapframe *tf) {
 
     if (addr >= MAXVA || addr + len > MAXVA)
         return -22; /* -EINVAL */
+
+    /* Write back MAP_SHARED pages before unmapping */
+    mmap_writeback_shared(current_proc, addr, addr + len);
 
     /* Unmap pages -- uvmunmap handles unmapped gaps gracefully */
     uvmunmap(current_proc->pagetable, addr, len);
@@ -3190,6 +3219,17 @@ static long sys_madvise_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+/* msync — flush MAP_SHARED pages back to file */
+static long sys_msync_handler(struct trapframe *tf) {
+    uint64_t addr = tf->a0 & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t len  = tf->a1;
+    len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    if (addr >= MAXVA || addr + len > MAXVA)
+        return (long)-22; /* EINVAL */
+    mmap_writeback_shared(current_proc, addr, addr + len);
+    return 0;
+}
+
 /* utimensat — update file timestamps (ext2 mtime) */
 static long sys_utimensat_handler(struct trapframe *tf) {
     /* a0 = dirfd (AT_FDCWD), a1 = path (NULL = use fd), a2 = times, a3 = flags */
@@ -3853,6 +3893,7 @@ void syscall_init(void) {
     syscall_table[SYS_utimensat]       = sys_utimensat_handler;
     syscall_table[SYS_statfs]          = sys_statfs_handler;
     syscall_table[SYS_fstatfs]         = sys_fstatfs_handler;
+    syscall_table[SYS_msync]           = sys_msync_handler;
 }
 
 /* ------------------------------------------------------------------ */
