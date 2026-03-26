@@ -113,6 +113,7 @@ int exec(char *path) {
     for (int pg = 0; pg < USER_STACK_PAGES; pg++) {
         char *sp_mem = kalloc();
         if (!sp_mem) goto bad;
+        memset(sp_mem, 0, PAGE_SIZE);
         uint64_t vaddr = stack_va + pg * PAGE_SIZE;
         if (uvmmap(pagetable, vaddr, (uint64_t)sp_mem, PAGE_SIZE, PTE_R | PTE_W | PTE_U) < 0) goto bad;
         if (pg == USER_STACK_PAGES - 1)
