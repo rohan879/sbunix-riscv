@@ -172,7 +172,7 @@ void execute_line(char *line) {
                     if (nlen > 127) nlen = 127;
                     memcpy(name, p, nlen);
                     name[nlen] = '\0';
-                    /* Strip quotes from value */
+                    /* Extract raw value, strip outer quotes */
                     char val[MAX_LINE];
                     int vi = 0;
                     char *vp = vstart;
@@ -181,6 +181,8 @@ void execute_line(char *line) {
                         val[vi++] = *vp++;
                     }
                     val[vi] = '\0';
+                    /* Expand $VAR, $1, $(cmd), etc. in the value */
+                    expand_vars(val);
                     var_set(name, val);
                     return;
                 }

@@ -1,4 +1,5 @@
 #include "sbush.h"
+#include <stdlib.h>
 
 /* -----------------------------------------------------------------------
  * Control flow state machine — accumulates lines for multi-line constructs
@@ -330,8 +331,12 @@ static int cf_process_segment(const char *seg) {
             if (strcmp(word, "done") == 0 && f->nested_loop == 0) {
                 f->evaluating = 1;
 
+                /* Expand globs in the for_words before iteration */
+                char *expanded_words = expand_glob_words(f->for_words);
+                char *words_to_use = expanded_words ? expanded_words : f->for_words;
+
                 char words_buf[MAX_LINE];
-                strncpy(words_buf, f->for_words, MAX_LINE - 1);
+                strncpy(words_buf, words_to_use, MAX_LINE - 1);
                 words_buf[MAX_LINE - 1] = '\0';
 
                 /* Iterate over space-separated words */
@@ -364,6 +369,12 @@ static int cf_process_segment(const char *seg) {
                     if (cf_break_count > 0) { cf_break_count--; break; }
                     if (cf_continue_flag) { cf_continue_flag = 0; continue; }
                 }
+
+                /* Clean up allocated memory */
+                if (expanded_words) {
+                    free(expanded_words);
+                }
+
                 f->evaluating = 0;
                 cf_depth--;
                 return 1;

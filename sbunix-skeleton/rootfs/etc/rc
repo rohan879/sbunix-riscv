@@ -6,20 +6,48 @@ if test -f /bin/badfd; then
     /bin/badfd
 fi
 
-# Verify /bin/sh exists (POSIX compliance)
+# Verify /bin/sh exists (POSIX compliance)  
 if test -f /bin/sh; then
     echo "[BOOT] /bin/sh found"
 else
     echo "[BOOT] WARNING: /bin/sh not found!"
 fi
 
-# Run test suite only if test runner is present (test builds only)
+# Run test suite only if test runner is present
 if test -f /bin/run-tests; then
     if test -f /mnt/.persist_sentinel; then
         # Boot 2: persistence verify phase only, then poweroff
         /bin/persisttest
         /bin/poweroff
     else
+        echo ""
+        echo "=========================================="
+        echo "  Optional Automatic Testing"
+        echo "=========================================="
+        echo ""
+        echo "Press Ctrl-C NOW to skip automatic tests"
+        echo "and go directly to the interactive shell."
+        echo ""
+        echo -n "Starting tests in: 3"
+        sleep 1 || exit 0
+        echo -n "... 2" 
+        sleep 1 || exit 0
+        echo -n "... 1"
+        sleep 1 || exit 0
+        echo ""
+        echo ""
+
+        echo "Running SBUnix regression tests..."
         run-tests
+        echo ""
+        echo "=========================================="
+        echo "  Boot Testing Complete"
+        echo "=========================================="
+        echo ""
+        echo "Available commands:"
+        echo "  run-tests     - Run SBUnix regression tests"  
+        echo "  run-os-test   - Run POSIX compliance tests"
+        echo "  poweroff      - Shutdown system"
+        echo ""
     fi
 fi

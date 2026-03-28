@@ -17,9 +17,11 @@ USER_BIN := $(C_BIN) $(RS_BIN)
 
 # MODIFIED: BEGIN added
 # Split user binaries: test binaries only included in test builds
-TEST_SRC_DIRS := $(wildcard tests/*)
+# Exclude thirdparty dir - it contains os-test which has its own build system
+TEST_SRC_DIRS := $(filter-out tests/thirdparty,$(wildcard tests/*))
 ifdef BUILD_TESTS
   USER_BIN += $(patsubst tests/%,build/rootfs/bin/%,$(TEST_SRC_DIRS))
+  OS_TEST_MARKER := build/.os-test-built
 endif
 
 TIMEOUT ?= 600
@@ -90,13 +92,32 @@ $(TEST_TARGETS): build/rootfs/bin/%: build/libc/crt.S.o build/libc.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 
-build/tarfs.o: $(USER_BIN)
-	cp -a rootfs/. build/rootfs/
+# MODIFIED: BEGIN added
+# Prepare base rootfs before building os-tests
+build/rootfs/.prepared: $(USER_BIN)
+	cp -a rootfs/. build/rootfs/ # MODIFIED: originally in tarfs
 	ln -sf sbush build/rootfs/bin/sh # MODIFIED: added
 	ln -sf test build/rootfs/bin/[ # MODIFIED: added
 ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests # MODIFIED: added
+	# run-os-test is now built as C binary via $(C_BIN) pattern
 endif
+	touch $@
+
+# Build os-tests into prepared rootfs (with parallel support)
+ifdef BUILD_TESTS
+$(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared
+	@echo "=== Building os-test suite ==="
+	$(MAKE) -f tools/os-test.mk SBUNIX_ROOT=$(CURDIR) -j16 install
+	# Copy test manifest to rootfs for fast runtime discovery
+	@if [ -f build/os-test-out/sbunix/test-manifest.txt ]; then \
+		cp build/os-test-out/sbunix/test-manifest.txt build/rootfs/bin/os-test-manifest; \
+	fi
+	@touch $@
+endif
+# MODIFIED: END added
+
+build/tarfs.o: build/rootfs/.prepared $(OS_TEST_MARKER) # MODIFIED: originally just : $(USER_BIN)
 	tar cf build/rootfs.tar -C build/rootfs .
 	cd build && $(OBJCOPY) -I binary -O elf64-littleriscv -B riscv \
 		--rename-section .data=.tarfs \

@@ -1,6 +1,7 @@
 #!/bin/sh
 # run-tests: SBUnix full test suite
 # Run this from the shell prompt: run-tests
+# Run os-test separately with: run-os-test
 
 set PASS 0
 set FAIL 0
@@ -544,6 +545,8 @@ echo ""
 echo "=== Summary ==="
 echo "Passed: $PASS"
 echo "Failed: $FAIL"
+echo ""
+echo "To run Sortix os-test POSIX compliance suite: run-os-test"
 
 # --- Persistence test: MUST be last (calls poweroff after write phase) ---
 echo "=== Running persisttest ==="

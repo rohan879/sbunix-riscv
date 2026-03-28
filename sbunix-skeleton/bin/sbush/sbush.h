@@ -114,6 +114,8 @@ void  positional_set_zero(const char *name);
 int parse_line(char *line, struct cmdlist *cl);
 int expand_and_parse_pipeline(char *seg, struct pipeline *pl);
 int glob_match(const char *pat, const char *name);
+void expand_vars(char *line);  /* expand $VAR, $1, $(cmd), etc. in-place */
+char *expand_glob_words(const char *words);  /* expand glob patterns in word list */
 
 /* path.c */
 char *resolve_path(const char *cmd);

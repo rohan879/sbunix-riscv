@@ -1,0 +1,73 @@
+#!/bin/bash
+# analyze-os-test-failures: Analyze compilation failures in os-test build
+
+if [ ! -d "build/os-test-out/sbunix/compile-logs" ]; then
+    echo "Error: No compilation logs found. Run 'BUILD_TESTS=1 make' first."
+    exit 1
+fi
+
+LOGS_DIR="build/os-test-out/sbunix/compile-logs"
+
+echo "=== os-test Compilation Analysis ==="
+echo ""
+
+echo "Summary:"
+missing=$(find "$LOGS_DIR" -name "*.log" -exec grep -l "missing_header" {} \; | wc -l)
+undeclared=$(find "$LOGS_DIR" -name "*.log" -exec grep -l "undeclared_symbol" {} \; | wc -l)
+link_err=$(find "$LOGS_DIR" -name "*.log" -exec grep -l "link_error" {} \; | wc -l)
+success=$(find "$LOGS_DIR" -name "*.log" -exec grep -l "COMPILED SUCCESSFULLY" {} \; | wc -l)
+total=$(find "$LOGS_DIR" -name "*.log" | wc -l)
+
+echo "  Total tests:          $total"
+echo "  Successful:           $success"
+echo "  Missing headers:      $missing"
+echo "  Undeclared symbols:   $undeclared" 
+echo "  Link errors:          $link_err"
+echo ""
+
+# Show specific examples if requested
+case "$1" in
+    "headers")
+        echo "=== Most common missing headers ==="
+        grep -r "fatal error:" "$LOGS_DIR" | sed 's/.*fatal error: //' | sed 's/: No such file.*//' | sort | uniq -c | sort -nr | head -10
+        ;;
+    "symbols")
+        echo "=== Examples of undeclared symbols ==="
+        grep -r "undeclared.*first use" "$LOGS_DIR" | sed "s/.*'\(.*\)' undeclared.*/\\1/" | sort | uniq -c | sort -nr | head -10
+        ;;
+    "suite")
+        echo "=== Success rate by suite ==="
+        for suite in basic include limits io malloc namespace paths process pty signal stdio udp; do
+            if [ -d "$LOGS_DIR/$suite" ]; then
+                total_suite=$(find "$LOGS_DIR/$suite" -name "*.log" | wc -l)
+                success_suite=$(find "$LOGS_DIR/$suite" -name "*.log" -exec grep -l "COMPILED SUCCESSFULLY" {} \; | wc -l)
+                if [ $total_suite -gt 0 ]; then
+                    pct=$((success_suite * 100 / total_suite))
+                    printf "  %-10s %3d/%3d (%2d%%)\n" "$suite:" $success_suite $total_suite $pct
+                fi
+            fi
+        done
+        ;;
+    "help"|"-h"|"--help")
+        echo "Usage: $0 [headers|symbols|suite]"
+        echo ""
+        echo "Options:"
+        echo "  headers  - Show most common missing headers"
+        echo "  symbols  - Show most common undeclared symbols" 
+        echo "  suite    - Show success rate by test suite"
+        echo ""
+        echo "Examples:"
+        echo "  $0                # Show summary"
+        echo "  $0 headers        # Analyze missing headers"
+        echo "  $0 symbols        # Analyze undeclared symbols"
+        echo "  $0 suite          # Show per-suite statistics"
+        ;;
+    "")
+        echo "Use '$0 help' for more analysis options."
+        ;;
+    *)
+        echo "Unknown option: $1"
+        echo "Use '$0 help' for usage information."
+        exit 1
+        ;;
+esac

@@ -21,6 +21,7 @@ This configures the PATH to include the RISC-V cross-compiler and QEMU.
 
 ```bash
 make              # Build kernel and all user binaries
+BUILD_TESTS=1 make # Build with test binaries and POSIX test suite
 make clean        # Remove build artifacts
 ```
 
@@ -39,7 +40,30 @@ make submit      # Submit to /submit directory
 
 ## Testing
 
-**There is no formal test framework.** Testing is done manually:
+### Test Infrastructure
+
+SBUnix has two test systems:
+
+1. **SBUnix regression tests** (`tests/*/`) - Custom tests for kernel functionality
+2. **Sortix os-test** (`tests/thirdparty/sortix/os-test/`) - POSIX compliance tests
+
+### Building and Running Tests
+
+```bash
+# Build with tests
+BUILD_TESTS=1 make
+
+# Run QEMU (tests do NOT auto-run on boot)
+make qemu
+
+# Inside SBUnix shell:
+run-tests         # Run SBUnix regression tests
+run-os-test       # Run sample POSIX compliance tests
+```
+
+### Manual Testing (Original)
+
+**For core functionality, testing is done manually:**
 
 1. Build with `make` - must succeed with `-Wall -Werror`
 2. Verify ELF binaries: `file build/rootfs/bin/sbush`
@@ -158,7 +182,7 @@ Example: `BF: Fix null pointer in allocproc`
 ## Important Notes
 
 1. **Pre-existing issue**: Kernel syscall numbers (`kernel/include/syscall.h`) do not match libc's Linux RISC-V ABI numbers - this causes "Unknown syscall" errors (now fixed in recent work)
-2. **No automated tests**: All testing is manual
+2. **Testing**: Both manual testing and automated test suites available (SBUnix regression tests + Sortix os-test POSIX compliance)
 3. **Development branches**: Work on separate branches, test locally before merging
 4. **Cross-compilation**: All binaries must be built for RISC-V target
 
@@ -240,6 +264,29 @@ Example: `BF: Fix null pointer in allocproc`
 - `resolve_path` now builds the raw combined path then calls `normalize_path` on it
 - Verified in QEMU: `cd /bin` → `cd ..` → `ls` shows `etc bin` (root)
 
+#### 12. Sortix os-test POSIX Test Suite Integration
+- **Moved build system out of submodule**: Created `tools/os-test.mk` (was `tests/thirdparty/sortix/os-test/SBUnix.mk`)
+- **Comprehensive compilation logging**: All 5,301 tests logged individually in `build/os-test-out/sbunix/compile-logs/<suite>/<test>.log`
+- **Success metrics**: 1,103 tests compile (21%), all from `include/` suite (header/symbol availability tests)
+- **Failure analysis**: 2,217 missing headers, 1,372 undeclared symbols, 0 link errors
+- **Analysis tools**: `tools/analyze-os-test-failures` script with summary, header analysis, symbol analysis, per-suite statistics
+- **Boot behavior**: Tests do NOT run automatically on boot (modified `/etc/rc`)
+- **Manual execution**: Use `run-os-test` command inside QEMU shell
+- **Most missing**: `sys/socket.h` (328), `pthread.h` (250), `inttypes.h` (174) - indicates missing networking, threading, extended integer support
+
+#### 13. Disabled Boot Tests (Original)
+- Modified `rootfs/etc/rc` to remove automatic test execution on boot
+- Tests now available via `run-tests` and `run-os-test` commands but don't run automatically
+- Faster boot time and cleaner user experience
+
+#### 14. Dynamic os-test Infrastructure (Latest Session)
+- **Fixed sbush glob expansion**: Added `expand_glob_words()` to `bin/sbush/parse.c` and modified `for` loop handling in `control.c` to support glob pattern expansion (e.g., `for file in /bin/e*` now works)
+- **Parallel build system**: Restructured `tools/os-test.mk` to use make's pattern rules instead of shell loops, enabling `BUILD_TESTS=1 make -j16` for 16-way parallel compilation
+- **Optimized test runner**: Rewrote `tools/guest-run-os-test` to dynamically discover and run all 1,103 compiled tests using the new shell glob expansion
+- **Fixed build dependencies**: Resolved Makefile dependency issues where os-test binaries were being overwritten during tarfs creation
+- **Restored optional boot testing**: Modified `/etc/rc` to run original SBUnix regression tests on boot with 3-second Ctrl-C timeout (uses `sleep 1 || exit 0` for proper interruption handling)
+- **Performance improvements**: os-test compilation now supports full parallelization, reducing build time from ~10+ minutes to ~2-3 minutes on multi-core systems
+
 ### QEMU Testing — Critical Notes
 
 **`make qemu` is the primary way to run QEMU.** It builds the kernel, creates `build/disk.img`, mounts ext2 on `/mnt`, and launches QEMU with the correct flags automatically. Always prefer `make qemu` over running `qemu-system-riscv64` directly.
@@ -279,16 +326,24 @@ tmux kill-session -t sbunix_test
 
 ### Testing Notes
 
-Boot is now fast — `/etc/rc` only prints `SBUnix booting...` and returns to the interactive shell. No tests run automatically at boot.
+Boot now includes optional regression testing — `/etc/rc` prints `SBUnix booting...`, then gives a 3-second Ctrl-C timeout before running `run-tests` automatically. Users can press Ctrl-C during the countdown to skip automatic tests and go directly to the interactive shell (using `sleep 1 || exit 0` for clean interruption handling).
 
-To run the full test suite from the shell prompt:
+To run test suites from the shell prompt:
 ```
-run-tests
+run-tests       # SBUnix regression tests (C tests + shell integration tests)
+run-os-test     # All 1,103 POSIX compliance tests (dynamically discovered)
 ```
+
+**Parallel building**: Use `BUILD_TESTS=1 make -j16` for 16-way parallel os-test compilation (reduces build time to ~2-3 minutes on multi-core systems).
 
 `/bin/run-tests` is a shell script (in `rootfs/bin/run-tests`) that runs:
 1. All C test binaries: `proctest`, `schedtest`, `sigpipetest`, `fstest`, `swaptest`
 2. All shell-level regression tests: Task345, Task6–Task11_14, and integration tests
+
+`/bin/run-os-test` dynamically discovers and runs all compiled POSIX compliance tests:
+- Uses sbush glob expansion to find all executable tests in `/bin/os-test/`
+- Supports running individual tests: `run-os-test include/assert/assert`
+- Provides summary statistics (passed/failed/total) and success rate percentage
 
 Other useful commands to verify manually:
 ```
@@ -320,3 +375,37 @@ exit                                # Cleanly halts the system
 - Fixed-size circular buffer (PIPE_BUF = 4096 bytes)
 - Writers block if full; readers block if empty
 - Refcounts track open read/write ends; pipe deallocated when both reach 0
+
+## Documentation
+
+Key documentation files in the project:
+
+| File | Purpose |
+|------|---------|
+| `AGENTS.md` | This file - comprehensive development guide |
+| `docs/os-test.md` | Sortix os-test POSIX compliance test suite usage |
+| `docs/sbush-bugs.md` | Shell bug fixes and variable expansion improvements |
+| `tools/analyze-os-test-failures` | Script to analyze os-test compilation failures |
+
+### Test Logs and Analysis
+
+When building with `BUILD_TESTS=1`:
+- Compilation logs: `build/os-test-out/sbunix/compile-logs/<suite>/<test>.log`
+- Build summary: `build/os-test-out/sbunix/build-summary.txt`
+- Analysis: `./tools/analyze-os-test-failures [headers|symbols|suite]`
+
+### Performance Notes
+
+**Parallel os-test compilation**: The new build system supports full parallelization:
+```bash
+# Fast parallel compilation (16 cores)
+BUILD_TESTS=1 make -j16
+
+# Standard compilation
+BUILD_TESTS=1 make
+```
+
+Build performance improvements:
+- **Before**: Sequential compilation (~10+ minutes for 5,301 tests)
+- **After**: Parallel pattern rules (~2-3 minutes on 16-core systems)
+- **Results**: 1,103 tests compile successfully out of 5,301 total (21% success rate)

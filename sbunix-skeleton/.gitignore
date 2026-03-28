@@ -3,3 +3,6 @@ CLAUDE.md
 zig-out/
 .zig-cache/
 .vscode/settings.json
+
+# os-test compilation logs (already covered by build/ but explicit for clarity)
+build/os-test-out/

@@ -460,7 +460,7 @@ static char *expand_braces(char **srcp, char *dst, char *end) {
     return dst;
 }
 
-static void expand_vars(char *line) {
+void expand_vars(char *line) {
     char *src = line;
     char *dst = expand_buf;
     char *end = expand_buf + MAX_LINE - 1;
@@ -842,6 +842,67 @@ static void glob_expand_cmd(struct command *cmd) {
 }
 
 /* -----------------------------------------------------------------------
+ * expand_glob_words: Expand a string containing space-separated words
+ * with glob patterns into an expanded result string. Used by for loops.
+ * Returns an allocated string that should be freed by caller, or NULL on error.
+ * ---------------------------------------------------------------------- */
+char *expand_glob_words(const char *words) {
+    if (!words || !*words) return NULL;
+    
+    /* Create a temporary command to use the existing glob expansion logic */
+    struct command temp_cmd;
+    temp_cmd.argc = 0;
+    temp_cmd.argv[0] = NULL;
+    
+    /* Save current glob string buffer position */
+    int saved_pos = glob_strbuf_pos;
+    
+    /* Parse the words string into tokens and expand each one */
+    char *words_copy = malloc(strlen(words) + 1);
+    if (!words_copy) return NULL;
+    strcpy(words_copy, words);
+    
+    /* Tokenize on whitespace */
+    char *token = strtok(words_copy, " \t");
+    while (token && temp_cmd.argc < MAX_ARGS - 1) {
+        /* Expand this token (handles globs) */
+        glob_expand_token(token, &temp_cmd);
+        token = strtok(NULL, " \t");
+    }
+    
+    free(words_copy);
+    
+    /* Build result string from expanded arguments */
+    if (temp_cmd.argc == 0) {
+        glob_strbuf_pos = saved_pos; /* restore position */
+        return NULL;
+    }
+    
+    /* Calculate total length needed */
+    int total_len = 0;
+    for (int i = 0; i < temp_cmd.argc; i++) {
+        total_len += strlen(temp_cmd.argv[i]) + 1; /* +1 for space or null */
+    }
+    
+    char *result = malloc(total_len + 1);
+    if (!result) {
+        glob_strbuf_pos = saved_pos; /* restore position */
+        return NULL;
+    }
+    
+    result[0] = '\0';
+    for (int i = 0; i < temp_cmd.argc; i++) {
+        if (i > 0) strcat(result, " ");
+        strcat(result, temp_cmd.argv[i]);
+    }
+    
+    /* Note: We don't restore glob_strbuf_pos since the expanded strings 
+     * in result point into the glob_strbuf and must remain valid */
+    
+    return result;
+}
+
+/* -----------------------------------------------------------------------
  * parse_pipeline: parse one pipeline segment (already split on ; && ||)
  * into a struct pipeline.  Returns 1 if any commands were found, else 0.
  * ---------------------------------------------------------------------- */
@@ -981,6 +1042,54 @@ int parse_line(char *line, struct cmdlist *cl) {
 
 int expand_and_parse_pipeline(char *seg, struct pipeline *pl) {
     expand_vars(seg);
+
+    /* Check for pure assignment: VAR=VALUE (no command after)
+     * This handles cases like "x=hello; echo $x" where x=hello becomes
+     * a separate segment after splitting on ';'. */
+    {
+        char *p = seg;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p && *p != '=' && is_name_char(*p)) {
+            char *s = p;
+            while (is_name_char(*s)) s++;
+            if (*s == '=' && s > p) {
+                /* Found NAME= at start. Check if rest is just a value */
+                char *vstart = s + 1;
+                char *vend = vstart;
+                int in_sq = 0, in_dq = 0;
+                while (*vend) {
+                    if (*vend == '\'' && !in_dq) in_sq = !in_sq;
+                    else if (*vend == '"' && !in_sq) in_dq = !in_dq;
+                    else if ((*vend == ' ' || *vend == '\t') && !in_sq && !in_dq) break;
+                    vend++;
+                }
+                /* Skip trailing whitespace */
+                char *trail = vend;
+                while (*trail == ' ' || *trail == '\t') trail++;
+                if (*trail == '\0' || *trail == '#') {
+                    /* Pure assignment: NAME=VALUE */
+                    char name[128];
+                    int nlen = s - p;
+                    if (nlen > 127) nlen = 127;
+                    memcpy(name, p, nlen);
+                    name[nlen] = '\0';
+                    /* Extract value, strip outer quotes */
+                    char val[MAX_LINE];
+                    int vi = 0;
+                    char *vp = vstart;
+                    while (vp < vend && vi < MAX_LINE - 1) {
+                        if ((*vp == '\'' || *vp == '"')) { vp++; continue; }
+                        val[vi++] = *vp++;
+                    }
+                    val[vi] = '\0';
+                    var_set(name, val);
+                    /* Return 0 to indicate no commands to execute */
+                    pl->ncmds = 0;
+                    return 0;
+                }
+            }
+        }
+    }
 
     /* Alias expansion: extract first word and substitute if aliased */
     {

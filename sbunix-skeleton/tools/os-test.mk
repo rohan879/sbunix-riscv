@@ -1,0 +1,153 @@
+# tools/os-test.mk - Cross-compile Sortix os-test for SBUnix/RISC-V
+#
+# This Makefile cross-compiles the Sortix os-test suite for SBUnix.
+# Tests that fail to compile are logged but skipped (no stubs created).
+# This shows which POSIX features SBUnix is missing.
+#
+# Usage from sbunix-skeleton/:
+#   make -f tools/os-test.mk SBUNIX_ROOT=$(pwd) install
+#
+# Or via the main Makefile with BUILD_TESTS=1
+
+SBUNIX_ROOT ?= $(CURDIR)/..
+OS_TEST_SRC := $(SBUNIX_ROOT)/tests/thirdparty/sortix/os-test
+CROSS := riscv64-unknown-elf-
+
+CC := $(CROSS)gcc
+OS := SBUnix
+OUT_OS := sbunix
+OUT_DIRECTORY := $(SBUNIX_ROOT)/build/os-test-out/$(OUT_OS)
+NO_SHARED := 1
+
+# Paths to SBUnix libc
+LIBC_INCLUDE := $(SBUNIX_ROOT)/libc/include
+CRT_OBJ := $(SBUNIX_ROOT)/build/libc/crt.S.o
+LIBC_A := $(SBUNIX_ROOT)/build/libc.a
+
+# Cross-compilation flags matching main Makefile
+CFLAGS := -gdwarf-4 -Wall -Os -ffreestanding -fno-builtin -nostdlib -nostdinc \
+          -isystem $(shell $(CC) -print-file-name=include) \
+          -I$(LIBC_INCLUDE) \
+          -mcmodel=medany -march=rv64imac_zicsr_zifencei -mabi=lp64 \
+          -ffunction-sections -fdata-sections
+
+# Preprocessor flags for POSIX feature test macros
+CPPFLAGS := -D_GNU_SOURCE -D_BSD_SOURCE -D_ALL_SOURCE -D_DEFAULT_SOURCE
+
+# We can't use -Werror since many tests intentionally test for missing features
+CFLAGS_WARN := -Wall -Wextra -Werror=implicit-function-declaration
+
+# Linker flags - CRT must be first, libc last
+LDFLAGS := $(CRT_OBJ) $(LIBC_A) -Wl,--gc-sections -nostdlib
+
+# Install target: copy compiled binaries to build/rootfs
+OS_TEST_DEST := $(SBUNIX_ROOT)/build/rootfs/bin/os-test
+SUITE_LIST := basic include limits io malloc namespace paths process pty signal stdio udp
+
+# Summary and log files for build results
+SUMMARY_FILE := $(OUT_DIRECTORY)/build-summary.txt
+COMPILE_LOG_DIR := $(OUT_DIRECTORY)/compile-logs
+MANIFEST_FILE := $(OUT_DIRECTORY)/test-manifest.txt
+
+# Enable parallel builds
+MAKEFLAGS += --output-sync=recurse
+
+# Find all test source files and create targets
+ALL_SOURCES := $(shell find $(OS_TEST_SRC) -name '*.c' 2>/dev/null | sort)
+COMPILE_TARGETS := $(patsubst $(OS_TEST_SRC)/%.c,$(OS_TEST_DEST)/%,$(ALL_SOURCES))
+
+.PHONY: all install clean setup
+
+all: setup $(COMPILE_TARGETS)
+	@echo ""
+	@echo "=== os-test build complete ==="
+	@ok_count=$$(find $(OS_TEST_DEST) -type f ! -name '*.failed' | wc -l); \
+	total_count=$$(find $(OS_TEST_SRC) -name '*.c' | wc -l); \
+	skip_count=$$((total_count - ok_count)); \
+	echo "Compiled: $$ok_count tests"; \
+	echo "Skipped:  $$skip_count tests (missing features)"; \
+	echo ""; \
+	echo "Binaries installed to: $(OS_TEST_DEST)"; \
+	echo "Compilation logs: $(COMPILE_LOG_DIR)/<suite>/<test>.log"
+
+setup:
+	@echo "=== Building os-test for SBUnix (RISC-V) ==="
+	@echo "CC=$(CC)"
+	@echo "SBUNIX_ROOT=$(SBUNIX_ROOT)"
+	@echo "OS_TEST_SRC=$(OS_TEST_SRC)"
+	@echo ""
+	@mkdir -p $(OUT_DIRECTORY)
+	@mkdir -p $(COMPILE_LOG_DIR)
+	@mkdir -p $(OS_TEST_DEST)
+	@echo "os-test build summary for SBUnix" > $(SUMMARY_FILE)
+	@echo "================================" >> $(SUMMARY_FILE)
+	@echo "" >> $(SUMMARY_FILE)
+	@echo "# Test manifest for SBUnix os-test" > $(MANIFEST_FILE)
+	@echo "# Format: /bin/os-test/path/to/test" >> $(MANIFEST_FILE)
+
+install: all
+
+# Pattern rule for compiling individual tests
+$(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
+	@relpath=$*; \
+	dir=$$(dirname $$relpath); \
+	name=$$(basename $$relpath); \
+	suite=$$(echo $$dir | cut -d'/' -f1); \
+	mkdir -p $(OUT_DIRECTORY)/$$dir; \
+	mkdir -p $(OS_TEST_DEST)/$$dir; \
+	mkdir -p $(COMPILE_LOG_DIR)/$$dir; \
+	outbin=$(OUT_DIRECTORY)/$$relpath; \
+	compile_log=$(COMPILE_LOG_DIR)/$$relpath.log; \
+	rm -f $$outbin $(OUT_DIRECTORY)/$$relpath.o $$compile_log; \
+	echo "=== Compiling $$relpath ===" > $$compile_log; \
+	echo "Source: $<" >> $$compile_log; \
+	echo "Command: $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -c $< -o $(OUT_DIRECTORY)/$$relpath.o" >> $$compile_log; \
+	echo "" >> $$compile_log; \
+	if $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -c $< -o $(OUT_DIRECTORY)/$$relpath.o 2>>$$compile_log; then \
+		echo "Compile: SUCCESS" >> $$compile_log; \
+		echo "Link command: $(CC) $(LDFLAGS) $(OUT_DIRECTORY)/$$relpath.o -o $$outbin" >> $$compile_log; \
+		echo "" >> $$compile_log; \
+		if $(CC) $(LDFLAGS) $(OUT_DIRECTORY)/$$relpath.o -o $$outbin 2>>$$compile_log; then \
+			echo "Link: SUCCESS" >> $$compile_log; \
+			echo "Result: COMPILED SUCCESSFULLY" >> $$compile_log; \
+			rm -f $(OUT_DIRECTORY)/$$relpath.o; \
+			cp $$outbin $@; \
+			echo "  OK: $$relpath"; \
+			echo "  OK: $$relpath" >> $(SUMMARY_FILE); \
+			echo "/bin/os-test/$$relpath" >> $(MANIFEST_FILE); \
+		else \
+			echo "Link: FAILED" >> $$compile_log; \
+			echo "Result: LINK ERROR" >> $$compile_log; \
+			rm -f $(OUT_DIRECTORY)/$$relpath.o $$outbin; \
+			echo "  SKIP (link_error): $$relpath"; \
+			echo "  SKIP (link_error): $$relpath" >> $(SUMMARY_FILE); \
+			touch $@.failed; \
+		fi; \
+	else \
+		echo "Compile: FAILED" >> $$compile_log; \
+		rm -f $(OUT_DIRECTORY)/$$relpath.o; \
+		if grep -qE 'fatal error' $$compile_log 2>/dev/null; then \
+			reason="missing_header"; \
+		elif grep -qE 'undeclared|no member named' $$compile_log 2>/dev/null; then \
+			reason="undeclared_symbol"; \
+		elif grep -qE 'unknown type name|expected declaration' $$compile_log 2>/dev/null; then \
+			reason="unknown_type"; \
+		elif grep -qE 'incompatible|pointer-sign' $$compile_log 2>/dev/null; then \
+			reason="type_mismatch"; \
+		else \
+			reason="compile_error"; \
+		fi; \
+		echo "Result: $$reason" >> $$compile_log; \
+		echo "  SKIP ($$reason): $$relpath"; \
+		echo "  SKIP ($$reason): $$relpath" >> $(SUMMARY_FILE); \
+		touch $@.failed; \
+	fi
+
+# Special rule to handle make continuing on failed tests
+.PRECIOUS: $(COMPILE_TARGETS)
+%-failed:
+	@# Failed tests create .failed files, continue building other tests
+
+clean:
+	rm -rf $(OUT_DIRECTORY)
+	rm -rf $(OS_TEST_DEST)
