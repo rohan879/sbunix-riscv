@@ -66,11 +66,19 @@ all: setup $(COMPILE_TARGETS)
 	@echo "# Format: /bin/os-test/path/to/test" >> $(MANIFEST_FILE)
 	@find $(OS_TEST_DEST) -type f ! -name '*.failed' -executable | sort | \
 		sed 's|$(SBUNIX_ROOT)/build/rootfs||' >> $(MANIFEST_FILE)
+	@# Generate summary of failed test outcomes (.out files)
+	@find $(OUT_DIRECTORY) -name '*.out' -type f | sort | while read f; do \
+		rel=$$(echo "$$f" | sed 's|$(OUT_DIRECTORY)/||;s|\.out$$||'); \
+		outcome=$$(cat "$$f"); \
+		echo "$$rel: $$outcome" >> $(SUMMARY_FILE); \
+	done
 	@ok_count=$$(find $(OS_TEST_DEST) -type f ! -name '*.failed' | wc -l); \
 	total_count=$$(find $(OS_TEST_SRC) -name '*.c' | wc -l); \
 	skip_count=$$((total_count - ok_count)); \
+	out_count=$$(find $(OUT_DIRECTORY) -name '*.out' | wc -l); \
 	echo "Compiled: $$ok_count tests"; \
 	echo "Skipped:  $$skip_count tests (missing features)"; \
+	echo ".out files generated: $$out_count"; \
 	echo ""; \
 	echo "Binaries installed to: $(OS_TEST_DEST)"; \
 	echo "Compilation logs: $(COMPILE_LOG_DIR)/<suite>/<test>.log"; \
@@ -119,10 +127,11 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 			echo "  OK: $$relpath"; \
 		else \
 			echo "Link: FAILED" >> $$compile_log; \
-			echo "Result: LINK ERROR" >> $$compile_log; \
+			echo "Result: undefined" >> $$compile_log; \
 			rm -f $(OUT_DIRECTORY)/$$relpath.o $$outbin; \
-			echo "  SKIP (link_error): $$relpath"; \
-			echo "  SKIP (link_error): $$relpath" >> $(SUMMARY_FILE); \
+			echo "undefined" > $(OUT_DIRECTORY)/$$relpath.out; \
+			echo "  SKIP (undefined): $$relpath"; \
+			echo "  SKIP (undefined): $$relpath" >> $(SUMMARY_FILE); \
 			touch $@.failed; \
 		fi; \
 	else \
@@ -131,15 +140,16 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 		if grep -qE 'fatal error' $$compile_log 2>/dev/null; then \
 			reason="missing_header"; \
 		elif grep -qE 'undeclared|no member named' $$compile_log 2>/dev/null; then \
-			reason="undeclared_symbol"; \
+			reason="undeclared"; \
 		elif grep -qE 'unknown type name|expected declaration' $$compile_log 2>/dev/null; then \
 			reason="unknown_type"; \
 		elif grep -qE 'incompatible|pointer-sign' $$compile_log 2>/dev/null; then \
-			reason="type_mismatch"; \
+			reason="incompatible"; \
 		else \
 			reason="compile_error"; \
 		fi; \
 		echo "Result: $$reason" >> $$compile_log; \
+		echo "$$reason" > $(OUT_DIRECTORY)/$$relpath.out; \
 		echo "  SKIP ($$reason): $$relpath"; \
 		echo "  SKIP ($$reason): $$relpath" >> $(SUMMARY_FILE); \
 		touch $@.failed; \

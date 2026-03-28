@@ -76,10 +76,23 @@ zig-out/lib/libsbunix.a: $(wildcard kernel/*.zig) build.zig
 
 .SECONDEXPANSION:
 
-# MODIFIED: added
+# MODIFIED: BEGIN added
 TEST_TARGETS := $(patsubst tests/%,build/rootfs/bin/%,$(TEST_SRC_DIRS))
 
-$(C_BIN): build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
+# Count total os-test source files at build time
+OS_TEST_TOTAL := $(shell find tests/thirdparty/sortix/os-test -name '*.c' 2>/dev/null | wc -l)
+
+# Special rule for run-os-test: pass TOTAL_TESTS_IN_SUITE as build-time define
+build/rootfs/bin/run-os-test: $$(wildcard bin/run-os-test/*.c) build/libc/crt.S.o build/libc.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -DTOTAL_TESTS_IN_SUITE=$(OS_TEST_TOTAL) -Ilibc/include build/libc/crt.S.o bin/run-os-test/*.c build/libc.a -Wl,--gc-sections -o $@
+
+# Filter run-os-test from generic rule to avoid conflict
+C_BIN_NO_OSTEST := $(filter-out build/rootfs/bin/run-os-test,$(C_BIN))
+# MODIFIED: END added
+
+# MODIFIED: was $(C_BIN)
+$(C_BIN_NO_OSTEST): build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o bin/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 
@@ -112,6 +125,16 @@ $(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared
 	# Copy test manifest to rootfs for fast runtime discovery
 	@if [ -f build/os-test-out/sbunix/test-manifest.txt ]; then \
 		cp build/os-test-out/sbunix/test-manifest.txt build/rootfs/bin/os-test-manifest; \
+	fi
+	# Create results directory and copy .out files for failed tests
+	@mkdir -p build/rootfs/var/log/os-test
+	@if [ -d build/os-test-out/sbunix ]; then \
+		find build/os-test-out/sbunix -name '*.out' -type f | while read f; do \
+			rel=$$(echo "$$f" | sed 's|build/os-test-out/sbunix/||'); \
+			mkdir -p build/rootfs/var/log/os-test/$$(dirname "$$rel"); \
+			cp "$$f" build/rootfs/var/log/os-test/"$$rel"; \
+		done; \
+		echo "Copied .out files for failed tests to rootfs"; \
 	fi
 	@touch $@
 endif

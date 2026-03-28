@@ -7,11 +7,25 @@
 #include <dirent.h>
 #include <errno.h>
 
-#define MAX_PATH 128
+#define MAX_PATH 256
+#define MAX_NAME 128
+#define MAX_SUITE 32
 #define MAX_TESTS 12000
 #define MAX_OUTPUT 4096
 #define MANIFEST_FILE "/bin/os-test-manifest"
-#define TOTAL_TESTS_IN_SUITE 5304  /* Total .c files in Sortix os-test */
+#define RESULTS_DIR "/var/log/os-test"
+
+#ifndef TOTAL_TESTS_IN_SUITE
+#define TOTAL_TESTS_IN_SUITE 5304
+#endif
+
+/* Known Sortix outcome strings (compile-time failures from compile.sh) */
+static const char *outcome_strings[] = {
+    "good", "bad", "unknown", "unrated", "missing_optional",
+    "outside_libc", "extension", "previous_posix", "compile_error",
+    "incompatible", "missing_header", "pollution", "undeclared",
+    "undefined", "unknown_type", NULL
+};
 
 enum test_result {
     RESULT_PASS = 0,
@@ -23,9 +37,8 @@ enum test_result {
 
 struct test_info {
     char path[MAX_PATH];
-    char name[MAX_PATH];
-    char suite[MAX_PATH];
-    int uses_expect;
+    char name[MAX_NAME];
+    char suite[MAX_SUITE];
 };
 
 static struct test_info tests[MAX_TESTS];
@@ -37,54 +50,39 @@ static int skipped = 0;
 static int errors = 0;
 
 static void extract_suite_name(const char *path, char *suite) {
-    /* Extract suite name from path like /bin/os-test/stdio/printf -> stdio */
     const char *start = strstr(path, "/os-test/");
-    if (!start) {
-        strcpy(suite, "unknown");
-        return;
-    }
-    start += 9; /* Skip "/os-test/" */
-    
+    if (!start) { strcpy(suite, "unknown"); return; }
+    start += 9;
     const char *slash = strchr(start, '/');
     if (!slash) {
-        strcpy(suite, start);
+        strncpy(suite, start, MAX_SUITE - 1);
+        suite[MAX_SUITE - 1] = '\0';
         return;
     }
-    
     size_t len = slash - start;
-    if (len >= MAX_PATH) len = MAX_PATH - 1;
+    if (len >= MAX_SUITE) len = MAX_SUITE - 1;
     strncpy(suite, start, len);
     suite[len] = '\0';
 }
 
-static int check_expect_support(const char *suite) {
-    /* Only these top-level suites use expect file validation.
-     * All other suites (especially 'include') use exit code validation. */
-    if (strcmp(suite, "stdio") == 0 || 
-        strcmp(suite, "malloc") == 0 ||
-        strcmp(suite, "pty") == 0 ||
-        strcmp(suite, "paths") == 0 ||
-        strcmp(suite, "process") == 0 ||
-        strcmp(suite, "udp") == 0 ||
-        strcmp(suite, "signal") == 0 ||
-        strcmp(suite, "io") == 0) {
-        return 1;
-    }
-    return 0;
-}
-
 static void add_test(const char *path, const char *relative_name) {
     if (total_tests >= MAX_TESTS) return;
-    
+    if (!relative_name || relative_name[0] == '\0') {
+        fprintf(stderr, "WARNING: skipping manifest entry with empty name (path: %s)\n",
+                path ? path : "(null)");
+        return;
+    }
+    if (!path || path[0] == '\0') {
+        fprintf(stderr, "WARNING: skipping manifest entry with empty path (name: %s)\n",
+                relative_name);
+        return;
+    }
+
     strncpy(tests[total_tests].path, path, MAX_PATH - 1);
     tests[total_tests].path[MAX_PATH - 1] = '\0';
-    
-    strncpy(tests[total_tests].name, relative_name, MAX_PATH - 1);
-    tests[total_tests].name[MAX_PATH - 1] = '\0';
-    
+    strncpy(tests[total_tests].name, relative_name, MAX_NAME - 1);
+    tests[total_tests].name[MAX_NAME - 1] = '\0';
     extract_suite_name(path, tests[total_tests].suite);
-    tests[total_tests].uses_expect = check_expect_support(tests[total_tests].suite);
-    
     total_tests++;
 }
 
@@ -95,173 +93,223 @@ static int load_tests_from_manifest(void) {
         printf("Build with BUILD_TESTS=1 make to compile the test suite.\n");
         return -1;
     }
-    
     char line[MAX_PATH];
-    int line_count = 0;
-    
+    int lc = 0;
     while (fgets(line, sizeof(line), f)) {
-        line_count++;
-        
-        /* Progress indicator every 200 lines */
-        if (line_count % 200 == 0) {
-            printf("Loaded %d tests...\n", total_tests);
-            fflush(stdout);
-        }
-        
-        /* Skip comments and empty lines */
+        lc++;
+        if (lc % 200 == 0) { printf("Loaded %d tests...\n", total_tests); fflush(stdout); }
         if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
-        
-        /* Remove trailing newline */
         size_t len = strlen(line);
-        if (len > 0 && line[len-1] == '\n') {
-            line[len-1] = '\0';
-            len--;
-        }
-        if (len > 0 && line[len-1] == '\r') {
-            line[len-1] = '\0';
-            len--;
-        }
-        
-        /* Skip empty lines after trimming */
+        if (len > 0 && line[len-1] == '\n') { line[--len] = '\0'; }
+        if (len > 0 && line[len-1] == '\r') { line[--len] = '\0'; }
         if (len == 0) continue;
-        
-        /* Extract relative name from full path */
-        const char *relative_name = line;
-        if (strncmp(line, "/bin/os-test/", 13) == 0) {
-            relative_name = line + 13;
-        }
-        
-        /* Trust the manifest - it should only contain valid tests */
-        add_test(line, relative_name);
+        const char *rel = line;
+        if (strncmp(line, "/bin/os-test/", 13) == 0) rel = line + 13;
+        add_test(line, rel);
     }
-    
     fclose(f);
     return 0;
 }
 
-static int compare_with_expect_files(const char *suite, const char *test_name, const char *output) {
-    char expect_dir[MAX_PATH];
-    snprintf(expect_dir, sizeof(expect_dir), "/bin/os-test-expect/%s.expect", suite);
-    
-    DIR *dir = opendir(expect_dir);
-    if (!dir) {
-        /* Expect directory missing - this means the suite uses expect files */
-        /* but they weren't copied to rootfs. Return SKIP for now. */
-        return RESULT_SKIP;
-    }
-    
-    struct dirent *entry;
-    int result = RESULT_FAIL; /* Default to fail if no matches */
-    
-    while ((entry = readdir(dir)) != NULL) {
-        /* Check if this expect file matches our test */
-        if (strncmp(entry->d_name, test_name, strlen(test_name)) != 0) continue;
-        
-        char expect_file[MAX_PATH];
-        snprintf(expect_file, sizeof(expect_file), "%s/%s", expect_dir, entry->d_name);
-        
-        FILE *f = fopen(expect_file, "r");
-        if (!f) continue;
-        
-        char expected[MAX_OUTPUT];
-        size_t len = fread(expected, 1, sizeof(expected) - 1, f);
-        fclose(f);
-        expected[len] = '\0';
-        
-        /* Compare outputs */
-        if (strcmp(output, expected) == 0) {
-            /* Determine result type based on file suffix */
-            if (strstr(entry->d_name, ".unknown")) {
-                result = RESULT_NEUTRAL;
-            } else {
-                result = RESULT_PASS;
-            }
-            break;
-        }
-    }
-    
-    closedir(dir);
-    return result;
+/*
+ * Strip trailing newline from string, return new length.
+ */
+static size_t strip_trailing_newline(char *s) {
+    size_t len = strlen(s);
+    while (len > 0 && s[len-1] == '\n') s[--len] = '\0';
+    return len;
 }
 
-static enum test_result run_test_with_output(const char *path, char *output, size_t output_size) {
+/*
+ * Check if content is a known Sortix outcome string.
+ * The compare is done against a newline-stripped copy of content.
+ */
+static const char *classify_known_outcome(char *content) {
+    char stripped[MAX_OUTPUT];
+    strncpy(stripped, content, sizeof(stripped) - 1);
+    stripped[sizeof(stripped) - 1] = '\0';
+    strip_trailing_newline(stripped);
+    for (int i = 0; outcome_strings[i]; i++) {
+        if (strcmp(stripped, outcome_strings[i]) == 0)
+            return outcome_strings[i];
+    }
+    return NULL;
+}
+
+/*
+ * Classify test outcome from .out content, following Sortix html.c logic:
+ *
+ * 1. Strip trailing newline from content
+ * 2. Check if stripped content is a known outcome string
+ *    -> GOOD/BAD/SKIP/NEUTRAL
+ * 3. Try the suite's .expect directory — scan for expect files matching this
+ *    specific test (e.g., test.posix, test.posix.0, test.1, test.2)
+ *    -> GOOD if any variant matches, UNKNOWN if match has .unknown. prefix
+ *    -> If no matching expect files found, fall through to step 4
+ * 4. Compare ORIGINAL .out content (with newline) to "exit: 0\n"
+ *    -> GOOD (PASS) or BAD (FAIL)
+ */
+static enum test_result classify_from_out(const char *test_name,
+                                           const char *suite,
+                                           char *out_content) {
+    /* 1+2. Check for known outcome strings */
+    const char *known = classify_known_outcome(out_content);
+    if (known) {
+        if (strcmp(known, "good") == 0) return RESULT_PASS;
+        if (strcmp(known, "missing_optional") == 0) return RESULT_SKIP;
+        if (strcmp(known, "unknown") == 0) return RESULT_NEUTRAL;
+        return RESULT_FAIL;
+    }
+
+    /* 3. Try expect directory — check for individual test expect files */
+    {
+        char expect_dir[MAX_PATH];
+        snprintf(expect_dir, sizeof(expect_dir),
+                 "/bin/os-test-expect/%s.expect", suite);
+        DIR *dir = opendir(expect_dir);
+        if (dir) {
+            /* Strip newline from output for expect comparison
+             * (expect files don't have trailing newlines) */
+            char stripped[MAX_OUTPUT];
+            strncpy(stripped, out_content, sizeof(stripped) - 1);
+            stripped[sizeof(stripped) - 1] = '\0';
+            strip_trailing_newline(stripped);
+
+            struct dirent *entry;
+            size_t tlen = strlen(test_name);
+            int found_expectation = 0;
+            int result = RESULT_FAIL;
+
+            while ((entry = readdir(dir)) != NULL) {
+                /* Match: entry name starts with test_name + '.' */
+                if (strncmp(entry->d_name, test_name, tlen) != 0 ||
+                    entry->d_name[tlen] != '.')
+                    continue;
+
+                found_expectation = 1;
+
+                char expect_file[MAX_PATH];
+                snprintf(expect_file, sizeof(expect_file),
+                         "%s/%s", expect_dir, entry->d_name);
+                FILE *ef = fopen(expect_file, "r");
+                if (!ef) continue;
+                char expected[MAX_OUTPUT];
+                size_t elen = fread(expected, 1, sizeof(expected) - 1, ef);
+                fclose(ef);
+                expected[elen] = '\0';
+
+                if (strcmp(stripped, expected) == 0) {
+                    if (strstr(entry->d_name + tlen + 1, "unknown"))
+                        result = RESULT_NEUTRAL;
+                    else
+                        result = RESULT_PASS;
+                    break;
+                }
+            }
+            closedir(dir);
+            if (found_expectation)
+                return result;
+        }
+    }
+
+    /* 4. No expect files found — compare .out content to "exit: 0\n" */
+    if (strcmp(out_content, "exit: 0\n") == 0)
+        return RESULT_PASS;
+    return RESULT_FAIL;
+}
+
+/*
+ * Run a test, capturing stdout+stderr to a buffer.
+ * Follows Sortix run.sh: ./$1 > $2 2>&1
+ * Appends "exit: CODE\n" if output is empty OR exit code >= 2.
+ * Returns the raw exit code.
+ */
+static int run_test_capture(const char *path, char *output, size_t output_size) {
     int pipefd[2];
-    if (pipe(pipefd) == -1) return RESULT_ERROR;
-    
+    if (pipe(pipefd) == -1) return -1;
+
     pid_t pid = fork();
     if (pid == 0) {
-        /* Child: redirect stdout/stderr to pipe */
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
-        
         char *argv[] = {(char *)path, NULL};
         execv(path, argv);
-        exit(1);
+        _exit(127);
     } else if (pid > 0) {
-        /* Parent: read output and wait for child */
         close(pipefd[1]);
-        
         size_t pos = 0;
         ssize_t n;
-        while (pos < output_size - 1 && (n = read(pipefd[0], output + pos, output_size - 1 - pos)) > 0) {
+        while (pos < output_size - 1 &&
+               (n = read(pipefd[0], output + pos,
+                         output_size - 1 - pos)) > 0)
             pos += n;
-        }
         output[pos] = '\0';
-        
         close(pipefd[0]);
-        
+
         int status;
         waitpid(pid, &status, 0);
-        
-        /* If test had non-zero output but still exited normally, append exit code */
         int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-        if (pos > 0 || exit_code >= 2) {
+
+        /*
+         * Sortix run.sh:
+         *   if [ ! -s $2 ] || [ 2 -le $CODE ]; then
+         *     echo "exit: $CODE" >> $2
+         *   fi
+         */
+        if (pos == 0 || exit_code >= 2) {
             size_t remaining = output_size - pos - 1;
-            if (remaining > 20) {
-                snprintf(output + pos, remaining, "exit: %d", exit_code);
-            }
+            if (remaining > 20)
+                pos += snprintf(output + pos, remaining,
+                                "exit: %d\n", exit_code);
         }
-        
-        return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? RESULT_PASS : RESULT_FAIL;
+        return exit_code;
     }
-    
-    return RESULT_ERROR;
+    return -1;
 }
 
-static enum test_result run_test_simple(const char *path) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        /* Child: run the test with output redirected */
-        freopen("/dev/null", "w", stdout);
-        freopen("/dev/null", "w", stderr);
-        char *argv[] = {(char *)path, NULL};
-        execv(path, argv);
-        exit(1);
-    } else if (pid > 0) {
-        /* Parent: wait for child */
-        int status;
-        waitpid(pid, &status, 0);
-        return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? RESULT_PASS : RESULT_FAIL;
+/*
+ * Create intermediate directories for a file path.
+ */
+static void mkdirs_for_path(const char *file_path) {
+    char dir[MAX_PATH];
+    strncpy(dir, file_path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    char *slash = strrchr(dir, '/');
+    if (!slash) return;
+    *slash = '\0';
+    for (char *p = dir + 1; *p; p++) {
+        if (*p == '/') { *p = '\0'; mkdir(dir, 0755); *p = '/'; }
     }
-    return RESULT_ERROR;
+    mkdir(dir, 0755);
 }
 
+/*
+ * Write .out file for a test.
+ * Path: RESULTS_DIR/<name>.out  (e.g., /var/log/os-test/include/errno/ENFILE.out)
+ */
+static void write_out_file(const char *name, const char *content) {
+    char out_path[MAX_PATH];
+    snprintf(out_path, sizeof(out_path), "%s/%s.out", RESULTS_DIR, name);
+    mkdirs_for_path(out_path);
+    FILE *f = fopen(out_path, "w");
+    if (f) { fputs(content, f); fclose(f); }
+}
+
+/*
+ * Run a single test and classify its result.
+ * Flow matching Sortix:
+ * 1. Run test, capture output (stdout+stderr)
+ * 2. Append "exit: CODE\n" if empty or exit>=2 (run.sh behavior)
+ * 3. Write .out file (Sortix artifact for html.c)
+ * 4. Classify from .out content
+ */
 static enum test_result run_test_single(struct test_info *test) {
-    if (test->uses_expect) {
-        /* Use expect file validation */
-        char output[MAX_OUTPUT];
-        enum test_result exec_result = run_test_with_output(test->path, output, sizeof(output));
-        
-        if (exec_result == RESULT_ERROR) return RESULT_ERROR;
-        
-        /* Compare with expect files regardless of exit code */
-        return compare_with_expect_files(test->suite, test->name, output);
-    } else {
-        /* Use simple exit code validation */
-        return run_test_simple(test->path);
-    }
+    char output[MAX_OUTPUT];
+    run_test_capture(test->path, output, sizeof(output));
+    write_out_file(test->name, output);
+    return classify_from_out(test->name, test->suite, output);
 }
 
 static enum test_result run_test(int test_idx) {
@@ -280,113 +328,100 @@ static void show_usage(void) {
 
 int main(int argc, char *argv[]) {
     printf("=== Sortix os-test Suite ===\n\n");
-    
-    /* If specific test requested */
+    mkdir(RESULTS_DIR, 0755);
+
     if (argc == 2) {
         char test_path[MAX_PATH];
         snprintf(test_path, sizeof(test_path), "/bin/os-test/%s", argv[1]);
-        
         struct stat st;
         if (stat(test_path, &st) != 0 || !(st.st_mode & S_IXUSR)) {
             printf("Test not found: %s\n", argv[1]);
             printf("The test may not have compiled due to missing POSIX features.\n");
             return 1;
         }
-        
-        /* Create a temporary test info structure */
         struct test_info single_test;
         strncpy(single_test.path, test_path, MAX_PATH - 1);
         single_test.path[MAX_PATH - 1] = '\0';
-        strncpy(single_test.name, argv[1], MAX_PATH - 1);
-        single_test.name[MAX_PATH - 1] = '\0';
+        strncpy(single_test.name, argv[1], MAX_NAME - 1);
+        single_test.name[MAX_NAME - 1] = '\0';
         extract_suite_name(test_path, single_test.suite);
-        single_test.uses_expect = check_expect_support(single_test.suite);
-        
-        printf("Running: %s (%s validation)\n", argv[1], 
-               single_test.uses_expect ? "expect file" : "exit code");
-        
+
+        printf("Running: %s\n", argv[1]);
         enum test_result result = run_test_single(&single_test);
-        const char* result_str = (result == RESULT_PASS) ? "PASS" :
-                                (result == RESULT_NEUTRAL) ? "NEUTRAL" : "FAIL";
-        printf("%s: %s\n", result_str, argv[1]);
+        const char* rstr = (result == RESULT_PASS) ? "PASS" :
+                           (result == RESULT_NEUTRAL) ? "NEUTRAL" :
+                           (result == RESULT_SKIP) ? "SKIP" : "FAIL";
+        printf("%s: %s\n", rstr, argv[1]);
         return (result == RESULT_PASS) ? 0 : 1;
     }
-    
-    /* Discover all tests from manifest */
+
     printf("Loading tests from manifest...\n");
     fflush(stdout);
-    
     if (load_tests_from_manifest() != 0) {
-        /* Fallback: check if directory exists for better error message */
         struct stat st;
-        if (stat("/bin/os-test", &st) != 0 || !S_ISDIR(st.st_mode)) {
+        if (stat("/bin/os-test", &st) != 0 || !S_ISDIR(st.st_mode))
             printf("os-test directory not found: /bin/os-test\n");
-        }
         return 1;
     }
-    
+
     printf("Found %d executable tests\n\n", total_tests);
-    
     if (total_tests == 0) {
         printf("No executable tests found.\n");
-        printf("This may indicate:\n");
-        printf("  1. Tests failed to compile due to missing POSIX features\n");
-        printf("  2. File permissions issue\n");
-        printf("  3. Build system issue\n");
-        printf("\nDebug info:\n");
-        printf("  /bin/os-test exists: %s\n", (access("/bin/os-test", F_OK) == 0) ? "yes" : "no");
-        printf("  /bin/os-test readable: %s\n", (access("/bin/os-test", R_OK) == 0) ? "yes" : "no");
         return 1;
     }
-    
+
     printf("Running %d tests (press Ctrl-C to stop)...\n", total_tests);
-    printf("Legend: X=exit code validation, E=expect file validation\n\n");
-    
-    /* Run all tests */
+    printf("Legend: X=exit code, E=expect file\n\n");
+
     for (int i = 0; i < total_tests; i++) {
-        enum test_result result = run_test(i);
-        const char *result_str;
-        char suffix;
-        
-        /* Determine validation type suffix */
-        suffix = tests[i].uses_expect ? 'E' : 'X';
-        
-        switch (result) {
-            case RESULT_PASS:
-                result_str = "PASS";
-                passed++;
-                break;
-            case RESULT_FAIL:
-                result_str = "FAIL";
-                failed++;
-                break;
-            case RESULT_NEUTRAL:
-                result_str = "NEUT";
-                neutral++;
-                break;
-            case RESULT_SKIP:
-                result_str = "SKIP";
-                skipped++;
-                break;
-            case RESULT_ERROR:
-            default:
-                result_str = "ERR ";
-                errors++;
-                break;
+        if (tests[i].name[0] == '\0') {
+            printf("[%d/%d] ERROR: test at index %d has blank name (path: %s)\n",
+                   i + 1, total_tests, i, tests[i].path);
+            errors++;
+            continue;
         }
-        
-        /* Calculate progress and pass rate */
-        int progress_pct = (i + 1) * 100 / total_tests;
-        int current_success = passed + neutral;
-        int current_total = i + 1;
-        int pass_rate = current_total > 0 ? current_success * 100 / current_total : 0;
-        
-        /* Print result: [n/total %% | pass%%] RESULT<suffix>: test/name */
-        printf("[%d/%d %d%% | %d%% pass] %s%c: %s\n", 
-               i + 1, total_tests, progress_pct, pass_rate,
+
+        enum test_result result = run_test(i);
+
+        /* Determine suffix: 'E' if test has expect files, 'X' otherwise */
+        char suffix = 'X';
+        {
+            char expect_dir[MAX_PATH];
+            snprintf(expect_dir, sizeof(expect_dir),
+                     "/bin/os-test-expect/%s.expect", tests[i].suite);
+            DIR *edir = opendir(expect_dir);
+            if (edir) {
+                size_t tlen = strlen(tests[i].name);
+                struct dirent *ent;
+                while ((ent = readdir(edir)) != NULL) {
+                    if (strncmp(ent->d_name, tests[i].name, tlen) == 0 &&
+                        ent->d_name[tlen] == '.') {
+                        suffix = 'E';
+                        break;
+                    }
+                }
+                closedir(edir);
+            }
+        }
+
+        const char *result_str;
+        switch (result) {
+            case RESULT_PASS:    result_str = "PASS"; passed++; break;
+            case RESULT_FAIL:    result_str = "FAIL"; failed++; break;
+            case RESULT_NEUTRAL: result_str = "NEUT"; neutral++; break;
+            case RESULT_SKIP:    result_str = "SKIP"; skipped++; break;
+            case RESULT_ERROR:
+            default:             result_str = "ERR "; errors++; break;
+        }
+
+        int pct = (i + 1) * 100 / total_tests;
+        int rate = (i + 1) > 0 ? (passed + neutral) * 100 / (i + 1) : 0;
+
+        printf("[%d/%d %d%% | %d%% pass] %s%c: %s\n",
+               i + 1, total_tests, pct, rate,
                result_str, suffix, tests[i].name);
     }
-    
+
     printf("\n=== Final Results ===\n");
     int compile_skipped = TOTAL_TESTS_IN_SUITE - total_tests;
     int compile_pct = total_tests * 100 / TOTAL_TESTS_IN_SUITE;
@@ -400,14 +435,14 @@ int main(int argc, char *argv[]) {
     printf("  Neutral:  %d\n", neutral);
     printf("  Skipped:  %d\n", skipped);
     printf("  Errors:   %d\n", errors);
-    
+
     if (total_tests > 0) {
-        int success_rate = (passed + neutral) * 100 / total_tests;
-        printf("\nPass rate: %d%% (of %d compiled tests)\n", success_rate, total_tests);
+        int sr = (passed + neutral) * 100 / total_tests;
+        printf("\nPass rate: %d%% (of %d compiled tests)\n",
+               sr, total_tests);
     }
-    
     printf("\n");
     show_usage();
-    
+
     return (failed > 0) ? 1 : 0;
 }
