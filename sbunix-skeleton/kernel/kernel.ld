@@ -6,13 +6,12 @@ PHDRS {
 }
 SECTIONS {
 	. = 0x80200000;
-	.text   : { *(.text.init) *(.text) } :text
-	.text.rest : { *(.text.*) } :text
+	.text   : { *(.text.init) *(.text) *(.text.*) } :text
 	.rodata : { *(.rodata) *(.rodata.*) } :text
-	.data   : { *(.data) *(.data.*) } :data
+	.data   : { *(.data) *(.data.*) *(.sdata) *(.sdata.*) } :data
 	.tarfs  : { *(.tarfs) } :data
 	_bss_start = .;
-	.bss    : { *(.bss) *(.bss.*) *(.sbss) *(.sbss.*) *(COMMON) } :data
+	.bss (NOLOAD) : { *(.bss) *(.bss.*) *(.sbss) *(.sbss.*) *(COMMON) } :data
 	. = ALIGN(16);
 	. += 16384;
 	_stack_top = .;

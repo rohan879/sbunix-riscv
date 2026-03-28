@@ -6,23 +6,28 @@ CC      := $(CROSS)gcc
 LD      := $(CROSS)ld
 AR      := $(CROSS)ar
 OBJCOPY := $(CROSS)objcopy
-CFLAGS  := -Wall -Werror -Os -ffreestanding -fno-builtin -nostdlib -nostdinc -isystem $(shell $(CC) -print-file-name=include) -mcmodel=medany -march=rv64imac_zicsr_zifencei -mabi=lp64 -ffunction-sections -fdata-sections
+CFLAGS  := -gdwarf-4 -Wall -Werror -Os -ffreestanding -fno-builtin -nostdlib -nostdinc -isystem $(shell $(CC) -print-file-name=include) -mcmodel=medany -march=rv64imac_zicsr_zifencei -mabi=lp64 -ffunction-sections -fdata-sections -fno-tree-switch-conversion
+RUSTFLAGS := --target riscv64imac-unknown-none-elf -C panic=abort -C linker=$(CC) -C code-model=medium -C link-arg=-nostartfiles -C link-arg=-march=rv64imac -C link-arg=-mabi=lp64
 
 KERN_ASM := $(patsubst %,build/%.o,$(wildcard kernel/*.S))
 LIBC_OBJ := $(patsubst %,build/%.o,$(filter-out libc/crt.S,$(wildcard libc/*.c libc/*.S)))
+C_BIN    := $(addprefix build/rootfs/bin/,$(shell ls -d bin/*/*.c 2>/dev/null | cut -d/ -f2 | sort -u))
+RS_BIN   := $(addprefix build/rootfs/bin/,$(shell ls -d bin/*/*.rs 2>/dev/null | cut -d/ -f2 | sort -u))
+USER_BIN := $(C_BIN) $(RS_BIN)
+
+# MODIFIED: BEGIN added
 # Split user binaries: test binaries only included in test builds
-UTIL_BIN_DIRS := $(wildcard bin/*)
 TEST_SRC_DIRS := $(wildcard tests/*)
-USER_BIN := $(patsubst bin/%,build/rootfs/bin/%,$(UTIL_BIN_DIRS))
 ifdef BUILD_TESTS
   USER_BIN += $(patsubst tests/%,build/rootfs/bin/%,$(TEST_SRC_DIRS))
 endif
 
 TIMEOUT ?= 600
+# MODIFIED: END added
 
 # Language-specific kernel object/library
 ifeq ($(KLANG),c)
-  KERN_C   := $(patsubst %,build/%.o,$(wildcard kernel/*.c))
+  KERN_C   := $(patsubst %,build/%.o,$(shell find kernel -name '*.c'))
   KERN_ALL := $(KERN_ASM) $(KERN_C)
 else ifeq ($(KLANG),rust)
   KERN_LIB := build/rust/riscv64imac-unknown-none-elf/debug/libsbunix.a
@@ -35,15 +40,25 @@ endif
 DISK_SIZE ?= 16
 DISK_IMG  := build/disk.img
 
+-include Makefile.local
+
 all: build/kernel.elf
 
-build/%.c.o: %.c
+build/kernel/%.c.o: kernel/%.c
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -I$(<D)/include -c $< -o $@
+	$(CC) $(CFLAGS) -Ikernel/include -c $< -o $@
 
-build/%.S.o: %.S
+build/kernel/%.S.o: kernel/%.S
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -I$(<D)/include -c $< -o $@
+	$(CC) $(CFLAGS) -Ikernel/include -c $< -o $@
+
+build/libc/%.c.o: libc/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -Ilibc/include -c $< -o $@
+
+build/libc/%.S.o: libc/%.S
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -Ilibc/include -c $< -o $@
 
 build/libc.a: $(LIBC_OBJ)
 	@mkdir -p $(@D)
@@ -57,23 +72,30 @@ build/rust/riscv64imac-unknown-none-elf/debug/libsbunix.a: $(wildcard kernel/*.r
 zig-out/lib/libsbunix.a: $(wildcard kernel/*.zig) build.zig
 	zig build -Doptimize=ReleaseSafe
 
-UTIL_TARGETS := $(patsubst bin/%,build/rootfs/bin/%,$(UTIL_BIN_DIRS))
+.SECONDEXPANSION:
+
+# MODIFIED: added
 TEST_TARGETS := $(patsubst tests/%,build/rootfs/bin/%,$(TEST_SRC_DIRS))
 
-$(UTIL_TARGETS): build/rootfs/bin/%: build/libc/crt.S.o build/libc.a
+$(C_BIN): build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o bin/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 
+$(RS_BIN): build/rootfs/bin/%: $$(wildcard bin/%/*.rs) build/libc/crt.S.o build/libc.a
+	@mkdir -p $(@D)
+	rustc $(RUSTFLAGS) -C link-arg=build/libc/crt.S.o -C link-arg=build/libc.a bin/$*/$*.rs -o $@
+
+# MODIFIED: added
 $(TEST_TARGETS): build/rootfs/bin/%: build/libc/crt.S.o build/libc.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 
 build/tarfs.o: $(USER_BIN)
 	cp -a rootfs/. build/rootfs/
-	ln -sf sbush build/rootfs/bin/sh
-	ln -sf test build/rootfs/bin/[
+	ln -sf sbush build/rootfs/bin/sh # MODIFIED: added
+	ln -sf test build/rootfs/bin/[ # MODIFIED: added
 ifdef BUILD_TESTS
-	cp tools/guest-run-tests build/rootfs/bin/run-tests
+	cp tools/guest-run-tests build/rootfs/bin/run-tests # MODIFIED: added
 endif
 	tar cf build/rootfs.tar -C build/rootfs .
 	cd build && $(OBJCOPY) -I binary -O elf64-littleriscv -B riscv \
@@ -107,6 +129,7 @@ qemu: build/kernel.elf $(DISK_IMG)
 		-netdev user,id=net0 \
 		-nographic
 
+# MODIFIED: added
 test: $(DISK_IMG)
 	TIMEOUT=$(TIMEOUT) bash tools/run_tests.sh
 
@@ -117,7 +140,7 @@ submit:
 	@set -e; \
 	STMP=$$(mktemp -d /tmp/sbunix-submit.XXXXXX); \
 	cleanup() { set +e; chmod -R u+w "$$STMP" 2>/dev/null; rm -rf "$$STMP" 2>/dev/null; }; \
-	trap cleanup EXIT; \
+	trap cleanup EXIT; # MODIFIED: max-size \
 	rsync -a \
 		--exclude='.git' --exclude='build/' --exclude='zig-out/' \
 		--exclude='.zig-cache/' --exclude='.claude/' --exclude='thirdparty/' \
@@ -135,4 +158,4 @@ submit:
 	echo "Submitted to $(SUBMIT_DIR)/sbunix"
 
 .PRECIOUS: build/%.S.o build/%.c.o
-.PHONY: all qemu clean thirdparty submit test
+.PHONY: all qemu clean thirdparty submit test # MODIFIED: added test
