@@ -61,6 +61,11 @@ COMPILE_TARGETS := $(patsubst $(OS_TEST_SRC)/%.c,$(OS_TEST_DEST)/%,$(ALL_SOURCES
 all: setup $(COMPILE_TARGETS)
 	@echo ""
 	@echo "=== os-test build complete ==="
+	@# Generate manifest from actually compiled binaries (avoids parallel append issues)
+	@echo "# Test manifest for SBUnix os-test" > $(MANIFEST_FILE)
+	@echo "# Format: /bin/os-test/path/to/test" >> $(MANIFEST_FILE)
+	@find $(OS_TEST_DEST) -type f ! -name '*.failed' -executable | sort | \
+		sed 's|$(SBUNIX_ROOT)/build/rootfs||' >> $(MANIFEST_FILE)
 	@ok_count=$$(find $(OS_TEST_DEST) -type f ! -name '*.failed' | wc -l); \
 	total_count=$$(find $(OS_TEST_SRC) -name '*.c' | wc -l); \
 	skip_count=$$((total_count - ok_count)); \
@@ -68,7 +73,8 @@ all: setup $(COMPILE_TARGETS)
 	echo "Skipped:  $$skip_count tests (missing features)"; \
 	echo ""; \
 	echo "Binaries installed to: $(OS_TEST_DEST)"; \
-	echo "Compilation logs: $(COMPILE_LOG_DIR)/<suite>/<test>.log"
+	echo "Compilation logs: $(COMPILE_LOG_DIR)/<suite>/<test>.log"; \
+	echo "Test manifest: $(MANIFEST_FILE) ($$ok_count entries)"
 
 setup:
 	@echo "=== Building os-test for SBUnix (RISC-V) ==="
@@ -82,8 +88,6 @@ setup:
 	@echo "os-test build summary for SBUnix" > $(SUMMARY_FILE)
 	@echo "================================" >> $(SUMMARY_FILE)
 	@echo "" >> $(SUMMARY_FILE)
-	@echo "# Test manifest for SBUnix os-test" > $(MANIFEST_FILE)
-	@echo "# Format: /bin/os-test/path/to/test" >> $(MANIFEST_FILE)
 
 install: all
 
@@ -113,8 +117,6 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 			rm -f $(OUT_DIRECTORY)/$$relpath.o; \
 			cp $$outbin $@; \
 			echo "  OK: $$relpath"; \
-			echo "  OK: $$relpath" >> $(SUMMARY_FILE); \
-			echo "/bin/os-test/$$relpath" >> $(MANIFEST_FILE); \
 		else \
 			echo "Link: FAILED" >> $$compile_log; \
 			echo "Result: LINK ERROR" >> $$compile_log; \

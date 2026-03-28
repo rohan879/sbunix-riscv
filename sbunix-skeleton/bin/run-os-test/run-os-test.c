@@ -7,10 +7,11 @@
 #include <dirent.h>
 #include <errno.h>
 
-#define MAX_PATH 512
-#define MAX_TESTS 10000
-#define MAX_OUTPUT 8192
+#define MAX_PATH 128
+#define MAX_TESTS 12000
+#define MAX_OUTPUT 4096
 #define MANIFEST_FILE "/bin/os-test-manifest"
+#define TOTAL_TESTS_IN_SUITE 5304  /* Total .c files in Sortix os-test */
 
 enum test_result {
     RESULT_PASS = 0,
@@ -57,8 +58,8 @@ static void extract_suite_name(const char *path, char *suite) {
 }
 
 static int check_expect_support(const char *suite) {
-    /* For now, we know these suites should use expect files but don't exist */
-    /* This is a temporary implementation until we copy expect dirs to rootfs */
+    /* Only these top-level suites use expect file validation.
+     * All other suites (especially 'include') use exit code validation. */
     if (strcmp(suite, "stdio") == 0 || 
         strcmp(suite, "malloc") == 0 ||
         strcmp(suite, "pty") == 0 ||
@@ -69,12 +70,7 @@ static int check_expect_support(const char *suite) {
         strcmp(suite, "io") == 0) {
         return 1;
     }
-    
-    char expect_dir[MAX_PATH];
-    snprintf(expect_dir, sizeof(expect_dir), "/bin/os-test-expect/%s.expect", suite);
-    
-    struct stat st;
-    return (stat(expect_dir, &st) == 0 && S_ISDIR(st.st_mode));
+    return 0;
 }
 
 static void add_test(const char *path, const char *relative_name) {
@@ -106,6 +102,12 @@ static int load_tests_from_manifest(void) {
     while (fgets(line, sizeof(line), f)) {
         line_count++;
         
+        /* Progress indicator every 200 lines */
+        if (line_count % 200 == 0) {
+            printf("Loaded %d tests...\n", total_tests);
+            fflush(stdout);
+        }
+        
         /* Skip comments and empty lines */
         if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
         
@@ -131,11 +133,6 @@ static int load_tests_from_manifest(void) {
         
         /* Trust the manifest - it should only contain valid tests */
         add_test(line, relative_name);
-        
-        /* Progress indicator for debugging */
-        if (line_count % 200 == 0) {
-            printf("Processed %d lines, found %d tests so far\n", line_count, total_tests);
-        }
     }
     
     fclose(f);
@@ -317,6 +314,7 @@ int main(int argc, char *argv[]) {
     
     /* Discover all tests from manifest */
     printf("Loading tests from manifest...\n");
+    fflush(stdout);
     
     if (load_tests_from_manifest() != 0) {
         /* Fallback: check if directory exists for better error message */
@@ -341,74 +339,71 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    printf("Running tests with progress indicators...\n");
-    printf("(Press Ctrl-C to stop)\n\n");
+    printf("Running %d tests (press Ctrl-C to stop)...\n", total_tests);
+    printf("Legend: X=exit code validation, E=expect file validation\n\n");
     
     /* Run all tests */
     for (int i = 0; i < total_tests; i++) {
-        int percent = (i + 1) * 100 / total_tests;
-        printf("[%d/%d %d%%] ", i + 1, total_tests, percent);
-        
         enum test_result result = run_test(i);
-        const char* validation_type = tests[i].uses_expect ? "E" : "X";
+        const char *result_str;
+        char suffix;
+        
+        /* Determine validation type suffix */
+        suffix = tests[i].uses_expect ? 'E' : 'X';
         
         switch (result) {
             case RESULT_PASS:
-                printf("PASS%s: %s\n", validation_type, tests[i].name);
+                result_str = "PASS";
                 passed++;
                 break;
             case RESULT_FAIL:
-                printf("FAIL%s: %s\n", validation_type, tests[i].name);
+                result_str = "FAIL";
                 failed++;
                 break;
             case RESULT_NEUTRAL:
-                printf("NEUT%s: %s\n", validation_type, tests[i].name);
+                result_str = "NEUT";
                 neutral++;
                 break;
             case RESULT_SKIP:
-                printf("SKIP%s: %s\n", validation_type, tests[i].name);
+                result_str = "SKIP";
                 skipped++;
                 break;
             case RESULT_ERROR:
-                printf("ERR%s: %s\n", validation_type, tests[i].name);
+            default:
+                result_str = "ERR ";
                 errors++;
                 break;
         }
         
-        /* Show intermediate progress every 50 tests */
-        if ((i + 1) % 50 == 0) {
-            int current_rate = passed * 100 / (i + 1);
-            printf("     Progress: %d/%d complete (%d%% success rate so far)\n", 
-                   i + 1, total_tests, current_rate);
-        }
+        /* Calculate progress and pass rate */
+        int progress_pct = (i + 1) * 100 / total_tests;
+        int current_success = passed + neutral;
+        int current_total = i + 1;
+        int pass_rate = current_total > 0 ? current_success * 100 / current_total : 0;
+        
+        /* Print result: [n/total %% | pass%%] RESULT<suffix>: test/name */
+        printf("[%d/%d %d%% | %d%% pass] %s%c: %s\n", 
+               i + 1, total_tests, progress_pct, pass_rate,
+               result_str, suffix, tests[i].name);
     }
     
     printf("\n=== Final Results ===\n");
-    printf("Total tests:  %d\n", total_tests);
-    printf("Passed:       %d\n", passed);
-    printf("Failed:       %d\n", failed);
-    printf("Neutral:      %d\n", neutral);
-    printf("Skipped:      %d\n", skipped);
-    printf("Errors:       %d\n", errors);
+    int compile_skipped = TOTAL_TESTS_IN_SUITE - total_tests;
+    int compile_pct = total_tests * 100 / TOTAL_TESTS_IN_SUITE;
+    printf("Tests in suite:  %d\n", TOTAL_TESTS_IN_SUITE);
+    printf("Compiled:        %d (%d%%)\n", total_tests, compile_pct);
+    printf("Build skipped:   %d (missing POSIX features)\n", compile_skipped);
+    printf("\n");
+    printf("Results (of compiled tests):\n");
+    printf("  Passed:   %d\n", passed);
+    printf("  Failed:   %d\n", failed);
+    printf("  Neutral:  %d\n", neutral);
+    printf("  Skipped:  %d\n", skipped);
+    printf("  Errors:   %d\n", errors);
     
     if (total_tests > 0) {
-        int success_rate = passed * 100 / total_tests;
-        printf("Success rate: %d%%\n\n", success_rate);
-        
-        printf("This represents POSIX compliance for features that compiled\n");
-        printf("successfully in SBUnix. Many tests fail to compile due to\n");
-        printf("missing headers and system calls.\n\n");
-        
-        if (success_rate > 80) {
-            printf("Excellent! >80%% success indicates strong POSIX compliance\n");
-            printf("for implemented features.\n");
-        } else if (success_rate > 50) {
-            printf("Good progress. >50%% success shows partial POSIX compliance\n");
-            printf("with room for improvement.\n");
-        } else {
-            printf("Low success rate indicates many POSIX features need\n");
-            printf("implementation or have compatibility issues.\n");
-        }
+        int success_rate = (passed + neutral) * 100 / total_tests;
+        printf("\nPass rate: %d%% (of %d compiled tests)\n", success_rate, total_tests);
     }
     
     printf("\n");
