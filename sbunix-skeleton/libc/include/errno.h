@@ -68,6 +68,35 @@ extern int errno;
 #define ECONNREFUSED 111 /* connection refused */
 #define ETIMEDOUT  110  /* connection timed out */
 
+/* Additional POSIX/Linux errno constants (asm-generic/errno.h) */
+#define EDESTADDRREQ  89  /* destination address required */
+#define EMSGSIZE      90  /* message too long */
+#define EPROTOTYPE    91  /* protocol wrong type for socket */
+#define ENOPROTOOPT   92  /* protocol not available */
+#define EPROTONOSUPPORT 93 /* protocol not supported */
+#define ESOCKTNOSUPPORT 94 /* socket type not supported */
+#define EOPNOTSUPP    95  /* operation not supported on transport endpoint */
+#define EPFNOSUPPORT  96  /* protocol family not supported */
+#define EAFNOSUPPORT  97  /* address family not supported by protocol */
+#define EADDRNOTAVAIL 99  /* cannot assign requested address */
+#define ENETDOWN      100 /* network is down */
+#define ENETUNREACH   101 /* network is unreachable */
+#define ENETRESET     102 /* network dropped connection because of reset */
+#define ECONNABORTED  103 /* software caused connection abort */
+#define ECONNRESET    104 /* connection reset by peer */
+#define ENOBUFS       105 /* no buffer space available */
+#define EISCONN       106 /* transport endpoint is already connected */
+#define ENOTCONN      107 /* transport endpoint is not connected */
+#define EHOSTUNREACH  113 /* no route to host */
+#define EALREADY      114 /* operation already in progress */
+#define EINPROGRESS   115 /* operation now in progress */
+#define ESTALE        116 /* stale file handle */
+#define EDQUOT        122 /* quota exceeded */
+#define ECANCELED     125 /* operation canceled */
+#define ENOTSUP       126 /* operation not supported */
+#define EOWNERDEAD    130 /* owner died */
+#define ENOTRECOVERABLE 131 /* state not recoverable */
+
 /* Convert raw negative kernel return to -1 + errno */
 static inline long __syscall_ret(long r) {
     if (r < 0 && r >= -4095) {
