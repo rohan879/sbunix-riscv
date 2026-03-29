@@ -12,8 +12,12 @@
 #define MAX_SUITE 32
 #define MAX_TESTS 12000
 #define MAX_OUTPUT 4096
-#define MANIFEST_FILE "/bin/os-test-manifest"
-#define RESULTS_DIR "/var/log/os-test"
+#define TEST_ROOT "/test"
+#define TEST_BIN_ROOT TEST_ROOT "/bin"
+#define OS_TEST_BIN_ROOT TEST_ROOT "/bin/os-test"
+#define MANIFEST_FILE TEST_ROOT "/os-test-manifest"
+#define EXPECT_ROOT TEST_ROOT "/os-test-expect"
+#define RESULTS_DIR TEST_ROOT "/var/log/os-test"
 
 #ifndef TOTAL_TESTS_IN_SUITE
 #define TOTAL_TESTS_IN_SUITE 5304
@@ -104,7 +108,7 @@ static int load_tests_from_manifest(void) {
         if (len > 0 && line[len-1] == '\r') { line[--len] = '\0'; }
         if (len == 0) continue;
         const char *rel = line;
-        if (strncmp(line, "/bin/os-test/", 13) == 0) rel = line + 13;
+        if (strncmp(line, "/test/bin/os-test/", 18) == 0) rel = line + 18;
         add_test(line, rel);
     }
     fclose(f);
@@ -165,7 +169,7 @@ static enum test_result classify_from_out(const char *test_name,
     {
         char expect_dir[MAX_PATH];
         snprintf(expect_dir, sizeof(expect_dir),
-                 "/bin/os-test-expect/%s.expect", suite);
+                 EXPECT_ROOT "/%s.expect", suite);
         DIR *dir = opendir(expect_dir);
         if (dir) {
             /* Strip newline from output for expect comparison
@@ -287,7 +291,7 @@ static void mkdirs_for_path(const char *file_path) {
 
 /*
  * Write .out file for a test.
- * Path: RESULTS_DIR/<name>.out  (e.g., /var/log/os-test/include/errno/ENFILE.out)
+ * Path: RESULTS_DIR/<name>.out  (e.g., /test/var/log/os-test/include/errno/ENFILE.out)
  */
 static void write_out_file(const char *name, const char *content) {
     char out_path[MAX_PATH];
@@ -332,7 +336,7 @@ int main(int argc, char *argv[]) {
 
     if (argc == 2) {
         char test_path[MAX_PATH];
-        snprintf(test_path, sizeof(test_path), "/bin/os-test/%s", argv[1]);
+        snprintf(test_path, sizeof(test_path), OS_TEST_BIN_ROOT "/%s", argv[1]);
         struct stat st;
         if (stat(test_path, &st) != 0 || !(st.st_mode & S_IXUSR)) {
             printf("Test not found: %s\n", argv[1]);
@@ -359,8 +363,8 @@ int main(int argc, char *argv[]) {
     fflush(stdout);
     if (load_tests_from_manifest() != 0) {
         struct stat st;
-        if (stat("/bin/os-test", &st) != 0 || !S_ISDIR(st.st_mode))
-            printf("os-test directory not found: /bin/os-test\n");
+        if (stat(OS_TEST_BIN_ROOT, &st) != 0 || !S_ISDIR(st.st_mode))
+            printf("os-test directory not found: %s\n", OS_TEST_BIN_ROOT);
         return 1;
     }
 
@@ -388,7 +392,7 @@ int main(int argc, char *argv[]) {
         {
             char expect_dir[MAX_PATH];
             snprintf(expect_dir, sizeof(expect_dir),
-                     "/bin/os-test-expect/%s.expect", tests[i].suite);
+                     EXPECT_ROOT "/%s.expect", tests[i].suite);
             DIR *edir = opendir(expect_dir);
             if (edir) {
                 size_t tlen = strlen(tests[i].name);

@@ -3,6 +3,8 @@
 
 #include <riscv.h>
 
+struct vfs_ops;
+
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
@@ -70,6 +72,8 @@ struct ext2_superblock {
   int      dirty;           /* in-memory only: needs writeback */
 };
 
+struct ext2_fs;
+
 /* ------------------------------------------------------------------ */
 /* On-disk inode (128 bytes packed)                                     */
 /* ------------------------------------------------------------------ */
@@ -136,18 +140,32 @@ struct ext2_inode_mem {
 /* Per-open-file private data                                          */
 /* ------------------------------------------------------------------ */
 struct ext2_open_private {
+  struct ext2_fs *fs;       /* owning filesystem instance */
   uint32_t ino;              /* inode number */
   int      is_dir;
+};
+
+/* Per-mount ext2 instance. */
+struct ext2_fs {
+  struct ext2_superblock sb;
+  struct bcache_entry bcache[BCACHE_SIZE];
+  struct ext2_inode_mem icache[ICACHE_SIZE];
+  int mounted;
+  int bcache_hand;
+  int device_index;
+  const char *mount_path;
 };
 
 /* ------------------------------------------------------------------ */
 /* Public functions                                                    */
 /* ------------------------------------------------------------------ */
 int  ext2_init(void);
-void ext2_sync(void);
-int  ext2_mknod(const char *path, uint32_t mode, uint32_t rdev);
-int  ext2_ftruncate_ino(uint32_t ino, uint64_t length);
-int  ext2_fchmod_ino(uint32_t ino, uint32_t mode);
-int  ext2_hardlink(const char *newpath, uint32_t src_ino);
+int  ext2_register_mounts(void);
+int  ext2_is_ops(struct vfs_ops *ops);
+void ext2_sync(void *fs_data);
+int  ext2_mknod(void *fs_data, const char *path, uint32_t mode, uint32_t rdev);
+int  ext2_ftruncate_ino(void *fs_data, uint32_t ino, uint64_t length);
+int  ext2_fchmod_ino(void *fs_data, uint32_t ino, uint32_t mode);
+int  ext2_hardlink(void *fs_data, const char *newpath, uint32_t src_ino);
 
 #endif

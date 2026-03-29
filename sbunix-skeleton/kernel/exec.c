@@ -15,6 +15,13 @@ extern char _tarfs_start[];
 extern char _tarfs_end[];
 extern char _kernel_end[];
 
+static uint64_t exec_mmap_base(uint64_t sz) {
+    uint64_t base = PGROUNDUP(sz) + PAGE_SIZE;
+    if (base < 0x20000000UL)
+        base = 0x20000000UL;
+    return base;
+}
+
 int exec(char *path) {
     struct posix_header *elf_tar_header;
     Elf64_Ehdr *ehdr;
@@ -135,6 +142,7 @@ int exec(char *path) {
     // Initialize stack bounds for auto-grow
     current_proc->stack_top = USER_STACK_TOP;
     current_proc->stack_bottom = stack_va;
+    current_proc->mmap_base = exec_mmap_base(sz);
 
     /* Update process name from the last component of the path */
     {
@@ -199,18 +207,19 @@ bad:
 /* ------------------------------------------------------------------ */
 int exec_vfs(const char *resolved_path) {
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved_path, &relpath);
+    struct mount *mnt = vfs_lookup_mount_entry(resolved_path, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops || !ops->open || !ops->read)
         return -1;
 
     void *priv = NULL;
-    if (ops->open(relpath, 0, &priv) < 0)
+    if (ops->open(mnt->fs_data, relpath, 0, &priv) < 0)
         return -1;
 
     /* 1. Read ELF header */
     Elf64_Ehdr ehdr;
     int64_t off = 0;
-    int64_t nr = ops->read(priv, (char *)&ehdr, sizeof(ehdr), &off);
+    int64_t nr = ops->read(mnt->fs_data, priv, (char *)&ehdr, sizeof(ehdr), &off);
     if (nr < (int64_t)sizeof(ehdr))
         goto fail_close;
 
@@ -229,7 +238,7 @@ int exec_vfs(const char *resolved_path) {
         goto fail_close;
 
     off = (int64_t)ehdr.e_phoff;
-    nr = ops->read(priv, phdr_buf, phdr_total, &off);
+    nr = ops->read(mnt->fs_data, priv, phdr_buf, phdr_total, &off);
     if (nr < (int64_t)phdr_total) {
         kfree(phdr_buf);
         goto fail_close;
@@ -296,7 +305,7 @@ int exec_vfs(const char *resolved_path) {
             uint64_t chunk = PAGE_SIZE - page_off;
             if (chunk > remain) chunk = remain;
 
-            nr = ops->read(priv, tmp_page, chunk, &file_off);
+            nr = ops->read(mnt->fs_data, priv, tmp_page, chunk, &file_off);
             if (nr < (int64_t)chunk) {
                 kfree(tmp_page);
                 kfree(phdr_buf);
@@ -336,7 +345,7 @@ int exec_vfs(const char *resolved_path) {
     }
     kfree(tmp_page);
     kfree(phdr_buf);
-    if (ops->close) ops->close(priv);
+    if (ops->close) ops->close(mnt->fs_data, priv);
     priv = NULL;
 
     /* 5. User stack (8 pages) */
@@ -365,7 +374,7 @@ int exec_vfs(const char *resolved_path) {
     current_proc->sz = sz;
     current_proc->stack_top = USER_STACK_TOP;
     current_proc->stack_bottom = stack_va;
-    current_proc->mmap_base = PGROUNDUP(sz) + PAGE_SIZE;
+    current_proc->mmap_base = exec_mmap_base(sz);
 
     /* Update process name and exe_path */
     {
@@ -402,10 +411,10 @@ int exec_vfs(const char *resolved_path) {
     return 0;
 
 bad_vfs:
-    if (priv && ops->close) ops->close(priv);
+    if (priv && ops->close) ops->close(mnt->fs_data, priv);
     return -1;
 
 fail_close:
-    if (ops->close) ops->close(priv);
+    if (ops->close) ops->close(mnt->fs_data, priv);
     return -1;
 }

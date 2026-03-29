@@ -344,7 +344,8 @@ static int procfs_render_meminfo(char *buf, int bufsz) {
 /* ------------------------------------------------------------------ */
 /* procfs_open                                                         */
 /* ------------------------------------------------------------------ */
-static int procfs_open(const char *path, int flags, void **private) {
+static int procfs_open(void *fs_data, const char *path, int flags, void **private) {
+  (void)fs_data;
   (void)flags;
   const char *p = path;
   while (*p == '/') p++;
@@ -537,7 +538,9 @@ static int procfs_open(const char *path, int flags, void **private) {
 /* ------------------------------------------------------------------ */
 /* procfs_read                                                         */
 /* ------------------------------------------------------------------ */
-static int64_t procfs_read(void *private, char *buf, uint64_t count, int64_t *offset) {
+static int64_t procfs_read(void *fs_data, void *private, char *buf,
+                           uint64_t count, int64_t *offset) {
+  (void)fs_data;
   struct procfs_private *priv = (struct procfs_private *)private;
   if (!priv) return 0;
 
@@ -575,7 +578,9 @@ static int64_t procfs_read(void *private, char *buf, uint64_t count, int64_t *of
 /* ------------------------------------------------------------------ */
 /* procfs_write                                                        */
 /* ------------------------------------------------------------------ */
-static int64_t procfs_write(void *private, const char *buf, uint64_t count, int64_t *offset) {
+static int64_t procfs_write(void *fs_data, void *private, const char *buf,
+                            uint64_t count, int64_t *offset) {
+  (void)fs_data;
   (void)private; (void)buf; (void)count; (void)offset;
   return -30; /* -EROFS */
 }
@@ -583,7 +588,8 @@ static int64_t procfs_write(void *private, const char *buf, uint64_t count, int6
 /* ------------------------------------------------------------------ */
 /* procfs_close                                                        */
 /* ------------------------------------------------------------------ */
-static int procfs_close(void *private) {
+static int procfs_close(void *fs_data, void *private) {
+  (void)fs_data;
   if (private)
     kmfree(private, sizeof(struct procfs_private));
   return 0;
@@ -592,7 +598,8 @@ static int procfs_close(void *private) {
 /* ------------------------------------------------------------------ */
 /* procfs_stat                                                         */
 /* ------------------------------------------------------------------ */
-static int procfs_stat(const char *path, uint8_t *st) {
+static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
+  (void)fs_data;
   const char *p = path;
   while (*p == '/') p++;
 
@@ -713,7 +720,8 @@ static int procfs_stat(const char *path, uint8_t *st) {
 /* ------------------------------------------------------------------ */
 /* procfs_fstat                                                        */
 /* ------------------------------------------------------------------ */
-static int procfs_fstat(void *private, uint8_t *st) {
+static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
+  (void)fs_data;
   struct procfs_private *priv = (struct procfs_private *)private;
   memset(st, 0, 128);
   uint64_t dev = 4;
@@ -756,7 +764,9 @@ static int procfs_fstat(void *private, uint8_t *st) {
 /* ------------------------------------------------------------------ */
 /* procfs_readdir                                                      */
 /* ------------------------------------------------------------------ */
-static int procfs_readdir(void *private, char *ubuf, unsigned int count, int64_t *offset) {
+static int procfs_readdir(void *fs_data, void *private, char *ubuf,
+                          unsigned int count, int64_t *offset) {
+  (void)fs_data;
   struct procfs_private *priv = (struct procfs_private *)private;
   if (!priv) return -1;
 
@@ -852,12 +862,14 @@ done:
 /* ------------------------------------------------------------------ */
 /* procfs stubs                                                        */
 /* ------------------------------------------------------------------ */
-static int procfs_mkdir(const char *path, int mode) {
+static int procfs_mkdir(void *fs_data, const char *path, int mode) {
+  (void)fs_data;
   (void)path; (void)mode;
   return -30; /* -EROFS */
 }
 
-static int procfs_unlink(const char *path) {
+static int procfs_unlink(void *fs_data, const char *path) {
+  (void)fs_data;
   (void)path;
   return -30; /* -EROFS */
 }
@@ -865,7 +877,9 @@ static int procfs_unlink(const char *path) {
 /* ------------------------------------------------------------------ */
 /* procfs_readlink                                                     */
 /* ------------------------------------------------------------------ */
-static int procfs_readlink(const char *path, char *buf, int bufsiz) {
+static int procfs_readlink(void *fs_data, const char *path, char *buf,
+                           int bufsiz) {
+  (void)fs_data;
   const char *p = path;
   while (*p == '/') p++;
 

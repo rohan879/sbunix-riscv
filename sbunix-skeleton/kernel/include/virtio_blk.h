@@ -190,11 +190,15 @@ struct virtio_blk_dev {
     uint16_t            last_used_idx;
 
     uint64_t capacity;   /* in 512-byte sectors */
+    int present;
 };
 
 int  virtio_blk_init(void);
 int  virtio_blk_rw(uint64_t sector, void *buf, int write);
+int  virtio_blk_rw_on_dev(int dev_index, uint64_t sector, void *buf, int write);
 void virtio_blk_test(void);
 uint64_t virtio_blk_capacity(void);
+uint64_t virtio_blk_capacity_on_dev(int dev_index);
+int virtio_blk_count(void);
 
 #endif

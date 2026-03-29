@@ -18,51 +18,51 @@ check() {
 
 echo === C Binary Tests ===
 echo "=== Running proctest ==="
-/bin/proctest
+/test/bin/proctest
 echo "=== Running schedtest ==="
-/bin/schedtest
+/test/bin/schedtest
 echo "=== Running sigpipetest ==="
-/bin/sigpipetest
+/test/bin/sigpipetest
 echo "=== Running fstest ==="
-/bin/fstest
+/test/bin/fstest
 echo "=== Running swaptest ==="
-/bin/swaptest
+/test/bin/swaptest
 echo "=== Running libc-test ==="
-/bin/libc-test
+/test/bin/libc-test
 echo "=== Running alarmtest ==="
-/bin/alarmtest
+/test/bin/alarmtest
 echo "=== Running segvtest ==="
-/bin/segvtest
+/test/bin/segvtest
 echo "=== Running fdiotest ==="
-/bin/fdiotest
+/test/bin/fdiotest
 echo "=== Running sigtest ==="
-/bin/sigtest
+/test/bin/sigtest
 echo "=== Running sighandtest ==="
-/bin/sighandtest
+/test/bin/sighandtest
 echo "=== Running dirtest ==="
-/bin/dirtest
+/test/bin/dirtest
 echo "=== Running procfstest ==="
-/bin/procfstest
+/test/bin/procfstest
 echo "=== Running cowtest ==="
-/bin/cowtest
+/test/bin/cowtest
 echo "=== Running lazytest ==="
-/bin/lazytest
+/test/bin/lazytest
 echo "=== Running pgrptest ==="
-/bin/pgrptest
+/test/bin/pgrptest
 echo "=== Running symlinktest ==="
-/bin/symlinktest
+/test/bin/symlinktest
 echo "=== Running clocktest ==="
-/bin/clocktest
+/test/bin/clocktest
 echo "=== Running exectest ==="
-/bin/exectest
+/test/bin/exectest
 echo "=== Running posixtest ==="
-/bin/posixtest
+/test/bin/posixtest
 echo "=== Running libxtest ==="
-/bin/libxtest
+/test/bin/libxtest
 echo "=== Running mmaptest ==="
-/bin/mmaptest
+/test/bin/mmaptest
 echo "=== Running cowstresstest ==="
-/bin/cowstresstest
+/test/bin/cowstresstest
 echo === C Binary Tests Done ===
 
 echo "=== Shell Regression Tests ==="

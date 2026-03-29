@@ -447,6 +447,19 @@ void vma_free_all(struct proc *p) {
   p->vma_list = NULL;
 }
 
+static int pa_is_valid_page(uint64_t pa) {
+  return pa != 0 &&
+         (pa % PAGE_SIZE) == 0 &&
+         pa >= 0x80000000UL &&
+         pa < PHYSTOP;
+}
+
+static int pa_is_valid_superpage(uint64_t pa) {
+  return pa_is_valid_page(pa) &&
+         IS_SUPERPAGE_ALIGNED(pa) &&
+         pa + SUPERPAGE_SIZE <= PHYSTOP;
+}
+
 /* Recursively free page-table pages and user leaf pages in a sub-tree.
  * Kernel-only leaf entries (no PTE_U) are skipped so MMIO and kernel
  * RAM are never kfree'd.  Page-table pages themselves are always freed.
@@ -459,24 +472,33 @@ static void freewalk_level(pagetable_t pt, int level) {
     if (PTE_IS_SWAPPED(pte)) {
       swap_free(PTE_SWAP_SLOT(pte));
       pt[i] = 0;
+    } else if (pte & PTE_U) {
+      /* User leaf PTEs can legally have no R/W/X bits (for example after
+       * mprotect(PROT_NONE)). Treat them as leaves before the non-leaf case. */
+      uint64_t pa = PTE2PA(pte);
+      if (level == 1) {
+        if (pa_is_valid_superpage(pa))
+          kfree_super((void *)pa);
+      } else if (pa_is_valid_page(pa)) {
+        kfree((void *)pa);
+      }
+      pt[i] = 0;
     } else if (!(pte & (PTE_R | PTE_W | PTE_X))) {
-      /* Non-leaf PTE: points to next-level page table page */
+       /* Non-leaf PTE: points to next-level page table page.
+        * Guard against corrupted page table pointers (e.g., PPN==0 or
+        * values outside physical RAM). If the child pagetable PA is
+        * invalid we log and detach the entry rather than attempting
+        * to recurse into it and crash the kernel. */
       pagetable_t child = (pagetable_t)PTE2PA(pte);
-      if (!child) { pt[i] = 0; continue; } /* guard against corrupt PPN=0 */
+      if (!pa_is_valid_page((uint64_t)child)) {
+        printk("vm: skipping invalid child pagetable pte=0x%lx pa=0x%lx level=%d\n",
+               pte, (uint64_t)child, level);
+        pt[i] = 0;
+        continue;
+      }
       if (level > 0)
         freewalk_level(child, level - 1);
       kfree((void *)child);
-      pt[i] = 0;
-    } else if (pte & PTE_U) {
-      /* User leaf PTE: free the physical page.
-       * Skip kernel-only leaves (UART/CLINT/PLIC/PCIe I/O pages mapped
-       * without PTE_U) — those are MMIO, not kalloc'd memory. */
-      uint64_t pa = PTE2PA(pte);
-      if (!pa) { pt[i] = 0; continue; } /* guard against corrupt PPN=0 */
-      if (level == 1)
-        kfree_super((void *)pa);
-      else
-        kfree((void *)pa);
       pt[i] = 0;
     }
     /* Kernel-only leaf entries (no PTE_U): leave them, they point to MMIO */
@@ -502,18 +524,22 @@ void proc_freepagetable(pagetable_t pagetable) {
       if (kernel_L1 && user_L1[j] == kernel_L1[j]) {
         user_L1[j] = 0; /* shared MMIO — detach */
       } else if (user_L1[j] & PTE_V) {
-        /* User-owned entry — free recursively */
-        if (!(user_L1[j] & (PTE_R | PTE_W | PTE_X))) {
+        /* User-owned entry — free recursively. A user leaf may have no R/W/X
+         * bits after mprotect(PROT_NONE), so handle PTE_U before non-leaf. */
+        if (user_L1[j] & PTE_U) {
+          uint64_t pa = PTE2PA(user_L1[j]);
+          if (pa_is_valid_superpage(pa))
+            kfree_super((void *)pa);
+        } else if (!(user_L1[j] & (PTE_R | PTE_W | PTE_X))) {
           /* Non-leaf: recurse into level-0 table */
           pagetable_t child = (pagetable_t)PTE2PA(user_L1[j]);
-          if (child) {
+          if (pa_is_valid_page((uint64_t)child)) {
             freewalk_level(child, 0);
             kfree((void *)child);
+          } else {
+            printk("vm: skipping invalid L1 child pagetable pte=0x%lx pa=0x%lx\n",
+                   user_L1[j], (uint64_t)child);
           }
-        } else if (user_L1[j] & PTE_U) {
-          /* User leaf (super page) */
-          uint64_t pa = PTE2PA(user_L1[j]);
-          if (pa) kfree_super((void *)pa);
         }
         user_L1[j] = 0;
       } else if (PTE_IS_SWAPPED(user_L1[j])) {

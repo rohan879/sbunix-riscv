@@ -244,7 +244,8 @@ struct ramfs_private {
 #define RAMFS_O_TRUNC   0x200
 #define RAMFS_O_APPEND  0x400
 
-static int ramfs_open(const char *path, int flags, void **private) {
+static int ramfs_open(void *fs_data, const char *path, int flags, void **private) {
+  (void)fs_data;
   struct ramfs_inode *ino = ramfs_walk(path);
 
   if (!ino && (flags & RAMFS_O_CREAT)) {
@@ -288,7 +289,9 @@ static int ramfs_open(const char *path, int flags, void **private) {
   return 0;
 }
 
-static int64_t ramfs_read(void *private, char *buf, uint64_t count, int64_t *offset) {
+static int64_t ramfs_read(void *fs_data, void *private, char *buf,
+                          uint64_t count, int64_t *offset) {
+  (void)fs_data;
   struct ramfs_private *priv = (struct ramfs_private *)private;
   if (!priv || !priv->inode) return -1;
   if (priv->inode->type != RAMFS_FILE)
@@ -318,7 +321,9 @@ static int64_t ramfs_read(void *private, char *buf, uint64_t count, int64_t *off
   return (int64_t)total;
 }
 
-static int64_t ramfs_write(void *private, const char *buf, uint64_t count, int64_t *offset) {
+static int64_t ramfs_write(void *fs_data, void *private, const char *buf,
+                           uint64_t count, int64_t *offset) {
+  (void)fs_data;
   struct ramfs_private *priv = (struct ramfs_private *)private;
   if (!priv || !priv->inode || priv->inode->type != RAMFS_FILE)
     return -1;
@@ -350,7 +355,8 @@ static int64_t ramfs_write(void *private, const char *buf, uint64_t count, int64
   return (int64_t)total;
 }
 
-static int ramfs_close(void *private) {
+static int ramfs_close(void *fs_data, void *private) {
+  (void)fs_data;
   if (private)
     kmfree(private, sizeof(struct ramfs_private));
   return 0;
@@ -380,21 +386,25 @@ static void ramfs_fill_stat(uint8_t *st, struct ramfs_inode *ino) {
   memcpy(st + 64, &blks, 8);     /* st_blocks */
 }
 
-static int ramfs_fstat(void *private, uint8_t *st) {
+static int ramfs_fstat(void *fs_data, void *private, uint8_t *st) {
+  (void)fs_data;
   struct ramfs_private *priv = (struct ramfs_private *)private;
   if (!priv || !priv->inode) return -1;
   ramfs_fill_stat(st, priv->inode);
   return 0;
 }
 
-static int ramfs_stat(const char *path, uint8_t *st) {
+static int ramfs_stat(void *fs_data, const char *path, uint8_t *st) {
+  (void)fs_data;
   struct ramfs_inode *ino = ramfs_walk(path);
   if (!ino) return -2; /* -ENOENT */
   ramfs_fill_stat(st, ino);
   return 0;
 }
 
-static int ramfs_readdir(void *private, char *ubuf, unsigned int count, int64_t *offset) {
+static int ramfs_readdir(void *fs_data, void *private, char *ubuf,
+                         unsigned int count, int64_t *offset) {
+  (void)fs_data;
   struct ramfs_private *priv = (struct ramfs_private *)private;
   if (!priv || !priv->inode || priv->inode->type != RAMFS_DIR)
     return -1;
@@ -443,7 +453,8 @@ done:
   return (int)written;
 }
 
-static int ramfs_mkdir(const char *path, int mode) {
+static int ramfs_mkdir(void *fs_data, const char *path, int mode) {
+  (void)fs_data;
   /* Check if it already exists */
   if (ramfs_walk(path))
     return -17; /* -EEXIST */
@@ -466,7 +477,8 @@ static int ramfs_mkdir(const char *path, int mode) {
   return 0;
 }
 
-static int ramfs_unlink(const char *path) {
+static int ramfs_unlink(void *fs_data, const char *path) {
+  (void)fs_data;
   const char *basename;
   struct ramfs_inode *parent = ramfs_walk_parent(path, &basename);
   if (!parent) return -2;
@@ -482,7 +494,8 @@ static int ramfs_unlink(const char *path) {
   return 0;
 }
 
-static int ramfs_rmdir(const char *path) {
+static int ramfs_rmdir(void *fs_data, const char *path) {
+  (void)fs_data;
   const char *basename;
   struct ramfs_inode *parent = ramfs_walk_parent(path, &basename);
   if (!parent) return -2;
@@ -499,7 +512,9 @@ static int ramfs_rmdir(const char *path) {
   return 0;
 }
 
-static int ramfs_rename(const char *oldpath, const char *newpath) {
+static int ramfs_rename(void *fs_data, const char *oldpath,
+                        const char *newpath) {
+  (void)fs_data;
   /* Find old entry */
   const char *old_base;
   struct ramfs_inode *old_parent = ramfs_walk_parent(oldpath, &old_base);

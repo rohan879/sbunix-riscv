@@ -46,17 +46,19 @@ void forkret(void) {
  * Returns the fd number or -1 on failure. */
 static int kern_open_console(void) {
   const char *relpath;
-  struct vfs_ops *ops = vfs_lookup_mount("/dev/console", &relpath);
+  struct mount *mnt = vfs_lookup_mount_entry("/dev/console", &relpath);
+  struct vfs_ops *ops = mnt ? mnt->ops : NULL;
   if (!ops || !ops->open) return -1;
   void *priv = NULL;
-  int ret = ops->open(relpath, 2 /* O_RDWR */, &priv);
+  int ret = ops->open(mnt->fs_data, relpath, 2 /* O_RDWR */, &priv);
   if (ret < 0) return ret;
   struct open_file *f = vfs_alloc_file();
   if (!f) {
-    if (ops->close) ops->close(priv);
+    if (ops->close) ops->close(mnt->fs_data, priv);
     return -12; /* -ENOMEM */
   }
   f->ops = ops;
+  f->fs_data = mnt->fs_data;
   f->private = priv;
   f->offset = 0;
   f->flags = 2; /* O_RDWR */
@@ -69,7 +71,7 @@ static int kern_open_console(void) {
     }
   }
   /* No free slot */
-  if (ops->close) ops->close(priv);
+  if (ops->close) ops->close(mnt->fs_data, priv);
   vfs_free_file(f);
   return -1;
 }

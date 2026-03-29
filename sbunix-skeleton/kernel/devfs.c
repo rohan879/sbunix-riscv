@@ -92,7 +92,8 @@ struct devfs_private {
 /* ------------------------------------------------------------------ */
 /* devfs_open                                                           */
 /* ------------------------------------------------------------------ */
-static int devfs_open(const char *path, int flags, void **private) {
+static int devfs_open(void *fs_data, const char *path, int flags, void **private) {
+  (void)fs_data;
   (void)flags;
 
   /* path is relative to /dev mount, e.g. "null", "zero", "console"
@@ -125,7 +126,9 @@ static int devfs_open(const char *path, int flags, void **private) {
 /* ------------------------------------------------------------------ */
 /* devfs_read                                                           */
 /* ------------------------------------------------------------------ */
-static int64_t devfs_read(void *private, char *buf, uint64_t count, int64_t *offset) {
+static int64_t devfs_read(void *fs_data, void *private, char *buf,
+                          uint64_t count, int64_t *offset) {
+  (void)fs_data;
   (void)offset;
   struct devfs_private *priv = (struct devfs_private *)private;
   if (!priv || !priv->dev || !priv->dev->read_fn)
@@ -136,7 +139,9 @@ static int64_t devfs_read(void *private, char *buf, uint64_t count, int64_t *off
 /* ------------------------------------------------------------------ */
 /* devfs_write                                                          */
 /* ------------------------------------------------------------------ */
-static int64_t devfs_write(void *private, const char *buf, uint64_t count, int64_t *offset) {
+static int64_t devfs_write(void *fs_data, void *private, const char *buf,
+                           uint64_t count, int64_t *offset) {
+  (void)fs_data;
   (void)offset;
   struct devfs_private *priv = (struct devfs_private *)private;
   if (!priv || !priv->dev || !priv->dev->write_fn)
@@ -147,7 +152,8 @@ static int64_t devfs_write(void *private, const char *buf, uint64_t count, int64
 /* ------------------------------------------------------------------ */
 /* devfs_close                                                          */
 /* ------------------------------------------------------------------ */
-static int devfs_close(void *private) {
+static int devfs_close(void *fs_data, void *private) {
+  (void)fs_data;
   if (private)
     kmfree(private, sizeof(struct devfs_private));
   return 0;
@@ -156,7 +162,8 @@ static int devfs_close(void *private) {
 /* ------------------------------------------------------------------ */
 /* devfs_fstat -- per-fd stat for open device files                     */
 /* ------------------------------------------------------------------ */
-static int devfs_fstat(void *private, uint8_t *st) {
+static int devfs_fstat(void *fs_data, void *private, uint8_t *st) {
+  (void)fs_data;
   struct devfs_private *priv = (struct devfs_private *)private;
   memset(st, 0, 128);
   uint64_t dev = 3; /* devfs device */
@@ -197,7 +204,8 @@ int devfs_is_tty(void *private) {
 /* ------------------------------------------------------------------ */
 /* devfs_stat                                                           */
 /* ------------------------------------------------------------------ */
-static int devfs_stat(const char *path, uint8_t *st) {
+static int devfs_stat(void *fs_data, const char *path, uint8_t *st) {
+  (void)fs_data;
   const char *name = path;
   while (*name == '/') name++;
 
@@ -239,7 +247,9 @@ static int devfs_stat(const char *path, uint8_t *st) {
 /* ------------------------------------------------------------------ */
 /* devfs_readdir                                                        */
 /* ------------------------------------------------------------------ */
-static int devfs_readdir(void *private, char *ubuf, unsigned int count, int64_t *offset) {
+static int devfs_readdir(void *fs_data, void *private, char *ubuf,
+                         unsigned int count, int64_t *offset) {
+  (void)fs_data;
   struct devfs_private *priv = (struct devfs_private *)private;
   if (!priv)
     return -1;
@@ -320,12 +330,14 @@ done:
 /* ------------------------------------------------------------------ */
 /* devfs stubs                                                          */
 /* ------------------------------------------------------------------ */
-static int devfs_mkdir(const char *path, int mode) {
+static int devfs_mkdir(void *fs_data, const char *path, int mode) {
+  (void)fs_data;
   (void)path; (void)mode;
   return -30; /* -EROFS */
 }
 
-static int devfs_unlink(const char *path) {
+static int devfs_unlink(void *fs_data, const char *path) {
+  (void)fs_data;
   (void)path;
   return -30; /* -EROFS */
 }

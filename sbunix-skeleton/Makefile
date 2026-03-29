@@ -19,9 +19,11 @@ USER_BIN := $(C_BIN) $(RS_BIN)
 # Split user binaries: test binaries only included in test builds
 # Exclude thirdparty dir - it contains os-test which has its own build system
 TEST_SRC_DIRS := $(filter-out tests/thirdparty,$(wildcard tests/*))
+TEST_BIN_NAMES := $(notdir $(TEST_SRC_DIRS))
+LEGACY_TEST_TARFS_TARGETS := $(addprefix build/rootfs/bin/,$(TEST_BIN_NAMES))
 ifdef BUILD_TESTS
-  USER_BIN += $(patsubst tests/%,build/rootfs/bin/%,$(TEST_SRC_DIRS))
   OS_TEST_MARKER := build/.os-test-built
+  TEST_TARGETS := $(patsubst tests/%,build/testfs/bin/%,$(TEST_SRC_DIRS))
 endif
 
 TIMEOUT ?= 600
@@ -41,6 +43,8 @@ endif
 
 DISK_SIZE ?= 16
 DISK_IMG  := build/disk.img
+TEST_DISK_SIZE ?= 128 # MODIFIED: added
+TEST_DISK_IMG  := build/test-disk.img # MODIFIED: added
 
 -include Makefile.local
 
@@ -77,8 +81,6 @@ zig-out/lib/libsbunix.a: $(wildcard kernel/*.zig) build.zig
 .SECONDEXPANSION:
 
 # MODIFIED: BEGIN added
-TEST_TARGETS := $(patsubst tests/%,build/rootfs/bin/%,$(TEST_SRC_DIRS))
-
 # Count total os-test source files at build time
 OS_TEST_TOTAL := $(shell find tests/thirdparty/sortix/os-test -name '*.c' 2>/dev/null | wc -l)
 
@@ -100,14 +102,24 @@ $(RS_BIN): build/rootfs/bin/%: $$(wildcard bin/%/*.rs) build/libc/crt.S.o build/
 	@mkdir -p $(@D)
 	rustc $(RUSTFLAGS) -C link-arg=build/libc/crt.S.o -C link-arg=build/libc.a bin/$*/$*.rs -o $@
 
-# MODIFIED: added
-$(TEST_TARGETS): build/rootfs/bin/%: build/libc/crt.S.o build/libc.a
+# MODIFIED: BEGIN added
+# Prepare writable test filesystem staging area
+build/testfs/.dirs:
+	@mkdir -p build/testfs/bin build/testfs/var/log/os-test
+	@touch $@
+
+ifdef BUILD_TESTS
+$(TEST_TARGETS): build/testfs/bin/%: build/libc/crt.S.o build/libc.a | build/testfs/.dirs
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
+endif
 
-# MODIFIED: BEGIN added
 # Prepare base rootfs before building os-tests
 build/rootfs/.prepared: $(USER_BIN)
+	mkdir -p build/rootfs
+	rm -rf build/rootfs/bin/os-test build/rootfs/os-test-manifest \
+		build/rootfs/os-test-expect build/rootfs/var/log/os-test
+	rm -f $(LEGACY_TEST_TARFS_TARGETS)
 	cp -a rootfs/. build/rootfs/ # MODIFIED: originally in tarfs
 	ln -sf sbush build/rootfs/bin/sh # MODIFIED: added
 	ln -sf test build/rootfs/bin/[ # MODIFIED: added
@@ -117,30 +129,32 @@ ifdef BUILD_TESTS
 endif
 	touch $@
 
-# Build os-tests into prepared rootfs (with parallel support)
+# Build os-tests into prepared testfs (with parallel support)
 ifdef BUILD_TESTS
-$(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared
+$(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/testfs/.dirs $(TEST_TARGETS)
 	@echo "=== Building os-test suite ==="
 	$(MAKE) -f tools/os-test.mk SBUNIX_ROOT=$(CURDIR) -j16 install
-	# Copy test manifest to rootfs for fast runtime discovery
+	# Copy test manifest and expected outputs into testfs
 	@if [ -f build/os-test-out/sbunix/test-manifest.txt ]; then \
-		cp build/os-test-out/sbunix/test-manifest.txt build/rootfs/bin/os-test-manifest; \
+		cp build/os-test-out/sbunix/test-manifest.txt build/testfs/os-test-manifest; \
 	fi
-	# Create results directory and copy .out files for failed tests
-	@mkdir -p build/rootfs/var/log/os-test
+	@mkdir -p build/testfs/os-test-expect
+	@cp -a tests/thirdparty/sortix/os-test/*.expect build/testfs/os-test-expect/
+	# Seed testfs with compile-time .out files for skipped tests
+	@mkdir -p build/testfs/var/log/os-test
 	@if [ -d build/os-test-out/sbunix ]; then \
 		find build/os-test-out/sbunix -name '*.out' -type f | while read f; do \
 			rel=$$(echo "$$f" | sed 's|build/os-test-out/sbunix/||'); \
-			mkdir -p build/rootfs/var/log/os-test/$$(dirname "$$rel"); \
-			cp "$$f" build/rootfs/var/log/os-test/"$$rel"; \
+			mkdir -p build/testfs/var/log/os-test/$$(dirname "$$rel"); \
+			cp "$$f" build/testfs/var/log/os-test/"$$rel"; \
 		done; \
-		echo "Copied .out files for failed tests to rootfs"; \
+		echo "Copied .out files for failed tests to testfs"; \
 	fi
 	@touch $@
 endif
 # MODIFIED: END added
 
-build/tarfs.o: build/rootfs/.prepared $(OS_TEST_MARKER) # MODIFIED: originally just : $(USER_BIN)
+build/tarfs.o: build/rootfs/.prepared # MODIFIED: originally just : $(USER_BIN)
 	tar cf build/rootfs.tar -C build/rootfs .
 	cd build && $(OBJCOPY) -I binary -O elf64-littleriscv -B riscv \
 		--rename-section .data=.tarfs \
@@ -161,13 +175,42 @@ build/tools/mkfs: tools/mkfs.c
 	@mkdir -p $(@D)
 	gcc -Wall -o $@ $<
 
+# MODIFIED: added
+build/tools/mkext2img: tools/mkext2img.c
+	@mkdir -p $(@D)
+	gcc -Wall -Werror -O2 -o $@ $<
+
 $(DISK_IMG): build/tools/mkfs
 	build/tools/mkfs $@ $(DISK_SIZE)
 
-qemu: build/kernel.elf $(DISK_IMG)
+# MODIFIED: BEGIN added
+ifdef BUILD_TESTS
+build/testfs/.prepared: build/testfs/.dirs $(TEST_TARGETS) $(OS_TEST_MARKER)
+	@touch $@
+
+$(TEST_DISK_IMG): build/tools/mkext2img build/testfs/.prepared
+	@size_mb=$(TEST_DISK_SIZE); \
+	used_mb=$$(du -sm build/testfs | cut -f1); \
+	auto_mb=$$((used_mb + used_mb / 2 + 64)); \
+	if [ $$auto_mb -gt $$size_mb ]; then \
+		size_mb=$$auto_mb; \
+	fi; \
+	echo "Building test disk image ($${size_mb}MB for $${used_mb}MB staged testfs)"; \
+	build/tools/mkext2img $@ $$size_mb build/testfs
+endif
+
+ifdef BUILD_TESTS
+QEMU_TEST_DRIVE_ARGS := -drive file=$(TEST_DISK_IMG),format=raw,if=none,id=hd1 \
+	-device virtio-blk-pci-non-transitional,drive=hd1
+endif
+# MODIFIED: END added
+
+# MODIFIED: added " $(if $(BUILD_TESTS),$(TEST_DISK_IMG))", "$(QEMU_TEST_DRIVE_ARGS) \"
+qemu: build/kernel.elf $(DISK_IMG) $(if $(BUILD_TESTS),$(TEST_DISK_IMG))
 	qemu-system-riscv64 -machine virt -bios default -kernel $< \
 		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-pci-non-transitional,drive=hd0 \
+		$(QEMU_TEST_DRIVE_ARGS) \
 		-device virtio-gpu-pci \
 		-device virtio-net-pci-non-transitional,netdev=net0 \
 		-netdev user,id=net0 \

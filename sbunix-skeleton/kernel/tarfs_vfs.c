@@ -65,7 +65,8 @@ static int tarfs_is_dir(const char *path) {
 /* ------------------------------------------------------------------ */
 /* tarfs_open                                                           */
 /* ------------------------------------------------------------------ */
-static int tarfs_open(const char *path, int flags, void **private) {
+static int tarfs_open(void *fs_data, const char *path, int flags, void **private) {
+  (void)fs_data;
   char tarpath[256];
   to_tarfs_path(path, tarpath);
 
@@ -123,7 +124,9 @@ static int tarfs_open(const char *path, int flags, void **private) {
 /* ------------------------------------------------------------------ */
 /* tarfs_read                                                           */
 /* ------------------------------------------------------------------ */
-static int64_t tarfs_read(void *private, char *buf, uint64_t count, int64_t *offset) {
+static int64_t tarfs_read(void *fs_data, void *private, char *buf,
+                          uint64_t count, int64_t *offset) {
+  (void)fs_data;
   struct tarfs_private *priv = (struct tarfs_private *)private;
   if (!priv) return -1;
   if (priv->is_dir) return -21; /* -EISDIR */
@@ -143,7 +146,9 @@ static int64_t tarfs_read(void *private, char *buf, uint64_t count, int64_t *off
 /* ------------------------------------------------------------------ */
 /* tarfs_write                                                          */
 /* ------------------------------------------------------------------ */
-static int64_t tarfs_write(void *private, const char *buf, uint64_t count, int64_t *offset) {
+static int64_t tarfs_write(void *fs_data, void *private, const char *buf,
+                           uint64_t count, int64_t *offset) {
+  (void)fs_data;
   (void)private; (void)buf; (void)count; (void)offset;
   return -30; /* -EROFS */
 }
@@ -151,7 +156,8 @@ static int64_t tarfs_write(void *private, const char *buf, uint64_t count, int64
 /* ------------------------------------------------------------------ */
 /* tarfs_close                                                          */
 /* ------------------------------------------------------------------ */
-static int tarfs_close(void *private) {
+static int tarfs_close(void *fs_data, void *private) {
+  (void)fs_data;
   if (private)
     kmfree(private, sizeof(struct tarfs_private));
   return 0;
@@ -160,7 +166,8 @@ static int tarfs_close(void *private) {
 /* ------------------------------------------------------------------ */
 /* tarfs_fstat                                                          */
 /* ------------------------------------------------------------------ */
-static int tarfs_fstat(void *private, uint8_t *st) {
+static int tarfs_fstat(void *fs_data, void *private, uint8_t *st) {
+  (void)fs_data;
   struct tarfs_private *priv = (struct tarfs_private *)private;
   if (!priv) return -1;
 
@@ -202,7 +209,8 @@ static int tarfs_fstat(void *private, uint8_t *st) {
 /* ------------------------------------------------------------------ */
 /* tarfs_stat                                                           */
 /* ------------------------------------------------------------------ */
-static int tarfs_stat(const char *path, uint8_t *st) {
+static int tarfs_stat(void *fs_data, const char *path, uint8_t *st) {
+  (void)fs_data;
   char tarpath[256];
   to_tarfs_path(path, tarpath);
 
@@ -270,7 +278,9 @@ static int tarfs_stat(const char *path, uint8_t *st) {
 /* ------------------------------------------------------------------ */
 /* tarfs_readdir                                                        */
 /* ------------------------------------------------------------------ */
-static int tarfs_readdir(void *private, char *ubuf, unsigned int count, int64_t *offset) {
+static int tarfs_readdir(void *fs_data, void *private, char *ubuf,
+                         unsigned int count, int64_t *offset) {
+  (void)fs_data;
   struct tarfs_private *priv = (struct tarfs_private *)private;
   if (!priv || !priv->is_dir)
     return -1;
@@ -388,7 +398,8 @@ done:
 /* ------------------------------------------------------------------ */
 /* tarfs_readlink                                                       */
 /* ------------------------------------------------------------------ */
-static int tarfs_readlink(const char *path, char *buf, int bufsiz) {
+static int tarfs_readlink(void *fs_data, const char *path, char *buf, int bufsiz) {
+  (void)fs_data;
   char tarpath[256];
   to_tarfs_path(path, tarpath);
 
@@ -409,12 +420,14 @@ static int tarfs_readlink(const char *path, char *buf, int bufsiz) {
 /* ------------------------------------------------------------------ */
 /* tarfs_mkdir / tarfs_unlink                                           */
 /* ------------------------------------------------------------------ */
-static int tarfs_mkdir(const char *path, int mode) {
+static int tarfs_mkdir(void *fs_data, const char *path, int mode) {
+  (void)fs_data;
   (void)path; (void)mode;
   return -30; /* -EROFS */
 }
 
-static int tarfs_unlink(const char *path) {
+static int tarfs_unlink(void *fs_data, const char *path) {
+  (void)fs_data;
   (void)path;
   return -30; /* -EROFS */
 }

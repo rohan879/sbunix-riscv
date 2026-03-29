@@ -139,7 +139,8 @@ static int fmt_dec64(char *buf, uint64_t val) {
 /* ------------------------------------------------------------------ */
 /* sysfs_open                                                          */
 /* ------------------------------------------------------------------ */
-static int sysfs_open(const char *path, int flags, void **private) {
+static int sysfs_open(void *fs_data, const char *path, int flags, void **private) {
+  (void)fs_data;
   (void)flags;
   const char *p = path;
   while (*p == '/') p++;
@@ -260,7 +261,9 @@ static int sysfs_open(const char *path, int flags, void **private) {
 /* ------------------------------------------------------------------ */
 /* sysfs_read                                                          */
 /* ------------------------------------------------------------------ */
-static int64_t sysfs_read(void *private, char *buf, uint64_t count, int64_t *offset) {
+static int64_t sysfs_read(void *fs_data, void *private, char *buf,
+                          uint64_t count, int64_t *offset) {
+  (void)fs_data;
   struct sysfs_private *priv = (struct sysfs_private *)private;
   if (!priv) return 0;
 
@@ -282,15 +285,17 @@ static int64_t sysfs_read(void *private, char *buf, uint64_t count, int64_t *off
 /* ------------------------------------------------------------------ */
 /* sysfs_write                                                         */
 /* ------------------------------------------------------------------ */
-static int64_t sysfs_write(void *private, const char *buf, uint64_t count, int64_t *offset) {
-  (void)private; (void)buf; (void)count; (void)offset;
+static int64_t sysfs_write(void *fs_data, void *private, const char *buf,
+                           uint64_t count, int64_t *offset) {
+  (void)fs_data; (void)private; (void)buf; (void)count; (void)offset;
   return -30; /* -EROFS */
 }
 
 /* ------------------------------------------------------------------ */
 /* sysfs_close                                                         */
 /* ------------------------------------------------------------------ */
-static int sysfs_close(void *private) {
+static int sysfs_close(void *fs_data, void *private) {
+  (void)fs_data;
   if (private)
     kmfree(private, sizeof(struct sysfs_private));
   return 0;
@@ -299,7 +304,8 @@ static int sysfs_close(void *private) {
 /* ------------------------------------------------------------------ */
 /* sysfs_stat                                                          */
 /* ------------------------------------------------------------------ */
-static int sysfs_stat(const char *path, uint8_t *st) {
+static int sysfs_stat(void *fs_data, const char *path, uint8_t *st) {
+  (void)fs_data;
   const char *p = path;
   while (*p == '/') p++;
 
@@ -407,7 +413,8 @@ static int sysfs_stat(const char *path, uint8_t *st) {
 /* ------------------------------------------------------------------ */
 /* sysfs_fstat                                                         */
 /* ------------------------------------------------------------------ */
-static int sysfs_fstat(void *private, uint8_t *st) {
+static int sysfs_fstat(void *fs_data, void *private, uint8_t *st) {
+  (void)fs_data;
   struct sysfs_private *priv = (struct sysfs_private *)private;
   memset(st, 0, 128);
   uint64_t dev = 5;
@@ -445,7 +452,9 @@ static int sysfs_fstat(void *private, uint8_t *st) {
 /* ------------------------------------------------------------------ */
 /* sysfs_readdir                                                       */
 /* ------------------------------------------------------------------ */
-static int sysfs_readdir(void *private, char *ubuf, unsigned int count, int64_t *offset) {
+static int sysfs_readdir(void *fs_data, void *private, char *ubuf,
+                         unsigned int count, int64_t *offset) {
+  (void)fs_data;
   struct sysfs_private *priv = (struct sysfs_private *)private;
   if (!priv) return -1;
 
@@ -533,12 +542,14 @@ done:
 /* ------------------------------------------------------------------ */
 /* sysfs stubs                                                         */
 /* ------------------------------------------------------------------ */
-static int sysfs_mkdir(const char *path, int mode) {
+static int sysfs_mkdir(void *fs_data, const char *path, int mode) {
+  (void)fs_data;
   (void)path; (void)mode;
   return -30; /* -EROFS */
 }
 
-static int sysfs_unlink(const char *path) {
+static int sysfs_unlink(void *fs_data, const char *path) {
+  (void)fs_data;
   (void)path;
   return -30; /* -EROFS */
 }

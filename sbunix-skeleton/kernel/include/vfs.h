@@ -8,24 +8,28 @@ struct stat;
 struct dirent;
 
 struct vfs_ops {
-  int (*open)(const char *path, int flags, void **private);
-  int64_t (*read)(void *private, char *buf, uint64_t count, int64_t *offset);
-  int64_t (*write)(void *private, const char *buf, uint64_t count, int64_t *offset);
-  int (*close)(void *private);
-  int (*stat)(const char *path, uint8_t *st);
-  int (*fstat)(void *private, uint8_t *st);  /* per-fd stat */
-  int (*readdir)(void *private, char *buf, unsigned int count, int64_t *offset);
-  int (*mkdir)(const char *path, int mode);
-  int (*unlink)(const char *path);
-  int (*rmdir)(const char *path);
-  int (*symlink)(const char *target, const char *linkpath);
-  int (*readlink)(const char *path, char *buf, int bufsiz);
-  int (*rename)(const char *oldpath, const char *newpath);
+  int (*open)(void *fs_data, const char *path, int flags, void **private);
+  int64_t (*read)(void *fs_data, void *private, char *buf, uint64_t count,
+                  int64_t *offset);
+  int64_t (*write)(void *fs_data, void *private, const char *buf,
+                   uint64_t count, int64_t *offset);
+  int (*close)(void *fs_data, void *private);
+  int (*stat)(void *fs_data, const char *path, uint8_t *st);
+  int (*fstat)(void *fs_data, void *private, uint8_t *st);  /* per-fd stat */
+  int (*readdir)(void *fs_data, void *private, char *buf, unsigned int count,
+                 int64_t *offset);
+  int (*mkdir)(void *fs_data, const char *path, int mode);
+  int (*unlink)(void *fs_data, const char *path);
+  int (*rmdir)(void *fs_data, const char *path);
+  int (*symlink)(void *fs_data, const char *target, const char *linkpath);
+  int (*readlink)(void *fs_data, const char *path, char *buf, int bufsiz);
+  int (*rename)(void *fs_data, const char *oldpath, const char *newpath);
 };
 
 /* Open file description -- stored in proc->ofile[] */
 struct open_file {
   struct vfs_ops *ops;
+  void *fs_data;
   void *private;
   int64_t offset;
   int flags;
@@ -44,6 +48,8 @@ struct mount {
   const char *path;     /* mount path prefix (e.g., "/", "/dev") */
   int path_len;
   struct vfs_ops *ops;
+  void *fs_data;
+  const char *fstype;
 };
 
 /* Maximum open file descriptions system-wide */
@@ -53,7 +59,9 @@ struct mount {
 struct open_file *vfs_alloc_file(void);
 void vfs_free_file(struct open_file *f);
 struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath);
-void vfs_register_mount(const char *path, struct vfs_ops *ops);
+struct mount *vfs_lookup_mount_entry(const char *path, const char **relpath);
+void vfs_register_mount(const char *path, struct vfs_ops *ops, void *fs_data,
+                        const char *fstype);
 int vfs_unregister_mount(const char *path);
 void vfs_init(void);
 int vfs_get_child_mounts(const char *dir, const char *names[], int max);

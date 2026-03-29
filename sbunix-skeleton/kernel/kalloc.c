@@ -179,10 +179,11 @@ void *kalloc_super(void) {
 // Free a 2MB contiguous block back to the free list.
 // pa must be 2MB-aligned.
 void kfree_super(void *pa) {
-    if (!IS_SUPERPAGE_ALIGNED((uint64_t)pa))
-        return;
-
     uint64_t base_pa = (uint64_t)pa;
+    if (!IS_SUPERPAGE_ALIGNED(base_pa))
+        return;
+    if (base_pa < 0x80000000UL || base_pa + SUPERPAGE_SIZE > PHYSTOP)
+        return;
     int base_idx = pa_to_index(base_pa);
 
     /* Check base refcount -- only free when it reaches 0 */

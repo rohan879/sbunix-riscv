@@ -9,7 +9,8 @@
 static struct mount mount_table[MAX_MOUNTS];
 static int num_mounts = 0;
 
-void vfs_register_mount(const char *path, struct vfs_ops *ops) {
+void vfs_register_mount(const char *path, struct vfs_ops *ops, void *fs_data,
+                        const char *fstype) {
   if (num_mounts >= MAX_MOUNTS) {
     printk("vfs: mount table full\n");
     return;
@@ -17,6 +18,8 @@ void vfs_register_mount(const char *path, struct vfs_ops *ops) {
   mount_table[num_mounts].path = path;
   mount_table[num_mounts].path_len = strlen(path);
   mount_table[num_mounts].ops = ops;
+  mount_table[num_mounts].fs_data = fs_data;
+  mount_table[num_mounts].fstype = fstype;
   num_mounts++;
 }
 
@@ -33,7 +36,7 @@ int vfs_unregister_mount(const char *path) {
 }
 
 /* Longest-prefix match on path.  Sets *relpath to the remainder. */
-struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath) {
+struct mount *vfs_lookup_mount_entry(const char *path, const char **relpath) {
   struct mount *best = NULL;
   int best_len = -1;
 
@@ -78,7 +81,12 @@ struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath) {
     }
   }
 
-  return best->ops;
+  return best;
+}
+
+struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath) {
+  struct mount *m = vfs_lookup_mount_entry(path, relpath);
+  return m ? m->ops : NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -156,7 +164,8 @@ int vfs_get_mount_info(int index, const char **path, const char **fstype) {
   struct mount *m = &mount_table[index];
   if (path) *path = m->path;
   if (fstype) {
-    if (m->ops == &tarfs_ops)       *fstype = "tarfs";
+    if (m->fstype)                  *fstype = m->fstype;
+    else if (m->ops == &tarfs_ops)  *fstype = "tarfs";
     else if (m->ops == &devfs_ops)  *fstype = "devfs";
     else if (m->ops == &procfs_ops) *fstype = "procfs";
     else if (m->ops == &ext2_ops)   *fstype = "ext2";
@@ -176,20 +185,19 @@ void vfs_init(void) {
   num_mounts = 0;
 
   /* Register devfs at /dev first (longer prefix wins) */
-  vfs_register_mount("/dev", &devfs_ops);
+  vfs_register_mount("/dev", &devfs_ops, NULL, "devfs");
   /* Register procfs at /proc */
-  vfs_register_mount("/proc", &procfs_ops);
+  vfs_register_mount("/proc", &procfs_ops, NULL, "procfs");
   /* Register sysfs at /sys */
-  vfs_register_mount("/sys", &sysfs_ops);
-  /* Register ext2 at /mnt (if mounted) */
-  extern int ext2_mounted_flag(void);
-  if (ext2_mounted_flag())
-    vfs_register_mount("/mnt", &ext2_ops);
+  vfs_register_mount("/sys", &sysfs_ops, NULL, "sysfs");
+  /* Register ext2 instances discovered at boot. */
+  extern int ext2_register_mounts(void);
+  ext2_register_mounts();
   /* Register ramfs at /tmp (writable in-memory filesystem) */
   ramfs_init();
-  vfs_register_mount("/tmp", &ramfs_ops);
+  vfs_register_mount("/tmp", &ramfs_ops, NULL, "ramfs");
   /* Register tarfs at / (root) */
-  vfs_register_mount("/", &tarfs_ops);
+  vfs_register_mount("/", &tarfs_ops, NULL, "tarfs");
 
   printk("vfs: initialized (/dev -> devfs, /proc -> procfs, /sys -> sysfs, /tmp -> ramfs, / -> tarfs)\n");
 }

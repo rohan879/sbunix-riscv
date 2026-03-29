@@ -42,6 +42,13 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+echo "==> Building test disk image..."
+make BUILD_TESTS=1 build/test-disk.img
+if [ $? -ne 0 ]; then
+    echo "FATAL: Test disk image build failed"
+    exit 1
+fi
+
 # --- Helper: run one QEMU boot, appending output to OUTPUT_FILE ---
 run_qemu_boot() {
     local label="$1"
@@ -53,6 +60,8 @@ run_qemu_boot() {
     qemu-system-riscv64 -machine virt -bios default -kernel build/kernel.elf \
         -drive file=build/disk.img,format=raw,if=none,id=hd0 \
         -device virtio-blk-pci-non-transitional,drive=hd0 \
+        -drive file=build/test-disk.img,format=raw,if=none,id=hd1 \
+        -device virtio-blk-pci-non-transitional,drive=hd1 \
         -device virtio-gpu-pci \
         -device virtio-net-pci-non-transitional,netdev=net0 \
         -netdev user,id=net0 \

@@ -155,7 +155,7 @@ static void close_ofile(struct proc *p, int fd) {
   if (f->refcount <= 0) {
     /* Last reference -- call VFS close if applicable */
     if (!f->is_pipe && f->ops && f->ops->close)
-      f->ops->close(f->private);
+      f->ops->close(f->fs_data, f->private);
     vfs_free_file(f);
   }
 }
@@ -744,11 +744,12 @@ static void resolve_path(const char *cwd, const char *path, char *out) {
 /* Check if a resolved path exists as a directory by trying to open it */
 static int vfs_is_dir(const char *path) {
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(path, &relpath);
+    struct mount *mnt = vfs_lookup_mount_entry(path, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops) return 0;
     /* Try stat to check if it's a directory */
     uint8_t st[128];
-    if (ops->stat(relpath, st) == 0) {
+    if (ops->stat(mnt->fs_data, relpath, st) == 0) {
         uint32_t mode;
         memcpy(&mode, st + 16, 4);
         return (mode & 0xF000) == 0x4000; /* S_IFDIR */
@@ -761,11 +762,12 @@ static int follow_symlinks(char *resolved, int maxdepth) {
     if (maxdepth <= 0) return -40; /* ELOOP */
 
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops || !ops->readlink) return 0; /* no readlink = not a symlink-capable fs */
 
     char target[256];
-    int ret = ops->readlink(relpath, target, sizeof(target) - 1);
+    int ret = ops->readlink(mnt->fs_data, relpath, target, sizeof(target) - 1);
     if (ret < 0) return 0; /* not a symlink, path is final */
     target[ret] = '\0';
 
@@ -1121,6 +1123,7 @@ static long sys_brk_handler(struct trapframe *tf) {
         if (new_rounded < old_rounded) {
             uvmunmap(current_proc->pagetable, new_rounded, old_rounded - new_rounded);
             vma_remove(current_proc, new_rounded, old_rounded);
+            sfence_vma();
         }
         current_proc->sz = new_brk;
         return (long)new_brk;
@@ -1199,7 +1202,7 @@ static long sys_write_handler(struct trapframe *tf) {
         /* O_APPEND: seek to end of file before each write */
         if ((f->flags & 02000) && f->ops->fstat) {
             uint8_t st[128];
-            if (f->ops->fstat(f->private, st) == 0) {
+            if (f->ops->fstat(f->fs_data, f->private, st) == 0) {
                 int64_t fsize;
                 memcpy(&fsize, st + 48, 8);
                 f->offset = fsize;
@@ -1213,7 +1216,8 @@ static long sys_write_handler(struct trapframe *tf) {
             if (copyin(current_proc->pagetable, kbuf, ubuf + total, chunk) < 0) {
                 return (total > 0) ? (long)total : (long)-14;
             }
-            int64_t ret = f->ops->write(f->private, kbuf, chunk, &f->offset);
+            int64_t ret = f->ops->write(f->fs_data, f->private, kbuf, chunk,
+                                        &f->offset);
             if (ret < 0) { return (total > 0) ? (long)total : (long)ret; }
             total += ret;
             if ((uint64_t)ret < chunk) break;
@@ -1283,7 +1287,8 @@ pipe_eof:
         while ((size_t)total < len) {
             uint64_t chunk = len - total;
             if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
-            int64_t ret = f->ops->read(f->private, kbuf, chunk, &f->offset);
+            int64_t ret = f->ops->read(f->fs_data, f->private, kbuf, chunk,
+                                       &f->offset);
             if (ret < 0) { return (total > 0) ? (long)total : (long)ret; }
             if (ret == 0) break;
             if (copyout(current_proc->pagetable, ubuf + total, kbuf, ret) < 0) {
@@ -1318,13 +1323,14 @@ static long sys_openat_handler(struct trapframe *tf) {
     }
 
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops) {
         return (long)-2; /* -ENOENT */
     }
 
     void *priv = NULL;
-    int ret = ops->open(relpath, flags, &priv);
+    int ret = ops->open(mnt->fs_data, relpath, flags, &priv);
     if (ret < 0) {
         return (long)ret;
     } else {
@@ -1332,28 +1338,29 @@ static long sys_openat_handler(struct trapframe *tf) {
         if (vfs_is_dir(resolved)) {
             int accmode = flags & 3;
             if (accmode == 1 || accmode == 2) { /* O_WRONLY or O_RDWR */
-                if (ops->close) ops->close(priv);
+                if (ops->close) ops->close(mnt->fs_data, priv);
                 return (long)-21; /* -EISDIR */
             }
         }
         /* Reject non-directory with O_DIRECTORY (ENOTDIR = -20) */
 #define O_DIRECTORY 0200000
         if ((flags & O_DIRECTORY) && !vfs_is_dir(resolved)) {
-            if (ops->close) ops->close(priv);
+            if (ops->close) ops->close(mnt->fs_data, priv);
             return (long)-20;
         }
         struct open_file *f = vfs_alloc_file();
         if (!f) {
-            if (ops->close) ops->close(priv);
+            if (ops->close) ops->close(mnt->fs_data, priv);
             return (long)-12;
         }
         int fd = alloc_fd();
         if (fd < 0) {
-            if (ops->close) ops->close(priv);
+            if (ops->close) ops->close(mnt->fs_data, priv);
             vfs_free_file(f);
             return (long)-24; /* -EMFILE: too many open files */
         }
         f->ops = ops;
+        f->fs_data = mnt->fs_data;
         f->private = priv;
         f->offset = 0;
         f->flags = flags;
@@ -1481,10 +1488,11 @@ static long sys_chdir_handler(struct trapframe *tf) {
     resolve_symlinks_in_path(resolved, 8, 1);
     /* Check if path exists by trying stat */
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops) return (long)-2; /* -ENOENT */
     uint8_t st[128];
-    if (ops->stat(relpath, st) != 0) return (long)-2; /* -ENOENT */
+    if (ops->stat(mnt->fs_data, relpath, st) != 0) return (long)-2; /* -ENOENT */
     /* Path exists — check if it's a directory */
     uint32_t mode;
     memcpy(&mode, st + 16, 4);
@@ -1612,15 +1620,17 @@ static long sys_execve_handler(struct trapframe *tf) {
         /* VFS fallback: read first line from ext2 or other mounted fs */
         if (got == 0) {
             const char *vfs_relpath;
-            struct vfs_ops *vops = vfs_lookup_mount(resolved, &vfs_relpath);
+            struct mount *vmnt = vfs_lookup_mount_entry(resolved, &vfs_relpath);
+            struct vfs_ops *vops = vmnt ? vmnt->ops : NULL;
             if (vops && vops->open) {
                 void *vpriv = NULL;
-                if (vops->open(vfs_relpath, 0, &vpriv) >= 0) {
+                if (vops->open(vmnt->fs_data, vfs_relpath, 0, &vpriv) >= 0) {
                     /* File exists on VFS — mark as found even if read fails */
                     shebang_file_found = 1;
                     int64_t voff = 0;
                     if (vops->read) {
-                        int64_t nr = vops->read(vpriv, first_bytes, 255, &voff);
+                        int64_t nr = vops->read(vmnt->fs_data, vpriv,
+                                                first_bytes, 255, &voff);
                         if (nr > 0) {
                             for (int j = 0; j < (int)nr; j++) {
                                 if (first_bytes[j] == '\n' || first_bytes[j] == '\0') {
@@ -1632,7 +1642,7 @@ static long sys_execve_handler(struct trapframe *tf) {
                         }
                     }
                     first_bytes[got] = '\0';
-                    if (vops->close) vops->close(vpriv);
+                    if (vops->close) vops->close(vmnt->fs_data, vpriv);
                 }
             }
         }
@@ -2013,7 +2023,7 @@ static long sys_lseek_handler(struct trapframe *tf) {
         int64_t file_size = 0;
         if (f->ops && f->ops->fstat) {
             uint8_t stbuf[128];
-            if (f->ops->fstat(f->private, stbuf) == 0)
+            if (f->ops->fstat(f->fs_data, f->private, stbuf) == 0)
                 memcpy(&file_size, stbuf + 48, 8);
         }
         new_off = file_size + (int64_t)offset;
@@ -2050,7 +2060,7 @@ static long sys_fstat_handler(struct trapframe *tf) {
         return (long)0;
     } else if (f->ops && f->ops->fstat) {
         uint8_t kstat[128];
-        int ret = f->ops->fstat(f->private, kstat);
+        int ret = f->ops->fstat(f->fs_data, f->private, kstat);
         if (ret == 0) {
             if (copyout(current_proc->pagetable, tf->a1, kstat, 128) < 0) {
                 return (long)-14;
@@ -2106,10 +2116,11 @@ static long sys_newfstatat_handler(struct trapframe *tf) {
     }
 
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (ops && ops->stat) {
         uint8_t kstat[128];
-        int ret = ops->stat(relpath, kstat);
+        int ret = ops->stat(mnt->fs_data, relpath, kstat);
         if (ret == 0) {
             if (copyout(current_proc->pagetable, tf->a2, kstat, 128) < 0) {
                 return (long)-14;
@@ -2139,7 +2150,8 @@ static long sys_getdents64_handler(struct trapframe *tf) {
         }
         memset(kbuf, 0, 4096);
 
-        int ret = f->ops->readdir(f->private, kbuf, count, &f->offset);
+        int ret = f->ops->readdir(f->fs_data, f->private, kbuf, count,
+                                  &f->offset);
         if (ret < 0) {
             kfree(kbuf);
             return (long)(int64_t)ret;
@@ -2211,7 +2223,7 @@ static long sys_exit_handler(struct trapframe *tf) {
         current_proc->stopped_signal = 0;
         cleanup_proc_resources(current_proc);
         if (current_proc->pid == 1) {
-            ext2_sync(); /* flush filesystem before halt */
+            ext2_sync(NULL); /* flush filesystems before halt */
             printk("\nSystem halted (init exited with status %d).\n", status);
             register unsigned long a0 asm("a0") = 0;
             register unsigned long a1 asm("a1") = 0;
@@ -2273,13 +2285,13 @@ static long sys_exit_handler(struct trapframe *tf) {
 
 static long sys_fsync_handler(struct trapframe *tf) {
     (void)tf;
-    ext2_sync();
+    ext2_sync(NULL);
     return 0;
 }
 
 static long sys_sync_handler(struct trapframe *tf) {
     (void)tf;
-    ext2_sync();
+    ext2_sync(NULL);
     return 0;
 }
 
@@ -2298,7 +2310,7 @@ static long sys_reboot_handler(struct trapframe *tf) {
         return (long)-1; /* -EPERM */
 
     /* Flush filesystem before reboot/shutdown */
-    ext2_sync();
+    ext2_sync(NULL);
 
     if (cmd == REBOOT_CMD_RESTART) {
         printk("\nSystem rebooting...\n");
@@ -2389,7 +2401,8 @@ static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) 
                     uint64_t file_off = v->file_offset + (va - v->start);
                     int64_t foff = (int64_t)file_off;
                     if (v->file->ops && v->file->ops->write) {
-                        v->file->ops->write(v->file->private,
+                        v->file->ops->write(v->file->fs_data,
+                                            v->file->private,
                                             (char *)pa, PAGE_SIZE, &foff);
                     }
                 }
@@ -2742,10 +2755,11 @@ static long sys_faccessat_handler(struct trapframe *tf) {
     resolve_symlinks_in_path(resolved, 8, 1);
 
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (ops && ops->stat) {
         uint8_t st[128];
-        int ret = ops->stat(relpath, st);
+        int ret = ops->stat(mnt->fs_data, relpath, st);
         return (ret == 0) ? (long)0 : (long)-2;
     } else {
         return (long)-2;
@@ -2764,17 +2778,18 @@ static long sys_unlinkat_handler(struct trapframe *tf) {
         /* Resolve intermediate symlinks; do NOT follow final (unlink targets the link itself) */
         resolve_symlinks_in_path(resolved, 8, 0);
         const char *relpath;
-        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+        struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+        struct vfs_ops *ops = mnt ? mnt->ops : NULL;
         if (flags & 0x200) {
             if (ops && ops->rmdir) {
-                int ret = ops->rmdir(relpath);
+                int ret = ops->rmdir(mnt->fs_data, relpath);
                 return (long)(int64_t)ret;
             } else {
                 return (long)-30;
             }
         } else {
             if (ops && ops->unlink) {
-                int ret = ops->unlink(relpath);
+                int ret = ops->unlink(mnt->fs_data, relpath);
                 return (long)(int64_t)ret;
             } else {
                 return (long)-30;
@@ -2797,26 +2812,28 @@ static long sys_linkat_handler(struct trapframe *tf) {
 
     /* Both paths must be on ext2 (same filesystem) */
     const char *old_rel, *new_rel;
-    struct vfs_ops *old_ops = vfs_lookup_mount(old_resolved, &old_rel);
-    struct vfs_ops *new_ops = vfs_lookup_mount(new_resolved, &new_rel);
-    if (old_ops != new_ops)
+    struct mount *old_mnt = vfs_lookup_mount_entry(old_resolved, &old_rel);
+    struct mount *new_mnt = vfs_lookup_mount_entry(new_resolved, &new_rel);
+    struct vfs_ops *old_ops = old_mnt ? old_mnt->ops : NULL;
+    struct vfs_ops *new_ops = new_mnt ? new_mnt->ops : NULL;
+    if (old_ops != new_ops ||
+        (old_mnt && new_mnt && old_mnt->fs_data != new_mnt->fs_data))
         return (long)-18; /* EXDEV: cross-device link */
-    if (old_ops != &ext2_ops)
+    if (!ext2_is_ops(old_ops))
         return (long)-30; /* EROFS: read-only filesystem */
 
     /* Get the source inode number by opening the old path */
     void *priv = NULL;
-    if (old_ops->open(old_rel, 0, &priv) < 0)
+    if (old_ops->open(old_mnt->fs_data, old_rel, 0, &priv) < 0)
         return (long)-2; /* ENOENT */
     struct ext2_open_private *ep = (struct ext2_open_private *)priv;
     uint32_t src_ino = ep->ino;
-    if (old_ops->close) old_ops->close(priv);
+    if (old_ops->close) old_ops->close(old_mnt->fs_data, priv);
 
     /* Create a new directory entry pointing to the same inode.
      * Use ext2_mknod-style approach: create entry in parent dir + increment link_count.
      * For simplicity, use the kernel's ext2 internal functions via a helper. */
-    extern int ext2_hardlink(const char *newpath, uint32_t ino);
-    int ret = ext2_hardlink(new_rel, src_ino);
+    int ret = ext2_hardlink(new_mnt->fs_data, new_rel, src_ino);
     return (long)ret;
 }
 
@@ -2832,15 +2849,19 @@ static long sys_renameat2_handler(struct trapframe *tf) {
     resolve_path(current_proc->cwd, knew, new_resolved);
 
     const char *old_relpath, *new_relpath;
-    struct vfs_ops *old_ops = vfs_lookup_mount(old_resolved, &old_relpath);
-    struct vfs_ops *new_ops = vfs_lookup_mount(new_resolved, &new_relpath);
+    struct mount *old_mnt = vfs_lookup_mount_entry(old_resolved, &old_relpath);
+    struct mount *new_mnt = vfs_lookup_mount_entry(new_resolved, &new_relpath);
+    struct vfs_ops *old_ops = old_mnt ? old_mnt->ops : NULL;
+    struct vfs_ops *new_ops = new_mnt ? new_mnt->ops : NULL;
 
-    if (old_ops != new_ops)
+    if (old_ops != new_ops ||
+        (old_mnt && new_mnt && old_mnt->fs_data != new_mnt->fs_data))
         return (long)-18; /* EXDEV */
     if (!old_ops || !old_ops->rename)
         return (long)-30; /* EROFS */
 
-    return (long)(int64_t)old_ops->rename(old_relpath, new_relpath);
+    return (long)(int64_t)old_ops->rename(old_mnt->fs_data, old_relpath,
+                                          new_relpath);
 }
 
 static long sys_mkdirat_handler(struct trapframe *tf) {
@@ -2855,9 +2876,10 @@ static long sys_mkdirat_handler(struct trapframe *tf) {
         /* Resolve intermediate symlinks only (creating at final component) */
         resolve_symlinks_in_path(resolved, 8, 0);
         const char *relpath;
-        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+        struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+        struct vfs_ops *ops = mnt ? mnt->ops : NULL;
         if (ops && ops->mkdir) {
-            int ret = ops->mkdir(relpath, mode);
+            int ret = ops->mkdir(mnt->fs_data, relpath, mode);
             return (long)(int64_t)ret;
         } else {
             return (long)-30;
@@ -2876,9 +2898,10 @@ static long sys_mknodat_handler(struct trapframe *tf) {
         char resolved[256];
         resolve_path(current_proc->cwd, kpath, resolved);
         const char *relpath;
-        struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
-        if (ops == &ext2_ops) {
-            int ret = ext2_mknod(relpath, mode, rdev);
+        struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+        struct vfs_ops *ops = mnt ? mnt->ops : NULL;
+        if (ext2_is_ops(ops)) {
+            int ret = ext2_mknod(mnt->fs_data, relpath, mode, rdev);
             return (long)(int64_t)ret;
         } else {
             return (long)-30;
@@ -2921,13 +2944,14 @@ static long sys_readlinkat_handler(struct trapframe *tf) {
     resolve_path(current_proc->cwd, kpath, resolved);
 
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops || !ops->readlink)
         return (long)-22; /* EINVAL */
 
     char kbuf[256];
     int maxread = bufsiz > 256 ? 256 : bufsiz;
-    int ret = ops->readlink(relpath, kbuf, maxread);
+    int ret = ops->readlink(mnt->fs_data, relpath, kbuf, maxread);
     if (ret < 0)
         return (long)(int64_t)ret;
 
@@ -2947,9 +2971,10 @@ static long sys_symlinkat_handler(struct trapframe *tf) {
     resolve_path(current_proc->cwd, klinkpath, resolved);
 
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (ops && ops->symlink)
-        return (long)(int64_t)ops->symlink(ktarget, relpath);
+        return (long)(int64_t)ops->symlink(mnt->fs_data, ktarget, relpath);
     return (long)-30; /* EROFS */
 }
 
@@ -3013,7 +3038,7 @@ static long sys_writev_handler(struct trapframe *tf) {
                 /* O_APPEND: seek to end before each iov write */
                 if ((f->flags & 02000) && f->ops->fstat) {
                     uint8_t st[128];
-                    if (f->ops->fstat(f->private, st) == 0) {
+                    if (f->ops->fstat(f->fs_data, f->private, st) == 0) {
                         int64_t fsize;
                         memcpy(&fsize, st + 48, 8);
                         f->offset = fsize;
@@ -3028,7 +3053,8 @@ static long sys_writev_handler(struct trapframe *tf) {
                         if (total == 0) total = -14;
                         goto writev_out;
                     }
-                    int64_t n = f->ops->write(f->private, kchunk, clen, &f->offset);
+                    int64_t n = f->ops->write(f->fs_data, f->private,
+                                              kchunk, clen, &f->offset);
                     if (n < 0) { if (total == 0) total = n; goto writev_out; }
                     total += n;
                     done += n;
@@ -3096,7 +3122,8 @@ static long sys_readv_handler(struct trapframe *tf) {
                 while (done < len) {
                     uint64_t clen = len - done;
                     if (clen > sizeof(kchunk)) clen = sizeof(kchunk);
-                    int64_t n = f->ops->read(f->private, kchunk, clen, &f->offset);
+                    int64_t n = f->ops->read(f->fs_data, f->private,
+                                             kchunk, clen, &f->offset);
                     if (n < 0) { if (total == 0) total = n; goto readv_out; }
                     if (n == 0) break;
                     if (copyout(current_proc->pagetable, buf_uaddr + done, kchunk, n) < 0) {
@@ -3364,7 +3391,7 @@ static long sys_pread64_handler(struct trapframe *tf) {
     while (total < count) {
         size_t chunk = count - total;
         if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
-        int64_t nr = f->ops->read(f->private, kbuf, chunk, &off);
+        int64_t nr = f->ops->read(f->fs_data, f->private, kbuf, chunk, &off);
         if (nr <= 0) break;
         if (copyout(current_proc->pagetable, ubuf + total, kbuf, (uint64_t)nr) < 0)
             return total > 0 ? (long)total : (long)-14;
@@ -3393,7 +3420,7 @@ static long sys_pwrite64_handler(struct trapframe *tf) {
         if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
         if (copyin(current_proc->pagetable, kbuf, ubuf + total, chunk) < 0)
             return total > 0 ? (long)total : (long)-14;
-        int64_t nw = f->ops->write(f->private, kbuf, chunk, &off);
+        int64_t nw = f->ops->write(f->fs_data, f->private, kbuf, chunk, &off);
         if (nw <= 0) break;
         total += (size_t)nw;
         if ((size_t)nw < chunk) break;
@@ -3758,17 +3785,18 @@ static long sys_utimensat_handler(struct trapframe *tf) {
     resolve_path(current_proc->cwd, kpath, resolved);
 
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops || !ops->open) return (long)-2; /* ENOENT */
 
     /* Open file to get inode, update mtime, close */
     void *priv = NULL;
-    if (ops->open(relpath, 0, &priv) < 0) return (long)-2;
+    if (ops->open(mnt->fs_data, relpath, 0, &priv) < 0) return (long)-2;
 
     /* For ext2 files, touch the inode to update mtime */
     (void)priv; /* ext2 mtime update handled by icache dirty flag on close */
 
-    if (ops->close) ops->close(priv);
+    if (ops->close) ops->close(mnt->fs_data, priv);
     return 0; /* Success — timestamps updated (or no-op for non-ext2) */
 }
 
@@ -3787,8 +3815,9 @@ static long sys_statfs_handler(struct trapframe *tf) {
     memset(kbuf, 0, sizeof(kbuf));
 
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
-    if (ops == &ext2_ops) {
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
+    if (ext2_is_ops(ops)) {
         /* ext2: report real stats */
         uint64_t vals[15];
         memset(vals, 0, sizeof(vals));
@@ -3830,7 +3859,7 @@ static long sys_fstatfs_handler(struct trapframe *tf) {
     memset(kbuf, 0, sizeof(kbuf));
     uint64_t vals[15];
     memset(vals, 0, sizeof(vals));
-    if (ftab[fd]->ops == &ext2_ops) {
+    if (ext2_is_ops(ftab[fd]->ops)) {
         vals[0] = 0xEF53;
     } else {
         vals[0] = 0x01021994;
@@ -3872,22 +3901,23 @@ static long sys_fchmodat_handler(struct trapframe *tf) {
     resolve_path(current_proc->cwd, kpath, resolved);
 
     const char *relpath;
-    struct vfs_ops *ops = vfs_lookup_mount(resolved, &relpath);
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (ops && ops->stat) {
         uint8_t st[128];
-        int ret = ops->stat(relpath, st);
+        int ret = ops->stat(mnt->fs_data, relpath, st);
         if (ret < 0)
             return (long)-2; /* ENOENT */
     } else {
         return (long)-2; /* ENOENT */
     }
     /* ext2: actually set the mode on disk */
-    if (ops == &ext2_ops && ops->open) {
+    if (ext2_is_ops(ops) && ops->open) {
         void *priv = NULL;
-        if (ops->open(relpath, 0, &priv) >= 0) {
+        if (ops->open(mnt->fs_data, relpath, 0, &priv) >= 0) {
             struct ext2_open_private *ep = (struct ext2_open_private *)priv;
-            ext2_fchmod_ino(ep->ino, (uint32_t)tf->a2);
-            if (ops->close) ops->close(priv);
+            ext2_fchmod_ino(mnt->fs_data, ep->ino, (uint32_t)tf->a2);
+            if (ops->close) ops->close(mnt->fs_data, priv);
         }
     }
     return 0;
@@ -3902,9 +3932,9 @@ static long sys_fchmod_handler(struct trapframe *tf) {
     struct open_file *f = ftab[fd];
     if (f->is_pipe) return (long)-22; /* EINVAL */
     /* ext2 files: update inode mode on disk */
-    if (f->ops == &ext2_ops && f->private) {
+    if (ext2_is_ops(f->ops) && f->private) {
         struct ext2_open_private *priv = (struct ext2_open_private *)f->private;
-        return (long)ext2_fchmod_ino(priv->ino, mode);
+        return (long)ext2_fchmod_ino(f->fs_data, priv->ino, mode);
     }
     return 0; /* other filesystems: no-op */
 }
@@ -3920,9 +3950,9 @@ static long sys_ftruncate_handler(struct trapframe *tf) {
     int accmode = f->flags & 3;
     if (accmode == 0) return (long)-9; /* EBADF: read-only fd */
     /* ext2 files: update inode size on disk */
-    if (f->ops == &ext2_ops && f->private) {
+    if (ext2_is_ops(f->ops) && f->private) {
         struct ext2_open_private *priv = (struct ext2_open_private *)f->private;
-        return (long)ext2_ftruncate_ino(priv->ino, length);
+        return (long)ext2_ftruncate_ino(f->fs_data, priv->ino, length);
     }
     return (long)-30; /* EROFS: tarfs and other read-only filesystems */
 }
@@ -4275,8 +4305,9 @@ static long sys_mount_handler(struct trapframe *tf) {
     if (copyinstr(current_proc->pagetable, kfstype, tf->a2, sizeof(kfstype)) < 0)
         return (long)-14;
 
-    char resolved[256];
-    resolve_path(current_proc->cwd, ktgt, resolved);
+    char source_resolved[256], target_resolved[256];
+    resolve_path(current_proc->cwd, ksrc, source_resolved);
+    resolve_path(current_proc->cwd, ktgt, target_resolved);
 
     /* Only ext2 supported */
     if (strcmp(kfstype, "ext2") != 0)
@@ -4285,10 +4316,16 @@ static long sys_mount_handler(struct trapframe *tf) {
     if (mount_path_next >= 8)
         return (long)-12; /* ENOMEM */
 
+    const char *src_relpath;
+    struct mount *src_mnt = vfs_lookup_mount_entry(source_resolved, &src_relpath);
+    if (!src_mnt || !ext2_is_ops(src_mnt->ops))
+        return (long)-19; /* ENODEV */
+
     /* Copy path to persistent storage (mount table stores pointers) */
-    int rlen = strlen(resolved);
-    memcpy(mount_path_storage[mount_path_next], resolved, (uint64_t)rlen + 1);
-    vfs_register_mount(mount_path_storage[mount_path_next], &ext2_ops);
+    int rlen = strlen(target_resolved);
+    memcpy(mount_path_storage[mount_path_next], target_resolved, (uint64_t)rlen + 1);
+    vfs_register_mount(mount_path_storage[mount_path_next], &ext2_ops,
+                       src_mnt->fs_data, "ext2");
     mount_path_next++;
     return 0;
 }
@@ -4545,7 +4582,9 @@ void trap_handler(struct trapframe *tf) {
                             if (fvma->file && fvma->file->ops && fvma->file->ops->read) {
                                 uint64_t file_off = fvma->file_offset + (va - fvma->start);
                                 int64_t foff = (int64_t)file_off;
-                                fvma->file->ops->read(fvma->file->private, pg, PAGE_SIZE, &foff);
+                                fvma->file->ops->read(fvma->file->fs_data,
+                                                      fvma->file->private, pg,
+                                                      PAGE_SIZE, &foff);
                                 /* Short reads are OK — remaining bytes stay zero */
                             }
 

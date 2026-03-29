@@ -40,8 +40,8 @@ CFLAGS_WARN := -Wall -Wextra -Werror=implicit-function-declaration
 # Linker flags - CRT must be first, libc last
 LDFLAGS := $(CRT_OBJ) $(LIBC_A) -Wl,--gc-sections -nostdlib
 
-# Install target: copy compiled binaries to build/rootfs
-OS_TEST_DEST := $(SBUNIX_ROOT)/build/rootfs/bin/os-test
+# Install target: copy compiled binaries to build/testfs
+OS_TEST_DEST ?= $(SBUNIX_ROOT)/build/testfs/bin/os-test
 SUITE_LIST := basic include limits io malloc namespace paths process pty signal stdio udp
 
 # Summary and log files for build results
@@ -63,9 +63,9 @@ all: setup $(COMPILE_TARGETS)
 	@echo "=== os-test build complete ==="
 	@# Generate manifest from actually compiled binaries (avoids parallel append issues)
 	@echo "# Test manifest for SBUnix os-test" > $(MANIFEST_FILE)
-	@echo "# Format: /bin/os-test/path/to/test" >> $(MANIFEST_FILE)
+	@echo "# Format: /test/bin/os-test/path/to/test" >> $(MANIFEST_FILE)
 	@find $(OS_TEST_DEST) -type f ! -name '*.failed' -executable | sort | \
-		sed 's|$(SBUNIX_ROOT)/build/rootfs||' >> $(MANIFEST_FILE)
+		sed 's|$(SBUNIX_ROOT)/build/testfs|/test|' >> $(MANIFEST_FILE)
 	@# Generate summary of failed test outcomes (.out files)
 	@find $(OUT_DIRECTORY) -name '*.out' -type f | sort | while read f; do \
 		rel=$$(echo "$$f" | sed 's|$(OUT_DIRECTORY)/||;s|\.out$$||'); \

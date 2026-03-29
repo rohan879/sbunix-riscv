@@ -492,12 +492,16 @@ static void test_exec_relative_path(void)
  * ---------------------------------------------------------------------- */
 int main(int argc, char *argv[], char *envp[])
 {
+    const char *self = "/test/bin/exectest";
+
     /* If re-invoked with --subtest, run that subtest and exit */
     if (argc >= 2 && strcmp(argv[1], "--subtest") == 0)
         return run_subtest(argc, argv, envp);
 
-    /* Determine our own binary path for self-exec tests */
-    const char *self = "/bin/exectest";
+    /* Use the actual invocation path when available. run-tests launches this
+     * from /test/bin, so a hard-coded /bin path breaks self-exec coverage. */
+    if (argc > 0 && argv[0] && argv[0][0] == '/')
+        self = argv[0];
 
     printf("=== exectest: execve compliance ===\n");
 

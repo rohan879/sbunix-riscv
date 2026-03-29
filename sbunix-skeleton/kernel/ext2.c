@@ -9,32 +9,41 @@
 /* ================================================================== */
 /* Globals                                                             */
 /* ================================================================== */
-static struct ext2_superblock sb;
-static struct bcache_entry bcache[BCACHE_SIZE];
-static struct ext2_inode_mem icache[ICACHE_SIZE];
-static int ext2_mounted = 0;
+#define EXT2_MAX_FS 2
 
-/* Clock hand for bcache eviction */
-static int bcache_hand = 0;
+static struct ext2_fs ext2_filesystems[EXT2_MAX_FS] = {
+  { .device_index = 0, .mount_path = "/mnt" },
+  { .device_index = 1, .mount_path = "/test" },
+};
+
+#define sb          (fs->sb)
+#define bcache      (fs->bcache)
+#define icache      (fs->icache)
+#define ext2_mounted (fs->mounted)
+#define bcache_hand (fs->bcache_hand)
 
 /* ================================================================== */
 /* Block I/O (low-level)                                               */
 /* ================================================================== */
 
-static int ext2_read_block(uint32_t blockno, void *buf) {
-  return virtio_blk_rw((uint64_t)blockno * EXT2_SECTORS_PER_BLOCK, buf, 0);
+static int ext2_read_block(struct ext2_fs *fs, uint32_t blockno, void *buf) {
+  return virtio_blk_rw_on_dev(fs->device_index,
+                              (uint64_t)blockno * EXT2_SECTORS_PER_BLOCK,
+                              buf, 0);
 }
 
-static int ext2_write_block(uint32_t blockno, const void *buf) {
-  return virtio_blk_rw((uint64_t)blockno * EXT2_SECTORS_PER_BLOCK,
-                        (void *)buf, 1);
+static int ext2_write_block(struct ext2_fs *fs, uint32_t blockno,
+                            const void *buf) {
+  return virtio_blk_rw_on_dev(fs->device_index,
+                              (uint64_t)blockno * EXT2_SECTORS_PER_BLOCK,
+                              (void *)buf, 1);
 }
 
 /* ================================================================== */
 /* Block Cache                                                         */
 /* ================================================================== */
 
-static struct bcache_entry *bcache_get(uint32_t blockno) {
+static struct bcache_entry *bcache_get(struct ext2_fs *fs, uint32_t blockno) {
   /* Check if already cached */
   for (int i = 0; i < BCACHE_SIZE; i++) {
     if (bcache[i].valid && bcache[i].blockno == blockno) {
@@ -43,7 +52,10 @@ static struct bcache_entry *bcache_get(uint32_t blockno) {
     }
   }
 
-  /* Find a slot to evict using clock algorithm */
+  /* Find a slot to evict using simple clock algorithm.
+   * bcache_hand is the clock hand that advances on each examined slot.
+   * We prefer clean entries but will write back dirty entries before
+   * reusing them. The refcount field pins entries in use. */
   for (int tries = 0; tries < BCACHE_SIZE * 2; tries++) {
     struct bcache_entry *e = &bcache[bcache_hand];
     bcache_hand = (bcache_hand + 1) % BCACHE_SIZE;
@@ -54,7 +66,7 @@ static struct bcache_entry *bcache_get(uint32_t blockno) {
     /* Prefer clean entries */
     if (e->valid && e->dirty) {
       /* Write back dirty entry */
-      ext2_write_block(e->blockno, e->data);
+      ext2_write_block(fs, e->blockno, e->data);
       e->dirty = 0;
     }
 
@@ -65,7 +77,7 @@ static struct bcache_entry *bcache_get(uint32_t blockno) {
     e->refcount = 1;
 
     /* Read from disk */
-    if (ext2_read_block(blockno, e->data) < 0) {
+    if (ext2_read_block(fs, blockno, e->data) < 0) {
       e->refcount = 0;
       return NULL;
     }
@@ -87,10 +99,10 @@ static void bcache_mark_dirty(struct bcache_entry *e) {
     e->dirty = 1;
 }
 
-static void bcache_sync(void) {
+static void bcache_sync(struct ext2_fs *fs) {
   for (int i = 0; i < BCACHE_SIZE; i++) {
     if (bcache[i].valid && bcache[i].dirty) {
-      ext2_write_block(bcache[i].blockno, bcache[i].data);
+      ext2_write_block(fs, bcache[i].blockno, bcache[i].data);
       bcache[i].dirty = 0;
     }
   }
@@ -100,8 +112,8 @@ static void bcache_sync(void) {
 /* Superblock helpers                                                  */
 /* ================================================================== */
 
-static int sb_write(void) {
-  struct bcache_entry *e = bcache_get(0);
+static int sb_write(struct ext2_fs *fs) {
+  struct bcache_entry *e = bcache_get(fs, 0);
   if (!e) return -1;
   memcpy(e->data, &sb, 52); /* only copy the on-disk portion */
   memset(e->data + 52, 0, EXT2_BLOCK_SIZE - 52);
@@ -111,19 +123,19 @@ static int sb_write(void) {
   return 0;
 }
 
-static void sb_flush_if_dirty(void) {
+static void sb_flush_if_dirty(struct ext2_fs *fs) {
   if (sb.dirty)
-    sb_write();
+    sb_write(fs);
 }
 
 /* ================================================================== */
 /* Block Bitmap                                                        */
 /* ================================================================== */
 
-static int ext2_alloc_block(void) {
+static int ext2_alloc_block(struct ext2_fs *fs) {
   /* Scan bitmap for a free bit starting from data_start */
   for (uint32_t bm_block = 0; bm_block < sb.bitmap_blocks; bm_block++) {
-    struct bcache_entry *e = bcache_get(sb.bitmap_start + bm_block);
+    struct bcache_entry *e = bcache_get(fs, sb.bitmap_start + bm_block);
     if (!e) return -1;
 
     uint32_t base = bm_block * (EXT2_BLOCK_SIZE * 8);
@@ -147,7 +159,7 @@ static int ext2_alloc_block(void) {
           bcache_release(e);
           sb.free_blocks--;
           sb.dirty = 1;
-          sb_flush_if_dirty();
+          sb_flush_if_dirty(fs);
           return (int)blockno;
         }
       }
@@ -157,13 +169,13 @@ static int ext2_alloc_block(void) {
   return -1; /* disk full */
 }
 
-static void ext2_free_block(uint32_t blockno) {
+static void ext2_free_block(struct ext2_fs *fs, uint32_t blockno) {
   uint32_t bm_block = blockno / (EXT2_BLOCK_SIZE * 8);
   uint32_t bit_idx  = blockno % (EXT2_BLOCK_SIZE * 8);
   uint32_t byte_idx = bit_idx / 8;
   uint32_t bit_off  = bit_idx % 8;
 
-  struct bcache_entry *e = bcache_get(sb.bitmap_start + bm_block);
+  struct bcache_entry *e = bcache_get(fs, sb.bitmap_start + bm_block);
   if (!e) return;
   e->data[byte_idx] &= ~(1 << bit_off);
   bcache_mark_dirty(e);
@@ -176,22 +188,24 @@ static void ext2_free_block(uint32_t blockno) {
 /* Inode Table I/O                                                     */
 /* ================================================================== */
 
-static int ext2_read_dinode(uint32_t ino, struct ext2_dinode *di) {
+static int ext2_read_dinode(struct ext2_fs *fs, uint32_t ino,
+                            struct ext2_dinode *di) {
   uint32_t block = sb.itable_start + (ino * EXT2_INODE_SIZE) / EXT2_BLOCK_SIZE;
   uint32_t off   = (ino * EXT2_INODE_SIZE) % EXT2_BLOCK_SIZE;
 
-  struct bcache_entry *e = bcache_get(block);
+  struct bcache_entry *e = bcache_get(fs, block);
   if (!e) return -1;
   memcpy(di, e->data + off, sizeof(struct ext2_dinode));
   bcache_release(e);
   return 0;
 }
 
-static int ext2_write_dinode(uint32_t ino, struct ext2_dinode *di) {
+static int ext2_write_dinode(struct ext2_fs *fs, uint32_t ino,
+                             struct ext2_dinode *di) {
   uint32_t block = sb.itable_start + (ino * EXT2_INODE_SIZE) / EXT2_BLOCK_SIZE;
   uint32_t off   = (ino * EXT2_INODE_SIZE) % EXT2_BLOCK_SIZE;
 
-  struct bcache_entry *e = bcache_get(block);
+  struct bcache_entry *e = bcache_get(fs, block);
   if (!e) return -1;
   memcpy(e->data + off, di, sizeof(struct ext2_dinode));
   bcache_mark_dirty(e);
@@ -203,7 +217,7 @@ static int ext2_write_dinode(uint32_t ino, struct ext2_dinode *di) {
 /* Inode Cache                                                         */
 /* ================================================================== */
 
-static struct ext2_inode_mem *icache_get(uint32_t ino) {
+static struct ext2_inode_mem *icache_get(struct ext2_fs *fs, uint32_t ino) {
   /* Check if already cached */
   for (int i = 0; i < ICACHE_SIZE; i++) {
     if (icache[i].valid && icache[i].ino == ino) {
@@ -236,7 +250,7 @@ static struct ext2_inode_mem *icache_get(uint32_t ino) {
           di.rdev = icache[i].rdev;
           di.ctime = icache[i].ctime;
           di.mtime = icache[i].mtime;
-          ext2_write_dinode(icache[i].ino, &di);
+          ext2_write_dinode(fs, icache[i].ino, &di);
         }
         slot = i;
         break;
@@ -250,7 +264,7 @@ static struct ext2_inode_mem *icache_get(uint32_t ino) {
 
   /* Read from disk */
   struct ext2_dinode di;
-  if (ext2_read_dinode(ino, &di) < 0)
+  if (ext2_read_dinode(fs, ino, &di) < 0)
     return NULL;
 
   struct ext2_inode_mem *ip = &icache[slot];
@@ -275,7 +289,7 @@ static void icache_release(struct ext2_inode_mem *ip) {
     ip->refcount--;
 }
 
-static void icache_writeback(struct ext2_inode_mem *ip) {
+static void icache_writeback(struct ext2_fs *fs, struct ext2_inode_mem *ip) {
   if (!ip || !ip->dirty)
     return;
   struct ext2_dinode di;
@@ -287,11 +301,11 @@ static void icache_writeback(struct ext2_inode_mem *ip) {
   di.indirect = ip->indirect;
   di.mode = ip->mode;
   di.rdev = ip->rdev;
-  ext2_write_dinode(ip->ino, &di);
+  ext2_write_dinode(fs, ip->ino, &di);
   ip->dirty = 0;
 }
 
-static void icache_evict(uint32_t ino) {
+static void icache_evict(struct ext2_fs *fs, uint32_t ino) {
   for (int i = 0; i < ICACHE_SIZE; i++) {
     if (icache[i].valid && icache[i].ino == ino) {
       icache[i].valid = 0;
@@ -306,10 +320,10 @@ static void icache_evict(uint32_t ino) {
 /* Inode Allocation                                                    */
 /* ================================================================== */
 
-static int ext2_alloc_inode(uint16_t type) {
+static int ext2_alloc_inode(struct ext2_fs *fs, uint16_t type) {
   for (uint32_t ino = 0; ino < sb.total_inodes; ino++) {
     struct ext2_dinode di;
-    if (ext2_read_dinode(ino, &di) < 0)
+    if (ext2_read_dinode(fs, ino, &di) < 0)
       continue;
     if (di.type == EXT2_TYPE_FREE) {
       memset(&di, 0, sizeof(di));
@@ -323,69 +337,69 @@ static int ext2_alloc_inode(uint16_t type) {
         di.mode = 0777;
       else
         di.mode = 0644;
-      ext2_write_dinode(ino, &di);
+      ext2_write_dinode(fs, ino, &di);
       sb.free_inodes--;
       sb.dirty = 1;
-      sb_flush_if_dirty();
+      sb_flush_if_dirty(fs);
       return (int)ino;
     }
   }
   return -1;
 }
 
-static void ext2_free_inode(uint32_t ino) {
-  struct ext2_inode_mem *ip = icache_get(ino);
+static void ext2_free_inode(struct ext2_fs *fs, uint32_t ino) {
+  struct ext2_inode_mem *ip = icache_get(fs, ino);
   if (!ip) {
     /* Read directly */
     struct ext2_dinode di;
-    if (ext2_read_dinode(ino, &di) < 0)
+    if (ext2_read_dinode(fs, ino, &di) < 0)
       return;
     /* Free direct blocks */
     for (int i = 0; i < EXT2_NDIRECT; i++) {
       if (di.direct[i])
-        ext2_free_block(di.direct[i]);
+        ext2_free_block(fs, di.direct[i]);
     }
     /* Free indirect blocks */
     if (di.indirect) {
-      struct bcache_entry *e = bcache_get(di.indirect);
+      struct bcache_entry *e = bcache_get(fs, di.indirect);
       if (e) {
         uint32_t *ptrs = (uint32_t *)e->data;
         for (int i = 0; i < EXT2_NINDIRECT; i++) {
           if (ptrs[i])
-            ext2_free_block(ptrs[i]);
+            ext2_free_block(fs, ptrs[i]);
         }
         bcache_release(e);
       }
-      ext2_free_block(di.indirect);
+      ext2_free_block(fs, di.indirect);
     }
     /* Zero the inode */
     memset(&di, 0, sizeof(di));
-    ext2_write_dinode(ino, &di);
+    ext2_write_dinode(fs, ino, &di);
   } else {
     /* Free direct blocks */
     for (int i = 0; i < EXT2_NDIRECT; i++) {
       if (ip->direct[i])
-        ext2_free_block(ip->direct[i]);
+        ext2_free_block(fs, ip->direct[i]);
     }
     /* Free indirect blocks */
     if (ip->indirect) {
-      struct bcache_entry *e = bcache_get(ip->indirect);
+      struct bcache_entry *e = bcache_get(fs, ip->indirect);
       if (e) {
         uint32_t *ptrs = (uint32_t *)e->data;
         for (int i = 0; i < EXT2_NINDIRECT; i++) {
           if (ptrs[i])
-            ext2_free_block(ptrs[i]);
+            ext2_free_block(fs, ptrs[i]);
         }
         bcache_release(e);
       }
-      ext2_free_block(ip->indirect);
+      ext2_free_block(fs, ip->indirect);
     }
     icache_release(ip);
-    icache_evict(ino);
+    icache_evict(fs, ino);
     /* Zero the inode on disk */
     struct ext2_dinode di;
     memset(&di, 0, sizeof(di));
-    ext2_write_dinode(ino, &di);
+    ext2_write_dinode(fs, ino, &di);
   }
   sb.free_inodes++;
   sb.dirty = 1;
@@ -395,7 +409,8 @@ static void ext2_free_inode(uint32_t ino) {
 /* Block Mapping (bmap)                                                */
 /* ================================================================== */
 
-static uint32_t ext2_bmap(struct ext2_inode_mem *ip, uint32_t file_block) {
+static uint32_t ext2_bmap(struct ext2_fs *fs, struct ext2_inode_mem *ip,
+                          uint32_t file_block) {
   if (file_block < EXT2_NDIRECT) {
     return ip->direct[file_block];
   }
@@ -404,7 +419,7 @@ static uint32_t ext2_bmap(struct ext2_inode_mem *ip, uint32_t file_block) {
     return 0;
   if (ip->indirect == 0)
     return 0;
-  struct bcache_entry *e = bcache_get(ip->indirect);
+  struct bcache_entry *e = bcache_get(fs, ip->indirect);
   if (!e) return 0;
   uint32_t *ptrs = (uint32_t *)e->data;
   uint32_t blk = ptrs[idx];
@@ -414,15 +429,16 @@ static uint32_t ext2_bmap(struct ext2_inode_mem *ip, uint32_t file_block) {
 
 /* bmap_alloc: like bmap but allocates blocks on demand.
  * Returns disk block number, or 0 on failure. */
-static uint32_t ext2_bmap_alloc(struct ext2_inode_mem *ip, uint32_t file_block) {
+static uint32_t ext2_bmap_alloc(struct ext2_fs *fs, struct ext2_inode_mem *ip,
+                                uint32_t file_block) {
   if (file_block < EXT2_NDIRECT) {
     if (ip->direct[file_block] == 0) {
-      int blk = ext2_alloc_block();
+      int blk = ext2_alloc_block(fs);
       if (blk < 0) return 0;
       ip->direct[file_block] = (uint32_t)blk;
       ip->dirty = 1;
       /* Zero the new block */
-      struct bcache_entry *e = bcache_get((uint32_t)blk);
+      struct bcache_entry *e = bcache_get(fs, (uint32_t)blk);
       if (e) {
         memset(e->data, 0, EXT2_BLOCK_SIZE);
         bcache_mark_dirty(e);
@@ -438,12 +454,12 @@ static uint32_t ext2_bmap_alloc(struct ext2_inode_mem *ip, uint32_t file_block) 
 
   /* Allocate indirect block if needed */
   if (ip->indirect == 0) {
-    int blk = ext2_alloc_block();
+    int blk = ext2_alloc_block(fs);
     if (blk < 0) return 0;
     ip->indirect = (uint32_t)blk;
     ip->dirty = 1;
     /* Zero the indirect block */
-    struct bcache_entry *e = bcache_get((uint32_t)blk);
+    struct bcache_entry *e = bcache_get(fs, (uint32_t)blk);
     if (e) {
       memset(e->data, 0, EXT2_BLOCK_SIZE);
       bcache_mark_dirty(e);
@@ -451,11 +467,11 @@ static uint32_t ext2_bmap_alloc(struct ext2_inode_mem *ip, uint32_t file_block) 
     }
   }
 
-  struct bcache_entry *e = bcache_get(ip->indirect);
+  struct bcache_entry *e = bcache_get(fs, ip->indirect);
   if (!e) return 0;
   uint32_t *ptrs = (uint32_t *)e->data;
   if (ptrs[idx] == 0) {
-    int blk = ext2_alloc_block();
+    int blk = ext2_alloc_block(fs);
     if (blk < 0) {
       bcache_release(e);
       return 0;
@@ -463,7 +479,7 @@ static uint32_t ext2_bmap_alloc(struct ext2_inode_mem *ip, uint32_t file_block) 
     ptrs[idx] = (uint32_t)blk;
     bcache_mark_dirty(e);
     /* Zero the new data block */
-    struct bcache_entry *e2 = bcache_get((uint32_t)blk);
+    struct bcache_entry *e2 = bcache_get(fs, (uint32_t)blk);
     if (e2) {
       memset(e2->data, 0, EXT2_BLOCK_SIZE);
       bcache_mark_dirty(e2);
@@ -488,7 +504,8 @@ static uint32_t ext2_dirent_size(uint32_t name_len) {
   return (EXT2_DIRENT_MIN + name_len + 3) & ~3u;
 }
 
-static int ext2_dir_lookup(struct ext2_inode_mem *dir, const char *name,
+static int ext2_dir_lookup(struct ext2_fs *fs, struct ext2_inode_mem *dir,
+                           const char *name,
                            uint32_t *out_ino) {
   if (dir->type != EXT2_TYPE_DIR)
     return -1;
@@ -497,10 +514,10 @@ static int ext2_dir_lookup(struct ext2_inode_mem *dir, const char *name,
   uint32_t nblocks = (dir->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
 
   for (uint32_t b = 0; b < nblocks; b++) {
-    uint32_t disk_blk = ext2_bmap(dir, b);
+    uint32_t disk_blk = ext2_bmap(fs, dir, b);
     if (disk_blk == 0) continue;
 
-    struct bcache_entry *e = bcache_get(disk_blk);
+    struct bcache_entry *e = bcache_get(fs, disk_blk);
     if (!e) continue;
 
     uint32_t off = 0;
@@ -522,7 +539,8 @@ static int ext2_dir_lookup(struct ext2_inode_mem *dir, const char *name,
   return -2; /* -ENOENT */
 }
 
-static int ext2_dir_add(struct ext2_inode_mem *dir, const char *name,
+static int ext2_dir_add(struct ext2_fs *fs, struct ext2_inode_mem *dir,
+                        const char *name,
                         uint32_t ino, uint8_t file_type) {
   uint32_t name_len = strlen(name);
   uint32_t needed = ext2_dirent_size(name_len);
@@ -530,10 +548,10 @@ static int ext2_dir_add(struct ext2_inode_mem *dir, const char *name,
 
   /* Try to find space in existing blocks */
   for (uint32_t b = 0; b < nblocks; b++) {
-    uint32_t disk_blk = ext2_bmap(dir, b);
+    uint32_t disk_blk = ext2_bmap(fs, dir, b);
     if (disk_blk == 0) continue;
 
-    struct bcache_entry *e = bcache_get(disk_blk);
+    struct bcache_entry *e = bcache_get(fs, disk_blk);
     if (!e) continue;
 
     uint32_t off = 0;
@@ -577,11 +595,11 @@ static int ext2_dir_add(struct ext2_inode_mem *dir, const char *name,
   }
 
   /* No space found in existing blocks -- allocate a new one */
-  uint32_t new_blk = ext2_bmap_alloc(dir, nblocks);
+  uint32_t new_blk = ext2_bmap_alloc(fs, dir, nblocks);
   if (new_blk == 0)
     return -28; /* -ENOSPC */
 
-  struct bcache_entry *e = bcache_get(new_blk);
+  struct bcache_entry *e = bcache_get(fs, new_blk);
   if (!e) return -1;
 
   memset(e->data, 0, EXT2_BLOCK_SIZE);
@@ -599,15 +617,16 @@ static int ext2_dir_add(struct ext2_inode_mem *dir, const char *name,
   return 0;
 }
 
-static int ext2_dir_remove(struct ext2_inode_mem *dir, const char *name) {
+static int ext2_dir_remove(struct ext2_fs *fs, struct ext2_inode_mem *dir,
+                           const char *name) {
   uint32_t name_len = strlen(name);
   uint32_t nblocks = (dir->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
 
   for (uint32_t b = 0; b < nblocks; b++) {
-    uint32_t disk_blk = ext2_bmap(dir, b);
+    uint32_t disk_blk = ext2_bmap(fs, dir, b);
     if (disk_blk == 0) continue;
 
-    struct bcache_entry *e = bcache_get(disk_blk);
+    struct bcache_entry *e = bcache_get(fs, disk_blk);
     if (!e) continue;
 
     uint32_t off = 0;
@@ -685,11 +704,12 @@ static const char *path_parent(const char *path, char *parent_out,
 /* Resolve path relative to ext2 root (with symlink following).
  * Returns inode with refcount++ on success.
  * The path is relative to the /mnt mount point (VFS strips prefix). */
-static struct ext2_inode_mem *ext2_namei_r(const char *path, int symdepth) {
+static struct ext2_inode_mem *ext2_namei_r(struct ext2_fs *fs, const char *path,
+                                           int symdepth) {
   if (symdepth <= 0) return NULL; /* ELOOP */
 
   /* Start from root inode */
-  struct ext2_inode_mem *ip = icache_get(EXT2_ROOT_INO);
+  struct ext2_inode_mem *ip = icache_get(fs, EXT2_ROOT_INO);
   if (!ip) return NULL;
 
   /* Handle root path */
@@ -723,13 +743,13 @@ static struct ext2_inode_mem *ext2_namei_r(const char *path, int symdepth) {
     comp[clen] = '\0';
 
     uint32_t child_ino;
-    if (ext2_dir_lookup(ip, comp, &child_ino) < 0) {
+    if (ext2_dir_lookup(fs, ip, comp, &child_ino) < 0) {
       icache_release(ip);
       return NULL;
     }
 
     icache_release(ip);
-    ip = icache_get(child_ino);
+    ip = icache_get(fs, child_ino);
     if (!ip) return NULL;
 
     /* Skip trailing slashes */
@@ -740,9 +760,9 @@ static struct ext2_inode_mem *ext2_namei_r(const char *path, int symdepth) {
       char target[256];
       int tlen = (int)ip->size;
       if (tlen > 255) tlen = 255;
-      uint32_t blk = ext2_bmap(ip, 0);
+      uint32_t blk = ext2_bmap(fs, ip, 0);
       if (blk == 0) { icache_release(ip); return NULL; }
-      struct bcache_entry *be = bcache_get(blk);
+      struct bcache_entry *be = bcache_get(fs, blk);
       memcpy(target, be->data, (uint32_t)tlen);
       bcache_release(be);
       target[tlen] = '\0';
@@ -768,41 +788,41 @@ static struct ext2_inode_mem *ext2_namei_r(const char *path, int symdepth) {
         newpath[npos] = '\0';
       }
 
-      return ext2_namei_r(newpath, symdepth - 1);
+      return ext2_namei_r(fs, newpath, symdepth - 1);
     }
   }
 
   return ip;
 }
 
-static struct ext2_inode_mem *ext2_namei(const char *path) {
-  return ext2_namei_r(path, 8);
+static struct ext2_inode_mem *ext2_namei(struct ext2_fs *fs, const char *path) {
+  return ext2_namei_r(fs, path, 8);
 }
 
 /* ================================================================== */
 /* Truncate -- free all data blocks of an inode                        */
 /* ================================================================== */
 
-static void ext2_truncate(struct ext2_inode_mem *ip) {
+static void ext2_truncate(struct ext2_fs *fs, struct ext2_inode_mem *ip) {
   /* Free direct blocks */
   for (int i = 0; i < EXT2_NDIRECT; i++) {
     if (ip->direct[i]) {
-      ext2_free_block(ip->direct[i]);
+      ext2_free_block(fs, ip->direct[i]);
       ip->direct[i] = 0;
     }
   }
   /* Free indirect blocks */
   if (ip->indirect) {
-    struct bcache_entry *e = bcache_get(ip->indirect);
+    struct bcache_entry *e = bcache_get(fs, ip->indirect);
     if (e) {
       uint32_t *ptrs = (uint32_t *)e->data;
       for (int i = 0; i < EXT2_NINDIRECT; i++) {
         if (ptrs[i])
-          ext2_free_block(ptrs[i]);
+          ext2_free_block(fs, ptrs[i]);
       }
       bcache_release(e);
     }
-    ext2_free_block(ip->indirect);
+    ext2_free_block(fs, ip->indirect);
     ip->indirect = 0;
   }
   ip->size = 0;
@@ -813,14 +833,16 @@ static void ext2_truncate(struct ext2_inode_mem *ip) {
 /* VFS Ops Implementation                                              */
 /* ================================================================== */
 
-static int ext2_open(const char *path, int flags, void **private_out) {
-  if (!ext2_mounted)
+static int ext2_open(void *fs_data, const char *path, int flags,
+                     void **private_out) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted)
     return -1;
 
   /* Strip leading slashes for namei */
   while (*path == '/') path++;
 
-  struct ext2_inode_mem *ip = ext2_namei(path);
+  struct ext2_inode_mem *ip = ext2_namei(fs, path);
 
   if (!ip && (flags & EXT2_O_CREAT)) {
     /* Create a new file */
@@ -830,7 +852,7 @@ static int ext2_open(const char *path, int flags, void **private_out) {
     if (basename[0] == '\0')
       return -1;
 
-    struct ext2_inode_mem *parent = ext2_namei(parent_path);
+    struct ext2_inode_mem *parent = ext2_namei(fs, parent_path);
     if (!parent)
       return -2; /* -ENOENT */
     if (parent->type != EXT2_TYPE_DIR) {
@@ -839,25 +861,26 @@ static int ext2_open(const char *path, int flags, void **private_out) {
     }
 
     /* Allocate new inode */
-    int new_ino = ext2_alloc_inode(EXT2_TYPE_FILE);
+    int new_ino = ext2_alloc_inode(fs, EXT2_TYPE_FILE);
     if (new_ino < 0) {
       icache_release(parent);
       return -28; /* -ENOSPC */
     }
 
     /* Add directory entry */
-    int ret = ext2_dir_add(parent, basename, (uint32_t)new_ino, EXT2_FT_FILE);
-    icache_writeback(parent);
+    int ret = ext2_dir_add(fs, parent, basename, (uint32_t)new_ino,
+                           EXT2_FT_FILE);
+    icache_writeback(fs, parent);
     icache_release(parent);
     if (ret < 0) {
-      ext2_free_inode((uint32_t)new_ino);
+      ext2_free_inode(fs, (uint32_t)new_ino);
       return ret;
     }
 
     /* Flush all dirty bcache blocks so the new dir entry is visible on disk */
-    bcache_sync();
+    bcache_sync(fs);
 
-    ip = icache_get((uint32_t)new_ino);
+    ip = icache_get(fs, (uint32_t)new_ino);
     if (!ip) return -1;
   }
 
@@ -866,8 +889,8 @@ static int ext2_open(const char *path, int flags, void **private_out) {
 
   /* Handle O_TRUNC */
   if ((flags & EXT2_O_TRUNC) && ip->type == EXT2_TYPE_FILE) {
-    ext2_truncate(ip);
-    icache_writeback(ip);
+    ext2_truncate(fs, ip);
+    icache_writeback(fs, ip);
   }
 
   /* Allocate private data */
@@ -877,6 +900,7 @@ static int ext2_open(const char *path, int flags, void **private_out) {
     icache_release(ip);
     return -12; /* -ENOMEM */
   }
+  priv->fs = fs;
   priv->ino = ip->ino;
   priv->is_dir = (ip->type == EXT2_TYPE_DIR);
   /* Keep refcount held from icache_get */
@@ -885,15 +909,16 @@ static int ext2_open(const char *path, int flags, void **private_out) {
   return 0;
 }
 
-static int64_t ext2_read(void *private, char *buf, uint64_t count,
-                         int64_t *offset) {
+static int64_t ext2_read(void *fs_data, void *private, char *buf,
+                         uint64_t count, int64_t *offset) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
   struct ext2_open_private *priv = (struct ext2_open_private *)private;
   if (!priv) return -1;
 
   /* Reading a directory fd is not allowed */
   if (priv->is_dir) return -21; /* -EISDIR */
 
-  struct ext2_inode_mem *ip = icache_get(priv->ino);
+  struct ext2_inode_mem *ip = icache_get(fs, priv->ino);
   if (!ip) return -1;
 
   uint64_t off = (uint64_t)*offset;
@@ -909,7 +934,7 @@ static int64_t ext2_read(void *private, char *buf, uint64_t count,
   while (total < count) {
     uint32_t file_block = (uint32_t)((off + total) / EXT2_BLOCK_SIZE);
     uint32_t block_off  = (uint32_t)((off + total) % EXT2_BLOCK_SIZE);
-    uint32_t disk_blk = ext2_bmap(ip, file_block);
+    uint32_t disk_blk = ext2_bmap(fs, ip, file_block);
 
     uint64_t chunk = EXT2_BLOCK_SIZE - block_off;
     if (chunk > count - total) chunk = count - total;
@@ -918,7 +943,7 @@ static int64_t ext2_read(void *private, char *buf, uint64_t count,
       /* Hole: zero-fill */
       memset(buf + total, 0, chunk);
     } else {
-      struct bcache_entry *e = bcache_get(disk_blk);
+      struct bcache_entry *e = bcache_get(fs, disk_blk);
       if (!e) break;
       memcpy(buf + total, e->data + block_off, chunk);
       bcache_release(e);
@@ -931,12 +956,13 @@ static int64_t ext2_read(void *private, char *buf, uint64_t count,
   return (int64_t)total;
 }
 
-static int64_t ext2_write(void *private, const char *buf, uint64_t count,
-                          int64_t *offset) {
+static int64_t ext2_write(void *fs_data, void *private, const char *buf,
+                          uint64_t count, int64_t *offset) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
   struct ext2_open_private *priv = (struct ext2_open_private *)private;
   if (!priv) return -1;
 
-  struct ext2_inode_mem *ip = icache_get(priv->ino);
+  struct ext2_inode_mem *ip = icache_get(fs, priv->ino);
   if (!ip) return -1;
 
   uint64_t off = (uint64_t)*offset;
@@ -955,7 +981,7 @@ static int64_t ext2_write(void *private, const char *buf, uint64_t count,
       break;
     }
 
-    uint32_t disk_blk = ext2_bmap_alloc(ip, file_block);
+    uint32_t disk_blk = ext2_bmap_alloc(fs, ip, file_block);
     if (disk_blk == 0) {
       if (total == 0) {
         icache_release(ip);
@@ -964,7 +990,7 @@ static int64_t ext2_write(void *private, const char *buf, uint64_t count,
       break;
     }
 
-    struct bcache_entry *e = bcache_get(disk_blk);
+    struct bcache_entry *e = bcache_get(fs, disk_blk);
     if (!e) break;
 
     uint64_t chunk = EXT2_BLOCK_SIZE - block_off;
@@ -983,18 +1009,19 @@ static int64_t ext2_write(void *private, const char *buf, uint64_t count,
   }
 
   *offset += (int64_t)total;
-  icache_writeback(ip);
+  icache_writeback(fs, ip);
   icache_release(ip);
   /* Flush all dirty blocks (data + inode) to disk so contents survive reboot */
-  bcache_sync();
+  bcache_sync(fs);
   return (int64_t)total;
 }
 
-static int ext2_close(void *private) {
+static int ext2_close(void *fs_data, void *private) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
   struct ext2_open_private *priv = (struct ext2_open_private *)private;
   if (!priv) return 0;
 
-  struct ext2_inode_mem *ip = icache_get(priv->ino);
+  struct ext2_inode_mem *ip = icache_get(fs, priv->ino);
   if (ip) {
     /* We got a new ref from icache_get, plus there was one from open.
      * Release both: the open-time ref and this lookup ref. */
@@ -1003,11 +1030,11 @@ static int ext2_close(void *private) {
 
     if (ip->refcount == 0 && ip->link_count == 0 &&
         ip->ino != EXT2_ROOT_INO) {
-      ext2_free_inode(ip->ino);
+      ext2_free_inode(fs, ip->ino);
     } else {
-      icache_writeback(ip);
+      icache_writeback(fs, ip);
       /* Flush inode writeback to disk */
-      bcache_sync();
+      bcache_sync(fs);
     }
   }
 
@@ -1015,13 +1042,14 @@ static int ext2_close(void *private) {
   return 0;
 }
 
-static int ext2_stat(const char *path, uint8_t *st) {
-  if (!ext2_mounted)
+static int ext2_stat(void *fs_data, const char *path, uint8_t *st) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted)
     return -1;
 
   while (*path == '/') path++;
 
-  struct ext2_inode_mem *ip = ext2_namei(path);
+  struct ext2_inode_mem *ip = ext2_namei(fs, path);
   if (!ip) return -2; /* -ENOENT */
 
   memset(st, 0, 128);
@@ -1064,11 +1092,12 @@ static int ext2_stat(const char *path, uint8_t *st) {
   return 0;
 }
 
-static int ext2_fstat(void *private, uint8_t *st) {
+static int ext2_fstat(void *fs_data, void *private, uint8_t *st) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
   struct ext2_open_private *priv = (struct ext2_open_private *)private;
   if (!priv) return -1;
 
-  struct ext2_inode_mem *ip = icache_get(priv->ino);
+  struct ext2_inode_mem *ip = icache_get(fs, priv->ino);
   if (!ip) return -1;
 
   memset(st, 0, 128);
@@ -1111,13 +1140,14 @@ static int ext2_fstat(void *private, uint8_t *st) {
   return 0;
 }
 
-static int ext2_readdir(void *private, char *ubuf, unsigned int count,
-                        int64_t *offset) {
+static int ext2_readdir(void *fs_data, void *private, char *ubuf,
+                        unsigned int count, int64_t *offset) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
   struct ext2_open_private *priv = (struct ext2_open_private *)private;
   if (!priv || !priv->is_dir)
     return -1;
 
-  struct ext2_inode_mem *ip = icache_get(priv->ino);
+  struct ext2_inode_mem *ip = icache_get(fs, priv->ino);
   if (!ip) return -1;
 
   uint64_t dir_off = (uint64_t)*offset;
@@ -1126,13 +1156,13 @@ static int ext2_readdir(void *private, char *ubuf, unsigned int count,
   uint32_t nblocks = (ip->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
 
   for (uint32_t b = 0; b < nblocks; b++) {
-    uint32_t disk_blk = ext2_bmap(ip, b);
+    uint32_t disk_blk = ext2_bmap(fs, ip, b);
     if (disk_blk == 0) {
       pos += EXT2_BLOCK_SIZE;
       continue;
     }
 
-    struct bcache_entry *e = bcache_get(disk_blk);
+    struct bcache_entry *e = bcache_get(fs, disk_blk);
     if (!e) {
       pos += EXT2_BLOCK_SIZE;
       continue;
@@ -1181,8 +1211,9 @@ done:
   return (int)written;
 }
 
-static int ext2_mkdir(const char *path, int mode) {
-  if (!ext2_mounted)
+static int ext2_mkdir(void *fs_data, const char *path, int mode) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted)
     return -1;
 
   while (*path == '/') path++;
@@ -1193,7 +1224,7 @@ static int ext2_mkdir(const char *path, int mode) {
   if (basename[0] == '\0')
     return -1;
 
-  struct ext2_inode_mem *parent = ext2_namei(parent_path);
+  struct ext2_inode_mem *parent = ext2_namei(fs, parent_path);
   if (!parent)
     return -2; /* -ENOENT */
   if (parent->type != EXT2_TYPE_DIR) {
@@ -1203,22 +1234,22 @@ static int ext2_mkdir(const char *path, int mode) {
 
   /* Check that name doesn't exist */
   uint32_t existing;
-  if (ext2_dir_lookup(parent, basename, &existing) == 0) {
+  if (ext2_dir_lookup(fs, parent, basename, &existing) == 0) {
     icache_release(parent);
     return -17; /* -EEXIST */
   }
 
   /* Allocate new inode for the directory */
-  int new_ino = ext2_alloc_inode(EXT2_TYPE_DIR);
+  int new_ino = ext2_alloc_inode(fs, EXT2_TYPE_DIR);
   if (new_ino < 0) {
     icache_release(parent);
     return -28; /* -ENOSPC */
   }
 
   /* Get the new inode into icache */
-  struct ext2_inode_mem *ip = icache_get((uint32_t)new_ino);
+  struct ext2_inode_mem *ip = icache_get(fs, (uint32_t)new_ino);
   if (!ip) {
-    ext2_free_inode((uint32_t)new_ino);
+    ext2_free_inode(fs, (uint32_t)new_ino);
     icache_release(parent);
     return -1;
   }
@@ -1229,10 +1260,10 @@ static int ext2_mkdir(const char *path, int mode) {
     ip->mode = 0755;
 
   /* Allocate first data block for . and .. entries */
-  uint32_t data_blk = ext2_bmap_alloc(ip, 0);
+  uint32_t data_blk = ext2_bmap_alloc(fs, ip, 0);
   if (data_blk == 0) {
     icache_release(ip);
-    ext2_free_inode((uint32_t)new_ino);
+    ext2_free_inode(fs, (uint32_t)new_ino);
     icache_release(parent);
     return -28; /* -ENOSPC */
   }
@@ -1241,10 +1272,10 @@ static int ext2_mkdir(const char *path, int mode) {
   ip->dirty = 1;
 
   /* Write . and .. entries */
-  struct bcache_entry *e = bcache_get(data_blk);
+  struct bcache_entry *e = bcache_get(fs, data_blk);
   if (!e) {
     icache_release(ip);
-    ext2_free_inode((uint32_t)new_ino);
+    ext2_free_inode(fs, (uint32_t)new_ino);
     icache_release(parent);
     return -1;
   }
@@ -1270,25 +1301,27 @@ static int ext2_mkdir(const char *path, int mode) {
   bcache_mark_dirty(e);
   bcache_release(e);
 
-  icache_writeback(ip);
+  icache_writeback(fs, ip);
   icache_release(ip);
 
   /* Add entry in parent directory */
-  int ret = ext2_dir_add(parent, basename, (uint32_t)new_ino, EXT2_FT_DIR);
-  icache_writeback(parent);
+  int ret = ext2_dir_add(fs, parent, basename, (uint32_t)new_ino,
+                         EXT2_FT_DIR);
+  icache_writeback(fs, parent);
   icache_release(parent);
 
   if (ret < 0) {
-    ext2_free_inode((uint32_t)new_ino);
+    ext2_free_inode(fs, (uint32_t)new_ino);
     return ret;
   }
 
-  bcache_sync();
+  bcache_sync(fs);
   return 0;
 }
 
-static int ext2_unlink(const char *path) {
-  if (!ext2_mounted)
+static int ext2_unlink(void *fs_data, const char *path) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted)
     return -1;
 
   while (*path == '/') path++;
@@ -1299,7 +1332,7 @@ static int ext2_unlink(const char *path) {
   if (basename[0] == '\0')
     return -1;
 
-  struct ext2_inode_mem *parent = ext2_namei(parent_path);
+  struct ext2_inode_mem *parent = ext2_namei(fs, parent_path);
   if (!parent)
     return -2; /* -ENOENT */
   if (parent->type != EXT2_TYPE_DIR) {
@@ -1309,7 +1342,7 @@ static int ext2_unlink(const char *path) {
 
   /* Look up the target inode */
   uint32_t target_ino;
-  if (ext2_dir_lookup(parent, basename, &target_ino) < 0) {
+  if (ext2_dir_lookup(fs, parent, basename, &target_ino) < 0) {
     icache_release(parent);
     return -2; /* -ENOENT */
   }
@@ -1320,7 +1353,7 @@ static int ext2_unlink(const char *path) {
     return -1;
   }
 
-  struct ext2_inode_mem *ip = icache_get(target_ino);
+  struct ext2_inode_mem *ip = icache_get(fs, target_ino);
   if (!ip) {
     icache_release(parent);
     return -1;
@@ -1334,8 +1367,8 @@ static int ext2_unlink(const char *path) {
   }
 
   /* Remove directory entry */
-  int ret = ext2_dir_remove(parent, basename);
-  icache_writeback(parent);
+  int ret = ext2_dir_remove(fs, parent, basename);
+  icache_writeback(fs, parent);
   icache_release(parent);
 
   if (ret < 0) {
@@ -1350,19 +1383,20 @@ static int ext2_unlink(const char *path) {
   if (ip->link_count == 0 && ip->refcount <= 1) {
     /* No more references -- free immediately */
     icache_release(ip);
-    ext2_free_inode(target_ino);
+    ext2_free_inode(fs, target_ino);
   } else {
-    icache_writeback(ip);
+    icache_writeback(fs, ip);
     icache_release(ip);
   }
 
-  bcache_sync();
-  sb_flush_if_dirty();
+  bcache_sync(fs);
+  sb_flush_if_dirty(fs);
   return 0;
 }
 
-int ext2_mknod(const char *path, uint32_t mode, uint32_t rdev) {
-  if (!ext2_mounted)
+int ext2_mknod(void *fs_data, const char *path, uint32_t mode, uint32_t rdev) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted)
     return -1;
 
   while (*path == '/') path++;
@@ -1385,7 +1419,7 @@ int ext2_mknod(const char *path, uint32_t mode, uint32_t rdev) {
   if (basename[0] == '\0')
     return -1;
 
-  struct ext2_inode_mem *parent = ext2_namei(parent_path);
+  struct ext2_inode_mem *parent = ext2_namei(fs, parent_path);
   if (!parent)
     return -2; /* -ENOENT */
   if (parent->type != EXT2_TYPE_DIR) {
@@ -1395,20 +1429,20 @@ int ext2_mknod(const char *path, uint32_t mode, uint32_t rdev) {
 
   /* Check name doesn't exist */
   uint32_t existing;
-  if (ext2_dir_lookup(parent, basename, &existing) == 0) {
+  if (ext2_dir_lookup(fs, parent, basename, &existing) == 0) {
     icache_release(parent);
     return -17; /* -EEXIST */
   }
 
-  int new_ino = ext2_alloc_inode(itype);
+  int new_ino = ext2_alloc_inode(fs, itype);
   if (new_ino < 0) {
     icache_release(parent);
     return -28; /* -ENOSPC */
   }
 
-  struct ext2_inode_mem *ip = icache_get((uint32_t)new_ino);
+  struct ext2_inode_mem *ip = icache_get(fs, (uint32_t)new_ino);
   if (!ip) {
-    ext2_free_inode((uint32_t)new_ino);
+    ext2_free_inode(fs, (uint32_t)new_ino);
     icache_release(parent);
     return -1;
   }
@@ -1416,24 +1450,26 @@ int ext2_mknod(const char *path, uint32_t mode, uint32_t rdev) {
   ip->mode = mode & 0xfff;
   ip->rdev = rdev;
   ip->dirty = 1;
-  icache_writeback(ip);
+  icache_writeback(fs, ip);
   icache_release(ip);
 
-  int ret = ext2_dir_add(parent, basename, (uint32_t)new_ino, ftype);
-  icache_writeback(parent);
+  int ret = ext2_dir_add(fs, parent, basename, (uint32_t)new_ino, ftype);
+  icache_writeback(fs, parent);
   icache_release(parent);
 
   if (ret < 0) {
-    ext2_free_inode((uint32_t)new_ino);
+    ext2_free_inode(fs, (uint32_t)new_ino);
     return ret;
   }
 
-  bcache_sync();
+  bcache_sync(fs);
   return 0;
 }
 
-static int ext2_symlink(const char *target, const char *linkpath) {
-    if (!ext2_mounted)
+static int ext2_symlink(void *fs_data, const char *target,
+                        const char *linkpath) {
+    struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+    if (!fs || !ext2_mounted)
         return -1;
 
     while (*linkpath == '/') linkpath++;
@@ -1449,25 +1485,25 @@ static int ext2_symlink(const char *target, const char *linkpath) {
     if (basename[0] == '\0')
         return -1;
 
-    struct ext2_inode_mem *parent = ext2_namei(parent_path);
+    struct ext2_inode_mem *parent = ext2_namei(fs, parent_path);
     if (!parent)
         return -2; /* ENOENT */
 
     /* Check name doesn't already exist */
     uint32_t existing_ino;
-    if (ext2_dir_lookup(parent, basename, &existing_ino) == 0) {
+    if (ext2_dir_lookup(fs, parent, basename, &existing_ino) == 0) {
         icache_release(parent);
         return -17; /* EEXIST */
     }
 
     /* Allocate inode */
-    int ino = ext2_alloc_inode(EXT2_TYPE_SYMLINK);
+    int ino = ext2_alloc_inode(fs, EXT2_TYPE_SYMLINK);
     if (ino < 0) {
         icache_release(parent);
         return -28; /* ENOSPC */
     }
 
-    struct ext2_inode_mem *ip = icache_get((uint32_t)ino);
+    struct ext2_inode_mem *ip = icache_get(fs, (uint32_t)ino);
     if (!ip) {
         icache_release(parent);
         return -1;
@@ -1477,44 +1513,47 @@ static int ext2_symlink(const char *target, const char *linkpath) {
     ip->size = (uint32_t)targetlen;
 
     /* Allocate data block and write target */
-    uint32_t blk = ext2_bmap_alloc(ip, 0);
+    uint32_t blk = ext2_bmap_alloc(fs, ip, 0);
     if (blk == 0) {
         icache_release(ip);
         icache_release(parent);
         return -28; /* ENOSPC */
     }
 
-    struct bcache_entry *be = bcache_get(blk);
+    struct bcache_entry *be = bcache_get(fs, blk);
     memset(be->data, 0, EXT2_BLOCK_SIZE);
     memcpy(be->data, target, (uint32_t)targetlen);
     bcache_mark_dirty(be);
     bcache_release(be);
 
     ip->dirty = 1;
-    icache_writeback(ip);
+    icache_writeback(fs, ip);
     icache_release(ip);
 
     /* Add directory entry */
-    int ret = ext2_dir_add(parent, basename, (uint32_t)ino, EXT2_FT_SYMLINK);
-    icache_writeback(parent);
+    int ret = ext2_dir_add(fs, parent, basename, (uint32_t)ino,
+                           EXT2_FT_SYMLINK);
+    icache_writeback(fs, parent);
     icache_release(parent);
 
     if (ret < 0) {
-        ext2_free_inode((uint32_t)ino);
+        ext2_free_inode(fs, (uint32_t)ino);
         return ret;
     }
 
-    bcache_sync();
+    bcache_sync(fs);
     return 0;
 }
 
-static int ext2_readlink(const char *path, char *buf, int bufsiz) {
-    if (!ext2_mounted)
+static int ext2_readlink(void *fs_data, const char *path, char *buf,
+                         int bufsiz) {
+    struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+    if (!fs || !ext2_mounted)
         return -1;
 
     while (*path == '/') path++;
 
-    struct ext2_inode_mem *ip = ext2_namei(path);
+    struct ext2_inode_mem *ip = ext2_namei(fs, path);
     if (!ip)
         return -2; /* ENOENT */
 
@@ -1527,21 +1566,23 @@ static int ext2_readlink(const char *path, char *buf, int bufsiz) {
     if (copylen > bufsiz)
         copylen = bufsiz;
 
-    uint32_t blk = ext2_bmap(ip, 0);
+    uint32_t blk = ext2_bmap(fs, ip, 0);
     if (blk == 0) {
         icache_release(ip);
         return -1;
     }
 
-    struct bcache_entry *be = bcache_get(blk);
+    struct bcache_entry *be = bcache_get(fs, blk);
     memcpy(buf, be->data, (uint32_t)copylen);
     bcache_release(be);
     icache_release(ip);
     return copylen;
 }
 
-static int ext2_rename(const char *oldpath, const char *newpath) {
-    if (!ext2_mounted)
+static int ext2_rename(void *fs_data, const char *oldpath,
+                       const char *newpath) {
+    struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+    if (!fs || !ext2_mounted)
         return -1;
 
     while (*oldpath == '/') oldpath++;
@@ -1555,19 +1596,19 @@ static int ext2_rename(const char *oldpath, const char *newpath) {
     if (old_basename[0] == '\0' || new_basename[0] == '\0')
         return -22;
 
-    struct ext2_inode_mem *old_parent = ext2_namei(old_parent_path);
+    struct ext2_inode_mem *old_parent = ext2_namei(fs, old_parent_path);
     if (!old_parent)
         return -2;
 
     /* Look up old entry */
     uint32_t ino;
-    if (ext2_dir_lookup(old_parent, old_basename, &ino) < 0) {
+    if (ext2_dir_lookup(fs, old_parent, old_basename, &ino) < 0) {
         icache_release(old_parent);
         return -2; /* ENOENT */
     }
 
     /* Get the inode to determine file type */
-    struct ext2_inode_mem *ip = icache_get(ino);
+    struct ext2_inode_mem *ip = icache_get(fs, ino);
     if (!ip) {
         icache_release(old_parent);
         return -1;
@@ -1576,7 +1617,7 @@ static int ext2_rename(const char *oldpath, const char *newpath) {
                  (ip->type == EXT2_TYPE_SYMLINK) ? EXT2_FT_SYMLINK : EXT2_FT_FILE;
     icache_release(ip);
 
-    struct ext2_inode_mem *new_parent = ext2_namei(new_parent_path);
+    struct ext2_inode_mem *new_parent = ext2_namei(fs, new_parent_path);
     if (!new_parent) {
         icache_release(old_parent);
         return -2;
@@ -1584,25 +1625,26 @@ static int ext2_rename(const char *oldpath, const char *newpath) {
 
     /* If new name exists, remove it */
     uint32_t existing;
-    if (ext2_dir_lookup(new_parent, new_basename, &existing) == 0) {
-        ext2_dir_remove(new_parent, new_basename);
+    if (ext2_dir_lookup(fs, new_parent, new_basename, &existing) == 0) {
+        ext2_dir_remove(fs, new_parent, new_basename);
     }
 
     /* Add new entry, remove old */
-    int ret = ext2_dir_add(new_parent, new_basename, ino, ft);
+    int ret = ext2_dir_add(fs, new_parent, new_basename, ino, ft);
     if (ret == 0)
-        ext2_dir_remove(old_parent, old_basename);
+        ext2_dir_remove(fs, old_parent, old_basename);
 
-    icache_writeback(new_parent);
-    icache_writeback(old_parent);
+    icache_writeback(fs, new_parent);
+    icache_writeback(fs, old_parent);
     icache_release(new_parent);
     icache_release(old_parent);
-    bcache_sync();
+    bcache_sync(fs);
     return ret;
 }
 
-static int ext2_rmdir(const char *path) {
-  if (!ext2_mounted)
+static int ext2_rmdir(void *fs_data, const char *path) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted)
     return -1;
 
   while (*path == '/') path++;
@@ -1612,7 +1654,7 @@ static int ext2_rmdir(const char *path) {
   if (basename[0] == '\0')
     return -1;
 
-  struct ext2_inode_mem *parent = ext2_namei(parent_path);
+  struct ext2_inode_mem *parent = ext2_namei(fs, parent_path);
   if (!parent)
     return -2; /* -ENOENT */
   if (parent->type != EXT2_TYPE_DIR) {
@@ -1621,7 +1663,7 @@ static int ext2_rmdir(const char *path) {
   }
 
   uint32_t target_ino;
-  if (ext2_dir_lookup(parent, basename, &target_ino) < 0) {
+  if (ext2_dir_lookup(fs, parent, basename, &target_ino) < 0) {
     icache_release(parent);
     return -2; /* -ENOENT */
   }
@@ -1631,7 +1673,7 @@ static int ext2_rmdir(const char *path) {
     return -1;
   }
 
-  struct ext2_inode_mem *ip = icache_get(target_ino);
+  struct ext2_inode_mem *ip = icache_get(fs, target_ino);
   if (!ip) {
     icache_release(parent);
     return -1;
@@ -1646,9 +1688,9 @@ static int ext2_rmdir(const char *path) {
   /* Check directory is empty (only . and ..) */
   uint32_t nblocks = (ip->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
   for (uint32_t b = 0; b < nblocks; b++) {
-    uint32_t disk_blk = ext2_bmap(ip, b);
+    uint32_t disk_blk = ext2_bmap(fs, ip, b);
     if (disk_blk == 0) continue;
-    struct bcache_entry *e = bcache_get(disk_blk);
+    struct bcache_entry *e = bcache_get(fs, disk_blk);
     if (!e) continue;
     uint32_t off = 0;
     while (off < EXT2_BLOCK_SIZE) {
@@ -1670,8 +1712,8 @@ static int ext2_rmdir(const char *path) {
   }
 
   /* Remove directory entry from parent */
-  int ret = ext2_dir_remove(parent, basename);
-  icache_writeback(parent);
+  int ret = ext2_dir_remove(fs, parent, basename);
+  icache_writeback(fs, parent);
   icache_release(parent);
 
   if (ret < 0) {
@@ -1683,10 +1725,10 @@ static int ext2_rmdir(const char *path) {
   ip->link_count = 0;
   ip->dirty = 1;
   icache_release(ip);
-  ext2_free_inode(target_ino);
+  ext2_free_inode(fs, target_ino);
 
-  bcache_sync();
-  sb_flush_if_dirty();
+  bcache_sync(fs);
+  sb_flush_if_dirty(fs);
   return 0;
 }
 
@@ -1714,7 +1756,7 @@ struct vfs_ops ext2_ops = {
 /* mkfs -- format disk with ext2-lite filesystem                       */
 /* ================================================================== */
 
-static int ext2_mkfs(uint64_t capacity_sectors) {
+static int ext2_mkfs(struct ext2_fs *fs, uint64_t capacity_sectors) {
   uint32_t total_blocks = (uint32_t)(capacity_sectors / EXT2_SECTORS_PER_BLOCK);
   if (total_blocks < 16) {
     printk("ext2: disk too small (%d blocks)\n", total_blocks);
@@ -1722,7 +1764,6 @@ static int ext2_mkfs(uint64_t capacity_sectors) {
   }
 
   uint32_t total_inodes = total_blocks / 4;
-  if (total_inodes > 4096) total_inodes = 4096;
   if (total_inodes < 16)   total_inodes = 16;
 
   uint32_t bitmap_blocks = (total_blocks + 32767) / 32768;
@@ -1757,7 +1798,7 @@ static int ext2_mkfs(uint64_t capacity_sectors) {
   fmtsb->data_start   = data_start;
   fmtsb->root_inode   = EXT2_ROOT_INO;
   fmtsb->version      = EXT2_VERSION;
-  if (ext2_write_block(0, fmt_buf) < 0)
+  if (ext2_write_block(fs, 0, fmt_buf) < 0)
     return -1;
 
   /* Write block bitmap (mark blocks 0..data_start allocated,
@@ -1774,14 +1815,14 @@ static int ext2_mkfs(uint64_t capacity_sectors) {
           fmt_buf[byte] |= (1 << bit);
       }
     }
-    if (ext2_write_block(1 + bm, fmt_buf) < 0)
+    if (ext2_write_block(fs, 1 + bm, fmt_buf) < 0)
       return -1;
   }
 
   /* Zero all inode table blocks */
   memset(fmt_buf, 0, EXT2_BLOCK_SIZE);
   for (uint32_t i = 0; i < itable_blocks; i++) {
-    if (ext2_write_block(1 + bitmap_blocks + i, fmt_buf) < 0)
+    if (ext2_write_block(fs, 1 + bitmap_blocks + i, fmt_buf) < 0)
       return -1;
   }
 
@@ -1797,7 +1838,7 @@ static int ext2_mkfs(uint64_t capacity_sectors) {
   /* Write root inode into inode table block */
   memset(fmt_buf, 0, EXT2_BLOCK_SIZE);
   memcpy(fmt_buf, &root_di, sizeof(root_di));
-  if (ext2_write_block(1 + bitmap_blocks, fmt_buf) < 0)
+  if (ext2_write_block(fs, 1 + bitmap_blocks, fmt_buf) < 0)
     return -1;
 
   /* Write root directory data block with . and .. entries */
@@ -1817,7 +1858,7 @@ static int ext2_mkfs(uint64_t capacity_sectors) {
   de->name[0] = '.';
   de->name[1] = '.';
 
-  if (ext2_write_block(data_start, fmt_buf) < 0)
+  if (ext2_write_block(fs, data_start, fmt_buf) < 0)
     return -1;
 
   printk("ext2_mkfs: done\n");
@@ -1829,92 +1870,118 @@ static int ext2_mkfs(uint64_t capacity_sectors) {
 /* ================================================================== */
 
 int ext2_init(void) {
-  memset(bcache, 0, sizeof(bcache));
-  memset(icache, 0, sizeof(icache));
-  ext2_mounted = 0;
-
-  /* Try to read superblock from disk */
+  int mounted = 0;
   static uint8_t init_buf[EXT2_BLOCK_SIZE]
     __attribute__((aligned(4096)));
 
-  if (ext2_read_block(0, init_buf) < 0) {
-    printk("ext2: cannot read block 0 (no disk?)\n");
-    return -1;
-  }
+  /* Probe each configured ext2_filesystems[] entry. For each present
+   * virtio block device we attempt to read the superblock. If no
+   * valid filesystem is found we run ext2_mkfs to format the device,
+   * then mount and register the filesystem state in ext2_filesystems[].
+   * This supports multiple independent ext2 mounts (e.g. /mnt and /test).
+   */
+  for (int i = 0; i < EXT2_MAX_FS; i++) {
+    struct ext2_fs *fs = &ext2_filesystems[i];
 
-  struct ext2_superblock *disk_sb = (struct ext2_superblock *)init_buf;
-  if (disk_sb->magic != EXT2_MAGIC) {
-    printk("ext2: no valid filesystem (magic=0x%x, expected 0x%x)\n",
-           disk_sb->magic, EXT2_MAGIC);
-    printk("ext2: formatting disk...\n");
+    memset(bcache, 0, sizeof(bcache));
+    memset(icache, 0, sizeof(icache));
+    fs->mounted = 0;
+    bcache_hand = 0;
 
-    /* Need to know disk capacity. Read it from virtio_blk_rw by
-     * checking the capacity. We'll use a simple approach:
-     * try writing/reading block 0 to estimate. For now, assume
-     * the QEMU disk size. We can get capacity from the blk device. */
-    uint64_t cap = virtio_blk_capacity();
-    if (cap == 0) cap = 131072; /* 64 MB fallback */
-    if (ext2_mkfs(cap) < 0) {
-      printk("ext2: mkfs failed\n");
-      return -1;
+    if (fs->device_index >= virtio_blk_count())
+      continue;
+
+    if (ext2_read_block(fs, 0, init_buf) < 0) {
+      printk("ext2[%d]: cannot read block 0\n", fs->device_index);
+      continue;
     }
 
-    /* Re-read superblock after format */
-    if (ext2_read_block(0, init_buf) < 0)
-      return -1;
-    disk_sb = (struct ext2_superblock *)init_buf;
+    struct ext2_superblock *disk_sb = (struct ext2_superblock *)init_buf;
     if (disk_sb->magic != EXT2_MAGIC) {
-      printk("ext2: mkfs produced invalid superblock\n");
-      return -1;
+      printk("ext2[%d]: no valid filesystem (magic=0x%x, expected 0x%x)\n",
+             fs->device_index, disk_sb->magic, EXT2_MAGIC);
+      printk("ext2[%d]: formatting disk...\n", fs->device_index);
+
+      {
+        uint64_t cap = virtio_blk_capacity_on_dev(fs->device_index);
+        if (cap == 0) cap = 131072; /* 64 MB fallback */
+        if (ext2_mkfs(fs, cap) < 0) {
+          printk("ext2[%d]: mkfs failed\n", fs->device_index);
+          continue;
+        }
+      }
+
+      if (ext2_read_block(fs, 0, init_buf) < 0)
+        continue;
+      disk_sb = (struct ext2_superblock *)init_buf;
+      if (disk_sb->magic != EXT2_MAGIC) {
+        printk("ext2[%d]: mkfs produced invalid superblock\n",
+               fs->device_index);
+        continue;
+      }
     }
+
+    memcpy(&sb, disk_sb, sizeof(sb));
+    sb.dirty = 0;
+    fs->mounted = 1;
+    mounted++;
+
+    printk("ext2[%d]: mounted at %s (%d blocks, %d inodes, %d free blocks, "
+           "%d free inodes)\n",
+           fs->device_index, fs->mount_path,
+           sb.total_blocks, sb.total_inodes, sb.free_blocks, sb.free_inodes);
   }
 
-  /* Load superblock into memory */
-  memcpy(&sb, disk_sb, sizeof(sb));
-  sb.dirty = 0;
-  ext2_mounted = 1;
+  return mounted ? 0 : -1;
+}
 
-  printk("ext2: mounted (%d blocks, %d inodes, %d free blocks, "
-         "%d free inodes)\n",
-         sb.total_blocks, sb.total_inodes, sb.free_blocks, sb.free_inodes);
+int ext2_register_mounts(void) {
+  for (int i = 0; i < EXT2_MAX_FS; i++) {
+    struct ext2_fs *fs = &ext2_filesystems[i];
+    if (fs->mounted)
+      vfs_register_mount(fs->mount_path, &ext2_ops, fs, "ext2");
+  }
   return 0;
+}
+
+int ext2_is_ops(struct vfs_ops *ops) {
+  return ops == &ext2_ops;
 }
 
 /* ================================================================== */
 /* ext2_sync -- flush all dirty data to disk                           */
 /* ================================================================== */
 
-int ext2_mounted_flag(void) {
-  return ext2_mounted;
-}
-
 /* ext2_ftruncate_ino -- set file size by inode number */
-int ext2_ftruncate_ino(uint32_t ino, uint64_t length) {
-  if (!ext2_mounted) return -30; /* EROFS */
-  struct ext2_inode_mem *ip = icache_get(ino);
+int ext2_ftruncate_ino(void *fs_data, uint32_t ino, uint64_t length) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted) return -30; /* EROFS */
+  struct ext2_inode_mem *ip = icache_get(fs, ino);
   if (!ip) return -1;
   ip->size = (uint32_t)length;
   ip->dirty = 1;
-  icache_writeback(ip);
+  icache_writeback(fs, ip);
   icache_release(ip);
   return 0;
 }
 
 /* ext2_fchmod_ino -- set file mode by inode number */
-int ext2_fchmod_ino(uint32_t ino, uint32_t mode) {
-  if (!ext2_mounted) return -30; /* EROFS */
-  struct ext2_inode_mem *ip = icache_get(ino);
+int ext2_fchmod_ino(void *fs_data, uint32_t ino, uint32_t mode) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted) return -30; /* EROFS */
+  struct ext2_inode_mem *ip = icache_get(fs, ino);
   if (!ip) return -1;
   ip->mode = mode & 07777;
   ip->dirty = 1;
-  icache_writeback(ip);
+  icache_writeback(fs, ip);
   icache_release(ip);
   return 0;
 }
 
 /* ext2_hardlink -- create a hard link: add dirent for existing inode */
-int ext2_hardlink(const char *newpath, uint32_t src_ino) {
-  if (!ext2_mounted) return -30; /* EROFS */
+int ext2_hardlink(void *fs_data, const char *newpath, uint32_t src_ino) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted) return -30; /* EROFS */
 
   while (*newpath == '/') newpath++;
 
@@ -1922,7 +1989,7 @@ int ext2_hardlink(const char *newpath, uint32_t src_ino) {
   const char *basename = path_parent(newpath, parent_path, sizeof(parent_path));
   if (basename[0] == '\0') return -1;
 
-  struct ext2_inode_mem *parent = ext2_namei(parent_path);
+  struct ext2_inode_mem *parent = ext2_namei(fs, parent_path);
   if (!parent) return -2; /* ENOENT */
   if (parent->type != EXT2_TYPE_DIR) {
     icache_release(parent);
@@ -1931,13 +1998,13 @@ int ext2_hardlink(const char *newpath, uint32_t src_ino) {
 
   /* Check name doesn't already exist */
   uint32_t existing;
-  if (ext2_dir_lookup(parent, basename, &existing) == 0) {
+  if (ext2_dir_lookup(fs, parent, basename, &existing) == 0) {
     icache_release(parent);
     return -17; /* EEXIST */
   }
 
   /* Get source inode to determine file type for dirent */
-  struct ext2_inode_mem *src = icache_get(src_ino);
+  struct ext2_inode_mem *src = icache_get(fs, src_ino);
   if (!src) {
     icache_release(parent);
     return -2;
@@ -1948,7 +2015,7 @@ int ext2_hardlink(const char *newpath, uint32_t src_ino) {
   else if (src->type == EXT2_TYPE_SYMLINK) ftype = EXT2_FT_SYMLINK;
 
   /* Add directory entry pointing to existing inode */
-  int ret = ext2_dir_add(parent, basename, src_ino, ftype);
+  int ret = ext2_dir_add(fs, parent, basename, src_ino, ftype);
   if (ret < 0) {
     icache_release(src);
     icache_release(parent);
@@ -1958,25 +2025,33 @@ int ext2_hardlink(const char *newpath, uint32_t src_ino) {
   /* Increment link count on source inode */
   src->link_count++;
   src->dirty = 1;
-  icache_writeback(src);
+  icache_writeback(fs, src);
 
   icache_release(src);
   icache_release(parent);
   return 0;
 }
 
-void ext2_sync(void) {
+void ext2_sync(void *fs_data) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs) {
+    for (int i = 0; i < EXT2_MAX_FS; i++) {
+      if (ext2_filesystems[i].mounted)
+        ext2_sync(&ext2_filesystems[i]);
+    }
+    return;
+  }
   if (!ext2_mounted) return;
 
   /* Write back all dirty icache entries */
   for (int i = 0; i < ICACHE_SIZE; i++) {
     if (icache[i].valid && icache[i].dirty)
-      icache_writeback(&icache[i]);
+      icache_writeback(fs, &icache[i]);
   }
 
   /* Write back all dirty bcache entries */
-  bcache_sync();
+  bcache_sync(fs);
 
   /* Write superblock if dirty */
-  sb_flush_if_dirty();
+  sb_flush_if_dirty(fs);
 }
