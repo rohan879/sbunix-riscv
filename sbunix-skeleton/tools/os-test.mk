@@ -49,6 +49,9 @@ SUMMARY_FILE := $(OUT_DIRECTORY)/build-summary.txt
 COMPILE_LOG_DIR := $(OUT_DIRECTORY)/compile-logs
 MANIFEST_FILE := $(OUT_DIRECTORY)/test-manifest.txt
 
+# Suppress log files for tests that compile and link without warnings
+OS_TEST_SUPPRESS_OK_LOGS ?= 1
+
 # Enable parallel builds
 MAKEFLAGS += --output-sync=recurse
 
@@ -110,33 +113,33 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 	mkdir -p $(COMPILE_LOG_DIR)/$$dir; \
 	outbin=$(OUT_DIRECTORY)/$$relpath; \
 	compile_log=$(COMPILE_LOG_DIR)/$$relpath.log; \
-	rm -f $$outbin $(OUT_DIRECTORY)/$$relpath.o $$compile_log; \
-	echo "=== Compiling $$relpath ===" > $$compile_log; \
-	echo "Source: $<" >> $$compile_log; \
-	echo "Command: $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -c $< -o $(OUT_DIRECTORY)/$$relpath.o" >> $$compile_log; \
-	echo "" >> $$compile_log; \
-	if $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -c $< -o $(OUT_DIRECTORY)/$$relpath.o 2>>$$compile_log; then \
-		echo "Compile: SUCCESS" >> $$compile_log; \
-		echo "Link command: $(CC) $(LDFLAGS) $(OUT_DIRECTORY)/$$relpath.o -o $$outbin" >> $$compile_log; \
-		echo "" >> $$compile_log; \
-		if $(CC) $(LDFLAGS) $(OUT_DIRECTORY)/$$relpath.o -o $$outbin 2>>$$compile_log; then \
-			echo "Link: SUCCESS" >> $$compile_log; \
-			echo "Result: COMPILED SUCCESSFULLY" >> $$compile_log; \
-			rm -f $(OUT_DIRECTORY)/$$relpath.o; \
+	rm -f $$outbin $(OUT_DIRECTORY)/$$relpath.o; \
+	_tmpc=$$(mktemp); \
+	_tmpl=$$(mktemp); \
+	_keep_log=0; \
+	if $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -c $< -o $(OUT_DIRECTORY)/$$relpath.o 2>$$_tmpc; then \
+		if [ -s $$_tmpc ]; then _keep_log=1; fi; \
+		cat $$_tmpc > $$compile_log; \
+		if $(CC) $(LDFLAGS) $(OUT_DIRECTORY)/$$relpath.o -o $$outbin 2>$$_tmpl; then \
+			if [ -s $$_tmpl ]; then _keep_log=1; fi; \
+			cat $$_tmpl >> $$compile_log; \
+			if [ $$_keep_log -eq 0 ] && [ "$(OS_TEST_SUPPRESS_OK_LOGS)" = "1" ]; then \
+				rm -f $$compile_log; \
+			fi; \
+			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
 			cp $$outbin $@; \
 			echo "  OK: $$relpath"; \
 		else \
-			echo "Link: FAILED" >> $$compile_log; \
-			echo "Result: undefined" >> $$compile_log; \
-			rm -f $(OUT_DIRECTORY)/$$relpath.o $$outbin; \
+			cat $$_tmpl >> $$compile_log; \
+			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
 			echo "undefined" > $(OUT_DIRECTORY)/$$relpath.out; \
 			echo "  SKIP (undefined): $$relpath"; \
 			echo "  SKIP (undefined): $$relpath" >> $(SUMMARY_FILE); \
 			touch $@.failed; \
 		fi; \
 	else \
-		echo "Compile: FAILED" >> $$compile_log; \
-		rm -f $(OUT_DIRECTORY)/$$relpath.o; \
+		cat $$_tmpc > $$compile_log; \
+		rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
 		if grep -qE 'fatal error' $$compile_log 2>/dev/null; then \
 			reason="missing_header"; \
 		elif grep -qE 'undeclared|no member named' $$compile_log 2>/dev/null; then \
@@ -148,7 +151,6 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 		else \
 			reason="compile_error"; \
 		fi; \
-		echo "Result: $$reason" >> $$compile_log; \
 		echo "$$reason" > $(OUT_DIRECTORY)/$$relpath.out; \
 		echo "  SKIP ($$reason): $$relpath"; \
 		echo "  SKIP ($$reason): $$relpath" >> $(SUMMARY_FILE); \
