@@ -922,6 +922,12 @@ static int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_fi
 /* ------------------------------------------------------------------ */
 
 static void deliver_signal(struct trapframe *tf, struct proc *p) {
+    /* Force unblock fatal/synchronous signals that shouldn't be blocked or ignored */
+    uint64_t force_unblock = signal_bit(SIGKILL) | signal_bit(SIGSTOP) |
+                             signal_bit(SIGILL) | signal_bit(SIGSEGV) |
+                             signal_bit(SIGBUS) | signal_bit(SIGFPE);
+    p->sigmask &= ~force_unblock;
+
     /* Find lowest-numbered pending unblocked signal */
     uint64_t deliverable = p->sigpending & ~p->sigmask;
     if (deliverable == 0)
@@ -939,6 +945,12 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     p->sigpending &= ~signal_bit(signum);
 
     struct kern_sigaction *sa = proc_sigactions(p);
+    
+    /* Force SIG_DFL for SIG_IGN on unblockable/synchronous signals */
+    if (sa[signum].handler == 1 && (force_unblock & signal_bit(signum))) {
+        sa[signum].handler = 0;
+    }
+    
     uint64_t handler = sa[signum].handler;
 
     /* SIG_DFL (0) -- default action */
@@ -2234,19 +2246,23 @@ static long sys_exit_handler(struct trapframe *tf) {
         if (current_proc->parent) {
             struct proc *par = current_proc->parent;
             struct kern_sigaction *psa = proc_sigactions(par);
-            /* SA_NOCLDWAIT: auto-reap child instead of leaving zombie */
-            if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
-                if (current_proc->kstack) { kfree(current_proc->kstack); current_proc->kstack = NULL; }
-                if (current_proc->trapframe) { kfree(current_proc->trapframe); current_proc->trapframe = NULL; }
-                current_proc->state = UNUSED;
-                current_proc->pid = 0;
-                current_proc->parent = NULL;
-            } else {
-                current_proc->state = ZOMBIE;
-            }
+            current_proc->state = ZOMBIE;
             par->sigpending |= signal_bit(SIGCHLD);
             if (par->state == SLEEPING)
                 par->state = RUNNABLE;
+                
+            /* SA_NOCLDWAIT: auto-reap child instead of leaving zombie */
+            if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
+                /* Reparent to init so init reaps it safely via sys_wait4 */
+                /* Do NOT kfree(kstack) here, as current thread is still running on it! */
+                struct proc *initproc = NULL;
+                for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+                    if (p->pid == 1 && p->state != UNUSED) { initproc = p; break; }
+                }
+                current_proc->parent = initproc; /* Can be NULL if init is dead */
+                if (initproc && initproc->state == SLEEPING)
+                    initproc->state = RUNNABLE;
+            }
         } else {
             current_proc->state = ZOMBIE;
         }

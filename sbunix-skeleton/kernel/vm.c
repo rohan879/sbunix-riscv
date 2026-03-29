@@ -491,8 +491,7 @@ static void freewalk_level(pagetable_t pt, int level) {
         * to recurse into it and crash the kernel. */
       pagetable_t child = (pagetable_t)PTE2PA(pte);
       if (!pa_is_valid_page((uint64_t)child)) {
-        printk("vm: skipping invalid child pagetable pte=0x%lx pa=0x%lx level=%d\n",
-               pte, (uint64_t)child, level);
+        /* Corrupted/reused page table page — silently detach */
         pt[i] = 0;
         continue;
       }
@@ -537,8 +536,7 @@ void proc_freepagetable(pagetable_t pagetable) {
             freewalk_level(child, 0);
             kfree((void *)child);
           } else {
-            printk("vm: skipping invalid L1 child pagetable pte=0x%lx pa=0x%lx\n",
-                   user_L1[j], (uint64_t)child);
+            /* Corrupted/reused L0 page — silently detach */
           }
         }
         user_L1[j] = 0;

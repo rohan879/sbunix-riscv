@@ -43,8 +43,10 @@ endif
 
 DISK_SIZE ?= 16
 DISK_IMG  := build/disk.img
-TEST_DISK_SIZE ?= 128 # MODIFIED: added
-TEST_DISK_IMG  := build/test-disk.img # MODIFIED: added
+# MODIFIED: added
+TEST_DISK_SIZE ?= 128
+# MODIFIED: added
+TEST_DISK_IMG  := build/test-disk.img
 
 -include Makefile.local
 

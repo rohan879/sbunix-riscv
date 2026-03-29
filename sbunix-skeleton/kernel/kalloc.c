@@ -64,6 +64,10 @@ void kfree(void *pa) {
             page_refcount[idx]--;
             return; /* still referenced */
         }
+        if (page_refcount[idx] == 0) {
+            printk("WARNING: double kfree of pa 0x%lx! Ignoring.\n", (uint64_t)pa);
+            return;
+        }
         page_refcount[idx] = 0;
     }
 
@@ -86,6 +90,9 @@ void kinit(void) {
     printk("kinit: initializing memory from 0x%lx to 0x%lx\n", (unsigned long)p, (unsigned long)PHYSTOP);
 
     for (; p + PAGE_SIZE <= (char*)PHYSTOP; p += PAGE_SIZE) {
+        int idx = pa_to_index((uint64_t)p);
+        if (idx >= 0 && idx < MAX_PAGES)
+            page_refcount[idx] = 1;
         kfree(p);
     }
 
@@ -191,6 +198,10 @@ void kfree_super(void *pa) {
         if (page_refcount[base_idx] > 1) {
             page_refcount[base_idx]--;
             return; /* still referenced */
+        }
+        if (page_refcount[base_idx] == 0) {
+            printk("WARNING: double kfree_super of pa 0x%lx! Ignoring.\n", (uint64_t)base_pa);
+            return;
         }
     }
 
