@@ -1,0 +1,77 @@
+#!/bin/bash
+# analyze-open-posix-failures: Analyze compilation failures in open-posix-test build
+
+if [ ! -d "build/open-posix-test-out/sbunix/compile-logs" ]; then
+    echo "Error: No compilation logs found. Run 'BUILD_TESTS=1 make' first."
+    exit 1
+fi
+
+LOGS_DIR="build/open-posix-test-out/sbunix/compile-logs"
+
+echo "=== Open POSIX Test Suite Compilation Analysis ==="
+echo ""
+
+echo "Summary:"
+missing=$(find "$LOGS_DIR" -name "*.log" -exec grep -l "fatal error:" {} \; | wc -l)
+undeclared=$(find "$LOGS_DIR" -name "*.log" -exec grep -l "undeclared" {} \; | wc -l)
+link_err=$(find "$LOGS_DIR" -name "*.log" -exec grep -l "undefined reference" {} \; | wc -l)
+total=$(find "$LOGS_DIR" -name "*.log" | wc -l)
+total_src=$(find tests/thirdparty/open-posix-test-suite/posixtest/conformance -name '*.c' ! -name 'testfrmw*' | wc -l)
+compiled=$(find build/testfs/bin/open-posix-test -type f ! -name '*.failed' 2>/dev/null | wc -l)
+skipped=$((total_src - compiled))
+
+echo "  Total source:         $total_src"
+echo "  Compiled:             $compiled"
+echo "  Skipped:              $skipped"
+echo "  Log files:            $total"
+echo "  Missing headers:      $missing"
+echo "  Undeclared symbols:   $undeclared"
+echo "  Link errors:          $link_err"
+echo ""
+
+# Show specific examples if requested
+case "$1" in
+    "headers")
+        echo "=== Most common missing headers ==="
+        grep -r "fatal error:" "$LOGS_DIR" | sed 's/.*fatal error: //' | sed 's/: No such file.*//' | sort | uniq -c | sort -nr | head -10
+        ;;
+    "symbols")
+        echo "=== Most common undeclared symbols ==="
+        grep -rh "undeclared" "$LOGS_DIR" | sed "s/.*'\(.*\)' undeclared.*/\\1/" | sort | uniq -c | sort -nr | head -10
+        ;;
+    "category")
+        echo "=== Success rate by category ==="
+        for category in definitions interfaces behavior; do
+            if [ -d "$LOGS_DIR/conformance/$category" ]; then
+                total_cat=$(find "$LOGS_DIR/conformance/$category" -name "*.log" | wc -l)
+                ok_cat=$(find build/testfs/bin/open-posix-test/conformance/$category -type f ! -name '*.failed' 2>/dev/null | wc -l)
+                if [ $total_cat -gt 0 ]; then
+                    pct=$((ok_cat * 100 / total_cat))
+                    printf "  %-15s %3d/%3d (%2d%%)\n" "$category:" $ok_cat $total_cat $pct
+                fi
+            fi
+        done
+        ;;
+    "help"|"-h"|"--help")
+        echo "Usage: $0 [headers|symbols|category]"
+        echo ""
+        echo "Options:"
+        echo "  headers    - Show most common missing headers"
+        echo "  symbols    - Show most common undeclared symbols"
+        echo "  category   - Show success rate by test category"
+        echo ""
+        echo "Examples:"
+        echo "  $0              # Show summary"
+        echo "  $0 headers      # Analyze missing headers"
+        echo "  $0 symbols      # Analyze undeclared symbols"
+        echo "  $0 category     # Show per-category statistics"
+        ;;
+    "")
+        echo "Use '$0 help' for more analysis options."
+        ;;
+    *)
+        echo "Unknown option: $1"
+        echo "Use '$0 help' for usage information."
+        exit 1
+        ;;
+esac

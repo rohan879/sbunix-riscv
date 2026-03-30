@@ -45,9 +45,10 @@ if test -f /bin/run-tests; then
         echo "=========================================="
         echo ""
         echo "Available commands:"
-        echo "  run-tests     - Run SBUnix regression tests"  
-        echo "  run-os-test   - Run POSIX compliance tests"
-        echo "  poweroff      - Shutdown system"
+        echo "  run-tests          - Run SBUnix regression tests"  
+        echo "  run-os-test        - Run Sortix POSIX compliance tests"
+        echo "  run-open-posix-test - Run Open POSIX test suite"
+        echo "  poweroff           - Shutdown system"
         echo ""
     fi
 fi

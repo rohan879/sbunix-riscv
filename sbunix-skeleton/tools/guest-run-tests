@@ -547,6 +547,7 @@ echo "Passed: $PASS"
 echo "Failed: $FAIL"
 echo ""
 echo "To run Sortix os-test POSIX compliance suite: run-os-test"
+echo "To run Open POSIX test suite: run-open-posix-test"
 
 # --- Persistence test: MUST be last (calls poweroff after write phase) ---
 echo "=== Running persisttest ==="

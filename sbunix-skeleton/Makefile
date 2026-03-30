@@ -23,6 +23,7 @@ TEST_BIN_NAMES := $(notdir $(TEST_SRC_DIRS))
 LEGACY_TEST_TARFS_TARGETS := $(addprefix build/rootfs/bin/,$(TEST_BIN_NAMES))
 ifdef BUILD_TESTS
   OS_TEST_MARKER := build/.os-test-built
+  OPEN_POSIX_TEST_MARKER := build/.open-posix-test-built
   TEST_TARGETS := $(patsubst tests/%,build/testfs/bin/%,$(TEST_SRC_DIRS))
 endif
 
@@ -86,17 +87,25 @@ zig-out/lib/libsbunix.a: $(wildcard kernel/*.zig) build.zig
 # Count total os-test source files at build time
 OS_TEST_TOTAL := $(shell find tests/thirdparty/sortix/os-test -name '*.c' 2>/dev/null | wc -l)
 
+# Count total open-posix-test source files at build time
+OPEN_POSIX_TOTAL := $(shell find tests/thirdparty/open-posix-test-suite/posixtest -name '*.c' ! -name 'testfrmw*' 2>/dev/null | wc -l)
+
 # Special rule for run-os-test: pass TOTAL_TESTS_IN_SUITE as build-time define
 build/rootfs/bin/run-os-test: $$(wildcard bin/run-os-test/*.c) build/libc/crt.S.o build/libc.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -DTOTAL_TESTS_IN_SUITE=$(OS_TEST_TOTAL) -Ilibc/include build/libc/crt.S.o bin/run-os-test/*.c build/libc.a -Wl,--gc-sections -o $@
 
-# Filter run-os-test from generic rule to avoid conflict
-C_BIN_NO_OSTEST := $(filter-out build/rootfs/bin/run-os-test,$(C_BIN))
+# Special rule for run-open-posix-test: pass TOTAL_OPEN_POSIX_TESTS as build-time define
+build/rootfs/bin/run-open-posix-test: $$(wildcard bin/run-open-posix-test/*.c) build/libc/crt.S.o build/libc.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -DTOTAL_OPEN_POSIX_TESTS=$(OPEN_POSIX_TOTAL) -Ilibc/include build/libc/crt.S.o bin/run-open-posix-test/*.c build/libc.a -Wl,--gc-sections -o $@
+
+# Filter special targets from generic rule to avoid conflict
+C_BIN_NO_SPECIAL := $(filter-out build/rootfs/bin/run-os-test build/rootfs/bin/run-open-posix-test,$(C_BIN))
 # MODIFIED: END added
 
 # MODIFIED: was $(C_BIN)
-$(C_BIN_NO_OSTEST): build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
+$(C_BIN_NO_SPECIAL): build/rootfs/bin/%: $$(wildcard bin/%/*.c) build/libc/crt.S.o build/libc.a
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o bin/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 
@@ -107,7 +116,7 @@ $(RS_BIN): build/rootfs/bin/%: $$(wildcard bin/%/*.rs) build/libc/crt.S.o build/
 # MODIFIED: BEGIN added
 # Prepare writable test filesystem staging area
 build/testfs/.dirs:
-	@mkdir -p build/testfs/bin build/testfs/var/log/os-test
+	@mkdir -p build/testfs/bin build/testfs/var/log/os-test build/testfs/var/log/open-posix-test
 	@touch $@
 
 ifdef BUILD_TESTS
@@ -120,7 +129,9 @@ endif
 build/rootfs/.prepared: $(USER_BIN)
 	mkdir -p build/rootfs
 	rm -rf build/rootfs/bin/os-test build/rootfs/os-test-manifest \
-		build/rootfs/os-test-expect build/rootfs/var/log/os-test
+		build/rootfs/os-test-expect build/rootfs/var/log/os-test \
+		build/rootfs/bin/open-posix-test build/rootfs/open-posix-test-manifest \
+		build/rootfs/var/log/open-posix-test
 	rm -f $(LEGACY_TEST_TARFS_TARGETS)
 	cp -a rootfs/. build/rootfs/ # MODIFIED: originally in tarfs
 	ln -sf sbush build/rootfs/bin/sh # MODIFIED: added
@@ -151,6 +162,28 @@ $(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/
 			cp "$$f" build/testfs/var/log/os-test/"$$rel"; \
 		done; \
 		echo "Copied .out files for failed tests to testfs"; \
+	fi
+	@touch $@
+endif
+
+# Build open-posix tests into prepared testfs (with parallel support)
+ifdef BUILD_TESTS
+$(OPEN_POSIX_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/testfs/.dirs $(TEST_TARGETS)
+	@echo "=== Building open-posix-test suite ==="
+	$(MAKE) -f tools/open-posix-test.mk SBUNIX_ROOT=$(CURDIR) -j16 install
+	# Copy test manifest into testfs
+	@if [ -f build/open-posix-test-out/sbunix/test-manifest.txt ]; then \
+		cp build/open-posix-test-out/sbunix/test-manifest.txt build/testfs/open-posix-test-manifest; \
+	fi
+	# Seed testfs with compile-time .out files for skipped tests
+	@mkdir -p build/testfs/var/log/open-posix-test
+	@if [ -d build/open-posix-test-out/sbunix ]; then \
+		find build/open-posix-test-out/sbunix -name '*.out' -type f | while read f; do \
+			rel=$$(echo "$$f" | sed 's|build/open-posix-test-out/sbunix/||'); \
+			mkdir -p build/testfs/var/log/open-posix-test/$$(dirname "$$rel"); \
+			cp "$$f" build/testfs/var/log/open-posix-test/"$$rel"; \
+		done; \
+		echo "Copied .out files for failed open-posix tests to testfs"; \
 	fi
 	@touch $@
 endif
@@ -187,7 +220,7 @@ $(DISK_IMG): build/tools/mkfs
 
 # MODIFIED: BEGIN added
 ifdef BUILD_TESTS
-build/testfs/.prepared: build/testfs/.dirs $(TEST_TARGETS) $(OS_TEST_MARKER)
+build/testfs/.prepared: build/testfs/.dirs $(TEST_TARGETS) $(OS_TEST_MARKER) $(OPEN_POSIX_TEST_MARKER)
 	@touch $@
 
 $(TEST_DISK_IMG): build/tools/mkext2img build/testfs/.prepared

@@ -1,3 +1,6 @@
 [submodule "sbunix-skeleton/tests/thirdparty/sortix/os-test"]
 	path = sbunix-skeleton/tests/thirdparty/sortix/os-test
 	url = https://gitlab.com/sortix/os-test.git
+[submodule "sbunix-skeleton/tests/thirdparty/open-posix-test-suite/posixtest"]
+	path = sbunix-skeleton/tests/thirdparty/open-posix-test-suite/posixtest
+	url = git@github.com:stevennyman/posixtest.git
