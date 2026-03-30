@@ -42,10 +42,11 @@ make submit      # Submit to /submit directory
 
 ### Test Infrastructure
 
-SBUnix has two test systems:
+SBUnix has three test systems:
 
 1. **SBUnix regression tests** (`tests/*/`) - Custom tests for kernel functionality
 2. **Sortix os-test** (`tests/thirdparty/sortix/os-test/`) - POSIX compliance tests
+3. **Open POSIX Test Suite** (`tests/thirdparty/open-posix-test-suite/`) - Conformance, functional, and stress tests
 
 ### Building and Running Tests
 
@@ -57,8 +58,9 @@ BUILD_TESTS=1 make
 make qemu
 
 # Inside SBUnix shell:
-run-tests         # Run SBUnix regression tests
-run-os-test       # Run sample POSIX compliance tests
+run-tests          # Run SBUnix regression tests
+run-os-test        # Run Sortix POSIX compliance tests
+run-open-posix-test # Run Open POSIX test suite
 ```
 
 ### Manual Testing (Original)
@@ -182,7 +184,7 @@ Example: `BF: Fix null pointer in allocproc`
 ## Important Notes
 
 1. **Pre-existing issue**: Kernel syscall numbers (`kernel/include/syscall.h`) do not match libc's Linux RISC-V ABI numbers - this causes "Unknown syscall" errors (now fixed in recent work)
-2. **Testing**: Both manual testing and automated test suites available (SBUnix regression tests + Sortix os-test POSIX compliance)
+2. **Testing**: Both manual testing and automated test suites available (SBUnix regression tests + Sortix os-test + Open POSIX Test Suite)
 3. **Development branches**: Work on separate branches, test locally before merging
 4. **Cross-compilation**: All binaries must be built for RISC-V target
 
@@ -287,6 +289,16 @@ Example: `BF: Fix null pointer in allocproc`
 - **Restored optional boot testing**: Modified `/etc/rc` to run original SBUnix regression tests on boot with 3-second Ctrl-C timeout (uses `sleep 1 || exit 0` for proper interruption handling)
 - **Performance improvements**: os-test compilation now supports full parallelization, reducing build time from ~10+ minutes to ~2-3 minutes on multi-core systems
 
+#### 15. Open POSIX Test Suite Integration
+- **Build system**: Created `tools/open-posix-test.mk` following the same pattern as os-test.mk
+- **Compiles all test categories**: `conformance/` (definitions, interfaces, behavior), `functional/` (threads, timers, semaphores, mqueues), and `stress/`
+- **Success metrics**: 423 tests compile (21%), 1,621 skipped (mostly missing `pthread.h`)
+- **Test runner**: `bin/run-open-posix-test/run-open-posix-test.c` — C binary using Open POSIX exit codes (0=PASS, 1=FAIL, 2=UNRESOLVED, 4=UNSUPPORTED, 5=UNTESTED)
+- **Analysis tools**: `tools/analyze-open-posix-failures` script with `headers`, `symbols`, `category` subcommands
+- **Main Makefile integration**: `OPEN_POSIX_TEST_MARKER`, `OPEN_POSIX_TOTAL` counter, special build rule for `run-open-posix-test` binary
+- **Total suite size**: 2,044 C source files (excluding `testfrmw.c` framework files)
+- **Top missing headers**: `pthread.h` (614), `mqueue.h` (137), `aio.h` (99)
+
 ### QEMU Testing — Critical Notes
 
 **`make qemu` is the primary way to run QEMU.** It builds the kernel, creates `build/disk.img`, mounts ext2 on `/mnt`, and launches QEMU with the correct flags automatically. Always prefer `make qemu` over running `qemu-system-riscv64` directly.
@@ -330,8 +342,9 @@ Boot now includes optional regression testing — `/etc/rc` prints `SBUnix booti
 
 To run test suites from the shell prompt:
 ```
-run-tests       # SBUnix regression tests (C tests + shell integration tests)
-run-os-test     # All 1,103 POSIX compliance tests (dynamically discovered)
+run-tests          # SBUnix regression tests (C tests + shell integration tests)
+run-os-test        # All 1,103 Sortix POSIX compliance tests (dynamically discovered)
+run-open-posix-test # All 423 compiled Open POSIX tests (2,044 in suite, 1,621 skipped)
 ```
 
 **Parallel building**: Use `BUILD_TESTS=1 make -j16` for 16-way parallel os-test compilation (reduces build time to ~2-3 minutes on multi-core systems).
@@ -344,6 +357,11 @@ run-os-test     # All 1,103 POSIX compliance tests (dynamically discovered)
 - Uses sbush glob expansion to find all executable tests in `/bin/os-test/`
 - Supports running individual tests: `run-os-test include/assert/assert`
 - Provides summary statistics (passed/failed/total) and success rate percentage
+
+`/bin/run-open-posix-test` dynamically discovers and runs all compiled Open POSIX tests:
+- Reads from `/test/open-posix-test-manifest` (built at compile time)
+- Supports running individual tests: `run-open-posix-test definitions/errno_h/4-1`
+- Uses Open POSIX exit codes: 0=PASS, 1=FAIL, 2=UNRESOLVED, 4=UNSUPPORTED, 5=UNTESTED
 
 Other useful commands to verify manually:
 ```
@@ -386,17 +404,21 @@ Key documentation files in the project:
 | `docs/os-test.md` | Sortix os-test POSIX compliance test suite usage |
 | `docs/sbush-bugs.md` | Shell bug fixes and variable expansion improvements |
 | `tools/analyze-os-test-failures` | Script to analyze os-test compilation failures |
+| `tools/analyze-open-posix-failures` | Script to analyze open-posix compilation failures |
 
 ### Test Logs and Analysis
 
 When building with `BUILD_TESTS=1`:
-- Compilation logs: `build/os-test-out/sbunix/compile-logs/<suite>/<test>.log`
-- Build summary: `build/os-test-out/sbunix/build-summary.txt`
-- Analysis: `./tools/analyze-os-test-failures [headers|symbols|suite]`
+- os-test compilation logs: `build/os-test-out/sbunix/compile-logs/<suite>/<test>.log`
+- os-test build summary: `build/os-test-out/sbunix/build-summary.txt`
+- os-test analysis: `./tools/analyze-os-test-failures [headers|symbols|suite]`
+- open-posix compilation logs: `build/open-posix-test-out/sbunix/compile-logs/<category>/<test>.log`
+- open-posix build summary: `build/open-posix-test-out/sbunix/build-summary.txt`
+- open-posix analysis: `./tools/analyze-open-posix-failures [headers|symbols|category]`
 
 ### Performance Notes
 
-**Parallel os-test compilation**: The new build system supports full parallelization:
+**Parallel test compilation**: Both test suites support full parallelization:
 ```bash
 # Fast parallel compilation (16 cores)
 BUILD_TESTS=1 make -j16
@@ -405,7 +427,8 @@ BUILD_TESTS=1 make -j16
 BUILD_TESTS=1 make
 ```
 
-Build performance improvements:
-- **Before**: Sequential compilation (~10+ minutes for 5,301 tests)
-- **After**: Parallel pattern rules (~2-3 minutes on 16-core systems)
+os-test build:
 - **Results**: 1,103 tests compile successfully out of 5,301 total (21% success rate)
+
+open-posix build:
+- **Results**: 423 tests compile successfully out of 2,044 total (21% success rate)
