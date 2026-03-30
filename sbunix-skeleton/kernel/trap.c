@@ -2682,13 +2682,32 @@ static long sys_rt_sigsuspend_handler(struct trapframe *tf) {
     current_proc->sigmask = mask;
     /* Sleep until a deliverable signal arrives.  Loop to handle spurious
      * wakeups (e.g., from UART interrupts or process exits that wake all
-     * sleeping processes with waiting_for_uart == 0). */
-    while (!(current_proc->sigpending & ~current_proc->sigmask)) {
+     * sleeping processes with waiting_for_uart == 0).
+     *
+     * On each wakeup we restore the old mask before checking deliverability.
+     * This ensures that signals which arrived while blocked by sigsuspend's
+     * temporary mask are visible as deliverable.  POSIX requires the old
+     * mask to be restored when sigsuspend returns; restoring it early on
+     * each wakeup is equivalent since no user code runs between wakeups. */
+    while (1) {
+        current_proc->sigmask = old_mask;
+        if (current_proc->sigpending & ~current_proc->sigmask)
+            break;
+        current_proc->sigmask = mask;
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
     }
-    // Restore old mask
+    // Restore old mask (already restored above, but keep for clarity)
     current_proc->sigmask = old_mask;
+    /* If restoring the old mask unblocked any pending signals, deliver them
+     * now rather than returning to user mode.  Without this, a signal that
+     * arrived while blocked by sigsuspend's mask would never be processed:
+     * sigwait() would see it via sigpending() (only reports blocked pending),
+     * call sigsuspend again, and spin forever. */
+    if (current_proc->sigpending & ~current_proc->sigmask) {
+        deliver_signal(tf, current_proc);
+        return SYSCALL_NORETURN;
+    }
     return -4; // EINTR
 }
 

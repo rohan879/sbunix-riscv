@@ -305,26 +305,36 @@ Example: `BF: Fix null pointer in allocproc`
 
 **`make qemu` requires a real interactive terminal** — it cannot be piped. Use `tmux`:
 
+**Note: In sandboxed environments, tmux may need a custom socket path.** Use `-S /tmp/tmux-debug` instead of the default socket:
+
 ```bash
-# Start a tmux session and run make qemu inside it
-tmux new-session -d -s sbunix_test -x 220 -y 50
-tmux send-keys -t sbunix_test \
-  "cd /home/steven/College/Graduate_Spring_2026/CSE506/CSE506/sbunix-skeleton && export PATH=/home/steven/College/Graduate_Spring_2026/CSE506/riscv-toolchain/bin:/home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin:$PATH && make qemu 2>/tmp/qemu_err.txt" Enter
+# Start a tmux session and run QEMU inside it (use custom socket in sandbox)
+rm -f /tmp/tmux-debug 2>/dev/null
+tmux -S /tmp/tmux-debug new-session -d -s qemu \
+  "export PATH=/home/steven/College/Graduate_Spring_2026/CSE506/riscv-toolchain/bin:/home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin:\$PATH && \
+   cd /home/steven/College/Graduate_Spring_2026/CSE506/CSE506/sbunix-skeleton && \
+   qemu-system-riscv64 -machine virt -bios default -kernel build/kernel.elf \
+   -drive file=build/disk.img,format=raw,if=none,id=hd0 \
+   -device virtio-blk-pci-non-transitional,drive=hd0 \
+   -nographic 2>&1; bash"
 
 # Wait for boot (~10s including build), then capture screen
 sleep 10
-tmux capture-pane -t sbunix_test -p | tail -5
+tmux -S /tmp/tmux-debug capture-pane -t qemu -p | tail -5
 # Should show: "sbush$"
 
 # Send commands and capture output
-tmux send-keys -t sbunix_test "ls" Enter
+tmux -S /tmp/tmux-debug send-keys -t qemu "ls" Enter
 sleep 2
-tmux capture-pane -t sbunix_test -p | tail -10
+tmux -S /tmp/tmux-debug capture-pane -t qemu -p | tail -10
+
+# To include test disk image (for /test access):
+# Add: -drive file=build/test-disk.img,format=raw,if=none,id=hd1 -device virtio-blk-pci-non-transitional,drive=hd1
 
 # Exit cleanly
-tmux send-keys -t sbunix_test "exit" Enter
+tmux -S /tmp/tmux-debug send-keys -t qemu "poweroff" Enter
 sleep 2
-tmux kill-session -t sbunix_test
+tmux -S /tmp/tmux-debug kill-session -t qemu
 ```
 
 **Key notes about `make qemu`**:
