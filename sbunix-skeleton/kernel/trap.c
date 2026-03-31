@@ -583,7 +583,13 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == UNUSED) continue;
             if (p->parent != current_proc) continue;
+            /* wpid >  0: wait for specific child */
+            /* wpid == 0: wait for children in caller's process group */
+            /* wpid < -1: wait for children in process group -wpid */
+            /* wpid == -1: wait for any child */
             if (wpid > 0 && p->pid != wpid) continue;
+            if (wpid == 0 && p->pgid != current_proc->pgid) continue;
+            if (wpid < -1 && p->pgid != (pid_t)(-wpid)) continue;
             found_child = 1;
             if (p->state == ZOMBIE) {
                 pid_t pid = p->pid;
@@ -666,7 +672,7 @@ static void to_tarfs_path(const char *path, char *out) {
 static void normalize_path(const char *in, char *out) {
     /* Use a small stack of component offsets into out[] */
     /* We build the result into out directly, tracking segment starts. */
-    char tmp[256];
+    char tmp[128];
     int tlen = 0;
     const char *p = in;
 
@@ -712,20 +718,20 @@ static void normalize_path(const char *in, char *out) {
 
 /* Resolve a path against cwd.  Result in out[256]. */
 static void resolve_path(const char *cwd, const char *path, char *out) {
-    char raw[512]; /* intermediate buffer before normalization */
+    char raw[256]; /* intermediate buffer before normalization */
     int rlen;
 
     if (path[0] == '/') {
         /* absolute */
         rlen = strlen(path);
-        if (rlen > 511) rlen = 511;
+        if (rlen > 255) rlen = 255;
         memcpy(raw, path, rlen);
         raw[rlen] = '\0';
     } else {
         /* relative — prepend cwd */
         int cwdlen = strlen(cwd);
         int pathlen = strlen(path);
-        if (cwdlen + 1 + pathlen > 510) {
+        if (cwdlen + 1 + pathlen > 254) {
             out[0] = '/'; out[1] = '\0';
             return;
         }
@@ -824,12 +830,12 @@ static int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_fi
         return 0; /* root or empty — nothing to resolve */
 
     /* Split into components */
-    char work[256];
+    char work[128];
     if (rlen > 255) rlen = 255;
     memcpy(work, resolved, rlen);
     work[rlen] = '\0';
 
-    char built[256]; /* path built so far */
+    char built[128]; /* path built so far */
     int bi = 0;
 
     int wi = 0; /* index into work */
@@ -873,7 +879,7 @@ static int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_fi
 
         /* Try to resolve this component as a symlink */
         int old_bi = bi;
-        char before[256];
+        char before[128];
         memcpy(before, built, bi + 1);
 
         int sym_ret = follow_symlinks(built, maxdepth);
@@ -899,7 +905,7 @@ static int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_fi
                 built[bi] = '\0';
 
                 /* Normalize the combined path */
-                char normalized[256];
+                char normalized[128];
                 resolve_path("/", built, normalized);
                 int nlen = strlen(normalized);
                 if (nlen > 255) nlen = 255;
@@ -1332,12 +1338,12 @@ pipe_eof:
 static long sys_openat_handler(struct trapframe *tf) {
     int flags = (int)tf->a2;
 
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
 
-    char resolved[256];
+    char resolved[128];
     resolve_path(current_proc->cwd, kpath, resolved);
 
     /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
@@ -1503,13 +1509,13 @@ static long sys_getcwd_handler(struct trapframe *tf) {
 }
 
 static long sys_chdir_handler(struct trapframe *tf) {
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
         return (long)-14;
     }
     /* Empty path is invalid */
     if (kpath[0] == '\0') return (long)-2; /* -ENOENT */
-    char resolved[256];
+    char resolved[128];
     resolve_path(current_proc->cwd, kpath, resolved);
     resolve_symlinks_in_path(resolved, 8, 1);
     /* Check if path exists by trying stat */
@@ -1545,7 +1551,7 @@ static long sys_clone_handler(struct trapframe *tf) {
 }
 
 static long sys_execve_handler(struct trapframe *tf) {
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
         return (long)-14;
     }
@@ -1571,7 +1577,7 @@ static long sys_execve_handler(struct trapframe *tf) {
             if (copyin(current_proc->pagetable, &uptr, uargv + (uint64_t)kargc * 8, 8) < 0)
                 break;
             if (uptr == 0) break;
-            char tmpstr[256];
+            char tmpstr[128];
             if (copyinstr(current_proc->pagetable, tmpstr, uptr, sizeof(tmpstr)) < 0)
                 break;
             int slen = strlen(tmpstr) + 1;
@@ -1594,7 +1600,7 @@ static long sys_execve_handler(struct trapframe *tf) {
             if (copyin(current_proc->pagetable, &uptr, uenvp + (uint64_t)kenvc * 8, 8) < 0)
                 break;
             if (uptr == 0) break;
-            char tmpstr[256];
+            char tmpstr[128];
             if (copyinstr(current_proc->pagetable, tmpstr, uptr, sizeof(tmpstr)) < 0)
                 break;
             int slen = strlen(tmpstr) + 1;
@@ -1606,15 +1612,15 @@ static long sys_execve_handler(struct trapframe *tf) {
         }
     }
 
-    char resolved[256];
-    char tarpath[256];
+    char resolved[128];
+    char tarpath[128];
     resolve_path(current_proc->cwd, kpath, resolved);
     resolve_symlinks_in_path(resolved, 8, 1);
     to_tarfs_path(resolved, tarpath);
 
     int ret = exec(tarpath);
     if (ret < 0) {
-        char orig_tarpath[256];
+        char orig_tarpath[128];
         to_tarfs_path(kpath, orig_tarpath);
         ret = exec(orig_tarpath);
     }
@@ -1629,11 +1635,11 @@ static long sys_execve_handler(struct trapframe *tf) {
     /* Shebang (#!) handling: if exec failed, check if file is a script */
     int shebang_file_found = 0;
     if (ret < 0) {
-        char first_bytes[256];
+        char first_bytes[128];
         int got = 0;
         struct posix_header *th = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
         if (!th) {
-            char orig_tp[256];
+            char orig_tp[128];
             to_tarfs_path(kpath, orig_tp);
             th = tar_find_file(_tarfs_start, _tarfs_end, orig_tp);
         }
@@ -1675,7 +1681,7 @@ static long sys_execve_handler(struct trapframe *tf) {
         if (got > 0) shebang_file_found = 1;
         if (got >= 2 && first_bytes[0] == '#' && first_bytes[1] == '!') {
             /* Parse interpreter path */
-            char interp[256];
+            char interp[128];
             int j = 2;
             while (first_bytes[j] == ' ' || first_bytes[j] == '\t') j++;
             int k = 0;
@@ -1724,10 +1730,10 @@ static long sys_execve_handler(struct trapframe *tf) {
                     kfree(tmpbuf);
 
                     /* Now exec the interpreter (follow symlinks) */
-                    char interp_resolved[256];
+                    char interp_resolved[128];
                     resolve_path("/", interp, interp_resolved);
                     resolve_symlinks_in_path(interp_resolved, 8, 1);
-                    char interp_tarpath[256];
+                    char interp_tarpath[128];
                     to_tarfs_path(interp_resolved, interp_tarpath);
                     ret = exec(interp_tarpath);
                 }
@@ -2129,11 +2135,11 @@ static long sys_newfstatat_handler(struct trapframe *tf) {
     if (!tf->a1 || !tf->a2) {
         return (long)-1;
     }
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
-    char resolved[256];
+    char resolved[128];
     resolve_path(current_proc->cwd, kpath, resolved);
 
     /* Resolve symlinks: intermediate always, final unless AT_SYMLINK_NOFOLLOW */
@@ -2789,12 +2795,12 @@ static long sys_fcntl_handler(struct trapframe *tf) {
 }
 
 static long sys_faccessat_handler(struct trapframe *tf) {
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
 
-    char resolved[256];
+    char resolved[128];
     resolve_path(current_proc->cwd, kpath, resolved);
     resolve_symlinks_in_path(resolved, 8, 1);
 
@@ -2812,12 +2818,12 @@ static long sys_faccessat_handler(struct trapframe *tf) {
 
 static long sys_unlinkat_handler(struct trapframe *tf) {
     int flags = (int)tf->a2;
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
     {
-        char resolved[256];
+        char resolved[128];
         resolve_path(current_proc->cwd, kpath, resolved);
         /* Resolve intermediate symlinks; do NOT follow final (unlink targets the link itself) */
         resolve_symlinks_in_path(resolved, 8, 0);
@@ -2844,13 +2850,13 @@ static long sys_unlinkat_handler(struct trapframe *tf) {
 
 static long sys_linkat_handler(struct trapframe *tf) {
     /* a0 = olddirfd (AT_FDCWD), a1 = oldpath, a2 = newdirfd, a3 = newpath, a4 = flags */
-    char kold[256], knew[256];
+    char kold[128], knew[256];
     if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
         return (long)-14;
     if (copyinstr(current_proc->pagetable, knew, tf->a3, sizeof(knew)) < 0)
         return (long)-14;
 
-    char old_resolved[256], new_resolved[256];
+    char old_resolved[128], new_resolved[256];
     resolve_path(current_proc->cwd, kold, old_resolved);
     resolve_path(current_proc->cwd, knew, new_resolved);
 
@@ -2882,13 +2888,13 @@ static long sys_linkat_handler(struct trapframe *tf) {
 }
 
 static long sys_renameat2_handler(struct trapframe *tf) {
-    char kold[256], knew[256];
+    char kold[128], knew[256];
     if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
         return (long)-14;
     if (copyinstr(current_proc->pagetable, knew, tf->a3, sizeof(knew)) < 0)
         return (long)-14;
 
-    char old_resolved[256], new_resolved[256];
+    char old_resolved[128], new_resolved[256];
     resolve_path(current_proc->cwd, kold, old_resolved);
     resolve_path(current_proc->cwd, knew, new_resolved);
 
@@ -2910,12 +2916,12 @@ static long sys_renameat2_handler(struct trapframe *tf) {
 
 static long sys_mkdirat_handler(struct trapframe *tf) {
     int mode = (int)tf->a2;
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
     {
-        char resolved[256];
+        char resolved[128];
         resolve_path(current_proc->cwd, kpath, resolved);
         /* Resolve intermediate symlinks only (creating at final component) */
         resolve_symlinks_in_path(resolved, 8, 0);
@@ -2934,12 +2940,12 @@ static long sys_mkdirat_handler(struct trapframe *tf) {
 static long sys_mknodat_handler(struct trapframe *tf) {
     uint32_t mode = (uint32_t)tf->a2;
     uint32_t rdev = (uint32_t)tf->a3;
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
     }
     {
-        char resolved[256];
+        char resolved[128];
         resolve_path(current_proc->cwd, kpath, resolved);
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -2976,7 +2982,7 @@ static long sys_set_tid_address_handler(struct trapframe *tf) {
 }
 
 static long sys_readlinkat_handler(struct trapframe *tf) {
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
         return (long)-14;
 
@@ -2984,7 +2990,7 @@ static long sys_readlinkat_handler(struct trapframe *tf) {
     if (bufsiz <= 0)
         return (long)-22;
 
-    char resolved[256];
+    char resolved[128];
     resolve_path(current_proc->cwd, kpath, resolved);
 
     const char *relpath;
@@ -2993,7 +2999,7 @@ static long sys_readlinkat_handler(struct trapframe *tf) {
     if (!ops || !ops->readlink)
         return (long)-22; /* EINVAL */
 
-    char kbuf[256];
+    char kbuf[128];
     int maxread = bufsiz > 256 ? 256 : bufsiz;
     int ret = ops->readlink(mnt->fs_data, relpath, kbuf, maxread);
     if (ret < 0)
@@ -3005,13 +3011,13 @@ static long sys_readlinkat_handler(struct trapframe *tf) {
 }
 
 static long sys_symlinkat_handler(struct trapframe *tf) {
-    char ktarget[256], klinkpath[256];
+    char ktarget[128], klinkpath[256];
     if (copyinstr(current_proc->pagetable, ktarget, tf->a0, sizeof(ktarget)) < 0)
         return (long)-14;
     if (copyinstr(current_proc->pagetable, klinkpath, tf->a2, sizeof(klinkpath)) < 0)
         return (long)-14;
 
-    char resolved[256];
+    char resolved[128];
     resolve_path(current_proc->cwd, klinkpath, resolved);
 
     const char *relpath;
@@ -3821,11 +3827,11 @@ static long sys_utimensat_handler(struct trapframe *tf) {
     uint64_t path_uva = tf->a1;
     if (!path_uva) return 0; /* NULL path with fd — not supported, succeed silently */
 
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, path_uva, sizeof(kpath)) < 0)
         return (long)-14;
 
-    char resolved[256];
+    char resolved[128];
     resolve_path(current_proc->cwd, kpath, resolved);
 
     const char *relpath;
@@ -3847,11 +3853,11 @@ static long sys_utimensat_handler(struct trapframe *tf) {
 /* statfs/fstatfs — filesystem statistics */
 static long sys_statfs_handler(struct trapframe *tf) {
     /* a0 = path, a1 = buf (struct statfs, 120 bytes on RISC-V) */
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0)
         return (long)-14;
 
-    char resolved[256];
+    char resolved[128];
     resolve_path(current_proc->cwd, kpath, resolved);
 
     /* Fill in basic statfs structure */
@@ -3936,12 +3942,12 @@ static long sys_setgid_handler(struct trapframe *tf) {
 
 static long sys_fchmodat_handler(struct trapframe *tf) {
     /* a0 = dirfd (AT_FDCWD), a1 = user path, a2 = mode, a3 = flags */
-    char kpath[256];
+    char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
         return (long)-14; /* EFAULT */
 
     /* Resolve path and verify it exists via stat */
-    char resolved[256];
+    char resolved[128];
     resolve_path(current_proc->cwd, kpath, resolved);
 
     const char *relpath;
@@ -4337,11 +4343,11 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
 }
 
 /* Static storage for dynamically mounted paths */
-static char mount_path_storage[8][256];
+static char mount_path_storage[8][128];
 static int mount_path_next = 0;
 
 static long sys_mount_handler(struct trapframe *tf) {
-    char ksrc[256], ktgt[256], kfstype[64];
+    char ksrc[128], ktgt[256], kfstype[64];
     if (copyinstr(current_proc->pagetable, ksrc, tf->a0, sizeof(ksrc)) < 0)
         return (long)-14;
     if (copyinstr(current_proc->pagetable, ktgt, tf->a1, sizeof(ktgt)) < 0)
@@ -4349,7 +4355,7 @@ static long sys_mount_handler(struct trapframe *tf) {
     if (copyinstr(current_proc->pagetable, kfstype, tf->a2, sizeof(kfstype)) < 0)
         return (long)-14;
 
-    char source_resolved[256], target_resolved[256];
+    char source_resolved[128], target_resolved[256];
     resolve_path(current_proc->cwd, ksrc, source_resolved);
     resolve_path(current_proc->cwd, ktgt, target_resolved);
 
@@ -4375,11 +4381,11 @@ static long sys_mount_handler(struct trapframe *tf) {
 }
 
 static long sys_umount2_handler(struct trapframe *tf) {
-    char ktgt[256];
+    char ktgt[128];
     if (copyinstr(current_proc->pagetable, ktgt, tf->a0, sizeof(ktgt)) < 0)
         return (long)-14;
 
-    char resolved[256];
+    char resolved[128];
     resolve_path(current_proc->cwd, ktgt, resolved);
     return (long)vfs_unregister_mount(resolved);
 }
