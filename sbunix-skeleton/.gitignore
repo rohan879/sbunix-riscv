@@ -6,3 +6,5 @@ zig-out/
 
 # os-test compilation logs (already covered by build/ but explicit for clarity)
 build/os-test-out/
+
+susv5-html

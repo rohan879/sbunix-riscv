@@ -2680,34 +2680,25 @@ static long sys_rt_sigsuspend_handler(struct trapframe *tf) {
         return -14; // EFAULT
     uint64_t old_mask = current_proc->sigmask;
     current_proc->sigmask = mask;
-    /* Sleep until a deliverable signal arrives.  Loop to handle spurious
-     * wakeups (e.g., from UART interrupts or process exits that wake all
-     * sleeping processes with waiting_for_uart == 0).
-     *
-     * On each wakeup we restore the old mask before checking deliverability.
-     * This ensures that signals which arrived while blocked by sigsuspend's
-     * temporary mask are visible as deliverable.  POSIX requires the old
-     * mask to be restored when sigsuspend returns; restoring it early on
-     * each wakeup is equivalent since no user code runs between wakeups. */
+    /* Suspend until a signal is deliverable.  Check under both the
+     * temporary mask and the old mask — a signal may arrive while
+     * blocked by the temporary mask (kill_deliver wakes us but the
+     * standard deliverability check fails). */
     while (1) {
-        current_proc->sigmask = old_mask;
         if (current_proc->sigpending & ~current_proc->sigmask)
             break;
-        current_proc->sigmask = mask;
+        if (current_proc->sigpending & ~old_mask)
+            break;
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
     }
-    // Restore old mask (already restored above, but keep for clarity)
-    current_proc->sigmask = old_mask;
-    /* If restoring the old mask unblocked any pending signals, deliver them
-     * now rather than returning to user mode.  Without this, a signal that
-     * arrived while blocked by sigsuspend's mask would never be processed:
-     * sigwait() would see it via sigpending() (only reports blocked pending),
-     * call sigsuspend again, and spin forever. */
-    if (current_proc->sigpending & ~current_proc->sigmask) {
-        deliver_signal(tf, current_proc);
-        return SYSCALL_NORETURN;
-    }
+    /* If a signal is only deliverable under the old mask (blocked by the
+     * temporary mask), restore old_mask so the trap handler's post-syscall
+     * deliver_signal can process it.  For signals already deliverable under
+     * the new mask, keep the new mask — sigreturn restores the old mask
+     * after the handler. */
+    if (!(current_proc->sigpending & ~current_proc->sigmask))
+        current_proc->sigmask = old_mask;
     return -4; // EINTR
 }
 
