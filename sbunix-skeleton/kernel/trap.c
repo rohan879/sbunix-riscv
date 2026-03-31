@@ -766,20 +766,22 @@ static int follow_symlinks(char *resolved, int maxdepth) {
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops || !ops->readlink) return 0; /* no readlink = not a symlink-capable fs */
 
-    char target[256];
+    char target[64];
     int ret = ops->readlink(mnt->fs_data, relpath, target, sizeof(target) - 1);
     if (ret < 0) return 0; /* not a symlink, path is final */
     target[ret] = '\0';
 
-    /* Resolve the symlink target */
-    char new_resolved[256];
+    /* Resolve the symlink target.  Use small local buffers to avoid
+     * kernel stack overflow — follow_symlinks recurses up to 8 levels
+     * and each frame consumes the sum of all local arrays. */
+    char new_resolved[64];
     if (target[0] == '/') {
         resolve_path("/", target, new_resolved);
     } else {
         /* Relative: resolve from symlink's parent directory */
-        char dir[256];
+        char dir[64];
         int rlen = strlen(resolved);
-        if (rlen > 255) rlen = 255;
+        if (rlen > 63) rlen = 63;
         memcpy(dir, resolved, rlen);
         dir[rlen] = '\0';
         char *last_slash = dir;
@@ -790,10 +792,10 @@ static int follow_symlinks(char *resolved, int maxdepth) {
         else
             dir[1] = '\0';
 
-        char combined[512];
+        char combined[128];
         int dlen = strlen(dir);
         int tlen = strlen(target);
-        if (dlen + tlen >= 510) return -36; /* ENAMETOOLONG */
+        if (dlen + tlen >= 126) return -36; /* ENAMETOOLONG */
         memcpy(combined, dir, dlen);
         memcpy(combined + dlen, target, tlen + 1);
 
@@ -926,10 +928,14 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     uint64_t force_unblock = signal_bit(SIGKILL) | signal_bit(SIGSTOP) |
                              signal_bit(SIGILL) | signal_bit(SIGSEGV) |
                              signal_bit(SIGBUS) | signal_bit(SIGFPE);
-    p->sigmask &= ~force_unblock;
 
-    /* Find lowest-numbered pending unblocked signal */
+    /* Find lowest-numbered pending unblocked signal.  Unblockable signals
+     * (SIGKILL, synchronous faults) must be deliverable even if sa_mask
+     * has them blocked, so we temporarily unblock them for the check. */
+    uint64_t saved_mask = p->sigmask;
+    p->sigmask &= ~force_unblock;
     uint64_t deliverable = p->sigpending & ~p->sigmask;
+    p->sigmask = saved_mask;
     if (deliverable == 0)
         return;
 
@@ -1090,24 +1096,33 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     }
 
     /* Set up trapframe to call handler(signum[, siginfo, ucontext]) */
-    tf->epc = handler;                   /* jump to signal handler */
-    tf->a0 = (uint64_t)signum;           /* first arg: signal number */
-    if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
-        tf->a1 = siginfo_uaddr;         /* second arg: siginfo_t * */
-        tf->a2 = 0;                     /* third arg: ucontext_t * (NULL) */
+    /* Sanity check: handler must be a valid user-space address.
+     * If not, fall through to the existing SIG_DFL handling below. */
+    if (handler >= 2 && (handler < 0x1000 || handler >= 0x80000000UL)) {
+        printk("deliver_signal: invalid handler=0x%lx sig=%d pid=%d\n",
+               handler, signum, p->pid);
+        handler = 0;
     }
-    tf->sp = sp;                         /* stack points to saved trapframe */
-    tf->ra = sa[signum].restorer;        /* return address -> libc restorer -> sigreturn */
+    if (handler >= 2) {
+        tf->epc = handler;                   /* jump to signal handler */
+        tf->a0 = (uint64_t)signum;           /* first arg: signal number */
+        if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
+            tf->a1 = siginfo_uaddr;         /* second arg: siginfo_t * */
+            tf->a2 = 0;                     /* third arg: ucontext_t * (NULL) */
+        }
+        tf->sp = sp;                         /* stack points to saved trapframe */
+        tf->ra = sa[signum].restorer;        /* return address -> libc restorer -> sigreturn */
 
-    /* Block this signal during handler execution */
-    p->sigmask |= sa[signum].mask;
-    if (!(sa[signum].flags & 0x40000000)) /* SA_NODEFER */
-        p->sigmask |= signal_bit(signum);
+        /* Block this signal during handler execution */
+        p->sigmask |= sa[signum].mask;
+        if (!(sa[signum].flags & 0x40000000)) /* SA_NODEFER */
+            p->sigmask |= signal_bit(signum);
 
-    /* SA_RESETHAND: reset handler to SIG_DFL after delivery */
-    if (sa[signum].flags & (int)0x80000000) { /* SA_RESETHAND */
-        sa[signum].handler = 0; /* SIG_DFL */
-        sa[signum].flags &= ~(int)0x80000000;
+        /* SA_RESETHAND: reset handler to SIG_DFL after delivery */
+        if (sa[signum].flags & (int)0x80000000) { /* SA_RESETHAND */
+            sa[signum].handler = 0; /* SIG_DFL */
+            sa[signum].flags &= ~(int)0x80000000;
+        }
     }
 }
 
@@ -1875,6 +1890,10 @@ static void kill_deliver(struct proc *target, int sig) {
             if (target->parent->state == SLEEPING)
                 target->parent->state = RUNNABLE;
         }
+        /* If killing ourselves, swtch away immediately — we're ZOMBIE
+         * and must not continue executing on this kernel stack. */
+        if (target == current_proc)
+            swtch(&target->context, &scheduler_context);
     } else if (signal_is_valid(sig)) {
         target->sigpending |= signal_bit(sig);
         if (sig == SIGCONT) {
@@ -4505,9 +4524,20 @@ void trap_handler(struct trapframe *tf) {
         } else {
             printk("Unknown interrupt: scause=0x%lx\n", cause);
         }
-        /* Deliver pending signals before returning to user mode */
-        if (current_proc && (current_proc->sigpending & ~current_proc->sigmask))
-            deliver_signal(tf, current_proc);
+        /* Deliver pending signals before returning to user mode.
+         * Unblockable signals (SIGKILL, synchronous faults) must be
+         * deliverable even if sa_mask has them blocked, so we
+         * temporarily unblock them for the deliverability check. */
+        if (current_proc) {
+            uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP) |
+                          signal_bit(SIGILL) | signal_bit(SIGSEGV) |
+                          signal_bit(SIGBUS) | signal_bit(SIGFPE);
+            uint64_t saved = current_proc->sigmask;
+            current_proc->sigmask &= ~fu;
+            int has = (current_proc->sigpending & ~current_proc->sigmask) != 0;
+            current_proc->sigmask = saved;
+            if (has) deliver_signal(tf, current_proc);
+        }
         return;
     }
 
@@ -4761,8 +4791,19 @@ pagefault_kill:
 
     if (current_proc) current_proc->in_syscall = 0;
 
-    /* Deliver pending signals before returning to user mode */
-    if (current_proc && (current_proc->sigpending & ~current_proc->sigmask))
-        deliver_signal(tf, current_proc);
+    /* Deliver pending signals before returning to user mode.
+     * Unblockable signals (SIGKILL, synchronous faults) must be
+     * deliverable even if sa_mask has them blocked, so we
+     * temporarily unblock them for the deliverability check. */
+    if (current_proc) {
+        uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP) |
+                      signal_bit(SIGILL) | signal_bit(SIGSEGV) |
+                      signal_bit(SIGBUS) | signal_bit(SIGFPE);
+        uint64_t saved = current_proc->sigmask;
+        current_proc->sigmask &= ~fu;
+        int has = (current_proc->sigpending & ~current_proc->sigmask) != 0;
+        current_proc->sigmask = saved;
+        if (has) deliver_signal(tf, current_proc);
+    }
     return;
 }
