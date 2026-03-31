@@ -1026,7 +1026,33 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         }
     }
 
-    /* Push the saved mask and original trapframe onto user stack */
+    /* SA_SIGINFO: push siginfo_t BELOW the signal frame.  The signal
+     * frame must be at sp (sigreturn reads from sp), so we push
+     * siginfo first, then the signal frame on top. */
+    uint64_t siginfo_uaddr = 0;
+    if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
+        /* siginfo_t: { int si_signo, si_errno, si_code; pid_t si_pid; uid_t si_uid; ... }
+         * Minimal: 128 bytes (Linux RISC-V siginfo_t is 128 bytes) */
+        uint8_t ksi[128];
+        memset(ksi, 0, sizeof(ksi));
+        int32_t si_signo = (int32_t)signum;
+        memcpy(ksi + 0, &si_signo, 4);
+        int32_t si_code = 0; /* SI_USER */
+        memcpy(ksi + 8, &si_code, 4);
+        int32_t si_pid = current_proc ? (int32_t)current_proc->pid : 0;
+        memcpy(ksi + 16, &si_pid, 4);
+
+        sp -= 128;
+        sp &= ~15UL;
+        siginfo_uaddr = sp;
+        if (copyout(p->pagetable, sp, ksi, 128) < 0)
+            return;
+    }
+
+    /* Push signal frame onto user stack.  For SA_SIGINFO this goes on
+     * top of the siginfo; for non-SA_SIGINFO it goes directly below
+     * the original sp.  In both cases sp points to the signal frame
+     * when we're done (sigreturn reads from sp). */
     sp -= sizeof(struct signal_frame);
     sp &= ~15UL; /* 16-byte align */
 
@@ -1066,33 +1092,6 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         }
         swtch(&p->context, &scheduler_context);
         return;
-    }
-
-    /* SA_SIGINFO: push siginfo_t onto stack and pass as second arg */
-    uint64_t siginfo_uaddr = 0;
-    if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
-        /* siginfo_t: { int si_signo, si_errno, si_code; pid_t si_pid; uid_t si_uid; ... }
-         * Minimal: 128 bytes (Linux RISC-V siginfo_t is 128 bytes) */
-        uint8_t ksi[128];
-        memset(ksi, 0, sizeof(ksi));
-        /* si_signo at offset 0 (int32) */
-        int32_t si_signo = (int32_t)signum;
-        memcpy(ksi + 0, &si_signo, 4);
-        /* si_errno at offset 4 (int32) */
-        /* si_code at offset 8 (int32) — SI_USER=0 for kill(), SI_KERNEL=128 */
-        int32_t si_code = 0; /* SI_USER */
-        memcpy(ksi + 8, &si_code, 4);
-        /* si_pid at offset 16 (int32 on RISC-V LP64) */
-        int32_t si_pid = current_proc ? (int32_t)current_proc->pid : 0;
-        memcpy(ksi + 16, &si_pid, 4);
-        /* si_uid at offset 20 (uint32) */
-        /* (uid=0, already zeroed) */
-
-        sp -= 128;
-        sp &= ~15UL;
-        siginfo_uaddr = sp;
-        if (copyout(p->pagetable, sp, ksi, 128) < 0)
-            return;
     }
 
     /* Set up trapframe to call handler(signum[, siginfo, ucontext]) */
