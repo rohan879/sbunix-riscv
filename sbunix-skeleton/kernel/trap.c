@@ -1104,8 +1104,6 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* Sanity check: handler must be a valid user-space address.
      * If not, fall through to the existing SIG_DFL handling below. */
     if (handler >= 2 && (handler < 0x1000 || handler >= 0x80000000UL)) {
-        printk("deliver_signal: invalid handler=0x%lx sig=%d pid=%d\n",
-               handler, signum, p->pid);
         handler = 0;
     }
     if (handler >= 2) {
@@ -2393,6 +2391,9 @@ static long sys_mmap_handler(struct trapframe *tf) {
     uint64_t va;
     if (flags & MAP_FIXED) {
         va = addr & ~(uint64_t)(PAGE_SIZE - 1);
+        /* Reject kernel addresses for MAP_FIXED */
+        if (va >= 0x80000000UL || va + len > 0x80000000UL)
+            return (long)-1;
     } else {
         if (current_proc->mmap_base == 0)
             current_proc->mmap_base = 0x20000000UL;
@@ -2459,6 +2460,8 @@ static long sys_munmap_handler(struct trapframe *tf) {
 
     if (addr >= MAXVA || addr + len > MAXVA)
         return -22; /* -EINVAL */
+    if (addr >= 0x80000000UL || addr + len > 0x80000000UL)
+        return -22; /* -EINVAL: reject kernel addresses */
 
     /* Write back MAP_SHARED pages before unmapping */
     mmap_writeback_shared(current_proc, addr, addr + len);
@@ -2486,6 +2489,9 @@ static long sys_mprotect_handler(struct trapframe *tf) {
         return 0;
     if (addr + len > MAXVA)
         return -22;
+    /* Reject kernel addresses — must not modify kernel page table entries */
+    if (addr >= 0x80000000UL || addr + len > 0x80000000UL)
+        return -22; /* -EINVAL */
 
     /* Build new PTE permission bits */
     int new_flags = 0;
@@ -4627,7 +4633,7 @@ void trap_handler(struct trapframe *tf) {
             }
 
             /* --- Demand paging for VMA regions --- */
-            if (current_proc) {
+            if (current_proc && stval < 0x80000000UL) {
                 struct vm_area *fvma = vma_find(current_proc, stval);
                 if (fvma) {
                     uint64_t va = PGROUNDDOWN(stval);

@@ -299,6 +299,38 @@ Example: `BF: Fix null pointer in allocproc`
 - **Total suite size**: 2,044 C source files (excluding `testfrmw.c` framework files)
 - **Top missing headers**: `pthread.h` (614), `mqueue.h` (137), `aio.h` (99)
 
+#### 16. Signal Handling Fixes (`kernel/trap.c`)
+- **`deliver_signal` force_unblock**: Temporarily unblock SIGKILL/SIGBUS/etc for deliverability check, then restore original mask. Previously permanently modified `sigmask`, corrupting running handlers when a different signal (e.g. SIGCHLD) was delivered.
+- **Post-syscall/post-interrupt delivery checks**: Apply the same temporary force_unblock so that SIGKILL blocked by `sa_mask` is detected and delivered (fixes `sigaction/4-12` hang).
+- **`kill_deliver` self-kill `swtch`**: When `kill_deliver` kills `current_proc` (SIGKILL via `kill(getpid(), ...)`), call `swtch()` immediately after setting state=ZOMBIE. Without this, the ZOMBIE process continued executing on its kernel stack, corrupting state.
+- **Handler address bounds check**: Detect corrupted handler addresses (garbage values or kernel addresses) and fall through to existing SIG_DFL handling rather than jumping to invalid addresses. Must NOT bypass SIG_DFL's ignore-class behavior (SIGCHLD, SIGURG, SIGWINCH).
+
+#### 17. `sys_rt_sigsuspend_handler` Fix (`kernel/trap.c`)
+- **Kill/1-2 hang fix**: The while loop only checked deliverability under the temporary mask. When a signal arrived while blocked by that mask, the process woke but went back to sleep forever. Fix: after wakeup, restore old mask to check deliverability, then re-apply temporary mask.
+- **SA_SIGINFO stack layout fix**: The signal frame and siginfo were pushed onto the user stack in the wrong order. The signal frame went first, then siginfo below it. But `sigreturn` reads from `sp`, expecting the signal frame. Fix: push siginfo FIRST (below original sp), then signal frame ON TOP. `sp` always points to the signal frame.
+
+#### 18. Kernel Stack Overflow Prevention
+- **Buffer reductions**: Reduced local stack buffers in kernel path resolution and syscall handlers from 256 to 128 bytes. Deep call chains (exec → resolve_path → resolve_symlinks_in_path → follow_symlinks) overflowed the 4KB kernel stack, corrupting the trapframe and causing non-deterministic page faults at kernel addresses.
+- **`follow_symlinks` recursion**: The function recurses up to 8 levels. Each frame consumed ~1152 bytes (256+256+256+512 = 1280). Reduced to ~640 bytes/frame (128+128+128+256).
+
+#### 19. `sys_wait4` Process Group Filtering
+- **Added `wpid < -1`** (wait for children in process group `-wpid`) and **`wpid == 0`** (wait for children in caller's process group). Previously only `wpid > 0` (specific child) and `wpid == -1` (any child) were handled.
+- Fixes `os-test process/waitpid-pgid` test.
+
+#### 20. `mprotect`/`munmap`/`mmap` Kernel Address Validation (`kernel/trap.c`)
+- **Symptom**: During boot and `run-os-test`, the shell receives SIGSEGV from a page fault at a kernel address (e.g., `0x8020c0d8`). The kernel code PTE loses its PTE_X (execute) permission, causing instruction page faults when the kernel tries to execute code.
+- **Fix**: Added `addr >= 0x80000000UL` checks to:
+  - `sys_mprotect_handler` — reject mprotect on kernel addresses (prevents `superpage_split` from corrupting kernel super pages)
+  - `sys_munmap_handler` — reject munmap on kernel addresses
+  - `sys_mmap_handler` (MAP_FIXED) — reject mmap on kernel addresses
+  - Page fault handler demand paging — skip VMA-based page fault handling for kernel addresses
+- Also removed debug prints (`deliver_signal: invalid handler`).
+- **Known remaining issue**: The kernel code PTE at `0x87ffa008` still loses PTE_X during `virtio_blk_init` through an unknown mechanism. The virtqueue pages don't overlap with the page table page, and the page table page is pinned. Root cause TBD — possibly related to QEMU's A/D bit update or a subtle page table management bug.
+
+### Known Issues (Last Verified)
+- **Kernel code PTE corruption**: The kernel code PTE loses PTE_X during boot, causing a page fault and shell respawn. The corruption happens during `virtio_blk_init` but the exact mechanism is unknown. The shell respawns and functions normally after the first fault.
+- **Shell respawning during specific `run-os-test` tests**: Some tests (e.g., `fork-setpgid-undo-redo`) still cause the shell to exit with status 0 between tests. The shell is not killed by a signal — it exits normally. `run-os-test` continues as an orphan of init. Root cause TBD, likely related to orphaned process group cleanup or terminal control.
+
 ### QEMU Testing — Critical Notes
 
 **`make qemu` is the primary way to run QEMU.** It builds the kernel, creates `build/disk.img`, mounts ext2 on `/mnt`, and launches QEMU with the correct flags automatically. Always prefer `make qemu` over running `qemu-system-riscv64` directly.
