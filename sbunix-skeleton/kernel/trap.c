@@ -628,13 +628,33 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
             current_proc->waiting_for_uart = 0;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
-            /* Return EINTR only if a user handler signal is pending */
+            /* Check for pending signals after waking up:
+             * - User handler (handler > 1): return -EINTR
+             * - SIG_DFL terminating signal: return -EINTR to let deliver_signal kill us
+             * - SIG_IGN / SIG_DFL ignore-class: continue waiting */
             {
                 uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
                 struct kern_sigaction *ksa = proc_sigactions(current_proc);
                 for (int s = 1; s < 32 && deliverable; s++) {
-                    if ((deliverable & signal_bit(s)) && ksa[s].handler > 1)
-                        return -4; /* -EINTR */
+                    if (deliverable & signal_bit(s)) {
+                        if (ksa[s].handler > 1) /* user handler */
+                            return -4; /* -EINTR */
+                        if (ksa[s].handler == 0) { /* SIG_DFL */
+                            /* Ignore-class: SIGCHLD, SIGURG, SIGWINCH (continue waiting) */
+                            if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
+                                continue;
+                            /* Stop-class: handled by deliver_signal, don't terminate */
+                            if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
+                                continue;
+                            /* SIGCONT: resume, not terminate */
+                            if (s == SIGCONT)
+                                continue;
+                            /* All other SIG_DFL signals terminate; return so
+                             * deliver_signal can kill the process */
+                            return -4; /* -EINTR */
+                        }
+                        /* SIG_IGN (handler == 1): continue waiting */
+                    }
                 }
             }
         }
@@ -1281,15 +1301,33 @@ static long sys_read_handler(struct trapframe *tf) {
             if (pipes[pid].write_open == 0) goto pipe_eof;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
-            /* Return EINTR only if a signal with a USER HANDLER is pending
-             * (not SIG_DFL/SIG_IGN — those don't interrupt syscalls). */
+            /* Check for pending signals after waking up:
+             * - User handler (handler > 1): return -EINTR
+             * - SIG_DFL terminating signal: break out to let deliver_signal kill us
+             * - SIG_IGN / SIG_DFL ignore-class: continue sleeping */
             {
                 uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
                 struct kern_sigaction *sa = proc_sigactions(current_proc);
                 for (int s = 1; s < 32 && deliverable; s++) {
                     if (deliverable & signal_bit(s)) {
-                        if (sa[s].handler > 1) /* user handler (not SIG_DFL=0 or SIG_IGN=1) */
+                        if (sa[s].handler > 1) /* user handler */
                             return (long)-4; /* -EINTR */
+                        if (sa[s].handler == 0) { /* SIG_DFL */
+                            /* Ignore-class: SIGCHLD, SIGURG, SIGWINCH (continue sleeping) */
+                            if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
+                                continue;
+                            /* Stop-class: SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU
+                             * (will be handled by deliver_signal, but shouldn't terminate) */
+                            if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
+                                continue;
+                            /* SIGCONT: resume, not terminate */
+                            if (s == SIGCONT)
+                                continue;
+                            /* All other SIG_DFL signals terminate; break out so
+                             * deliver_signal can kill the process */
+                            goto pipe_eof;
+                        }
+                        /* SIG_IGN (handler == 1): continue sleeping */
                     }
                 }
             }
@@ -3078,6 +3116,30 @@ static long sys_writev_handler(struct trapframe *tf) {
                             if (!pipes[pid].read_open) break;
                             current_proc->state = SLEEPING;
                             swtch(&current_proc->context, &scheduler_context);
+                            /* Check for terminating signals after waking */
+                            {
+                                uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                                struct kern_sigaction *ksa = proc_sigactions(current_proc);
+                                for (int s = 1; s < 32 && deliverable; s++) {
+                                    if (deliverable & signal_bit(s)) {
+                                        if (ksa[s].handler > 1) { /* user handler */
+                                            if (total == 0) total = -4; /* -EINTR */
+                                            goto writev_out;
+                                        }
+                                        if (ksa[s].handler == 0) { /* SIG_DFL */
+                                            if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
+                                                continue; /* ignore-class */
+                                            if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
+                                                continue; /* stop-class */
+                                            if (s == SIGCONT)
+                                                continue; /* resume */
+                                            /* Terminating signal: return to let deliver_signal kill */
+                                            if (total == 0) total = -4;
+                                            goto writev_out;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         if (!pipes[pid].read_open) {
                             current_proc->sigpending |= signal_bit(SIGPIPE);
@@ -3154,6 +3216,29 @@ static long sys_readv_handler(struct trapframe *tf) {
                 while (pipe_avail(pid) == 0 && pipes[pid].write_open)  {
                     current_proc->state = SLEEPING;
                     swtch(&current_proc->context, &scheduler_context);
+                    /* Check for terminating signals after waking */
+                    {
+                        uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                        struct kern_sigaction *ksa = proc_sigactions(current_proc);
+                        for (int s = 1; s < 32 && deliverable; s++) {
+                            if (deliverable & signal_bit(s)) {
+                                if (ksa[s].handler > 1) { /* user handler */
+                                    if (total == 0) total = -4;
+                                    goto readv_out;
+                                }
+                                if (ksa[s].handler == 0) { /* SIG_DFL */
+                                    if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
+                                        continue;
+                                    if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
+                                        continue;
+                                    if (s == SIGCONT)
+                                        continue;
+                                    /* Terminating: return to let deliver_signal kill */
+                                    goto readv_out;
+                                }
+                            }
+                        }
+                    }
                 }
                 char kchunk[512];
                 uint64_t j = 0;
@@ -3378,10 +3463,21 @@ static long sys_futex_handler(struct trapframe *tf) {
         if (current_proc->sigpending & ~current_proc->sigmask) {
             struct kern_sigaction *ksa = proc_sigactions(current_proc);
             for (int s = 1; s < 32; s++) {
-                if ((current_proc->sigpending & signal_bit(s)) &&
-                    ~(current_proc->sigmask & signal_bit(s)) &&
-                    ksa[s].handler > 1)
-                    return (long)-4; /* EINTR */
+                uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                if (deliverable & signal_bit(s)) {
+                    if (ksa[s].handler > 1) /* user handler */
+                        return (long)-4; /* EINTR */
+                    if (ksa[s].handler == 0) { /* SIG_DFL */
+                        if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
+                            continue;
+                        if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
+                            continue;
+                        if (s == SIGCONT)
+                            continue;
+                        /* Terminating: return to let deliver_signal kill */
+                        return (long)-4;
+                    }
+                }
             }
         }
         return 0;

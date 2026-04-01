@@ -331,6 +331,48 @@ Example: `BF: Fix null pointer in allocproc`
   2. `kernel/trap.c` — in the page fault handler: if instruction page fault at kernel address (>= 0x80000000), force PTE_X on the PTE, flush TLB, and retry the instruction. This transparently handles re-corruption during boot tests.
 - Both workarounds ensure the kernel code PTE always has PTE_X, regardless of when the corruption occurs.
 
+#### 21. Blocking Syscall Signal Handling Fix (`kernel/trap.c`)
+- **Symptom**: The `basic/signal/kill` test (and similar tests) hung forever. The test creates a child that blocks in `read()` on a pipe. The parent sends `SIGUSR1` to the child. The child should be killed by the signal (SIG_DFL for SIGUSR1 = terminate), but the pipe read loop ignored SIG_DFL signals and only checked for user handlers.
+- **Root Cause**: Blocking syscalls (pipe read, pipe write, waitpid, futex, readv/writev) had signal checks after `swtch()` that only returned `-EINTR` for signals with custom user handlers (`handler > 1`). Signals with `SIG_DFL` (handler == 0) that should terminate the process were ignored, causing the process to loop back to sleep instead of returning so `deliver_signal` could terminate it.
+- **Signal delivery flow**: `kill_deliver()` sets `sigpending` and wakes the target process. Actual signal delivery happens in `deliver_signal()` which is called when the syscall returns. If the blocking syscall never returns (loops back to sleep), `deliver_signal` never runs.
+- **Terminating vs non-terminating SIG_DFL signals**:
+  - Ignore-class (continue sleeping): SIGCHLD, SIGURG, SIGWINCH
+  - Stop-class (don't terminate): SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU
+  - Resume (don't terminate): SIGCONT
+  - All others with SIG_DFL: TERMINATE (need to break out of sleep loop)
+- **Fixes applied**:
+  1. **Pipe read** (~line 1280) — now checks for SIG_DFL terminating signals and breaks out via `goto pipe_eof`
+  2. **Waitpid** (~line 630) — returns `-EINTR` for SIG_DFL terminating signals
+  3. **Pipe write (writev)** (~line 3118) — returns to let `deliver_signal` kill process
+  4. **Readv pipe read** (~line 3218) — same fix
+  5. **Futex wait** (~line 3460) — same fix
+- **Verification**: `basic/signal/kill` test now passes (exit status 0), `signal/raise` passes, boot tests pass (62/62)
+
+#### 22. `run-os-test` Completion Fix (`bin/run-os-test/run-os-test.c`)
+- **Symptom**: Full `run-os-test` run stalled around `1471/1494`, never reaching final results.
+- **Root cause**: A subset of process/signal tests can block indefinitely in this environment; the harness waited forever on those child tests.
+- **Fix**: Added per-test watchdog timeout in `run-os-test`:
+  - Install temporary `SIGALRM` handler around each test execution.
+  - Use `alarm(5)` per test.
+  - If timed out, kill the child test with `SIGKILL`, reap it, and classify as failure (`exit: 124`).
+- **Result**: Full suite now completes deterministically (`1494/1494`) and prints `=== Final Results ===`.
+
+#### 23. Shell Respawn + Post-Boot Prompt Fix (`bin/init/init.c`, `rootfs/etc/rc`)
+- **Symptoms**:
+  1. Shell respawn messages during `run-os-test` process-group tests.
+  2. After automatic boot tests, system printed "Boot Testing Complete" but no interactive prompt appeared.
+- **Root cause**: `init`'s async `SIGCHLD` reaping interfered with blocking `waitpid()` flow for the rc shell / interactive shell lifecycle.
+- **Fixes**:
+  - Removed `SIGCHLD` handler from `init`; switched to explicit synchronous reaping:
+    - `waitpid(child, &status, 0)` for managed child.
+    - `reap_orphans()` helper (`waitpid(-1, ..., WNOHANG)` loop) after each managed wait.
+  - Added boot-only env marker when launching `/etc/rc`:
+    - `SBUNIX_BOOT_RC=1` passed by `init` for startup rc execution.
+  - Updated `rootfs/etc/rc` to gate countdown/banner output on boot mode while preserving normal behavior.
+- **Result**:
+  - Boot path now reliably returns to interactive `sbush$` after automatic tests.
+  - Full `run-os-test` run completes without shell respawn interruptions.
+
 ### Known Issues (Last Verified)
 - **`run-os-test` crashes with SIGILL**: The run-os-test binary can crash with SIGILL (illegal instruction) during specific tests. This kills run-os-test but does NOT cause shell respawning — the shell continues normally after the crash. Root cause TBD (possibly test binary bug or compiler issue).
 - **Shell respawning (RESOLVED)**: The shell respawning during `run-os-test` was caused by two bugs:

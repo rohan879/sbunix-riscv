@@ -15,40 +15,51 @@ fi
 
 # Run test suite only if test runner is present
 if test -f /bin/run-tests; then
+    if test "$SBUNIX_BOOT_RC" = "1"; then
+        set BOOTMODE 1
+    else
+        set BOOTMODE 0
+    fi
+
     if test -f /mnt/.persist_sentinel; then
         # Boot 2: persistence verify phase only, then poweroff
         /test/bin/persisttest
         /bin/poweroff
     else
-        echo ""
-        echo "=========================================="
-        echo "  Optional Automatic Testing"
-        echo "=========================================="
-        echo ""
-        echo "Press Ctrl-C NOW to skip automatic tests"
-        echo "and go directly to the interactive shell."
-        echo ""
-        echo -n "Starting tests in: 3"
-        sleep 1 || exit 0
-        echo -n "... 2" 
-        sleep 1 || exit 0
-        echo -n "... 1"
-        sleep 1 || exit 0
-        echo ""
-        echo ""
+        if test "$BOOTMODE" = "1"; then
+            echo ""
+            echo "=========================================="
+            echo "  Optional Automatic Testing"
+            echo "=========================================="
+            echo ""
+            echo "Press Ctrl-C NOW to skip automatic tests"
+            echo "and go directly to the interactive shell."
+            echo ""
+            echo -n "Starting tests in: 3"
+            sleep 1 || exit 0
+            echo -n "... 2" 
+            sleep 1 || exit 0
+            echo -n "... 1"
+            sleep 1 || exit 0
+            echo ""
+            echo ""
+        fi
 
         echo "Running SBUnix regression tests..."
         run-tests
-        echo ""
-        echo "=========================================="
-        echo "  Boot Testing Complete"
-        echo "=========================================="
-        echo ""
-        echo "Available commands:"
-        echo "  run-tests          - Run SBUnix regression tests"  
-        echo "  run-os-test        - Run Sortix POSIX compliance tests"
-        echo "  run-open-posix-test - Run Open POSIX test suite"
-        echo "  poweroff           - Shutdown system"
-        echo ""
+
+        if test "$BOOTMODE" = "1"; then
+            echo ""
+            echo "=========================================="
+            echo "  Boot Testing Complete"
+            echo "=========================================="
+            echo ""
+            echo "Available commands:"
+            echo "  run-tests          - Run SBUnix regression tests"  
+            echo "  run-os-test        - Run Sortix POSIX compliance tests"
+            echo "  run-open-posix-test - Run Open POSIX test suite"
+            echo "  poweroff           - Shutdown system"
+            echo ""
+        fi
     fi
 fi
