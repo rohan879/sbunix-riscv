@@ -541,3 +541,25 @@ open-posix build:
   - Verified both modes: after automatic boot tests and after skipping boot tests via Ctrl-C during 3-second window.
   - Target tests now pass via `run-os-test` when invoked individually.
   - Long chained command lines in `sbush` can be truncated and cause spurious `Test not found` output; run target tests individually for reliable validation.
+
+#### 25. `waitpid` Empty-PGID + Harness Capture Fix (Current Session)
+- **`waitpid` return code fix** (`kernel/trap.c`):
+  - `sys_wait4` now returns `-ECHILD` when no matching children exist (instead of generic `-1`).
+  - This aligns with POSIX expectations for `waitpid(-pgid, ...)` when the requested process group becomes empty.
+- **Wake parent on process-group/session changes** (`kernel/trap.c`):
+  - `sys_setpgid_handler` now wakes a sleeping parent waiting in `wait4` when a child changes process group.
+  - `sys_setsid_handler` now wakes a sleeping parent waiting in `wait4` when a child enters a new session.
+  - This avoids hangs where parent remains asleep after child leaves the waited process group.
+- **`alarm` timebase consistency fix** (`kernel/trap.c`):
+  - `sys_alarm_handler` and timer expiry checks now use `r_time()` + `TIMER_FREQ` consistently.
+  - Fixes 1-second alarm behavior used by os-test waitpid timeout paths.
+- **`run-os-test` watchdog/capture fix** (`bin/run-os-test/run-os-test.c`):
+  - Replaced pipe-based output capture with per-test temp file capture.
+  - Prevents parent/child deadlocks on shared pipe reads/writes in signal-heavy tests.
+  - Classification logic remains unchanged (expect matching by leaf + CRLF/LF normalization).
+- **Validation**:
+  - Reproduced failures, then verified PASS for:
+    - `process/waitpid-pgid-empty-on-setpgid`
+    - `process/waitpid-pgid-empty-on-setpgid-rejoin`
+    - `process/waitpid-pgid-empty-on-setsid`
+  - Verified both modes: post-boot-tests shell and Ctrl-C boot-skip shell.

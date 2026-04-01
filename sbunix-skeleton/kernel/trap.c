@@ -270,8 +270,9 @@ static void handle_timer_interrupt(void) {
     }
     /* Check for expired alarms and deliver SIGALRM */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        uint64_t now = r_time();
         if (p->state != UNUSED && p->state != ZOMBIE &&
-            p->alarm_ticks > 0 && ticks >= p->alarm_ticks) {
+            p->alarm_ticks > 0 && now >= p->alarm_ticks) {
             p->alarm_ticks = 0;  /* one-shot */
             p->sigpending |= signal_bit(14);  /* SIGALRM = 14 */
             if (p->state == SLEEPING)
@@ -620,7 +621,7 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
                 return pid;
             }
         }
-        if (!found_child) return -1;
+        if (!found_child) return -10; /* -ECHILD */
         /* WNOHANG: don't block */
         if (options & 1) return 0;
         /* Otherwise sleep until a child exits */
@@ -3378,6 +3379,9 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     }
 
     tp->pgid = pgid;
+    if (tp->parent && tp->parent->state == SLEEPING &&
+        tp->parent->waiting_for_uart == 0)
+        tp->parent->state = RUNNABLE;
     return 0;
 }
 
@@ -3388,6 +3392,9 @@ static long sys_setsid_handler(struct trapframe *tf) {
         return (long)-1; /* -EPERM */
     current_proc->sid = current_proc->pid;
     current_proc->pgid = current_proc->pid;
+    if (current_proc->parent && current_proc->parent->state == SLEEPING &&
+        current_proc->parent->waiting_for_uart == 0)
+        current_proc->parent->state = RUNNABLE;
     return (long)current_proc->pid;
 }
 
@@ -3426,12 +3433,15 @@ static long sys_getsid_handler(struct trapframe *tf) {
 static long sys_alarm_handler(struct trapframe *tf) {
     unsigned long seconds = tf->a0;
     unsigned long remaining = 0;
-    if (current_proc->alarm_ticks > 0 && current_proc->alarm_ticks > ticks)
-        remaining = current_proc->alarm_ticks - ticks;
+    uint64_t now = r_time();
+    if (current_proc->alarm_ticks > 0 && current_proc->alarm_ticks > now) {
+        uint64_t delta = current_proc->alarm_ticks - now;
+        remaining = (unsigned long)((delta + TIMER_FREQ - 1) / TIMER_FREQ);
+    }
     if (seconds == 0)
         current_proc->alarm_ticks = 0;
     else
-        current_proc->alarm_ticks = ticks + seconds;
+        current_proc->alarm_ticks = now + (uint64_t)seconds * TIMER_FREQ;
     return (long)remaining;
 }
 

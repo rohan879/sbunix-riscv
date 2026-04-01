@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <signal.h>
+#include <fcntl.h>
 
 #define MAX_PATH 256
 #define MAX_NAME 128
@@ -257,29 +258,24 @@ static enum test_result classify_from_out(const char *test_name,
  * Returns the raw exit code.
  */
 static int run_test_capture(const char *path, char *output, size_t output_size) {
-    int pipefd[2];
-    if (pipe(pipefd) == -1) return -1;
+    static unsigned long capture_seq = 0;
+    char capture_path[MAX_PATH];
+    capture_seq++;
+    snprintf(capture_path, sizeof(capture_path),
+             RESULTS_DIR "/.capture-%lu.out", capture_seq);
 
     pid_t pid = fork();
     if (pid == 0) {
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
+        int fd = open(capture_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0)
+            _exit(127);
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        close(fd);
         char *argv[] = {(char *)path, NULL};
         execv(path, argv);
         _exit(127);
     } else if (pid > 0) {
-        close(pipefd[1]);
-        size_t pos = 0;
-        ssize_t n;
-        while (pos < output_size - 1 &&
-               (n = read(pipefd[0], output + pos,
-                         output_size - 1 - pos)) > 0)
-            pos += n;
-        output[pos] = '\0';
-        close(pipefd[0]);
-
         int status;
         for (;;) {
             pid_t wr = waitpid(pid, &status, 0);
@@ -296,6 +292,16 @@ static int run_test_capture(const char *path, char *output, size_t output_size) 
             }
             break;
         }
+
+        FILE *cap = fopen(capture_path, "r");
+        size_t pos = 0;
+        if (cap) {
+            pos = fread(output, 1, output_size - 1, cap);
+            fclose(cap);
+        }
+        output[pos] = '\0';
+        unlink(capture_path);
+
         int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
         /*
