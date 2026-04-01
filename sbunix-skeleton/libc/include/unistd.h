@@ -37,6 +37,7 @@ pid_t   getppid(void);
 int     execve(const char *path, char *const argv[], char *const envp[]);
 int     execv(const char *path, char *const argv[]);
 int     execvp(const char *file, char *const argv[]);
+int     execlp(const char *file, const char *arg, ...);
 pid_t   waitpid(pid_t pid, int *status, int options);
 void    _exit(int status) __attribute__((noreturn));
 

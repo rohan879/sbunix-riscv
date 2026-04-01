@@ -186,6 +186,29 @@ int execvp(const char *file, char *const argv[]) {
     return -1;
 }
 
+int execlp(const char *file, const char *arg, ...) {
+    char *argv[64];
+    int argc = 0;
+    va_list ap;
+
+    argv[argc++] = (char *)arg;
+
+    va_start(ap, arg);
+    while (argc < (int)(sizeof(argv) / sizeof(argv[0])) - 1) {
+        char *next = va_arg(ap, char *);
+        if (next == NULL)
+            break;
+        argv[argc++] = next;
+    }
+    va_end(ap);
+
+    argv[argc] = NULL;
+    if (argc == (int)(sizeof(argv) / sizeof(argv[0])) - 1)
+        errno = E2BIG;
+
+    return execvp(file, argv);
+}
+
 int ioctl(int fd, unsigned long request, ...) {
     va_list ap;
     va_start(ap, request);

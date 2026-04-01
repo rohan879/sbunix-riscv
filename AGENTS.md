@@ -523,3 +523,21 @@ os-test build:
 
 open-posix build:
 - **Results**: 423 tests compile successfully out of 2,044 total (21% success rate)
+
+#### 24. os-test Process Group + `execlp` Follow-up (Current Session)
+- **`setpgid` errno alignment fixes** (`kernel/trap.c`):
+  - Return `EINVAL` for negative `pid`/`pgid`.
+  - Return `ESRCH` (not `EPERM`) when caller tries `setpgid` on a non-child/non-self target.
+  - Return `EACCES` (not `EINVAL`) when parent tries `setpgid` on a child that already `exec`'d.
+- **`execlp` support added to libc** (`libc/include/unistd.h`, `libc/unistd.c`):
+  - Added declaration and varargs wrapper implementation over existing `execvp`.
+  - `process/fork-exec-setpgid-in-child` and `process/fork-exec-setpgid-in-parent` now compile and run.
+- **`run-os-test` expect matching fixes** (`bin/run-os-test/run-os-test.c`):
+  - Runner now matches suite expect files by leaf test name (e.g., `fork-setpgid-invalid.posix`) instead of requiring the full `suite/test` string.
+  - Normalizes `\r\n`/`\n` in both test output and expect file content before comparison.
+  - This resolves false FAIL classifications for tests that actually printed the expected errno string.
+- **Validation notes**:
+  - Verified with `make clean && BUILD_TESTS=1 make qemu -j$(nproc)`.
+  - Verified both modes: after automatic boot tests and after skipping boot tests via Ctrl-C during 3-second window.
+  - Target tests now pass via `run-os-test` when invoked individually.
+  - Long chained command lines in `sbush` can be truncated and cause spurious `Test not found` output; run target tests individually for reliable validation.

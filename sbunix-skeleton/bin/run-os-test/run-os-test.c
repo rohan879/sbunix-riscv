@@ -128,8 +128,28 @@ static int load_tests_from_manifest(void) {
  */
 static size_t strip_trailing_newline(char *s) {
     size_t len = strlen(s);
-    while (len > 0 && s[len-1] == '\n') s[--len] = '\0';
+    while (len > 0 && (s[len-1] == '\n' || s[len-1] == '\r'))
+        s[--len] = '\0';
     return len;
+}
+
+static const char *test_leaf_name(const char *test_name) {
+    const char *slash = strrchr(test_name, '/');
+    return slash ? slash + 1 : test_name;
+}
+
+static size_t expect_entry_match_len(const char *entry_name,
+                                     const char *test_name) {
+    size_t tlen = strlen(test_name);
+    if (strncmp(entry_name, test_name, tlen) == 0 && entry_name[tlen] == '.')
+        return tlen;
+
+    const char *leaf = test_leaf_name(test_name);
+    size_t llen = strlen(leaf);
+    if (strncmp(entry_name, leaf, llen) == 0 && entry_name[llen] == '.')
+        return llen;
+
+    return 0;
 }
 
 /*
@@ -188,14 +208,13 @@ static enum test_result classify_from_out(const char *test_name,
             strip_trailing_newline(stripped);
 
             struct dirent *entry;
-            size_t tlen = strlen(test_name);
             int found_expectation = 0;
             int result = RESULT_FAIL;
 
             while ((entry = readdir(dir)) != NULL) {
-                /* Match: entry name starts with test_name + '.' */
-                if (strncmp(entry->d_name, test_name, tlen) != 0 ||
-                    entry->d_name[tlen] != '.')
+                size_t match_len = expect_entry_match_len(entry->d_name,
+                                                          test_name);
+                if (!match_len)
                     continue;
 
                 found_expectation = 1;
@@ -209,9 +228,10 @@ static enum test_result classify_from_out(const char *test_name,
                 size_t elen = fread(expected, 1, sizeof(expected) - 1, ef);
                 fclose(ef);
                 expected[elen] = '\0';
+                strip_trailing_newline(expected);
 
                 if (strcmp(stripped, expected) == 0) {
-                    if (strstr(entry->d_name + tlen + 1, "unknown"))
+                    if (strstr(entry->d_name + match_len + 1, "unknown"))
                         result = RESULT_NEUTRAL;
                     else
                         result = RESULT_PASS;
@@ -433,11 +453,9 @@ int main(int argc, char *argv[]) {
                      EXPECT_ROOT "/%s.expect", tests[i].suite);
             DIR *edir = opendir(expect_dir);
             if (edir) {
-                size_t tlen = strlen(tests[i].name);
                 struct dirent *ent;
                 while ((ent = readdir(edir)) != NULL) {
-                    if (strncmp(ent->d_name, tests[i].name, tlen) == 0 &&
-                        ent->d_name[tlen] == '.') {
+                    if (expect_entry_match_len(ent->d_name, tests[i].name)) {
                         suffix = 'E';
                         break;
                     }

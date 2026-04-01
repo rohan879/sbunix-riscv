@@ -3332,6 +3332,10 @@ static long sys_getrandom_handler(struct trapframe *tf) {
 static long sys_setpgid_handler(struct trapframe *tf) {
     pid_t target = (pid_t)tf->a0;
     pid_t pgid = (pid_t)tf->a1;
+    if (target < 0)
+        return (long)-22; /* EINVAL */
+    if (pgid < 0)
+        return (long)-22; /* EINVAL */
     if (target == 0) target = current_proc->pid;
     if (pgid == 0) pgid = target;
 
@@ -3345,9 +3349,9 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     }
     if (!tp) return (long)-3; /* ESRCH */
 
-    /* POSIX: must be self or direct child */
+    /* POSIX: pid must refer to self or a child of caller */
     if (tp != current_proc && tp->parent != current_proc)
-        return (long)-1; /* EPERM */
+        return (long)-3; /* ESRCH */
 
     /* POSIX: cannot change pgid of session leader (pid == sid) */
     if (tp->pid == tp->sid)
@@ -3355,7 +3359,7 @@ static long sys_setpgid_handler(struct trapframe *tf) {
 
     /* POSIX: child must not have exec'd (unless targeting self) */
     if (tp != current_proc && tp->has_execed)
-        return (long)-22; /* EACCES mapped to EINVAL for simplicity */
+        return (long)-13; /* EACCES */
 
     /* POSIX: target and caller must be in same session */
     if (tp->sid != current_proc->sid)
