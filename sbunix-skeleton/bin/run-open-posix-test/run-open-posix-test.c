@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 #include <dirent.h>
 #include <errno.h>
+#include <signal.h>
 
 #define MAX_PATH 256
 #define MAX_NAME 128
@@ -54,6 +55,13 @@ static int skipped = 0;
 static int unsupported = 0;
 static int untested = 0;
 static int errors = 0;
+
+static volatile sig_atomic_t timed_out = 0;
+
+static void alarm_handler(int sig) {
+    (void)sig;
+    timed_out = 1;
+}
 
 /*
  * Extract category from path: conformance/definitions/unistd_h/1-1 -> definitions
@@ -150,7 +158,21 @@ static int run_test_capture(const char *path, char *output, size_t output_size) 
         close(pipefd[0]);
 
         int status;
-        waitpid(pid, &status, 0);
+        for (;;) {
+            pid_t wr = waitpid(pid, &status, 0);
+            if (wr == pid)
+                break;
+            if (wr < 0 && errno == EINTR) {
+                if (timed_out) {
+                    kill(pid, SIGKILL);
+                    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+                        ;
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
         int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
         if (pos == 0 || exit_code >= 2) {
@@ -208,7 +230,23 @@ static enum test_result classify_from_exit(int exit_code) {
 
 static enum test_result run_test(int test_idx) {
     char output[MAX_OUTPUT];
+    struct sigaction old_alrm;
+    struct sigaction sa;
+    timed_out = 0;
+    sa.sa_handler = alarm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sa.sa_restorer = NULL;
+    sigaction(SIGALRM, &sa, &old_alrm);
+    alarm(5);
     int exit_code = run_test_capture(tests[test_idx].path, output, sizeof(output));
+    alarm(0);
+    sigaction(SIGALRM, &old_alrm, NULL);
+
+    if (timed_out) {
+        snprintf(output, sizeof(output), "exit: %d\n", 124);
+    }
+
     write_out_file(tests[test_idx].name, output);
     return classify_from_exit(exit_code);
 }
