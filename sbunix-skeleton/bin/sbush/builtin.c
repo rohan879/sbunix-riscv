@@ -428,6 +428,7 @@ int run_builtin(struct command *cmd) {
             /* simple atoi */
             const char *s = cmd->argv[1];
             int neg = 0;
+            code = 0;
             if (*s == '-') { neg = 1; s++; }
             while (*s >= '0' && *s <= '9')
                 code = code * 10 + (*s++ - '0');
