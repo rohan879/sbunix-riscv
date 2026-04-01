@@ -326,10 +326,13 @@ Example: `BF: Fix null pointer in allocproc`
   - Page fault handler demand paging — skip VMA-based page fault handling for kernel addresses
 - Also removed debug prints (`deliver_signal: invalid handler`).
 - **Known remaining issue**: The kernel code PTE at `0x87ffa008` still loses PTE_X during `virtio_blk_init` through an unknown mechanism. The virtqueue pages don't overlap with the page table page, and the page table page is pinned. Root cause TBD — possibly related to QEMU's A/D bit update or a subtle page table management bug.
+- **Workaround**: Two PTE_X restore points added:
+  1. `kernel/kernel.c` — restores PTE_X after all boot init, before `scheduler()` starts
+  2. `kernel/trap.c` — in the page fault handler: if instruction page fault at kernel address (>= 0x80000000), force PTE_X on the PTE, flush TLB, and retry the instruction. This transparently handles re-corruption during boot tests.
+- Both workarounds ensure the kernel code PTE always has PTE_X, regardless of when the corruption occurs.
 
 ### Known Issues (Last Verified)
-- **Kernel code PTE corruption**: The kernel code PTE loses PTE_X during boot, causing a page fault and shell respawn. The corruption happens during `virtio_blk_init` but the exact mechanism is unknown. The shell respawns and functions normally after the first fault.
-- **Shell respawning during specific `run-os-test` tests**: Some tests (e.g., `fork-setpgid-undo-redo`) still cause the shell to exit with status 0 between tests. The shell is not killed by a signal — it exits normally. `run-os-test` continues as an orphan of init. Root cause TBD, likely related to orphaned process group cleanup or terminal control.
+- **Shell respawning during specific `run-os-test` tests**: Some tests (e.g., `fork-setpgid-undo-redo`) still cause the shell to exit with status 0 between tests. The shell is not killed by a signal — it exits normally. `run-os-test` continues as an orphan of init. This is NOT caused by page faults (0 page faults observed). Root cause TBD, likely related to orphaned process group cleanup or terminal control.
 
 ### QEMU Testing — Critical Notes
 

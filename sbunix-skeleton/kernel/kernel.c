@@ -47,6 +47,24 @@ void boot(uint64_t hartid, void *dtb) {
   syscall_init();
   userinit();
 
+  /* Workaround: something during boot corrupts the kernel code PTE
+   * (at 0x87ffa008), clearing PTE_X.  This causes instruction page
+   * faults when the kernel executes code.  Restore PTE_X before
+   * starting the scheduler so user processes run on a correct page
+   * table.  Root cause TBD — GDB shows corruption during
+   * virtio_blk_init but virtqueue pages don't overlap with the
+   * page table page and it is pinned. */
+  {
+    pte_t l2pte = kernel_pagetable[2]; /* VPN[2]=2 for 0x80000000+ */
+    if (l2pte & PTE_V) {
+      pagetable_t l1 = (pagetable_t)PTE2PA(l2pte);
+      if ((l1[0] & PTE_V) && !(l1[0] & PTE_X)) {
+        l1[0] |= PTE_X;
+        asm volatile("sfence.vma zero, zero");
+      }
+    }
+  }
+
   printk("Starting scheduler...\n");
   scheduler();
 

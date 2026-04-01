@@ -4715,6 +4715,20 @@ void trap_handler(struct trapframe *tf) {
                 }
             }
 
+            /* Workaround: if instruction page fault at kernel address,
+             * the kernel code PTE may have lost PTE_X.  Restore it and
+             * retry the instruction.  This handles corruption that
+             * occurs during boot tests (after the initial restore). */
+            if (cause == SCAUSE_INST_PAGE_FAULT && stval >= 0x80000000UL) {
+                pte_t *kpte = walk(kernel_pagetable, PGROUNDDOWN(stval), 0);
+                if (kpte && (*kpte & PTE_V)) {
+                    /* Always ensure PTE_X is set and flush TLB */
+                    *kpte |= PTE_X;
+                    asm volatile("sfence.vma %0, zero" : : "r"(stval));
+                    return; /* retry faulting instruction */
+                }
+            }
+
 pagefault_kill:
             if (current_proc) {
                 /* Suppress page-fault noise when the fault is a side-effect of
