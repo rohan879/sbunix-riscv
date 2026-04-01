@@ -556,6 +556,8 @@ open-posix build:
 - **`run-os-test` watchdog/capture fix** (`bin/run-os-test/run-os-test.c`):
   - Replaced pipe-based output capture with per-test temp file capture.
   - Prevents parent/child deadlocks on shared pipe reads/writes in signal-heavy tests.
+  - Capture temp files now live in `/tmp` (ramfs) rather than `/test` (ext2) to avoid avoidable I/O slowdown during large runs.
+  - Single-test mode now resolves targets via the manifest (exact path/name, then unique prefix), avoiding false `Test not found` errors for long or truncated names.
   - Classification logic remains unchanged (expect matching by leaf + CRLF/LF normalization).
 - **Validation**:
   - Reproduced failures, then verified PASS for:
@@ -563,3 +565,8 @@ open-posix build:
     - `process/waitpid-pgid-empty-on-setpgid-rejoin`
     - `process/waitpid-pgid-empty-on-setsid`
   - Verified both modes: post-boot-tests shell and Ctrl-C boot-skip shell.
+
+#### 26. Boot-Test Skipping Reliability Notes
+- **Best way to skip boot tests**: wait for the line `Starting tests in: 3` and then send Ctrl-C immediately.
+- **Operational tip**: queueing many commands at once in `sbush` can make it harder to land Ctrl-C timing cleanly; send one command at a time when debugging boot behavior.
+- **For scripted host-side control**: poll the tmux pane for `Starting tests in: 3` and inject Ctrl-C once matched. This is more reliable than fixed sleep delays.

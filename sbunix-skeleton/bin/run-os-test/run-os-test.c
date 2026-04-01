@@ -10,7 +10,7 @@
 #include <fcntl.h>
 
 #define MAX_PATH 256
-#define MAX_NAME 128
+#define MAX_NAME 256
 #define MAX_SUITE 32
 #define MAX_TESTS 12000
 #define MAX_OUTPUT 4096
@@ -20,6 +20,7 @@
 #define MANIFEST_FILE TEST_ROOT "/os-test-manifest"
 #define EXPECT_ROOT TEST_ROOT "/os-test-expect"
 #define RESULTS_DIR TEST_ROOT "/var/log/os-test"
+#define CAPTURE_TMP_DIR "/tmp"
 
 #ifndef TOTAL_TESTS_IN_SUITE
 #define TOTAL_TESTS_IN_SUITE 5304
@@ -99,7 +100,7 @@ static void add_test(const char *path, const char *relative_name) {
     total_tests++;
 }
 
-static int load_tests_from_manifest(void) {
+static int load_tests_from_manifest(int show_progress) {
     FILE *f = fopen(MANIFEST_FILE, "r");
     if (!f) {
         printf("Test manifest not found: %s\n", MANIFEST_FILE);
@@ -110,7 +111,10 @@ static int load_tests_from_manifest(void) {
     int lc = 0;
     while (fgets(line, sizeof(line), f)) {
         lc++;
-        if (lc % 200 == 0) { printf("Loaded %d tests...\n", total_tests); fflush(stdout); }
+        if (show_progress && lc % 200 == 0) {
+            printf("Loaded %d tests...\n", total_tests);
+            fflush(stdout);
+        }
         if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
         size_t len = strlen(line);
         if (len > 0 && line[len-1] == '\n') { line[--len] = '\0'; }
@@ -262,7 +266,8 @@ static int run_test_capture(const char *path, char *output, size_t output_size) 
     char capture_path[MAX_PATH];
     capture_seq++;
     snprintf(capture_path, sizeof(capture_path),
-             RESULTS_DIR "/.capture-%lu.out", capture_seq);
+             CAPTURE_TMP_DIR "/run-os-test-%d-%lu.out",
+             (int)getpid(), capture_seq);
 
     pid_t pid = fork();
     if (pid == 0) {
@@ -399,23 +404,58 @@ int main(int argc, char *argv[]) {
     mkdir(RESULTS_DIR, 0755);
 
     if (argc == 2) {
+        struct test_info *single_test = NULL;
         char test_path[MAX_PATH];
-        snprintf(test_path, sizeof(test_path), OS_TEST_BIN_ROOT "/%s", argv[1]);
         struct stat st;
-        if (stat(test_path, &st) != 0 || !(st.st_mode & S_IXUSR)) {
+
+        snprintf(test_path, sizeof(test_path), OS_TEST_BIN_ROOT "/%s", argv[1]);
+        if (stat(test_path, &st) == 0 && (st.st_mode & S_IXUSR)) {
+            static struct test_info exact_test;
+            strncpy(exact_test.path, test_path, MAX_PATH - 1);
+            exact_test.path[MAX_PATH - 1] = '\0';
+            strncpy(exact_test.name, argv[1], MAX_NAME - 1);
+            exact_test.name[MAX_NAME - 1] = '\0';
+            extract_suite_name(test_path, exact_test.suite);
+            single_test = &exact_test;
+        } else {
+            if (load_tests_from_manifest(0) != 0) {
+                printf("Test manifest not found: %s\n", MANIFEST_FILE);
+                return 1;
+            }
+
+            for (int i = 0; i < total_tests; i++) {
+                if (strcmp(tests[i].name, argv[1]) == 0 ||
+                    strcmp(tests[i].path, argv[1]) == 0) {
+                    single_test = &tests[i];
+                    break;
+                }
+            }
+
+            if (!single_test) {
+                size_t qlen = strlen(argv[1]);
+                int match_count = 0;
+                for (int i = 0; i < total_tests; i++) {
+                    if (strncmp(tests[i].name, argv[1], qlen) == 0) {
+                        single_test = &tests[i];
+                        match_count++;
+                    }
+                }
+                if (match_count > 1) {
+                    printf("Ambiguous test prefix: %s\n", argv[1]);
+                    printf("Please provide a longer test name.\n");
+                    return 1;
+                }
+            }
+        }
+
+        if (!single_test) {
             printf("Test not found: %s\n", argv[1]);
             printf("The test may not have compiled due to missing POSIX features.\n");
             return 1;
         }
-        struct test_info single_test;
-        strncpy(single_test.path, test_path, MAX_PATH - 1);
-        single_test.path[MAX_PATH - 1] = '\0';
-        strncpy(single_test.name, argv[1], MAX_NAME - 1);
-        single_test.name[MAX_NAME - 1] = '\0';
-        extract_suite_name(test_path, single_test.suite);
 
         printf("Running: %s\n", argv[1]);
-        enum test_result result = run_test_single(&single_test);
+        enum test_result result = run_test_single(single_test);
         const char* rstr = (result == RESULT_PASS) ? "PASS" :
                            (result == RESULT_NEUTRAL) ? "NEUTRAL" :
                            (result == RESULT_SKIP) ? "SKIP" : "FAIL";
@@ -425,7 +465,7 @@ int main(int argc, char *argv[]) {
 
     printf("Loading tests from manifest...\n");
     fflush(stdout);
-    if (load_tests_from_manifest() != 0) {
+    if (load_tests_from_manifest(1) != 0) {
         struct stat st;
         if (stat(OS_TEST_BIN_ROOT, &st) != 0 || !S_ISDIR(st.st_mode))
             printf("os-test directory not found: %s\n", OS_TEST_BIN_ROOT);
