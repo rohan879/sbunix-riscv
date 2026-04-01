@@ -332,7 +332,11 @@ Example: `BF: Fix null pointer in allocproc`
 - Both workarounds ensure the kernel code PTE always has PTE_X, regardless of when the corruption occurs.
 
 ### Known Issues (Last Verified)
-- **Shell respawning during specific `run-os-test` tests**: Some tests (e.g., `fork-setpgid-undo-redo`) still cause the shell to exit with status 0 between tests. The shell is not killed by a signal — it exits normally. `run-os-test` continues as an orphan of init. This is NOT caused by page faults (0 page faults observed). Root cause TBD, likely related to orphaned process group cleanup or terminal control.
+- **`run-os-test` crashes with SIGILL**: The run-os-test binary can crash with SIGILL (illegal instruction) during specific tests. This kills run-os-test but does NOT cause shell respawning — the shell continues normally after the crash. Root cause TBD (possibly test binary bug or compiler issue).
+- **Shell respawning (RESOLVED)**: The shell respawning during `run-os-test` was caused by two bugs:
+  1. The `exit` builtin's atoi started with `code = last_exit_status` instead of 0, causing `exit 0` to exit with `last_exit_status * 10` (e.g., status 10 when last_status was 1). This caused the boot script to exit with the wrong status.
+  2. The kernel code PTE losing PTE_X, causing page faults that killed the shell.
+  Both are now fixed. Testing shows 0 shell respawns and 0 page faults during `run-os-test`.
 
 ### QEMU Testing — Critical Notes
 
