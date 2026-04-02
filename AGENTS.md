@@ -181,72 +181,6 @@ From `contrib.md`, use these prefixes:
 
 Example: `BF: Fix null pointer in allocproc`
 
-## Important Notes
-
-1. **Pre-existing issue**: Kernel syscall numbers (`kernel/include/syscall.h`) do not match libc's Linux RISC-V ABI numbers - this causes "Unknown syscall" errors (now fixed in recent work)
-2. **Testing**: Both manual testing and automated test suites available (SBUnix regression tests + Sortix os-test + Open POSIX Test Suite)
-3. **Development branches**: Work on separate branches, test locally before merging
-4. **Cross-compilation**: All binaries must be built for RISC-V target
-
-## Recent Session Work (CSE506 Spring 2026)
-
-### Completed Features
-
-#### 1. `nanosleep` Syscall (SYS_nanosleep = 101)
-- Kernel handler (`kernel/trap.c:849-862`) sets `p->sleep_until = ticks + tv_sec` and `waiting_for_uart = 2`
-- Timer interrupt wakes timed-sleep processes when `ticks >= sleep_until`
-- `libc/unistd.c` provides `sleep()` wrapper using `timespec` struct
-
-#### 2. Ctrl-C Support
-- Kernel `handle_external_interrupt` kills all non-init processes when `0x03` is received
-- Two code paths:
-  - **Children killed** (`killed_any=1`): kernel prints `^C\n` for visual feedback, does NOT enqueue `0x03`
-  - **Shell idle** (`!killed_any`): kernel enqueues `0x03` for `read_line` to handle
-- `read_line` (`bin/sbush/sbush.c:14-52`) now prints `^C\n` when it receives `0x03`, then uses `goto restart:` to reprint the prompt cleanly
-- Ctrl-C during sleep: wakes sleep and kills the child process; shell returns to REPL
-
-#### 3. Backspace in Shell
-- `read_line` handles `0x7f` and `0x08` with proper echo (`\x08 \x08` sequence)
-- Guard `if (i > 0)` prevents erasing past the prompt
-
-#### 4. `exit` Builtin
-- Calls `SYS_exit` or `SYS_exit_group`
-- When pid==1 (init) exits: kernel prints "System halted (init exited with status N)." and calls SBI shutdown
-- Non-init processes become `ZOMBIE` and are reaped by parent
-
-#### 5. Syscall ABI Alignment (kernel/include/syscall.h)
-- Kernel `syscall.h` was missing most syscall numbers; added the full set matching the Linux RISC-V ABI:
-  `SYS_getcwd(17)`, `SYS_chdir(49)`, `SYS_openat(56)`, `SYS_close(57)`, `SYS_pipe2(59)`,
-  `SYS_getdents64(61)`, `SYS_dup3(24)`, `SYS_getpid(172)`, `SYS_clone(220)`, `SYS_execve(221)`,
-  `SYS_nanosleep(101)`, plus `AT_FDCWD` and `SIGCHLD` constants
-- Libc `syscall.h` and `unistd.h` updated to match: added `SYS_nanosleep = 101` and `sleep()` declaration
-- Resolved pre-existing mismatch that caused "Unknown syscall" errors for most userspace operations
-
-#### 6. `sleep` Binary (bin/sleep/sleep.c)
-- New `sleep` binary replaces any prior stub; uses libc `sleep()` which calls `SYS_nanosleep`
-- `simple_atou()` parses the seconds argument; prints usage error if no argument given
-
-#### 7. `exec` Fix (kernel/exec.c)
-- Track `sz` (process image size) correctly by updating it to `max(sz, segment_end)` for each PT_LOAD segment
-- Switch `satp` to the new page table immediately after `exec()` builds it, before `trap_restore`'s `sret`, so the new address space is active on entry to user mode
-
-#### 8. UART FIFO Constants (kernel/include/uart.h, kernel/uart.c)
-- Added `UART_FCR` register address and FIFO control bit definitions (`FIFO_EN`, `RX_RESET`, `TX_RESET`, `TRIG_1`)
-- Added comment to `uart_intr_init()` clarifying that it enables RX interrupts
-
-### Dead Code Removed
-
-1. **`kpipe.nread` field** (`kernel/trap.c:30`) — declared and initialized but never read; removed from struct and `alloc_pipe()`
-2. **`yield()` function** (`kernel/proc.c:120-125`) — declared in `proc.h` but never called anywhere; removed with declaration
-3. **Ghost declarations** (`kernel/include/vm.h:13,17`) — `uvmfirst()` and `uvminit()` declared but never implemented or called; removed
-
-### Known Remaining Dead Code (Low Priority)
-
-- **Display time functions** (`kernel/trap.c:104-137`): `print_two_digits()`, `display_key()`, `display_time()` run on every timer tick and UART interrupt but serve only cosmetic VT100 status bar (no functional impact)
-- **Unreachable `while(1){}` guards** after `swtch()` and `trap_restore()` in `trap.c` — intentional panic guards; left in place
-- **`SYS_getdents64` unimplemented** — `ls` utility calls this syscall (61) but kernel has no handler, making `ls_dir()` permanently unreachable
-- **`set` builtin** (`bin/sbush/builtin.c`) — silently succeeds for wrong argument counts instead of printing error
-
 #### 9. `mmap` / `munmap` / `mprotect` Syscalls
 - **`SYS_mmap=222`, `SYS_munmap=215`, `SYS_mprotect=226`** added to `kernel/include/syscall.h`
 - Anonymous `mmap` only (`MAP_ANONYMOUS=0x20`); file-backed mapping not required
@@ -255,16 +189,6 @@ Example: `BF: Fix null pointer in allocproc`
 - `allocproc()` zeroes `mmap_regions[]` and sets `mmap_base=0` (`kernel/proc.c`)
 - `uvmunmap(pagetable_t, uint64_t va, uint64_t len)` added to `kernel/vm.c` + declared in `kernel/include/vm.h`
 - Handlers implemented in `kernel/trap.c`; `mprotect` is a no-op returning 0
-
-#### 10. `ls` Fix — Root Directory
-- `ls` with no args calls `open(".", 0)`; `resolve_path` was producing `"/."` instead of `"/"`
-- Fixed by `normalize_path()` which collapses `.` components (see below)
-
-#### 11. `cd ..` / Path Normalization Fix
-- `resolve_path` appended `..` literally, producing e.g. `/bin/..` which tarfs could not find
-- Added `normalize_path()` to `kernel/trap.c`: processes absolute paths component-by-component, collapsing `.` (skip) and `..` (pop last segment)
-- `resolve_path` now builds the raw combined path then calls `normalize_path` on it
-- Verified in QEMU: `cd /bin` → `cd ..` → `ls` shows `etc bin` (root)
 
 #### 12. Sortix os-test POSIX Test Suite Integration
 - **Moved build system out of submodule**: Created `tools/os-test.mk` (was `tests/thirdparty/sortix/os-test/SBUnix.mk`)
@@ -275,11 +199,6 @@ Example: `BF: Fix null pointer in allocproc`
 - **Boot behavior**: Tests do NOT run automatically on boot (modified `/etc/rc`)
 - **Manual execution**: Use `run-os-test` command inside QEMU shell
 - **Most missing**: `sys/socket.h` (328), `pthread.h` (250), `inttypes.h` (174) - indicates missing networking, threading, extended integer support
-
-#### 13. Disabled Boot Tests (Original)
-- Modified `rootfs/etc/rc` to remove automatic test execution on boot
-- Tests now available via `run-tests` and `run-os-test` commands but don't run automatically
-- Faster boot time and cleaner user experience
 
 #### 14. Dynamic os-test Infrastructure (Latest Session)
 - **Fixed sbush glob expansion**: Added `expand_glob_words()` to `bin/sbush/parse.c` and modified `for` loop handling in `control.c` to support glob pattern expansion (e.g., `for file in /bin/e*` now works)
