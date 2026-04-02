@@ -3,6 +3,7 @@
 #include <virtio_blk.h>
 #include <kalloc.h>
 #include <kmalloc.h>
+#include <swap.h>
 #include <string.h>
 #include <printk.h>
 
@@ -26,7 +27,25 @@ static struct ext2_fs ext2_filesystems[EXT2_MAX_FS] = {
 /* Block I/O (low-level)                                               */
 /* ================================================================== */
 
+static uint64_t ext2_usable_sectors(struct ext2_fs *fs) {
+  uint64_t cap = virtio_blk_capacity_on_dev(fs->device_index);
+  if (cap == 0)
+    return 0;
+  /* Device 0 shares media with swap: reserve swap tail sectors. */
+  if (fs->device_index == 0 && cap > SWAP_NSECTORS)
+    return cap - SWAP_NSECTORS;
+  return cap;
+}
+
+static uint32_t ext2_usable_blocks(struct ext2_fs *fs) {
+  uint64_t sectors = ext2_usable_sectors(fs);
+  return (uint32_t)(sectors / EXT2_SECTORS_PER_BLOCK);
+}
+
 static int ext2_read_block(struct ext2_fs *fs, uint32_t blockno, void *buf) {
+  uint32_t max_blocks = ext2_usable_blocks(fs);
+  if (max_blocks && blockno >= max_blocks)
+    return -1;
   return virtio_blk_rw_on_dev(fs->device_index,
                               (uint64_t)blockno * EXT2_SECTORS_PER_BLOCK,
                               buf, 0);
@@ -34,6 +53,9 @@ static int ext2_read_block(struct ext2_fs *fs, uint32_t blockno, void *buf) {
 
 static int ext2_write_block(struct ext2_fs *fs, uint32_t blockno,
                             const void *buf) {
+  uint32_t max_blocks = ext2_usable_blocks(fs);
+  if (max_blocks && blockno >= max_blocks)
+    return -1;
   return virtio_blk_rw_on_dev(fs->device_index,
                               (uint64_t)blockno * EXT2_SECTORS_PER_BLOCK,
                               (void *)buf, 1);
@@ -1016,6 +1038,13 @@ static int64_t ext2_write(void *fs_data, void *private, const char *buf,
   return (int64_t)total;
 }
 
+static int ext2_ftruncate(void *fs_data, void *private, uint64_t length) {
+  struct ext2_open_private *priv = (struct ext2_open_private *)private;
+  if (!priv)
+    return -9; /* EBADF */
+  return ext2_ftruncate_ino(fs_data, priv->ino, length);
+}
+
 static int ext2_close(void *fs_data, void *private) {
   struct ext2_fs *fs = (struct ext2_fs *)fs_data;
   struct ext2_open_private *priv = (struct ext2_open_private *)private;
@@ -1740,6 +1769,7 @@ struct vfs_ops ext2_ops = {
   .open     = ext2_open,
   .read     = ext2_read,
   .write    = ext2_write,
+  .ftruncate = ext2_ftruncate,
   .close    = ext2_close,
   .stat     = ext2_stat,
   .fstat    = ext2_fstat,
@@ -1897,15 +1927,35 @@ int ext2_init(void) {
     }
 
     struct ext2_superblock *disk_sb = (struct ext2_superblock *)init_buf;
-    if (disk_sb->magic != EXT2_MAGIC) {
-      printk("ext2[%d]: no valid filesystem (magic=0x%x, expected 0x%x)\n",
-             fs->device_index, disk_sb->magic, EXT2_MAGIC);
+    uint64_t cap = virtio_blk_capacity_on_dev(fs->device_index);
+    if (cap == 0) cap = 131072; /* 64 MB fallback */
+    uint64_t usable_sectors = cap;
+    if (fs->device_index == 0 && cap > SWAP_NSECTORS)
+      usable_sectors = cap - SWAP_NSECTORS;
+    uint32_t usable_blocks = (uint32_t)(usable_sectors / EXT2_SECTORS_PER_BLOCK);
+
+    int need_format = 0;
+    if (disk_sb->magic != EXT2_MAGIC)
+      need_format = 1;
+    else if (fs->device_index == 0 && usable_blocks > 0 &&
+             disk_sb->total_blocks > usable_blocks)
+      need_format = 1;
+
+    if (need_format) {
+      if (disk_sb->magic != EXT2_MAGIC) {
+        printk("ext2[%d]: no valid filesystem (magic=0x%x, expected 0x%x)\n",
+               fs->device_index, disk_sb->magic, EXT2_MAGIC);
+      } else {
+        printk("ext2[%d]: filesystem overlaps swap reservation; reformatting\n",
+               fs->device_index);
+      }
+      if (fs->device_index == 0)
+        printk("ext2[%d]: reserving %d sectors for swap\n",
+               fs->device_index, SWAP_NSECTORS);
       printk("ext2[%d]: formatting disk...\n", fs->device_index);
 
       {
-        uint64_t cap = virtio_blk_capacity_on_dev(fs->device_index);
-        if (cap == 0) cap = 131072; /* 64 MB fallback */
-        if (ext2_mkfs(fs, cap) < 0) {
+        if (ext2_mkfs(fs, usable_sectors) < 0) {
           printk("ext2[%d]: mkfs failed\n", fs->device_index);
           continue;
         }

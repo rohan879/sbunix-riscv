@@ -7,7 +7,31 @@
 #include <proc.h>
 #include <swap.h>
 
+#ifndef VM_FREEWALK_TRACE
+#define VM_FREEWALK_TRACE 1
+#endif
+
+#if VM_FREEWALK_TRACE
+static int vm_freewalk_trace_count;
+static void vm_trace_freewalk(const char *kind, pagetable_t pt, int level,
+                              int index, pte_t pte, uint64_t pa) {
+  if (vm_freewalk_trace_count >= 128)
+    return;
+  printk("freewalk[%s] pt=0x%lx lvl=%d idx=%d pte=0x%lx pa=0x%lx ref=%d\n",
+         kind, (uint64_t)pt, level, index, pte, pa, page_ref_get(pa));
+  vm_freewalk_trace_count++;
+}
+#else
+#define vm_trace_freewalk(kind, pt, level, index, pte, pa) ((void)0)
+#endif
+
 pagetable_t kernel_pagetable;
+
+static int pa_is_valid_page(uint64_t pa);
+static int pa_is_valid_superpage(uint64_t pa);
+static int pa_is_live_page(uint64_t pa);
+static int pa_is_live_superpage(uint64_t pa);
+static int pa_is_live_ptpage(uint64_t pa);
 
 // Return the address of the PTE in page table pagetable
 // that corresponds to virtual address va.  If alloc!=0,
@@ -18,12 +42,16 @@ pte_t *walk(pagetable_t pagetable, uint64_t va, int alloc) {
     for (int level = 2; level > 0; level--) {
         pte_t *pte = &pagetable[PX(level, va)];
         if (*pte & PTE_V) {
-            if (PTE_IS_LEAF(*pte)) {
+            if (PTE_IS_LEAF(*pte) || (*pte & PTE_U)) {
                 /* This is a super page (level 1) or giga page (level 2).
                  * Cannot descend further -- return this leaf PTE. */
                 return pte;
             }
-            pagetable = (pagetable_t)PTE2PA(*pte);
+            uint64_t child_pa = PTE2PA(*pte);
+            if (!pa_is_valid_page(child_pa)) {
+                return 0;
+            }
+            pagetable = (pagetable_t)child_pa;
         } else {
             if (!alloc || (pagetable = (pagetable_t)kalloc()) == 0)
                 return 0;
@@ -42,11 +70,16 @@ pte_t *walk_super(pagetable_t pagetable, uint64_t va, int *level_out) {
     for (int level = 2; level > 0; level--) {
         pte_t *pte = &pagetable[PX(level, va)];
         if (*pte & PTE_V) {
-            if (PTE_IS_LEAF(*pte)) {
+            if (PTE_IS_LEAF(*pte) || (*pte & PTE_U)) {
                 if (level_out) *level_out = level;
                 return pte;
             }
-            pagetable = (pagetable_t)PTE2PA(*pte);
+            uint64_t child_pa = PTE2PA(*pte);
+            if (!pa_is_valid_page(child_pa)) {
+                if (level_out) *level_out = -1;
+                return 0;
+            }
+            pagetable = (pagetable_t)child_pa;
         } else {
             if (level_out) *level_out = -1;
             return 0;
@@ -307,12 +340,15 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
 
   struct vm_area *vma = (struct vm_area *)kmalloc(sizeof(struct vm_area));
   if (!vma) return -1;
+  memset(vma, 0, sizeof(*vma));
 
   vma->start = start;
   vma->end   = end;
   vma->prot  = prot;
   vma->flags = flags;
   vma->next  = NULL;
+  vma->file  = NULL;
+  vma->file_offset = 0;
 
   /* Initialize anon_vma fields */
   INIT_LIST_HEAD(&vma->anon_vma_chain);
@@ -343,11 +379,17 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
 
   /* Merge with next if they touch and have same prot/flags */
   while (vma->next && vma->next->start <= vma->end &&
-         vma->next->prot == vma->prot && vma->next->flags == vma->flags) {
+         vma->next->prot == vma->prot && vma->next->flags == vma->flags &&
+         (vma->flags & MAP_ANON) && (vma->next->flags & MAP_ANON) &&
+         vma->file == NULL && vma->next->file == NULL) {
     struct vm_area *nxt = vma->next;
     if (nxt->end > vma->end)
       vma->end = nxt->end;
     vma->next = nxt->next;
+    /* Unlink nxt from anon_vma chains before freeing */
+    if (nxt->anon_vma) {
+      anon_vma_unlink(nxt);
+    }
     kmfree(nxt, sizeof(struct vm_area));
   }
 
@@ -356,10 +398,16 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   while (*pp && *pp != vma) {
     struct vm_area *prev = *pp;
     if (prev->next == vma && prev->end >= vma->start &&
-        prev->prot == vma->prot && prev->flags == vma->flags) {
+        prev->prot == vma->prot && prev->flags == vma->flags &&
+        (prev->flags & MAP_ANON) && (vma->flags & MAP_ANON) &&
+        prev->file == NULL && vma->file == NULL) {
       if (vma->end > prev->end)
         prev->end = vma->end;
       prev->next = vma->next;
+      /* Unlink vma from anon_vma chains before freeing */
+      if (vma->anon_vma) {
+        anon_vma_unlink(vma);
+      }
       kmfree(vma, sizeof(struct vm_area));
       break;
     }
@@ -400,15 +448,21 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
     if (v->start < start && v->end > end) {
       /* VMA spans both sides of the range: split into two */
       struct vm_area *tail = (struct vm_area *)kmalloc(sizeof(struct vm_area));
-      if (tail) {
-        tail->start = end;
-        tail->end   = v->end;
-        tail->prot  = v->prot;
-        tail->flags = v->flags;
-        tail->next  = v->next;
-        v->end = start;
-        v->next = tail;
-      }
+      if (!tail)
+        return -1;
+      memset(tail, 0, sizeof(*tail));
+      uint64_t old_start = v->start;
+      tail->start = end;
+      tail->end   = v->end;
+      tail->prot  = v->prot;
+      tail->flags = v->flags;
+      tail->next  = v->next;
+      tail->file = v->file;
+      tail->file_offset = v->file_offset + (end - old_start);
+      if (tail->file)
+        tail->file->refcount++;
+      v->end = start;
+      v->next = tail;
       pp = &tail->next;
     } else if (v->start < start) {
       /* VMA starts before range: trim end */
@@ -416,11 +470,17 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
       pp = &v->next;
     } else if (v->end > end) {
       /* VMA ends after range: trim start */
+      if (v->file)
+        v->file_offset += (end - v->start);
       v->start = end;
       pp = &v->next;
     } else {
       /* VMA fully within range: remove entirely */
       *pp = v->next;
+      if (v->file) {
+        vfs_free_file(v->file);
+        v->file = NULL;
+      }
       kmfree(v, sizeof(struct vm_area));
     }
   }
@@ -439,10 +499,15 @@ int vma_dup(struct proc *src, struct proc *dst) {
       vma_free_all(dst);
       return -1;
     }
+    memset(nv, 0, sizeof(*nv));
     nv->start = sv->start;
     nv->end   = sv->end;
     nv->prot  = sv->prot;
     nv->flags = sv->flags;
+    nv->file = sv->file;
+    nv->file_offset = sv->file_offset;
+    if (nv->file)
+      nv->file->refcount++;
     nv->next  = NULL;
     
     /* Initialize anon_vma fields for child VMA */
@@ -466,10 +531,24 @@ int vma_dup(struct proc *src, struct proc *dst) {
   return 0;
 }
 
+/* Helper to check if a pointer looks like a valid kmalloc'd VMA address */
+static int vma_ptr_valid(struct vm_area *v) {
+  uint64_t addr = (uint64_t)v;
+  /* Must be within kernel physical RAM and reasonably aligned (at least 8-byte) */
+  return addr >= 0x80000000UL && addr < PHYSTOP && (addr & 7) == 0;
+}
+
 /* Free entire VMA list. Used by exec and exit. */
 void vma_free_all(struct proc *p) {
   struct vm_area *v = p->vma_list;
+  int count = 0;
   while (v) {
+    /* Sanity check for corrupted pointer */
+    if (!vma_ptr_valid(v)) {
+      printk("vma_free_all: corrupted vma ptr 0x%lx at count=%d, aborting\n",
+             (uint64_t)v, count);
+      break;
+    }
     struct vm_area *nxt = v->next;
     /* Release file reference for file-backed mappings */
     if (v->file) {
@@ -484,6 +563,12 @@ void vma_free_all(struct proc *p) {
     
     kmfree(v, sizeof(struct vm_area));
     v = nxt;
+    count++;
+    /* Safety limit to prevent infinite loops on corrupted lists */
+    if (count > 10000) {
+      printk("vma_free_all: too many VMAs (%d), possible corruption\n", count);
+      break;
+    }
   }
   p->vma_list = NULL;
 }
@@ -499,6 +584,20 @@ static int pa_is_valid_superpage(uint64_t pa) {
   return pa_is_valid_page(pa) &&
          IS_SUPERPAGE_ALIGNED(pa) &&
          pa + SUPERPAGE_SIZE <= PHYSTOP;
+}
+
+static int pa_is_live_page(uint64_t pa) {
+  return pa_is_valid_page(pa);
+}
+
+static int pa_is_live_superpage(uint64_t pa) {
+  return pa_is_valid_superpage(pa);
+}
+
+static int pa_is_live_ptpage(uint64_t pa) {
+  if (!pa_is_valid_page(pa))
+    return 0;
+  return page_ref_get(pa) > 0;
 }
 
 /* Recursively free page-table pages and user leaf pages in a sub-tree.
@@ -518,26 +617,34 @@ static void freewalk_level(pagetable_t pt, int level) {
        * mprotect(PROT_NONE)). Treat them as leaves before the non-leaf case. */
       uint64_t pa = PTE2PA(pte);
       if (level == 1) {
-        if (pa_is_valid_superpage(pa))
+        if (pa_is_live_superpage(pa)) {
+          vm_trace_freewalk("leaf-super", pt, level, i, pte, pa);
           kfree_super((void *)pa);
-      } else if (pa_is_valid_page(pa)) {
+        }
+      } else if (pa_is_live_page(pa)) {
+        vm_trace_freewalk("leaf-page", pt, level, i, pte, pa);
         kfree((void *)pa);
       }
       pt[i] = 0;
     } else if (!(pte & (PTE_R | PTE_W | PTE_X))) {
+      if (level == 0) {
+        pt[i] = 0;
+        continue;
+      }
        /* Non-leaf PTE: points to next-level page table page.
         * Guard against corrupted page table pointers (e.g., PPN==0 or
         * values outside physical RAM). If the child pagetable PA is
         * invalid we log and detach the entry rather than attempting
         * to recurse into it and crash the kernel. */
       pagetable_t child = (pagetable_t)PTE2PA(pte);
-      if (!pa_is_valid_page((uint64_t)child)) {
+      if (!pa_is_live_ptpage((uint64_t)child)) {
         /* Corrupted/reused page table page — silently detach */
         pt[i] = 0;
         continue;
       }
       if (level > 0)
         freewalk_level(child, level - 1);
+      vm_trace_freewalk("pt-child", pt, level, i, pte, (uint64_t)child);
       kfree((void *)child);
       pt[i] = 0;
     }
@@ -568,13 +675,16 @@ void proc_freepagetable(pagetable_t pagetable) {
          * bits after mprotect(PROT_NONE), so handle PTE_U before non-leaf. */
         if (user_L1[j] & PTE_U) {
           uint64_t pa = PTE2PA(user_L1[j]);
-          if (pa_is_valid_superpage(pa))
+          if (pa_is_live_superpage(pa)) {
+            vm_trace_freewalk("l1-super", user_L1, 1, j, user_L1[j], pa);
             kfree_super((void *)pa);
+          }
         } else if (!(user_L1[j] & (PTE_R | PTE_W | PTE_X))) {
           /* Non-leaf: recurse into level-0 table */
           pagetable_t child = (pagetable_t)PTE2PA(user_L1[j]);
-          if (pa_is_valid_page((uint64_t)child)) {
+          if (pa_is_live_ptpage((uint64_t)child)) {
             freewalk_level(child, 0);
+            vm_trace_freewalk("l1-child", user_L1, 1, j, user_L1[j], (uint64_t)child);
             kfree((void *)child);
           } else {
             /* Corrupted/reused L0 page — silently detach */
@@ -586,11 +696,13 @@ void proc_freepagetable(pagetable_t pagetable) {
         user_L1[j] = 0;
       }
     }
+    vm_trace_freewalk("user-l1-root", pagetable, 2, 0, upte0, (uint64_t)user_L1);
     kfree((void *)user_L1);
     pagetable[0] = 0;
   }
 
   /* Free the root page table page itself */
+  vm_trace_freewalk("pt-root", pagetable, 2, -1, 0, (uint64_t)pagetable);
   kfree((void *)pagetable);
 }
 
@@ -629,6 +741,11 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
         }
         sfence_vma();
       }
+      if ((*pte & PTE_W) == 0)
+        return -1;
+    } else {
+      if ((*pte & PTE_W) == 0)
+        return -1;
     }
 
     uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;

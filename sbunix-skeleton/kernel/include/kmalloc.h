@@ -5,5 +5,6 @@
 
 void *kmalloc(uint64_t size);
 void  kmfree(void *ptr, uint64_t size);
+int   kmalloc_is_managed_page(void *pa);
 
 #endif

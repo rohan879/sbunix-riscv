@@ -4130,12 +4130,9 @@ static long sys_ftruncate_handler(struct trapframe *tf) {
     if (f->is_pipe) return (long)-22; /* EINVAL */
     int accmode = f->flags & 3;
     if (accmode == 0) return (long)-9; /* EBADF: read-only fd */
-    /* ext2 files: update inode size on disk */
-    if (ext2_is_ops(f->ops) && f->private) {
-        struct ext2_open_private *priv = (struct ext2_open_private *)f->private;
-        return (long)ext2_ftruncate_ino(f->fs_data, priv->ino, length);
-    }
-    return (long)-30; /* EROFS: tarfs and other read-only filesystems */
+    if (f->ops && f->ops->ftruncate)
+        return (long)f->ops->ftruncate(f->fs_data, f->private, length);
+    return (long)-30; /* EROFS: read-only filesystems */
 }
 
 static long sys_tgkill_handler(struct trapframe *tf) {
@@ -4732,6 +4729,8 @@ void trap_handler(struct trapframe *tf) {
                     *spte = PA2PTE((uint64_t)newpage) | sflags | PTE_V;
                     swap_free(slot);
                     asm volatile("sfence.vma %0, zero" : : "r"(sva));
+                    if ((sflags & PTE_X) || cause == SCAUSE_INST_PAGE_FAULT)
+                        asm volatile("fence.i");
                     return; /* resume faulting instruction */
                 }
             }
@@ -4787,6 +4786,8 @@ void trap_handler(struct trapframe *tf) {
                             mappages(current_proc->pagetable, va, PAGE_SIZE,
                                      (uint64_t)pg, perm);
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
+                            if ((perm & PTE_X) || cause == SCAUSE_INST_PAGE_FAULT)
+                                asm volatile("fence.i");
                             return; /* resume */
                         }
                     } else if (!(*pte & PTE_COW)) {
@@ -4834,6 +4835,8 @@ void trap_handler(struct trapframe *tf) {
                                 *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | perm;
                             }
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
+                            if ((fvma->prot & PROT_EXEC) || cause == SCAUSE_INST_PAGE_FAULT)
+                                asm volatile("fence.i");
                             return; /* resume */
                         }
                     }

@@ -39,6 +39,8 @@ int exec(char *path) {
     elf_data = (char *)elf_tar_header + sizeof(struct posix_header);
     ehdr = (Elf64_Ehdr *)elf_data;
 
+    int old_pt_still_shared = 0;
+
     // 2. Validate
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
         ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3) return -1;
@@ -47,9 +49,10 @@ int exec(char *path) {
     if (current_proc->shared_pt) {
         current_proc->shared_pt->refcount--;
         if (current_proc->shared_pt->refcount == 0) {
-            /* We were the last user -- free old shared pagetable wrapper.
-             * The actual pagetable pages leak (pre-existing issue). */
+            /* Last user of this shared pagetable wrapper. */
             kmfree(current_proc->shared_pt, sizeof(struct shared_pagetable));
+        } else {
+            old_pt_still_shared = 1;
         }
         current_proc->shared_pt = NULL;
         current_proc->clone_flags &= ~CLONE_VM;
@@ -174,10 +177,11 @@ int exec(char *path) {
     /* Switch to new page table before freeing old one */
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
+    asm volatile("fence.i");
 
     // Reclaim old user pages + page table pages.
     // Kernel stays on kernel_pagetable (user PT has no kernel mappings).
-    if (old_pt != kernel_pagetable)
+    if (old_pt != kernel_pagetable && !old_pt_still_shared)
         proc_freepagetable(old_pt);
 
     // 7. Initialize trapframe
@@ -244,11 +248,15 @@ int exec_vfs(const char *resolved_path) {
         goto fail_close;
     }
 
+    int old_pt_still_shared = 0;
+
     /* Detach from shared state (same as exec()) */
     if (current_proc->shared_pt) {
         current_proc->shared_pt->refcount--;
         if (current_proc->shared_pt->refcount == 0)
             kmfree(current_proc->shared_pt, sizeof(struct shared_pagetable));
+        else
+            old_pt_still_shared = 1;
         current_proc->shared_pt = NULL;
         current_proc->clone_flags &= ~0x00000100; /* CLONE_VM */
     }
@@ -397,7 +405,8 @@ int exec_vfs(const char *resolved_path) {
 
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
-    if (old_pt != kernel_pagetable)
+    asm volatile("fence.i");
+    if (old_pt != kernel_pagetable && !old_pt_still_shared)
         proc_freepagetable(old_pt);
 
     /* 8. Initialize trapframe */

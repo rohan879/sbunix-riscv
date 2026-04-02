@@ -1,4 +1,5 @@
 #include <kalloc.h>
+#include <kmalloc.h>
 #include <printk.h>
 #include <riscv.h>
 #include <string.h>
@@ -20,6 +21,8 @@ static int free_page_count;
 /* Reference counts for physical pages */
 #define MAX_PAGES ((128 * 1024 * 1024) / PAGE_SIZE) /* 128MB / 4KB = 32768 */
 static int page_refcount[MAX_PAGES];
+static uint64_t page_last_free_ra[MAX_PAGES];
+static int kfree_debug_warn_count;
 
 static int pa_to_index(uint64_t pa) {
     return (int)((pa - 0x80000000UL) / PAGE_SIZE);
@@ -54,22 +57,34 @@ void page_ref_set(uint64_t pa, int val) {
 // Only actually frees when refcount reaches 0.
 void kfree(void *pa) {
     struct run *r;
+    uint64_t caller_ra = (uint64_t)__builtin_return_address(0);
 
     if (!pa) return;
     if ((uint64_t)pa % PAGE_SIZE != 0) return; /* alignment check */
     if ((uint64_t)pa < 0x80000000UL || (uint64_t)pa >= PHYSTOP) return; /* range check */
 
     int idx = pa_to_index((uint64_t)pa);
+
+    if (kmalloc_is_managed_page(pa)) {
+        printk("WARNING: kfree on kmalloc-managed page 0x%lx! Ignoring.\n", (uint64_t)pa);
+        return;
+    }
+
     if (idx >= 0 && idx < MAX_PAGES) {
         if (page_refcount[idx] > 1) {
             page_refcount[idx]--;
             return; /* still referenced */
         }
         if (page_refcount[idx] == 0) {
-            printk("WARNING: double kfree of pa 0x%lx! Ignoring.\n", (uint64_t)pa);
+            if (kfree_debug_warn_count < 32) {
+                printk("WARNING: double kfree pa=0x%lx prev_ra=0x%lx curr_ra=0x%lx\n",
+                       (uint64_t)pa, page_last_free_ra[idx], caller_ra);
+                kfree_debug_warn_count++;
+            }
             return;
         }
         page_refcount[idx] = 0;
+        page_last_free_ra[idx] = caller_ra;
     }
 
     r = (struct run*)pa;

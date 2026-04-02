@@ -439,6 +439,7 @@ struct vfs_ops tarfs_ops = {
   .open    = tarfs_open,
   .read    = tarfs_read,
   .write   = tarfs_write,
+  .ftruncate = NULL,
   .close   = tarfs_close,
   .stat    = tarfs_stat,
   .fstat   = tarfs_fstat,

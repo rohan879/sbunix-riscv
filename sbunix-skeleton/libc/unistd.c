@@ -43,8 +43,16 @@ int dup2(int oldfd, int newfd) {
     return (int)__syscall_ret(syscall(SYS_dup3, oldfd, newfd, 0));
 }
 
+int dup3(int oldfd, int newfd, int flags) {
+    return (int)__syscall_ret(syscall(SYS_dup3, oldfd, newfd, flags));
+}
+
 int pipe(int fds[2]) {
     return (int)__syscall_ret(syscall(SYS_pipe2, fds, 0));
+}
+
+int pipe2(int fds[2], int flags) {
+    return (int)__syscall_ret(syscall(SYS_pipe2, fds, flags));
 }
 
 pid_t fork(void) {
@@ -61,6 +69,14 @@ pid_t getpid(void) {
 
 int execve(const char *path, char *const argv[], char *const envp[]) {
     return (int)__syscall_ret(syscall(SYS_execve, path, argv, envp));
+}
+
+int fexecve(int fd, char *const argv[], char *const envp[]) {
+    (void)fd;
+    (void)argv;
+    (void)envp;
+    errno = ENOSYS;
+    return -1;
 }
 
 int chdir(const char *path) {
@@ -94,6 +110,14 @@ off_t lseek(int fd, off_t offset, int whence) {
     return (off_t)__syscall_ret(syscall(SYS_lseek, fd, offset, whence));
 }
 
+ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
+    return (ssize_t)__syscall_ret(syscall(SYS_pread64, fd, buf, count, offset));
+}
+
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
+    return (ssize_t)__syscall_ret(syscall(SYS_pwrite64, fd, buf, count, offset));
+}
+
 pid_t getppid(void) {
     return (pid_t)syscall(SYS_getppid);
 }
@@ -112,6 +136,10 @@ int usleep(unsigned int usecs) {
     unsigned long req[2] = { sec, nsec };
     syscall(SYS_nanosleep, req, 0);
     return 0;
+}
+
+int sched_yield(void) {
+    return (int)__syscall_ret(syscall(SYS_sched_yield));
 }
 
 int unlink(const char *path) {
@@ -184,6 +212,57 @@ int execvp(const char *file, char *const argv[]) {
 
     errno = 2; /* ENOENT */
     return -1;
+}
+
+int execl(const char *path, const char *arg, ...) {
+    char *argv[64];
+    int argc = 0;
+    va_list ap;
+
+    argv[argc++] = (char *)arg;
+
+    va_start(ap, arg);
+    while (argc < (int)(sizeof(argv) / sizeof(argv[0])) - 1) {
+        char *next = va_arg(ap, char *);
+        if (next == NULL)
+            break;
+        argv[argc++] = next;
+    }
+    va_end(ap);
+
+    argv[argc] = NULL;
+    if (argc == (int)(sizeof(argv) / sizeof(argv[0])) - 1)
+        errno = E2BIG;
+
+    return execve(path, argv, environ);
+}
+
+int execle(const char *path, const char *arg, ...) {
+    char *argv[64];
+    int argc = 0;
+    va_list ap;
+    char *const *envp;
+
+    argv[argc++] = (char *)arg;
+
+    va_start(ap, arg);
+    while (argc < (int)(sizeof(argv) / sizeof(argv[0])) - 1) {
+        char *next = va_arg(ap, char *);
+        if (next == NULL)
+            break;
+        argv[argc++] = next;
+    }
+
+    envp = va_arg(ap, char *const *);
+    va_end(ap);
+
+    argv[argc] = NULL;
+    if (argc == (int)(sizeof(argv) / sizeof(argv[0])) - 1)
+        errno = E2BIG;
+    if (envp == NULL)
+        envp = environ;
+
+    return execve(path, argv, (char *const *)envp);
 }
 
 int execlp(const char *file, const char *arg, ...) {
@@ -276,6 +355,10 @@ int fsync(int fd) {
     return (int)__syscall_ret(syscall(SYS_fsync, fd));
 }
 
+int fdatasync(int fd) {
+    return fsync(fd);
+}
+
 void sync(void) {
     syscall(SYS_sync);
 }
@@ -325,6 +408,24 @@ int faccessat(int dirfd, const char *path, int mode, int flags) {
     return (int)__syscall_ret(syscall(SYS_faccessat, dirfd, path, mode, flags));
 }
 
+int fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags) {
+    (void)flags;
+    (void)path;
+    return (int)__syscall_ret(syscall(SYS_fchownat, dirfd, path, owner, group, flags));
+}
+
+int linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, int flags) {
+    return (int)__syscall_ret(syscall(SYS_linkat, olddirfd, oldpath, newdirfd, newpath, flags));
+}
+
+int unlinkat(int dirfd, const char *path, int flags) {
+    return (int)__syscall_ret(syscall(SYS_unlinkat, dirfd, path, flags));
+}
+
+int symlinkat(const char *target, int newdirfd, const char *linkpath) {
+    return (int)__syscall_ret(syscall(SYS_symlinkat, target, newdirfd, linkpath));
+}
+
 ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
     return (ssize_t)__syscall_ret(syscall(SYS_readlinkat, dirfd, path, buf, bufsiz));
 }
@@ -365,9 +466,29 @@ long sysconf(int name) {
     }
 }
 
+long pathconf(const char *path, int name) {
+    (void)path;
+    if (name == _PC_FILESIZEBITS)
+        return 64;
+    errno = EINVAL;
+    return -1;
+}
+
+long fpathconf(int fd, int name) {
+    (void)fd;
+    if (name == _PC_FILESIZEBITS)
+        return 64;
+    errno = EINVAL;
+    return -1;
+}
+
 int chown(const char *path, uid_t owner, gid_t group) {
     (void)path; (void)owner; (void)group;
     return 0; /* single-user OS: always succeeds */
+}
+
+int lchown(const char *path, uid_t owner, gid_t group) {
+    return fchownat(AT_FDCWD, path, owner, group, AT_SYMLINK_NOFOLLOW);
 }
 
 int fchown(int fd, uid_t owner, gid_t group) {
@@ -400,4 +521,212 @@ int setreuid(uid_t ruid, uid_t euid) {
 int setregid(gid_t rgid, gid_t egid) {
     (void)rgid; (void)egid;
     return 0;
+}
+
+int setuid(uid_t uid) {
+    return (int)__syscall_ret(syscall(SYS_setuid, uid));
+}
+
+int setgid(gid_t gid) {
+    return (int)__syscall_ret(syscall(SYS_setgid, gid));
+}
+
+int seteuid(uid_t euid) {
+    return setuid(euid);
+}
+
+int setegid(gid_t egid) {
+    return setgid(egid);
+}
+
+int setresuid(uid_t ruid, uid_t euid, uid_t suid) {
+    (void)suid;
+    if (setreuid(ruid, euid) < 0)
+        return -1;
+    return 0;
+}
+
+int setresgid(gid_t rgid, gid_t egid, gid_t sgid) {
+    (void)sgid;
+    if (setregid(rgid, egid) < 0)
+        return -1;
+    return 0;
+}
+
+int getresuid(uid_t *ruid, uid_t *euid, uid_t *suid) {
+    uid_t uid = getuid();
+    uid_t e = geteuid();
+    if (ruid) *ruid = uid;
+    if (euid) *euid = e;
+    if (suid) *suid = e;
+    return 0;
+}
+
+int getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid) {
+    gid_t gid = getgid();
+    gid_t e = getegid();
+    if (rgid) *rgid = gid;
+    if (egid) *egid = e;
+    if (sgid) *sgid = e;
+    return 0;
+}
+
+int getgroups(int size, gid_t list[]) {
+    if (size < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (size == 0)
+        return 1;
+    if (list == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    list[0] = getgid();
+    return 1;
+}
+
+long gethostid(void) {
+    return 0;
+}
+
+int gethostname(char *name, size_t len) {
+    const char *host = "sbunix";
+    size_t need = strlen(host);
+
+    if (!name) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (len == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (need + 1 > len) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    strcpy(name, host);
+    return 0;
+}
+
+int getlogin_r(char *buf, size_t buflen) {
+    const char *name = "root";
+    size_t len = strlen(name);
+
+    if (!buf) {
+        errno = EINVAL;
+        return EINVAL;
+    }
+    if (len + 1 > buflen) {
+        errno = ERANGE;
+        return ERANGE;
+    }
+    strcpy(buf, name);
+    return 0;
+}
+
+int getentropy(void *buffer, size_t length) {
+    long ret = syscall(SYS_getrandom, buffer, length, 0);
+    return (int)__syscall_ret(ret);
+}
+
+size_t confstr(int name, char *buf, size_t len) {
+    const char *value;
+    size_t need;
+
+    if (name != _CS_PATH) {
+        errno = EINVAL;
+        return 0;
+    }
+
+    value = "/bin:/usr/bin";
+    need = strlen(value) + 1;
+
+    if (buf && len > 0) {
+        size_t ncopy = need;
+        if (ncopy > len)
+            ncopy = len;
+        memcpy(buf, value, ncopy - 1);
+        buf[ncopy - 1] = '\0';
+    }
+    return need;
+}
+
+int lockf(int fd, int cmd, off_t len) {
+    struct flock lk;
+
+    lk.l_whence = SEEK_CUR;
+    lk.l_start = 0;
+    lk.l_len = len;
+    lk.l_pid = 0;
+
+    switch (cmd) {
+    case F_ULOCK:
+        lk.l_type = F_UNLCK;
+        return fcntl(fd, F_SETLK, &lk);
+    case F_LOCK:
+        lk.l_type = F_WRLCK;
+        return fcntl(fd, F_SETLKW, &lk);
+    case F_TLOCK:
+        lk.l_type = F_WRLCK;
+        return fcntl(fd, F_SETLK, &lk);
+    case F_TEST:
+        lk.l_type = F_WRLCK;
+        if (fcntl(fd, F_GETLK, &lk) < 0)
+            return -1;
+        if (lk.l_type == F_UNLCK || lk.l_type == F_RDLCK)
+            return 0;
+        errno = EACCES;
+        return -1;
+    default:
+        errno = EINVAL;
+        return -1;
+    }
+}
+
+int posix_close(int fd, int flags) {
+    (void)flags;
+    return close(fd);
+}
+
+pid_t _Fork(void) {
+    return fork();
+}
+
+char *crypt(const char *key, const char *salt) {
+    static char out[32];
+    size_t i;
+
+    if (!key || !salt) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    out[0] = salt[0] ? salt[0] : 'x';
+    out[1] = salt[1] ? salt[1] : 'x';
+    for (i = 0; i < sizeof(out) - 3 && key[i]; i++)
+        out[i + 2] = key[i];
+    out[i + 2] = '\0';
+    return out;
+}
+
+void setkey(const char *key) {
+    (void)key;
+}
+
+void encrypt(char block[64], int edflag) {
+    (void)block;
+    (void)edflag;
+}
+
+void swab(const void *src, void *dest, ssize_t nbytes) {
+    const unsigned char *s = (const unsigned char *)src;
+    unsigned char *d = (unsigned char *)dest;
+    ssize_t i;
+
+    for (i = 0; i + 1 < nbytes; i += 2) {
+        d[i] = s[i + 1];
+        d[i + 1] = s[i];
+    }
 }

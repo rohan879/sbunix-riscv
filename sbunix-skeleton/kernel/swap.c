@@ -163,6 +163,11 @@ void swap_evict_pages(int n) {
     if ((*pte & (PTE_R | PTE_W | PTE_X)) == 0)
       goto advance;
 
+    /* Do not evict executable pages. This avoids instruction stream
+     * instability when heavily swapping code pages under test load. */
+    if (*pte & PTE_X)
+      goto advance;
+
     /* Only evict user pages */
     if (!(*pte & PTE_U))
       goto advance;

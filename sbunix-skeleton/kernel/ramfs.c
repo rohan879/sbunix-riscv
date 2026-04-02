@@ -355,6 +355,37 @@ static int64_t ramfs_write(void *fs_data, void *private, const char *buf,
   return (int64_t)total;
 }
 
+static int ramfs_ftruncate(void *fs_data, void *private, uint64_t length) {
+  (void)fs_data;
+  struct ramfs_private *priv = (struct ramfs_private *)private;
+  if (!priv || !priv->inode || priv->inode->type != RAMFS_FILE)
+    return -9; /* EBADF */
+
+  struct ramfs_inode *ino = priv->inode;
+
+  if (length < ino->size) {
+    int needed_blocks = (int)((length + PAGE_SIZE - 1) / PAGE_SIZE);
+    for (int i = needed_blocks; i < ino->nblocks; i++) {
+      if (ino->blocks[i]) {
+        kfree(ino->blocks[i]);
+        ino->blocks[i] = NULL;
+      }
+    }
+    ino->nblocks = needed_blocks;
+    ino->size = length;
+    return 0;
+  }
+
+  if (length > ino->size) {
+    int rc = ramfs_ensure_blocks(ino, length);
+    if (rc < 0)
+      return rc;
+    ino->size = length;
+  }
+
+  return 0;
+}
+
 static int ramfs_close(void *fs_data, void *private) {
   (void)fs_data;
   if (private)
@@ -558,6 +589,7 @@ struct vfs_ops ramfs_ops = {
   .open    = ramfs_open,
   .read    = ramfs_read,
   .write   = ramfs_write,
+  .ftruncate = ramfs_ftruncate,
   .close   = ramfs_close,
   .stat    = ramfs_stat,
   .fstat   = ramfs_fstat,

@@ -570,3 +570,30 @@ open-posix build:
 - **Best way to skip boot tests**: wait for the line `Starting tests in: 3` and then send Ctrl-C immediately.
 - **Operational tip**: queueing many commands at once in `sbush` can make it harder to land Ctrl-C timing cleanly; send one command at a time when debugging boot behavior.
 - **For scripted host-side control**: poll the tmux pane for `Starting tests in: 3` and inject Ctrl-C once matched. This is more reliable than fixed sleep delays.
+- **Pattern-trigger tmux example**:
+  ```bash
+  # Wait for boot countdown prompt, then send Ctrl-C exactly once
+  for i in $(seq 1 120); do
+    out=$(tmux -S /tmp/tmux-debug capture-pane -t qemu -p | tr -d '\r')
+    case "$out" in
+      *"Starting tests in: 3"*)
+        tmux -S /tmp/tmux-debug send-keys -t qemu C-c
+        break
+        ;;
+    esac
+    sleep 0.2
+  done
+  ```
+
+#### 27. `basic/unistd` Follow-up: Runner CWD + Tempfile Regression Rollback
+- **`run-os-test` execution cwd fix** (`bin/run-os-test/run-os-test.c`):
+  - Tests are now executed from their suite directory (e.g. `/test/bin/os-test/basic`) using `./<leaf>` argv, matching Sortix `misc/run.sh` behavior.
+  - This fixes relative-path tests under `basic/unistd` that expect paths like `unistd/lseek`, `unistd/read`, and relative `exec*` targets.
+- **Regression identified and rolled back**:
+  - A prior experiment that changed tempfile behavior (`TMPDIR=/mnt` injection and `tmpfile()` path/lifetime changes) correlated with `WARNING: double kfree ...` during full `run-os-test` and broader instability.
+  - Those risky tempfile changes were reverted; runner now keeps normal environment and still executes tests from suite cwd.
+- **Observed results (targeted tests)**:
+  - PASS after fixes: `basic/unistd/execlp`, `basic/unistd/execv`, `basic/unistd/execve`, `basic/unistd/execvp`, `basic/unistd/lseek`, `basic/unistd/read`, `basic/unistd/truncate`, `basic/unistd/ftruncate`.
+- **Build summary update**:
+  - os-test compiled tests increased to **1507 / 5304** (~28%) in the current build output.
+  - open-posix compiled tests remain **423 / 2044** (~21%).

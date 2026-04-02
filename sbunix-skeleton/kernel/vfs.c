@@ -93,6 +93,18 @@ struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath) {
 /* Open file pool                                                       */
 /* ------------------------------------------------------------------ */
 static struct open_file file_table[NFILE];
+static int vfs_bad_free_warnings;
+
+static int vfs_file_ptr_valid(struct open_file *f) {
+  uint64_t p = (uint64_t)f;
+  uint64_t base = (uint64_t)&file_table[0];
+  uint64_t end = (uint64_t)&file_table[NFILE];
+  if (p < base || p >= end)
+    return 0;
+  if (((p - base) % (uint64_t)sizeof(struct open_file)) != 0)
+    return 0;
+  return 1;
+}
 
 struct open_file *vfs_alloc_file(void) {
   for (int i = 0; i < NFILE; i++) {
@@ -107,6 +119,13 @@ struct open_file *vfs_alloc_file(void) {
 
 void vfs_free_file(struct open_file *f) {
   if (!f) return;
+  if (!vfs_file_ptr_valid(f)) {
+    if (vfs_bad_free_warnings < 16) {
+      printk("vfs: invalid file free 0x%lx ignored\n", (uint64_t)f);
+      vfs_bad_free_warnings++;
+    }
+    return;
+  }
   f->refcount--;
   if (f->refcount <= 0) {
     memset(f, 0, sizeof(struct open_file));

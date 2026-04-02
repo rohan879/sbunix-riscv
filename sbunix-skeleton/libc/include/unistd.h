@@ -27,16 +27,23 @@ int     open(const char *path, int flags, ...);
 int     close(int fd);
 int     dup(int oldfd);
 int     dup2(int oldfd, int newfd);
+int     dup3(int oldfd, int newfd, int flags);
 int     pipe(int fds[2]);
+int     pipe2(int fds[2], int flags);
 off_t   lseek(int fd, off_t offset, int whence);
+ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 
 /* Process management */
 pid_t   fork(void);
 pid_t   getpid(void);
 pid_t   getppid(void);
 int     execve(const char *path, char *const argv[], char *const envp[]);
+int     fexecve(int fd, char *const argv[], char *const envp[]);
 int     execv(const char *path, char *const argv[]);
 int     execvp(const char *file, char *const argv[]);
+int     execl(const char *path, const char *arg, ...);
+int     execle(const char *path, const char *arg, ...);
 int     execlp(const char *file, const char *arg, ...);
 pid_t   waitpid(pid_t pid, int *status, int options);
 void    _exit(int status) __attribute__((noreturn));
@@ -77,6 +84,7 @@ pid_t   getsid(pid_t pid);
 int     ftruncate(int fd, off_t length);
 int     truncate(const char *path, off_t length);
 int     fsync(int fd);
+int     fdatasync(int fd);
 void    sync(void);
 
 /* Wait (convenience wrapper) */
@@ -84,6 +92,10 @@ pid_t   wait(int *status);
 
 /* *at-style filesystem calls */
 int     faccessat(int dirfd, const char *path, int mode, int flags);
+int     fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags);
+int     linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, int flags);
+int     symlinkat(const char *target, int newdirfd, const char *linkpath);
+int     unlinkat(int dirfd, const char *path, int flags);
 ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz);
 
 /* ioctl */
@@ -103,9 +115,26 @@ int     ttyname_r(int fd, char *buf, size_t buflen);
 /* Process group / session */
 int     setreuid(uid_t ruid, uid_t euid);
 int     setregid(gid_t rgid, gid_t egid);
+int     setuid(uid_t uid);
+int     setgid(gid_t gid);
+int     seteuid(uid_t euid);
+int     setegid(gid_t egid);
+int     setresuid(uid_t ruid, uid_t euid, uid_t suid);
+int     setresgid(gid_t rgid, gid_t egid, gid_t sgid);
+int     getresuid(uid_t *ruid, uid_t *euid, uid_t *suid);
+int     getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid);
+int     getgroups(int size, gid_t list[]);
+int     lchown(const char *path, uid_t owner, gid_t group);
+long    gethostid(void);
+int     gethostname(char *name, size_t len);
+int     getlogin_r(char *buf, size_t buflen);
+int     getentropy(void *buffer, size_t length);
 
 /* Misc POSIX */
 long    sysconf(int name);
+size_t  confstr(int name, char *buf, size_t len);
+long    pathconf(const char *path, int name);
+long    fpathconf(int fd, int name);
 int     chown(const char *path, uid_t owner, gid_t group);
 int     fchown(int fd, uid_t owner, gid_t group);
 int     fchdir(int fd);
@@ -120,5 +149,28 @@ int     nice(int inc);
 #define _SC_CLK_TCK        2
 #define _SC_ARG_MAX        0
 #define _SC_NGROUPS_MAX    3
+
+/* pathconf names */
+#define _PC_FILESIZEBITS   18
+
+/* confstr names */
+#define _CS_PATH           0
+
+/* lockf commands */
+#define F_ULOCK            0
+#define F_LOCK             1
+#define F_TLOCK            2
+#define F_TEST             3
+int     lockf(int fd, int cmd, off_t len);
+
+int     posix_close(int fd, int flags);
+#define POSIX_CLOSE_RESTART 0x1
+
+/* Misc */
+void    swab(const void *src, void *dest, ssize_t nbytes);
+pid_t   _Fork(void);
+char   *crypt(const char *key, const char *salt);
+void    setkey(const char *key);
+void    encrypt(char block[64], int edflag);
 
 #endif /* _UNISTD_H */

@@ -261,7 +261,9 @@ static enum test_result classify_from_out(const char *test_name,
  * Appends "exit: CODE\n" if output is empty OR exit code >= 2.
  * Returns the raw exit code.
  */
-static int run_test_capture(const char *path, char *output, size_t output_size) {
+static int run_test_capture(struct test_info *test,
+                            char *output,
+                            size_t output_size) {
     static unsigned long capture_seq = 0;
     char capture_path[MAX_PATH];
     capture_seq++;
@@ -271,14 +273,31 @@ static int run_test_capture(const char *path, char *output, size_t output_size) 
 
     pid_t pid = fork();
     if (pid == 0) {
+        char suite_dir[MAX_PATH];
+        char rel_exec[MAX_PATH];
+        const char *rest;
+
+        snprintf(suite_dir, sizeof(suite_dir), OS_TEST_BIN_ROOT "/%s",
+                 test->suite);
+
+        rest = test->name;
+        if (strncmp(rest, test->suite, strlen(test->suite)) == 0 &&
+            rest[strlen(test->suite)] == '/') {
+            rest += strlen(test->suite) + 1;
+        }
+        snprintf(rel_exec, sizeof(rel_exec), "./%s", rest);
+
+        if (chdir(suite_dir) < 0)
+            _exit(127);
+
         int fd = open(capture_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0)
             _exit(127);
         dup2(fd, STDOUT_FILENO);
         dup2(fd, STDERR_FILENO);
         close(fd);
-        char *argv[] = {(char *)path, NULL};
-        execv(path, argv);
+        char *argv[] = {rel_exec, NULL};
+        execv(rel_exec, argv);
         _exit(127);
     } else if (pid > 0) {
         int status;
@@ -373,7 +392,7 @@ static enum test_result run_test_single(struct test_info *test) {
     sa.sa_restorer = NULL;
     sigaction(SIGALRM, &sa, &old_alrm);
     alarm(5);
-    run_test_capture(test->path, output, sizeof(output));
+    run_test_capture(test, output, sizeof(output));
     alarm(0);
     sigaction(SIGALRM, &old_alrm, NULL);
 

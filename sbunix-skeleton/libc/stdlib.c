@@ -617,6 +617,29 @@ int mkstemp(char *tmpl) {
     return -1;
 }
 
+int posix_openpt(int oflag) {
+    return open("/dev/console", oflag);
+}
+
+int grantpt(int fd) {
+    (void)fd;
+    return 0;
+}
+
+int unlockpt(int fd) {
+    (void)fd;
+    return 0;
+}
+
+char *ptsname(int fd) {
+    static char name[] = "/dev/console";
+    if (fd < 0) {
+        errno = EBADF;
+        return (void *)0;
+    }
+    return name;
+}
+
 /*
  * remove() — remove a file or directory.
  */

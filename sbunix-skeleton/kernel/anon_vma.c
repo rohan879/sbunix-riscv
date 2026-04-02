@@ -1,5 +1,6 @@
 #include "include/mm.h"
 #include "include/kalloc.h" 
+#include "include/kmalloc.h"
 #include "include/proc.h"
 #include "include/string.h"
 #include "include/printk.h"
@@ -15,7 +16,7 @@ void anon_vma_init(void) {
 
 /* Allocate a new anon_vma object */
 struct anon_vma *anon_vma_alloc(void) {
-  struct anon_vma *anon_vma = kalloc();
+  struct anon_vma *anon_vma = (struct anon_vma *)kmalloc(sizeof(struct anon_vma));
   if (!anon_vma) return NULL;
   
   memset(anon_vma, 0, sizeof(*anon_vma));
@@ -49,7 +50,7 @@ void anon_vma_free(struct anon_vma *anon_vma) {
     anon_vma_put(anon_vma->parent);
   }
   
-  kfree(anon_vma);
+  kmfree(anon_vma, sizeof(struct anon_vma));
 }
 
 /* Get reference to anon_vma */
@@ -97,7 +98,7 @@ int anon_vma_fork(struct vm_area *vma, struct vm_area *parent_vma) {
   }
   
   // Also link to parent's anon_vma for shared COW pages
-  avc = kalloc();
+  avc = (struct anon_vma_chain *)kmalloc(sizeof(struct anon_vma_chain));
   if (!avc) {
     anon_vma_unlink(vma);
     anon_vma_put(anon_vma);
@@ -106,6 +107,8 @@ int anon_vma_fork(struct vm_area *vma, struct vm_area *parent_vma) {
   
   avc->anon_vma = parent_vma->anon_vma;
   avc->vma = vma;
+  INIT_LIST_HEAD(&avc->anon_vma_node);
+  INIT_LIST_HEAD(&avc->vma_node);
   anon_vma_get(parent_vma->anon_vma);
   
   spin_lock(&parent_vma->anon_vma->lock);
@@ -124,13 +127,14 @@ int anon_vma_link(struct vm_area *vma) {
   
   if (!anon_vma) return -1;
   
-  avc = kalloc();
+  avc = (struct anon_vma_chain *)kmalloc(sizeof(struct anon_vma_chain));
   if (!avc) return -1;
   
   avc->anon_vma = anon_vma;
   avc->vma = vma;
   INIT_LIST_HEAD(&avc->anon_vma_node);
   INIT_LIST_HEAD(&avc->vma_node);
+  anon_vma_get(anon_vma);
   
   spin_lock(&anon_vma->lock);
   list_add(&avc->anon_vma_node, &anon_vma->head);
@@ -143,9 +147,11 @@ int anon_vma_link(struct vm_area *vma) {
 
 /* Unlink VMA from all anon_vma chains */
 void anon_vma_unlink(struct vm_area *vma) {
-  struct anon_vma_chain *avc, *next;
-  
-  list_for_each_entry_safe(avc, next, &vma->anon_vma_chain, vma_node) {
+  struct list_head *pos = vma->anon_vma_chain.next;
+
+  while (pos != &vma->anon_vma_chain) {
+    struct list_head *next = pos->next;
+    struct anon_vma_chain *avc = list_entry(pos, struct anon_vma_chain, vma_node);
     struct anon_vma *anon_vma = avc->anon_vma;
     
     spin_lock(&anon_vma->lock);
@@ -157,7 +163,8 @@ void anon_vma_unlink(struct vm_area *vma) {
     spin_unlock(&anon_vma->lock);
     
     anon_vma_put(anon_vma);
-    kfree(avc);
+    kmfree(avc, sizeof(struct anon_vma_chain));
+    pos = next;
   }
   
   if (vma->anon_vma) {
@@ -218,7 +225,6 @@ void page_remove_rmap(struct page *page, struct vm_area *vma) {
 
 /* Try to unmap page from all VMAs that map it */
 int try_to_unmap(struct page *page) {
-  struct anon_vma_chain *avc;
   struct anon_vma *anon_vma;
   int unmapped = 0;
   
@@ -229,8 +235,11 @@ int try_to_unmap(struct page *page) {
   anon_vma = page->anon_vma;
   spin_lock(&anon_vma->lock);
   
-  // Walk all VMAs that could map this page
-  list_for_each_entry(avc, &anon_vma->head, anon_vma_node) {
+  /* Walk all VMAs that could map this page */
+  for (struct list_head *pos = anon_vma->head.next;
+       pos != &anon_vma->head;
+       pos = pos->next) {
+    struct anon_vma_chain *avc = list_entry(pos, struct anon_vma_chain, anon_vma_node);
     struct vm_area *vma = avc->vma;
     uint64_t address;
     
@@ -242,7 +251,7 @@ int try_to_unmap(struct page *page) {
       pte_t *pte = walk(current_proc->pagetable, address, 0);
       if (pte && (*pte & PTE_V)) {
         uint64_t pa = PTE2PA(*pte);
-        if (pa == (uint64_t)page->virtual - 0x80000000UL) {
+        if (pa == (uint64_t)page->virtual) {
           // Found mapping - unmap it
           *pte = 0;
           asm volatile("sfence.vma %0, zero" : : "r"(address));
@@ -260,7 +269,6 @@ int try_to_unmap(struct page *page) {
 
 /* Find all VMAs that map a given page (for debugging) */
 int page_mapped_in_vma_count(struct page *page) {
-  struct anon_vma_chain *avc;
   struct anon_vma *anon_vma;
   int count = 0;
   
@@ -269,7 +277,9 @@ int page_mapped_in_vma_count(struct page *page) {
   anon_vma = page->anon_vma;
   spin_lock(&anon_vma->lock);
   
-  list_for_each_entry(avc, &anon_vma->head, anon_vma_node) {
+  for (struct list_head *pos = anon_vma->head.next;
+       pos != &anon_vma->head;
+       pos = pos->next) {
     // Each avc represents a potential mapping
     count++;
   }
@@ -292,10 +302,11 @@ void anon_vma_print_stats(struct anon_vma *anon_vma) {
   printk("  root=%p parent=%p\n", anon_vma->root, anon_vma->parent);
   
   if (!list_empty(&anon_vma->head)) {
-    struct anon_vma_chain *avc;
     int chain_count = 0;
     
-    list_for_each_entry(avc, &anon_vma->head, anon_vma_node) {
+    for (struct list_head *pos = anon_vma->head.next;
+         pos != &anon_vma->head;
+         pos = pos->next) {
       chain_count++;
     }
     printk("  chain_count=%d\n", chain_count);

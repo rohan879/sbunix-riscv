@@ -349,6 +349,7 @@ struct vfs_ops devfs_ops = {
   .open    = devfs_open,
   .read    = devfs_read,
   .write   = devfs_write,
+  .ftruncate = NULL,
   .close   = devfs_close,
   .stat    = devfs_stat,
   .fstat   = devfs_fstat,

@@ -13,6 +13,7 @@ struct vfs_ops {
                   int64_t *offset);
   int64_t (*write)(void *fs_data, void *private, const char *buf,
                    uint64_t count, int64_t *offset);
+  int (*ftruncate)(void *fs_data, void *private, uint64_t length);
   int (*close)(void *fs_data, void *private);
   int (*stat)(void *fs_data, const char *path, uint8_t *st);
   int (*fstat)(void *fs_data, void *private, uint8_t *st);  /* per-fd stat */

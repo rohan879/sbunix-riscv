@@ -561,6 +561,7 @@ struct vfs_ops sysfs_ops = {
   .open    = sysfs_open,
   .read    = sysfs_read,
   .write   = sysfs_write,
+  .ftruncate = NULL,
   .close   = sysfs_close,
   .stat    = sysfs_stat,
   .fstat   = sysfs_fstat,

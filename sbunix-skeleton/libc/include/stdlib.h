@@ -65,6 +65,10 @@ int system(const char *command);
 
 /* Temporary files */
 int mkstemp(char *tmpl);
+int posix_openpt(int oflag);
+int grantpt(int fd);
+int unlockpt(int fd);
+char *ptsname(int fd);
 
 /* Path resolution */
 char *realpath(const char *path, char *resolved_path);

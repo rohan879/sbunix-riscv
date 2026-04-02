@@ -307,6 +307,4 @@ void mm_free_page(struct page *page);
 
 /* Enhanced kalloc integration */
 void *enhanced_kalloc(void);
-void enhanced_kfree(void *pa);
-
 #endif /* _MM_H */

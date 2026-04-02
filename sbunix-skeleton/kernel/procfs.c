@@ -949,6 +949,7 @@ struct vfs_ops procfs_ops = {
   .open     = procfs_open,
   .read     = procfs_read,
   .write    = procfs_write,
+  .ftruncate = NULL,
   .close    = procfs_close,
   .stat     = procfs_stat,
   .fstat    = procfs_fstat,
