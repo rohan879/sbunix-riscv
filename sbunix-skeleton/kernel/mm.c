@@ -6,7 +6,7 @@
 
 /* Global page descriptor table */
 // Static page descriptor table to avoid bootstrap problems
-#define MAX_STATIC_PAGES 1024  // Support up to 1024 pages (4MB of memory)
+#define MAX_STATIC_PAGES ((128 * 1024 * 1024) / PAGE_SIZE)
 static struct page static_page_table[MAX_STATIC_PAGES];
 struct page *page_table;              // Points to static_page_table
 static uint64_t max_pfn;                     // Highest valid page frame number
@@ -192,22 +192,6 @@ void mm_free_page(struct page *page) {
 }
 
 /* Enhanced kalloc integration - implemented in kalloc.c */
-
-void enhanced_kfree(void *pa) {
-  if (!pa) return;
-  
-  // Update page descriptor before freeing
-  struct page *page = virt_to_page(pa);
-  if (page) {
-    page_put(page);  // This will call mm_free_page if appropriate
-    return;  // mm_free_page handles the actual freeing
-  }
-  
-  // Fallback to original kfree if no page descriptor
-  printk("WARNING: kfree called on page without descriptor: %p\n", pa);
-  kfree(pa);
-  mm_stats.free_pages++;
-}
 
 /* Debug function to print page descriptor information */
 void print_page_info(struct page *page) {

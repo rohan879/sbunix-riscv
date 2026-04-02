@@ -56,6 +56,7 @@ pte_t *walk(pagetable_t pagetable, uint64_t va, int alloc) {
             if (!alloc || (pagetable = (pagetable_t)kalloc()) == 0)
                 return 0;
             memset(pagetable, 0, PAGE_SIZE);
+            page_mark_ptpage((uint64_t)pagetable);  /* Track as page table page */
             *pte = PA2PTE(pagetable) | PTE_V;
         }
     }
@@ -143,6 +144,7 @@ int mappages_super(pagetable_t pagetable, uint64_t va, uint64_t size,
             l1pt = (pagetable_t)kalloc();
             if (!l1pt) return -1;
             memset(l1pt, 0, PAGE_SIZE);
+            page_mark_ptpage((uint64_t)l1pt);  /* Track as page table page */
             *l2pte = PA2PTE(l1pt) | PTE_V;
         }
 
@@ -164,6 +166,7 @@ void kvmmap_super(uint64_t va, uint64_t pa, uint64_t sz, int perm) {
 void kvminit(void) {
     kernel_pagetable = (pagetable_t)kalloc();
     memset(kernel_pagetable, 0, PAGE_SIZE);
+    page_mark_ptpage((uint64_t)kernel_pagetable);  /* Track kernel root page table */
 
     // UART registers: too small for super page, use 4KB
     kvmmap(0x10000000, 0x10000000, PAGE_SIZE, PTE_R | PTE_W);
@@ -229,6 +232,7 @@ pagetable_t uvmcreate() {
   if(pagetable == 0)
     return 0;
   memset(pagetable, 0, PAGE_SIZE);
+  page_mark_ptpage((uint64_t)pagetable);  /* Track as user root page table */
   return pagetable;
 }
 
@@ -587,17 +591,28 @@ static int pa_is_valid_superpage(uint64_t pa) {
 }
 
 static int pa_is_live_page(uint64_t pa) {
-  return pa_is_valid_page(pa);
+  if (!pa_is_valid_page(pa))
+    return 0;
+  /* Only consider it a live page if it has non-zero refcount.
+   * This prevents double-freeing pages that were already freed. */
+  return page_ref_get(pa) > 0;
 }
 
 static int pa_is_live_superpage(uint64_t pa) {
-  return pa_is_valid_superpage(pa);
+  if (!pa_is_valid_superpage(pa))
+    return 0;
+  /* Only consider it live if base page has non-zero refcount */
+  return page_ref_get(pa) > 0;
 }
 
 static int pa_is_live_ptpage(uint64_t pa) {
   if (!pa_is_valid_page(pa))
     return 0;
-  return page_ref_get(pa) > 0;
+  /* Only consider it a live page table page if:
+   * 1. It has non-zero refcount (allocated)
+   * 2. It was actually marked as a page table page at allocation time
+   * This prevents treating reused data pages as page tables. */
+  return page_ref_get(pa) > 0 && page_is_ptpage(pa);
 }
 
 /* Recursively free page-table pages and user leaf pages in a sub-tree.
@@ -632,21 +647,25 @@ static void freewalk_level(pagetable_t pt, int level) {
         continue;
       }
        /* Non-leaf PTE: points to next-level page table page.
-        * Guard against corrupted page table pointers (e.g., PPN==0 or
-        * values outside physical RAM). If the child pagetable PA is
-        * invalid we log and detach the entry rather than attempting
-        * to recurse into it and crash the kernel. */
+         * Guard against corrupted page table pointers (e.g., PPN==0 or
+         * values outside physical RAM). If the child pagetable PA is
+         * invalid we log and detach the entry rather than attempting
+         * to recurse into it and crash the kernel. */
       pagetable_t child = (pagetable_t)PTE2PA(pte);
       if (!pa_is_live_ptpage((uint64_t)child)) {
         /* Corrupted/reused page table page — silently detach */
         pt[i] = 0;
         continue;
       }
+      /* Clear PTE BEFORE recursing to prevent double-free if this same
+       * physical page appears elsewhere in the page table tree (circular
+       * reference or duplicate PTE). This ensures we only free each page
+       * table page once even if the tree structure is corrupted. */
+      pt[i] = 0;
       if (level > 0)
         freewalk_level(child, level - 1);
       vm_trace_freewalk("pt-child", pt, level, i, pte, (uint64_t)child);
       kfree((void *)child);
-      pt[i] = 0;
     }
     /* Kernel-only leaf entries (no PTE_U): leave them, they point to MMIO */
   }
@@ -682,15 +701,20 @@ void proc_freepagetable(pagetable_t pagetable) {
         } else if (!(user_L1[j] & (PTE_R | PTE_W | PTE_X))) {
           /* Non-leaf: recurse into level-0 table */
           pagetable_t child = (pagetable_t)PTE2PA(user_L1[j]);
+          pte_t saved_pte = user_L1[j];  /* save for trace after clearing */
           if (pa_is_live_ptpage((uint64_t)child)) {
+            /* Clear PTE before recursion to prevent double-free */
+            user_L1[j] = 0;
             freewalk_level(child, 0);
-            vm_trace_freewalk("l1-child", user_L1, 1, j, user_L1[j], (uint64_t)child);
+            vm_trace_freewalk("l1-child", user_L1, 1, j, saved_pte, (uint64_t)child);
             kfree((void *)child);
           } else {
             /* Corrupted/reused L0 page — silently detach */
+            user_L1[j] = 0;
           }
+        } else {
+          user_L1[j] = 0;
         }
-        user_L1[j] = 0;
       } else if (PTE_IS_SWAPPED(user_L1[j])) {
         swap_free(PTE_SWAP_SLOT(user_L1[j]));
         user_L1[j] = 0;

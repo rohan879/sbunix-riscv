@@ -119,9 +119,9 @@ void swap_read(int slot, void *page) {
 /* Eviction: enhanced clock algorithm with page descriptor integration */
 /* ================================================================== */
 
-void swap_evict_pages(int n) {
+int swap_evict_pages(int n) {
   if (!swap_is_enabled)
-    return;
+    return 0;
 
   int evicted = 0;
   /* Limit scan iterations to avoid infinite loops.
@@ -273,6 +273,8 @@ advance:
       clock_va = 0;
     }
   }
+
+  return evicted;
 }
 
 /* ================================================================== */

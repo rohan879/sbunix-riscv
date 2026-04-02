@@ -2313,6 +2313,8 @@ static long sys_exit_handler(struct trapframe *tf) {
         if (current_proc->pid == 1) {
             ext2_sync(NULL); /* flush filesystems before halt */
             printk("\nSystem halted (init exited with status %d).\n", status);
+            printk("Process stats: highwater=%d exhaustions=%d\n",
+                   get_proc_highwater(), get_proc_exhaustion_count());
             register unsigned long a0 asm("a0") = 0;
             register unsigned long a1 asm("a1") = 0;
             register unsigned long a7 asm("a7") = 0x53525354;

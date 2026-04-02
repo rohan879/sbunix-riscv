@@ -58,7 +58,7 @@ int  swap_alloc(void);
 void swap_free(int slot);
 void swap_write(int slot, void *page);
 void swap_read(int slot, void *page);
-void swap_evict_pages(int n);
+int  swap_evict_pages(int n);
 void swap_stats(void);
 
 /* Returns 1 if swap subsystem is enabled (disk present and large enough) */

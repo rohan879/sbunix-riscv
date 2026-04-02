@@ -101,15 +101,21 @@ void init_starter(void) {
 // Look in the process table for an UNUSED proc.
 struct proc* allocproc(void) {
   struct proc *p;
+  int used_count = 0;
 
   for(p = proc; p < &proc[NPROC]; p++) {
+    if(p->state != UNUSED)
+      used_count++;
     if(p->state == UNUSED) {
       goto found;
     }
   }
+  /* Process table exhausted */
+  track_proc_exhaustion();
   return 0;
 
 found:
+  track_proc_alloc(used_count + 1);
   p->pid = nextpid++;
   p->pgid = p->pid;
   p->sid = p->pid;

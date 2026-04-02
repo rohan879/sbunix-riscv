@@ -23,4 +23,14 @@ int  get_free_page_count(void);
 void *kalloc_super(void);      /* allocate 2MB-aligned contiguous block */
 void  kfree_super(void *pa);   /* free a 2MB contiguous block */
 
+/* Page table page tracking for debugging */
+void page_mark_ptpage(uint64_t pa);
+int  page_is_ptpage(uint64_t pa);
+
+/* Process table exhaustion tracking */
+void track_proc_alloc(int current_count);
+void track_proc_exhaustion(void);
+int  get_proc_highwater(void);
+int  get_proc_exhaustion_count(void);
+
 #endif

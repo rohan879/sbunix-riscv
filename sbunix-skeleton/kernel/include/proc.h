@@ -214,7 +214,7 @@ void            swtch(struct context*, struct context*);
 void            trap_restore(struct trapframe*);
 void            uart_wakeup(void);
 
-#define NPROC 128
+#define NPROC 256
 
 extern struct proc *current_proc;
 extern struct proc proc[NPROC];

@@ -4,7 +4,6 @@
 #include <riscv.h>
 #include <string.h>
 #include <swap.h>
-#include "include/mm.h"
 
 extern char _kernel_end[]; // Symbol from linker script
 
@@ -24,9 +23,63 @@ static int page_refcount[MAX_PAGES];
 static uint64_t page_last_free_ra[MAX_PAGES];
 static int kfree_debug_warn_count;
 
+/* Track page usage type for debugging */
+#define PAGE_TYPE_FREE    0
+#define PAGE_TYPE_DATA    1
+#define PAGE_TYPE_PTPAGE  2  /* page table page */
+#define PAGE_TYPE_KSTACK  3  /* kernel stack */
+static uint8_t page_type[MAX_PAGES];
+
+/* Process table high water mark tracking */
+static int proc_highwater = 0;
+static int proc_alloc_total = 0;
+static int proc_exhaustion_count = 0;
+
 static int pa_to_index(uint64_t pa) {
     return (int)((pa - 0x80000000UL) / PAGE_SIZE);
 }
+
+/* Mark a page as being used for a page table */
+void page_mark_ptpage(uint64_t pa) {
+    int idx = pa_to_index(pa);
+    if (idx >= 0 && idx < MAX_PAGES) {
+        if (page_type[idx] == PAGE_TYPE_PTPAGE) {
+            /* Already marked as ptpage - this might indicate double-use */
+            /* Only warn if we haven't seen too many warnings */
+            if (kfree_debug_warn_count < 32) {
+                printk("WARNING: page 0x%lx already marked as ptpage (ref=%d)\n",
+                       pa, page_refcount[idx]);
+            }
+        }
+        page_type[idx] = PAGE_TYPE_PTPAGE;
+    }
+}
+
+/* Check if a page is marked as a page table page */
+int page_is_ptpage(uint64_t pa) {
+    int idx = pa_to_index(pa);
+    if (idx >= 0 && idx < MAX_PAGES)
+        return page_type[idx] == PAGE_TYPE_PTPAGE;
+    return 0;
+}
+
+/* Track process table usage */
+void track_proc_alloc(int current_count) {
+    proc_alloc_total++;
+    if (current_count > proc_highwater)
+        proc_highwater = current_count;
+}
+
+void track_proc_exhaustion(void) {
+    proc_exhaustion_count++;
+    if (proc_exhaustion_count <= 5) {
+        printk("WARNING: process table exhausted! (count=%d, highwater=%d, total_allocs=%d)\n",
+               proc_exhaustion_count, proc_highwater, proc_alloc_total);
+    }
+}
+
+int get_proc_highwater(void) { return proc_highwater; }
+int get_proc_exhaustion_count(void) { return proc_exhaustion_count; }
 
 void page_ref_inc(uint64_t pa) {
     int idx = pa_to_index(pa);
@@ -77,14 +130,15 @@ void kfree(void *pa) {
         }
         if (page_refcount[idx] == 0) {
             if (kfree_debug_warn_count < 32) {
-                printk("WARNING: double kfree pa=0x%lx prev_ra=0x%lx curr_ra=0x%lx\n",
-                       (uint64_t)pa, page_last_free_ra[idx], caller_ra);
+                printk("WARNING: double kfree pa=0x%lx prev_ra=0x%lx curr_ra=0x%lx type=%d\n",
+                       (uint64_t)pa, page_last_free_ra[idx], caller_ra, page_type[idx]);
                 kfree_debug_warn_count++;
             }
             return;
         }
         page_refcount[idx] = 0;
         page_last_free_ra[idx] = caller_ra;
+        page_type[idx] = PAGE_TYPE_FREE;
     }
 
     r = (struct run*)pa;
@@ -92,10 +146,6 @@ void kfree(void *pa) {
     kmem.freelist = r;
     free_page_count++;
     
-    // Update mm_stats if page descriptors are available
-    if (page_table) {
-        mm_stats.free_pages = free_page_count;
-    }
 }
 
 // Initializes the page allocator.
@@ -110,9 +160,6 @@ void kinit(void) {
 
     printk("kinit: initializing memory from 0x%lx to 0x%lx\n", (unsigned long)p, (unsigned long)PHYSTOP);
 
-    // Initialize enhanced page descriptor system first
-    mm_init_page_descriptors();
-
     for (; p + PAGE_SIZE <= (char*)PHYSTOP; p += PAGE_SIZE) {
         int idx = pa_to_index((uint64_t)p);
         if (idx >= 0 && idx < MAX_PAGES)
@@ -120,95 +167,25 @@ void kinit(void) {
         kfree(p);
     }
 
-    // Initialize memory pressure watermarks after pages are set up
-    mm_init_watermarks();
-
-    printk("kinit: memory initialized with enhanced page descriptors and pressure detection.\n");
+    printk("kinit: memory initialized.\n");
 }
 
-// Original kalloc for internal use and compatibility
-static void *kalloc_internal(void) {
+// Allocates one 4096-byte page of physical memory.
+// Returns a pointer that the kernel can use.
+// Returns NULL if the memory cannot be allocated.
+void *kalloc(void) {
     struct run *r;
 
-    // Enhanced memory pressure detection
-    if (mm_watermarks.min_free > 0) {  // Check if watermarks initialized
-        int pressure = mm_check_memory_pressure();
-        if (pressure > 0) {
-            mm_stats.pressure_events++;
-            mm_trigger_reclaim(1);  // Try to reclaim pages
-        }
-    } else if (free_page_count < SWAP_LOW_WATERMARK && swap_enabled()) {
-        // Fallback to original pressure handling if watermarks not initialized
+    if (free_page_count < SWAP_LOW_WATERMARK && swap_enabled())
         swap_evict_pages(SWAP_EVICT_BATCH);
-    }
 
     r = kmem.freelist;
     if(r) {
         kmem.freelist = r->next;
         free_page_count--;
         page_refcount[pa_to_index((uint64_t)r)] = 1;
-        
-        // Update mm_stats if available
-        if (page_table) {
-            mm_stats.free_pages = free_page_count;
-        }
     }
     return r;
-}
-
-// New enhanced kalloc with page descriptor integration
-void *kalloc(void) {
-    // Use enhanced kalloc if page descriptors are available
-    if (page_table) {
-        return enhanced_kalloc();
-    }
-    // Fallback to original kalloc during early boot
-    return kalloc_internal();
-}
-
-// Enhanced kalloc implementation (moved from mm.c for integration)
-void *enhanced_kalloc(void) {
-    // Check for memory pressure before allocation
-    int pressure = mm_check_memory_pressure();
-    if (pressure >= 2) {  // High or critical pressure
-        mm_stats.pressure_events++;
-        if (mm_direct_reclaim(1) < 0) {
-            // Direct reclaim failed - allocation might fail
-            printk("mm: allocation may fail due to memory pressure\n");
-        }
-    } else if (pressure == 1) {  // Moderate pressure
-        mm_stats.pressure_events++;
-        mm_trigger_reclaim(1);  // Background reclaim
-    }
-    
-    void *pa = kalloc_internal();  // Use internal allocator
-    if (!pa) {
-        // Allocation failed - try emergency reclaim
-        if (mm_direct_reclaim(4) >= 0) {  // Try harder
-            pa = kalloc_internal();  // Retry allocation
-        }
-        if (!pa) {
-            printk("mm: enhanced_kalloc failed despite reclaim attempts\n");
-            return NULL;
-        }
-    }
-    
-    // Initialize page descriptor for newly allocated page
-    struct page *page = virt_to_page(pa);
-    if (page) {
-        page_get(page);  // Increment refcount
-        page->age_score = 128;  // Start with medium age
-        page->access_count = 1;
-        page->last_access = get_ticks();
-        
-        // Set accessed flag since it's just allocated
-        SetPageAccessed(page);
-    }
-    
-    // Update mm_stats to match kalloc internal tracking
-    mm_stats.free_pages = free_page_count;
-    
-    return pa;
 }
 
 int get_free_page_count(void) {
@@ -311,7 +288,3 @@ void kfree_super(void *pa) {
         free_page_count++;
     }
 }
-
-
-/* Enhanced kfree wrapper for page descriptor integration */
-
