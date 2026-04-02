@@ -314,6 +314,26 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   vma->flags = flags;
   vma->next  = NULL;
 
+  /* Initialize anon_vma fields */
+  INIT_LIST_HEAD(&vma->anon_vma_chain);
+  vma->anon_vma = NULL;
+  vma->vm_pgoff = 0;
+  vma->resident_pages = 0;
+  
+  /* For anonymous mappings, create anon_vma if needed */
+  if (flags & MAP_ANON) {
+    vma->anon_vma = anon_vma_alloc();
+    if (!vma->anon_vma) {
+      kmfree(vma, sizeof(struct vm_area));
+      return -1;
+    }
+    if (anon_vma_link(vma) < 0) {
+      anon_vma_put(vma->anon_vma);
+      kmfree(vma, sizeof(struct vm_area));
+      return -1;
+    }
+  }
+
   /* Insert into sorted list by start address */
   struct vm_area **pp = &p->vma_list;
   while (*pp && (*pp)->start < start)
@@ -424,6 +444,21 @@ int vma_dup(struct proc *src, struct proc *dst) {
     nv->prot  = sv->prot;
     nv->flags = sv->flags;
     nv->next  = NULL;
+    
+    /* Initialize anon_vma fields for child VMA */
+    INIT_LIST_HEAD(&nv->anon_vma_chain);
+    nv->anon_vma = NULL;
+    nv->vm_pgoff = sv->vm_pgoff;
+    nv->resident_pages = 0;  /* Child starts with no resident pages */
+    
+    /* Set up anon_vma inheritance for anonymous mappings */
+    if (sv->flags & MAP_ANON && sv->anon_vma) {
+      if (anon_vma_fork(nv, sv) < 0) {
+        kmfree(nv, sizeof(struct vm_area));
+        vma_free_all(dst);
+        return -1;
+      }
+    }
     *dpp = nv;
     dpp = &nv->next;
     sv = sv->next;
@@ -441,6 +476,12 @@ void vma_free_all(struct proc *p) {
       vfs_free_file(v->file);
       v->file = NULL;
     }
+    
+    /* Unlink from anon_vma chains for anonymous mappings */
+    if (v->flags & MAP_ANON && v->anon_vma) {
+      anon_vma_unlink(v);
+    }
+    
     kmfree(v, sizeof(struct vm_area));
     v = nxt;
   }

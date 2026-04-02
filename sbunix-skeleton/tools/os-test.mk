@@ -38,7 +38,8 @@ CPPFLAGS := -D_GNU_SOURCE -D_BSD_SOURCE -D_ALL_SOURCE -D_DEFAULT_SOURCE
 CFLAGS_WARN := -Wall -Wextra -Werror=implicit-function-declaration
 
 # Linker flags - CRT must be first, libc last
-LDFLAGS := $(CRT_OBJ) $(LIBC_A) -Wl,--gc-sections -nostdlib
+LDFLAGS_PRE := $(CRT_OBJ)
+LDFLAGS_POST := $(LIBC_A) -Wl,--gc-sections -nostdlib
 
 # Install target: copy compiled binaries to build/testfs
 OS_TEST_DEST ?= $(SBUNIX_ROOT)/build/testfs/bin/os-test
@@ -120,7 +121,7 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 	if $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -c $< -o $(OUT_DIRECTORY)/$$relpath.o 2>$$_tmpc; then \
 		if [ -s $$_tmpc ]; then _keep_log=1; fi; \
 		cat $$_tmpc > $$compile_log; \
-		if $(CC) $(LDFLAGS) $(OUT_DIRECTORY)/$$relpath.o -o $$outbin 2>$$_tmpl; then \
+		if $(CC) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; then \
 			if [ -s $$_tmpl ]; then _keep_log=1; fi; \
 			cat $$_tmpl >> $$compile_log; \
 			if [ $$_keep_log -eq 0 ] && [ "$(OS_TEST_SUPPRESS_OK_LOGS)" = "1" ]; then \

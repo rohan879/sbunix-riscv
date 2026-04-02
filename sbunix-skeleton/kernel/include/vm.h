@@ -2,6 +2,7 @@
 #define _VM_H
 
 #include <riscv.h>
+#include <mm.h>
 
 /* Protection bits for vm_area (must match libc PROT_* values) */
 #define PROT_READ   0x01
@@ -21,9 +22,18 @@ struct vm_area {
   int prot;             /* PROT_READ | PROT_WRITE | PROT_EXEC */
   int flags;            /* MAP_PRIVATE | MAP_ANONYMOUS */
   struct vm_area *next; /* sorted linked list by start addr */
+  
   /* File-backed mapping (NULL for anonymous) */
   struct open_file *file; /* backing file (refcount'd) */
   uint64_t file_offset;   /* offset within file for start of mapping */
+  
+  /* Anonymous VMA reverse mapping support */
+  struct list_head anon_vma_chain;   /* list of anon_vma_chain entries */
+  struct anon_vma *anon_vma;         /* primary anon_vma (optimization) */
+  
+  /* Enhanced VMA statistics */
+  uint64_t vm_pgoff;            /* offset within anon_vma (pages) */
+  uint64_t resident_pages;      /* number of resident pages in this VMA */
 };
 
 struct proc; /* forward declaration */
