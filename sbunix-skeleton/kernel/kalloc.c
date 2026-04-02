@@ -3,6 +3,7 @@
 #include <riscv.h>
 #include <string.h>
 #include <swap.h>
+#include "include/mm.h"
 
 extern char _kernel_end[]; // Symbol from linker script
 
@@ -75,6 +76,11 @@ void kfree(void *pa) {
     r->next = kmem.freelist;
     kmem.freelist = r;
     free_page_count++;
+    
+    // Update mm_stats if page descriptors are available
+    if (page_table) {
+        mm_stats.free_pages = free_page_count;
+    }
 }
 
 // Initializes the page allocator.
@@ -89,6 +95,9 @@ void kinit(void) {
 
     printk("kinit: initializing memory from 0x%lx to 0x%lx\n", (unsigned long)p, (unsigned long)PHYSTOP);
 
+    // Initialize enhanced page descriptor system first
+    mm_init_page_descriptors();
+
     for (; p + PAGE_SIZE <= (char*)PHYSTOP; p += PAGE_SIZE) {
         int idx = pa_to_index((uint64_t)p);
         if (idx >= 0 && idx < MAX_PAGES)
@@ -96,25 +105,95 @@ void kinit(void) {
         kfree(p);
     }
 
-    printk("kinit: memory initialized.\n");
+    // Initialize memory pressure watermarks after pages are set up
+    mm_init_watermarks();
+
+    printk("kinit: memory initialized with enhanced page descriptors and pressure detection.\n");
 }
 
-// Allocates one 4096-byte page of physical memory.
-// Returns a pointer that the kernel can use.
-// Returns NULL if the memory cannot be allocated.
-void *kalloc(void) {
+// Original kalloc for internal use and compatibility
+static void *kalloc_internal(void) {
     struct run *r;
 
-    if (free_page_count < SWAP_LOW_WATERMARK && swap_enabled())
+    // Enhanced memory pressure detection
+    if (mm_watermarks.min_free > 0) {  // Check if watermarks initialized
+        int pressure = mm_check_memory_pressure();
+        if (pressure > 0) {
+            mm_stats.pressure_events++;
+            mm_trigger_reclaim(1);  // Try to reclaim pages
+        }
+    } else if (free_page_count < SWAP_LOW_WATERMARK && swap_enabled()) {
+        // Fallback to original pressure handling if watermarks not initialized
         swap_evict_pages(SWAP_EVICT_BATCH);
+    }
 
     r = kmem.freelist;
     if(r) {
         kmem.freelist = r->next;
         free_page_count--;
         page_refcount[pa_to_index((uint64_t)r)] = 1;
+        
+        // Update mm_stats if available
+        if (page_table) {
+            mm_stats.free_pages = free_page_count;
+        }
     }
     return r;
+}
+
+// New enhanced kalloc with page descriptor integration
+void *kalloc(void) {
+    // Use enhanced kalloc if page descriptors are available
+    if (page_table) {
+        return enhanced_kalloc();
+    }
+    // Fallback to original kalloc during early boot
+    return kalloc_internal();
+}
+
+// Enhanced kalloc implementation (moved from mm.c for integration)
+void *enhanced_kalloc(void) {
+    // Check for memory pressure before allocation
+    int pressure = mm_check_memory_pressure();
+    if (pressure >= 2) {  // High or critical pressure
+        mm_stats.pressure_events++;
+        if (mm_direct_reclaim(1) < 0) {
+            // Direct reclaim failed - allocation might fail
+            printk("mm: allocation may fail due to memory pressure\n");
+        }
+    } else if (pressure == 1) {  // Moderate pressure
+        mm_stats.pressure_events++;
+        mm_trigger_reclaim(1);  // Background reclaim
+    }
+    
+    void *pa = kalloc_internal();  // Use internal allocator
+    if (!pa) {
+        // Allocation failed - try emergency reclaim
+        if (mm_direct_reclaim(4) >= 0) {  // Try harder
+            pa = kalloc_internal();  // Retry allocation
+        }
+        if (!pa) {
+            printk("mm: enhanced_kalloc failed despite reclaim attempts\n");
+            return NULL;
+        }
+    }
+    
+    // Initialize page descriptor for newly allocated page
+    struct page *page = virt_to_page(pa);
+    if (page) {
+        page_get(page);  // Increment refcount
+        page->age_score = 128;  // Start with medium age
+        page->access_count = 1;
+        page->last_access = get_ticks();
+        
+        // Set accessed flag since it's just allocated
+        SetPageAccessed(page);
+    }
+    
+    // Update mm_stats to match kalloc internal tracking
+    mm_stats.free_pages = free_page_count;
+    
+    return pa;
 }
 
 int get_free_page_count(void) {
@@ -217,3 +296,7 @@ void kfree_super(void *pa) {
         free_page_count++;
     }
 }
+
+
+/* Enhanced kfree wrapper for page descriptor integration */
+

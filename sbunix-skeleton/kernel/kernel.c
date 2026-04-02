@@ -4,6 +4,7 @@
 #include <kalloc.h>
 #include <exec.h>
 #include <vm.h>
+#include <mm.h>
 #include <proc.h>
 #include <vfs.h>
 #include <trap.h>
@@ -28,6 +29,7 @@ void boot(uint64_t hartid, void *dtb) {
   dtb_print_devices();
 
   kinit();
+  anon_vma_init();  /* Initialize anonymous VMA subsystem */
   kvminit();
 
   timer_init();

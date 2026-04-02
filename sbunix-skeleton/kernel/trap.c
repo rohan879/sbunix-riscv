@@ -14,6 +14,7 @@
 #include <exec.h>
 #include <tty.h>
 #include <swap.h>
+#include <mm.h>
 
 #define TIMER_FREQ 10000000UL  // 10 MHz timebase
 
@@ -24,6 +25,11 @@
 
 static unsigned long boot_time;
 static unsigned long ticks;
+
+/* Get current tick count - accessible from other modules */
+unsigned long get_ticks(void) {
+  return ticks;
+}
 static uint64_t boot_epoch_ns;  /* RTC nanoseconds at boot */
 static unsigned char last_key = 0;
 
@@ -260,6 +266,15 @@ static void handle_timer_interrupt(void) {
     display_time();
     #endif
     timer_set_next();
+    
+    /* Enhanced memory management: age pages periodically */
+    if (ticks % 10 == 0) {  /* Age pages every 10 ticks to reduce overhead */
+        extern struct page *page_table;
+        if (page_table) {
+            mm_age_pages();
+        }
+    }
+    
     /* Wake processes whose timed sleep has expired */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state == SLEEPING && p->waiting_for_uart == 2 &&

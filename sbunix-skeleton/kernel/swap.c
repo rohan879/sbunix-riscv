@@ -6,6 +6,7 @@
 #include <proc.h>
 #include <vm.h>
 #include <virtio_blk.h>
+#include "include/mm.h"
 
 /* ================================================================== */
 /* Swap bitmap                                                         */
@@ -115,7 +116,7 @@ void swap_read(int slot, void *page) {
 }
 
 /* ================================================================== */
-/* Eviction: clock (second-chance) algorithm                           */
+/* Eviction: enhanced clock algorithm with page descriptor integration */
 /* ================================================================== */
 
 void swap_evict_pages(int n) {
@@ -128,6 +129,10 @@ void swap_evict_pages(int n) {
    * a reasonable per-process VA step limit. */
   int max_iterations = 64 * 2 * 256;
   int iterations = 0;
+  
+  /* Enhanced clock algorithm statistics */
+  extern struct mm_stat mm_stats;
+  mm_stats.clock_scans++;
 
   while (evicted < n && iterations < max_iterations) {
     iterations++;
@@ -169,27 +174,89 @@ void swap_evict_pages(int n) {
       if (pa < (uint64_t)_kernel_end)
         goto advance;
 
-      /* Skip COW-shared pages (refcount > 1) */
-      if (page_ref_get(pa) > 1)
-        goto advance;
-
-      /* Second chance: check accessed bit (bit 6 in RISC-V Sv39) */
-      if (*pte & (1L << 6)) {
-        /* Clear accessed bit, give second chance */
-        *pte &= ~(1L << 6);
-        asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
-        goto advance;
+      /* Enhanced victim selection using page descriptors */
+      struct page *page = virt_to_page((void *)pa);
+      if (page) {
+        /* Skip pages with multiple mappings (shared pages) */
+        int mapcount = atomic_read(&page->mapcount);
+        if (mapcount > 0) {
+          goto advance;
+        }
+        
+        /* Enhanced aging: use age_score instead of simple accessed bit */
+        if (*pte & (1L << 6)) {
+          /* Page was accessed - update our tracking */
+          mark_page_accessed(page);
+          *pte &= ~(1L << 6);
+          asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+        }
+        
+        /* Multi-level aging decision */
+        if (page->age_score > 64) {
+          /* Young page - give it more chances */
+          if (page->age_score > 128) {
+            page->age_score -= 32;  /* Rapid aging for very young pages */
+          } else {
+            page->age_score -= 16;  /* Normal aging */
+          }
+          mm_stats.clock_second_chance++;
+          goto advance;
+        }
+        
+        /* Check access frequency for final decision */
+        if (page->access_count > 2) {
+          /* Frequently accessed - give one more chance */
+          page->access_count >>= 1;  /* Decay access count */
+          page->age_score = 32;      /* Reset to moderate age */
+          goto advance;
+        }
+      } else {
+        /* Fallback to old reference counting if no page descriptor */
+        if (page_ref_get(pa) > 1)
+          goto advance;
+          
+        /* Fallback to simple accessed bit check */
+        if (*pte & (1L << 6)) {
+          *pte &= ~(1L << 6);
+          asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+          goto advance;
+        }
       }
 
       /* This page is the victim -- evict it */
       int slot = swap_alloc();
       if (slot < 0)
         break; /* swap full, stop evicting */
+        
+      /* Try to unmap from all VMAs using anon_vma reverse mapping */
+      int unmapped_count = 0;
+      if (page && PageAnon(page)) {
+        unmapped_count = try_to_unmap(page);
+        if (unmapped_count == 0) {
+          /* Could not unmap - manually unmap from current process */
+          *pte = PTE_SWAP_ENCODE(slot, PTE_FLAGS(*pte));
+          asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+        }
+        /* Page should now be unmapped from all processes */
+      } else {
+        /* Non-anonymous page or no page descriptor - use old method */
+        int orig_flags = PTE_FLAGS(*pte);
+        *pte = PTE_SWAP_ENCODE(slot, orig_flags);
+        asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+      }
 
+      /* Write to swap */
       swap_write(slot, (void *)pa);
-      int orig_flags = PTE_FLAGS(*pte);
-      *pte = PTE_SWAP_ENCODE(slot, orig_flags);
-      asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+      
+      /* Update statistics */
+      mm_stats.clock_evictions++;
+      if (page) {
+        /* Mark page as reclaimed in our tracking */
+        SetPageReclaim(page);
+        printk("swap: evicted page pfn=%lu, unmapped from %d VMAs\n", 
+               page_to_pfn(page), unmapped_count);
+      }
+      
       kfree((void *)pa);
       evicted++;
     }

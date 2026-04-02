@@ -343,7 +343,7 @@ int main(int argc, char *argv[]) {
 
     printf("\n=== Final Results ===\n");
     int compile_skipped = TOTAL_OPEN_POSIX_TESTS - total_tests;
-    int compile_pct = total_tests * 100 / TOTAL_OPEN_POSIX_TESTS;
+    int compile_pct = TOTAL_OPEN_POSIX_TESTS > 0 ? (total_tests * 100 / TOTAL_OPEN_POSIX_TESTS) : 0;
     printf("Tests in suite:  %d\n", TOTAL_OPEN_POSIX_TESTS);
     printf("Compiled:        %d (%d%%)\n", total_tests, compile_pct);
     printf("Build skipped:   %d (missing POSIX features)\n", compile_skipped);
