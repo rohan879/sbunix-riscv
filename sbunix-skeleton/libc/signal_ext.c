@@ -113,8 +113,14 @@ int sigwaitinfo(const sigset_t *set, siginfo_t *info) {
 
 int sigpause(int sig) {
   sigset_t set;
-  sigemptyset(&set);
-  sigaddset(&set, sig);
+  if (sig < 1 || sig >= NSIG) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (sigprocmask(SIG_BLOCK, (const sigset_t *)0, &set) < 0) {
+    return -1;
+  }
+  sigdelset(&set, sig);
   return sigsuspend(&set);
 }
 

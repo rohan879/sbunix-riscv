@@ -89,6 +89,8 @@ struct tm *gmtime_r(const time_t *timep, struct tm *result);
 struct tm *localtime_r(const time_t *timep, struct tm *result);
 char *asctime(const struct tm *tm);
 char *ctime(const time_t *timep);
+char *asctime_r(const struct tm *tm, char *buf);
+char *ctime_r(const time_t *timep, char *buf);
 char *strptime(const char *s, const char *format, struct tm *tm);
 void tzset(void);
 struct tm *getdate(const char *string);

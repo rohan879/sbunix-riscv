@@ -769,6 +769,75 @@ long long __fixdfdi(double a)
   return (long long)mag;
 }
 
+unsigned long long __fixunsdfdi(double a)
+{
+  f64_u ua;
+  int sign;
+  int exp;
+  uint64_t frac;
+  uint64_t sig;
+  int shift;
+  uint64_t mag;
+
+  ua.d = a;
+  sign = (int)(ua.u >> 63);
+  exp = (int)((ua.u >> 52) & 0x7FFULL);
+  frac = ua.u & 0x000FFFFFFFFFFFFFULL;
+
+  if (exp == 0x7FF) {
+    if (frac != 0) {
+      return 0;
+    }
+    return sign ? 0 : 0xFFFFFFFFFFFFFFFFULL;
+  }
+
+  if (sign || exp == 0) {
+    return 0;
+  }
+
+  exp = exp - 1023;
+  if (exp < 0) {
+    return 0;
+  }
+
+  sig = (1ULL << 52) | frac;
+  shift = exp - 52;
+  if (shift >= 0) {
+    if (shift > 11) {
+      return 0xFFFFFFFFFFFFFFFFULL;
+    }
+    mag = sig << shift;
+  } else {
+    mag = sig >> (-shift);
+  }
+
+  return mag;
+}
+
+long long __fixsfdi(float a)
+{
+  return __fixdfdi(__extendsfdf2(a));
+}
+
+unsigned long long __fixunssfdi(float a)
+{
+  return __fixunsdfdi(__extendsfdf2(a));
+}
+
+unsigned int __fixunsdfsi(double a)
+{
+  unsigned long long v = __fixunsdfdi(a);
+  if (v > 0xFFFFFFFFULL) {
+    return 0xFFFFFFFFU;
+  }
+  return (unsigned int)v;
+}
+
+unsigned int __fixunssfsi(float a)
+{
+  return __fixunsdfsi(__extendsfdf2(a));
+}
+
 float __addsf3(float a, float b)
 {
   double da = __extendsfdf2(a);

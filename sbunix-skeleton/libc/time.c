@@ -191,12 +191,34 @@ char *asctime(const struct tm *tm)
     return buf;
 }
 
+char *asctime_r(const struct tm *tm, char *buf)
+{
+    if (!tm || !buf)
+        return (char *)0;
+    snprintf(buf, 26, "%s %s %2d %02d:%02d:%02d %d\n",
+             _wday_abbr[tm->tm_wday < 0 ? 0 : tm->tm_wday % 7],
+             _mon_abbr[tm->tm_mon < 0 ? 0 : tm->tm_mon % 12],
+             tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec,
+             tm->tm_year + 1900);
+    return buf;
+}
+
 char *ctime(const time_t *timep)
 {
     struct tm *tm = localtime(timep);
     if (!tm)
         return (char *)0;
     return asctime(tm);
+}
+
+char *ctime_r(const time_t *timep, char *buf)
+{
+    struct tm tmp;
+    if (!timep || !buf)
+        return (char *)0;
+    if (!localtime_r(timep, &tmp))
+        return (char *)0;
+    return asctime_r(&tmp, buf);
 }
 
 char *strptime(const char *s, const char *format, struct tm *tm)
