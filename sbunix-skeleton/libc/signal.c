@@ -143,20 +143,15 @@ int pause(void) {
  * Simple implementation: loop checking sigpending, sigsuspend if none ready.
  */
 int sigwait(const sigset_t *set, int *sig) {
-    sigset_t pending;
-    for (;;) {
-        sigpending(&pending);
-        for (int i = 1; i < 32; i++) {
-            if (sigismember(set, i) && sigismember(&pending, i)) {
-                *sig = i;
-                // Consume the signal
-                sigset_t block;
-                sigemptyset(&block);
-                sigaddset(&block, i);
-                sigprocmask(SIG_UNBLOCK, &block, NULL);
-                return 0;
-            }
-        }
-        sigsuspend(set);
-    }
+    int signo;
+
+    if (!set || !sig)
+        return EINVAL;
+
+    signo = sigwaitinfo(set, (siginfo_t *)0);
+    if (signo < 0)
+        return errno;
+
+    *sig = signo;
+    return 0;
 }
