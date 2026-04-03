@@ -313,9 +313,16 @@ static void handle_timer_interrupt(void) {
                     /* Periodic: schedule next expiry */
                     p->timers[i].next_expiry_ticks += p->timers[i].interval_ticks;
                     /* Handle missed periods (overruns) */
-                    while (p->timers[i].next_expiry_ticks <= now) {
+                    int overrun_limit = 1000; /* safety guard against infinite loop */
+                    while (p->timers[i].next_expiry_ticks <= now && overrun_limit > 0) {
                         p->timers[i].overrun++;
                         p->timers[i].next_expiry_ticks += p->timers[i].interval_ticks;
+                        overrun_limit--;
+                    }
+                    /* If we hit the limit, disarm the timer to prevent system hang */
+                    if (overrun_limit <= 0) {
+                        p->timers[i].next_expiry_ticks = 0;
+                        p->timers[i].used = 0;
                     }
                 } else {
                     /* One-shot: disarm timer */
