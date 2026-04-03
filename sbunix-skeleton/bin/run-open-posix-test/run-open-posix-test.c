@@ -63,6 +63,27 @@ static void alarm_handler(int sig) {
     timed_out = 1;
 }
 
+static void install_timeout_alarm(struct sigaction *old_alrm, sigset_t *old_mask) {
+    struct sigaction sa;
+    timed_out = 0;
+    sa.sa_handler = alarm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sa.sa_restorer = NULL;
+    sigprocmask(SIG_BLOCK, NULL, old_mask);
+    sigset_t mask = *old_mask;
+    sigdelset(&mask, SIGALRM);
+    sigprocmask(SIG_SETMASK, &mask, NULL);
+    sigaction(SIGALRM, &sa, old_alrm);
+    alarm(5);
+}
+
+static void uninstall_timeout_alarm(const struct sigaction *old_alrm, const sigset_t *old_mask) {
+    alarm(0);
+    sigaction(SIGALRM, old_alrm, NULL);
+    sigprocmask(SIG_SETMASK, old_mask, NULL);
+}
+
 /*
  * Extract category from path: conformance/definitions/unistd_h/1-1 -> definitions
  */
@@ -231,17 +252,10 @@ static enum test_result classify_from_exit(int exit_code) {
 static enum test_result run_test(int test_idx) {
     char output[MAX_OUTPUT];
     struct sigaction old_alrm;
-    struct sigaction sa;
-    timed_out = 0;
-    sa.sa_handler = alarm_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sa.sa_restorer = NULL;
-    sigaction(SIGALRM, &sa, &old_alrm);
-    alarm(5);
+    sigset_t old_mask;
+    install_timeout_alarm(&old_alrm, &old_mask);
     int exit_code = run_test_capture(tests[test_idx].path, output, sizeof(output));
-    alarm(0);
-    sigaction(SIGALRM, &old_alrm, NULL);
+    uninstall_timeout_alarm(&old_alrm, &old_mask);
 
     if (timed_out) {
         snprintf(output, sizeof(output), "exit: %d\n", 124);
@@ -287,19 +301,12 @@ int main(int argc, char *argv[]) {
         
         /* Install timeout alarm handler */
         struct sigaction old_alrm;
-        struct sigaction sa;
-        timed_out = 0;
-        sa.sa_handler = alarm_handler;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        sa.sa_restorer = NULL;
-        sigaction(SIGALRM, &sa, &old_alrm);
-        alarm(5);
+        sigset_t old_mask;
+        install_timeout_alarm(&old_alrm, &old_mask);
         
         int exit_code = run_test_capture(single_test.path, output, sizeof(output));
         
-        alarm(0);
-        sigaction(SIGALRM, &old_alrm, NULL);
+        uninstall_timeout_alarm(&old_alrm, &old_mask);
         
         if (timed_out) {
             snprintf(output, sizeof(output), "exit: %d\n", 124);

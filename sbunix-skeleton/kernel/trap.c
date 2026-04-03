@@ -2094,6 +2094,11 @@ static long sys_kill_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
 
+    if (sig < 0)
+        return (long)-22; /* -EINVAL */
+    if (sig != 0 && !signal_is_valid(sig))
+        return (long)-22; /* -EINVAL */
+
     if (target_pid == 0) {
         /* Send to all processes in caller's process group */
         pid_t pgid = current_proc->pgid;
