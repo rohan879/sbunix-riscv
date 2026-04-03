@@ -3,6 +3,12 @@
 
 #include <sys/types.h>
 
+#ifndef SEEK_SET
+#define SEEK_SET  0
+#define SEEK_CUR  1
+#define SEEK_END  2
+#endif
+
 #define STDIN_FILENO  0
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
@@ -152,6 +158,8 @@ int     nice(int inc);
 
 /* pathconf names */
 #define _PC_FILESIZEBITS   18
+#define _PC_NAME_MAX        3
+#define _PC_PATH_MAX        4
 
 /* confstr names */
 #define _CS_PATH           0

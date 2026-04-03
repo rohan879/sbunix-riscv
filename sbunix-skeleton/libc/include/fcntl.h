@@ -2,6 +2,14 @@
 #define _FCNTL_H
 
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#ifndef SEEK_SET
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+#endif
 
 /*
  * File access modes (bits 0-1 are mutually exclusive).
@@ -24,6 +32,11 @@
 #define O_DIRECTORY 0200000 /* fail if not a directory */
 #define O_NOFOLLOW  0400000 /* do not follow symlinks */
 #define O_CLOEXEC   02000000 /* set FD_CLOEXEC */
+#define O_RSYNC     O_SYNC
+#define O_EXEC      010000000
+#define O_SEARCH    O_DIRECTORY
+#define O_TTY_INIT  0
+#define O_CLOFORK   040000000
 
 /* Special value for openat() — use CWD as base */
 #define AT_FDCWD    (-100)
@@ -41,6 +54,18 @@
 #define F_GETLK     5
 #define F_SETLK     6
 #define F_SETLKW    7
+#define F_DUPFD_CLOEXEC 1030
+#define F_GETOWN    9
+#define F_SETOWN    8
+#define F_GETOWN_EX 16
+#define F_SETOWN_EX 15
+#define F_OFD_GETLK 36
+#define F_OFD_SETLK 37
+#define F_OFD_SETLKW 38
+#define F_DUPFD_CLOFORK 1031
+
+#define F_OWNER_PID 1
+#define F_OWNER_PGRP 2
 
 #define F_RDLCK     0
 #define F_WRLCK     1
@@ -48,6 +73,12 @@
 
 /* File descriptor flags for F_GETFD / F_SETFD */
 #define FD_CLOEXEC  1
+#define FD_CLOFORK  2
+
+struct f_owner_ex {
+  int type;
+  pid_t pid;
+};
 
 struct flock {
   short l_type;
@@ -61,5 +92,15 @@ int open(const char *path, int flags, ...);
 int openat(int dirfd, const char *path, int flags, ...);
 int creat(const char *path, mode_t mode);
 int fcntl(int fd, int cmd, ...);
+
+#define POSIX_FADV_NORMAL     0
+#define POSIX_FADV_RANDOM     1
+#define POSIX_FADV_SEQUENTIAL 2
+#define POSIX_FADV_WILLNEED   3
+#define POSIX_FADV_DONTNEED   4
+#define POSIX_FADV_NOREUSE    5
+
+int posix_fadvise(int fd, off_t offset, off_t len, int advice);
+int posix_fallocate(int fd, off_t offset, off_t len);
 
 #endif /* _FCNTL_H */

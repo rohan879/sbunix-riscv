@@ -2,6 +2,17 @@
 #define _TIME_H
 
 #include <sys/types.h>
+#include <locale.h>
+
+#ifndef __sigval_t_defined
+typedef union sigval {
+  int sival_int;
+  void *sival_ptr;
+} sigval_t;
+#define __sigval_t_defined
+#endif
+
+struct sigevent;
 
 struct timespec {
     time_t tv_sec;   /* seconds */
@@ -23,6 +34,16 @@ struct tm {
     int tm_wday;   /* days since Sunday [0, 6] */
     int tm_yday;   /* days since January 1 [0, 365] */
     int tm_isdst;  /* Daylight Saving Time flag */
+    long tm_gmtoff;
+    const char *tm_zone;
+};
+
+typedef int clockid_t;
+typedef void *timer_t;
+
+struct itimerspec {
+    struct timespec it_interval;
+    struct timespec it_value;
 };
 
 /* Clock IDs for clock_gettime */
@@ -31,8 +52,15 @@ struct tm {
 #define CLOCK_PROCESS_CPUTIME_ID 2
 #define CLOCK_THREAD_CPUTIME_ID  3
 
+#define TIME_UTC 1
+
+#define SIGEV_SIGNAL 0
+
 time_t time(time_t *t);
 int    clock_gettime(int clk_id, struct timespec *tp);
+int    clock_getres(clockid_t clockid, struct timespec *res);
+int    clock_settime(clockid_t clockid, const struct timespec *tp);
+int    clock_getcpuclockid(pid_t pid, clockid_t *clock_id);
 int    nanosleep(const struct timespec *req, struct timespec *rem);
 int    gettimeofday(struct timeval *tv, void *tz);
 
@@ -44,8 +72,18 @@ int clock_nanosleep(int clockid, int flags,
 
 struct tm *gmtime(const time_t *timep);
 struct tm *localtime(const time_t *timep);
+struct tm *gmtime_r(const time_t *timep, struct tm *result);
+struct tm *localtime_r(const time_t *timep, struct tm *result);
+char *asctime(const struct tm *tm);
+char *ctime(const time_t *timep);
+char *strptime(const char *s, const char *format, struct tm *tm);
+void tzset(void);
+struct tm *getdate(const char *string);
+extern int getdate_err;
 time_t     mktime(struct tm *tm);
 size_t     strftime(char *s, size_t max, const char *fmt, const struct tm *tm);
+size_t     strftime_l(char *s, size_t max, const char *fmt, const struct tm *tm,
+                      locale_t locale);
 
 /* CPU time */
 typedef long clock_t;
@@ -54,5 +92,19 @@ clock_t clock(void);
 
 /* difftime */
 double difftime(time_t time1, time_t time0);
+
+int timer_create(clockid_t clockid, struct sigevent *evp, timer_t *timerid);
+int timer_delete(timer_t timerid);
+int timer_getoverrun(timer_t timerid);
+int timer_gettime(timer_t timerid, struct itimerspec *value);
+int timer_settime(timer_t timerid, int flags,
+                  const struct itimerspec *value,
+                  struct itimerspec *ovalue);
+
+int timespec_get(struct timespec *ts, int base);
+
+extern int daylight;
+extern long timezone;
+extern char *tzname[2];
 
 #endif /* _TIME_H */

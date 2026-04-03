@@ -14,6 +14,9 @@
 #include <string.h>
 #include <limits.h>
 
+static int c_locale_obj;
+static locale_t current_thread_locale = (locale_t)&c_locale_obj;
+
 /* Number of locale categories (LC_ALL through LC_MESSAGES) */
 #define NUM_CATEGORIES 7
 
@@ -130,4 +133,46 @@ char *setlocale(int category, const char *locale)
 struct lconv *localeconv(void)
 {
     return &c_lconv;
+}
+
+locale_t duplocale(locale_t locobj)
+{
+    if (!locobj || locobj == LC_GLOBAL_LOCALE)
+        return (locale_t)&c_locale_obj;
+    return locobj;
+}
+
+void freelocale(locale_t locobj)
+{
+    (void)locobj;
+}
+
+locale_t newlocale(int category_mask, const char *locale, locale_t base)
+{
+    (void)category_mask;
+    (void)base;
+    if (!locale)
+        return (locale_t)0;
+    if (!locale_is_valid(locale))
+        return (locale_t)0;
+    return (locale_t)&c_locale_obj;
+}
+
+locale_t uselocale(locale_t newloc)
+{
+    locale_t old = current_thread_locale;
+    if (!newloc)
+        return old;
+    if (newloc == LC_GLOBAL_LOCALE)
+        return old;
+    current_thread_locale = newloc;
+    return old;
+}
+
+const char *getlocalename_l(int category, locale_t locale)
+{
+    (void)locale;
+    if (category < LC_ALL || category > LC_MESSAGES)
+        return (const char *)0;
+    return "C";
 }

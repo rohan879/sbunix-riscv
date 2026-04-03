@@ -3,6 +3,7 @@
 
 #include <sys/types.h>
 #include <stddef.h>
+#include <locale.h>
 
 size_t strlen(const char *s);
 int    strcmp(const char *s1, const char *s2);
@@ -34,5 +35,16 @@ char  *stpncpy(char *dst, const char *src, size_t n);
 char  *strsignal(int sig);
 char  *strtok_r(char *str, const char *delim, char **saveptr);
 int    strerror_r(int errnum, char *buf, size_t buflen);
+
+void  *memccpy(void *dst, const void *src, int c, size_t n);
+void  *memmem(const void *haystack, size_t haystacklen,
+              const void *needle, size_t needlelen);
+size_t strlcpy(char *dst, const char *src, size_t size);
+size_t strlcat(char *dst, const char *src, size_t size);
+int    strcoll(const char *s1, const char *s2);
+int    strcoll_l(const char *s1, const char *s2, locale_t locale);
+size_t strxfrm(char *dst, const char *src, size_t n);
+size_t strxfrm_l(char *dst, const char *src, size_t n, locale_t locale);
+char  *strerror_l(int errnum, locale_t locale);
 
 #endif

@@ -14,6 +14,7 @@
  */
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -42,6 +43,68 @@ DIR *opendir(const char *name) {
     return dp;
 }
 
+DIR *fdopendir(int fd) {
+    if (fd < 0) {
+        errno = EBADF;
+        return (void *)0;
+    }
+    DIR *dp = (DIR *)malloc(sizeof(DIR));
+    if (!dp)
+        return (void *)0;
+    dp->fd = fd;
+    dp->buf_pos = 0;
+    dp->buf_len = 0;
+    return dp;
+}
+
+int dirfd(DIR *dirp) {
+    if (!dirp) {
+        errno = EINVAL;
+        return -1;
+    }
+    return dirp->fd;
+}
+
+ssize_t posix_getdents(int fd, void *buf, size_t nbytes, int flags) {
+    (void)flags;
+    if (!buf || nbytes == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    char kbuf[2048];
+    long kn = getdents64(fd, (struct linux_dirent64 *)kbuf, sizeof(kbuf));
+    if (kn <= 0)
+        return (ssize_t)kn;
+
+    size_t out = 0;
+    size_t off = 0;
+    while (off < (size_t)kn) {
+        struct linux_dirent64 *kd = (struct linux_dirent64 *)(kbuf + off);
+        size_t nlen = strnlen(kd->d_name, NAME_MAX);
+        size_t reclen = sizeof(struct posix_dent) + nlen + 1;
+        if (out + reclen > nbytes) {
+            if (out == 0) {
+                errno = EINVAL;
+                return -1;
+            }
+            break;
+        }
+
+        struct posix_dent *pd = (struct posix_dent *)((char *)buf + out);
+        pd->d_ino = (ino_t)kd->d_ino;
+        pd->d_reclen = (reclen_t)reclen;
+        pd->d_type = kd->d_type;
+        memcpy(pd->d_name, kd->d_name, nlen);
+        pd->d_name[nlen] = '\0';
+
+        out += reclen;
+        off += kd->d_reclen;
+    }
+
+    return (ssize_t)out;
+}
+
 /* readdir — return the next directory entry, or NULL at end / error */
 struct dirent *readdir(DIR *dirp) {
     static struct dirent ent;
@@ -68,11 +131,48 @@ struct dirent *readdir(DIR *dirp) {
         /* Copy into the POSIX dirent */
         ent.d_ino  = kd->d_ino;
         ent.d_type = kd->d_type;
+        ent.d_reclen = (reclen_t)(sizeof(struct dirent));
+        ent.d_namlen = (reclen_t)strnlen(kd->d_name, NAME_MAX);
         strncpy(ent.d_name, kd->d_name, NAME_MAX);
         ent.d_name[NAME_MAX] = '\0';
 
         return &ent;
     }
+}
+
+int readdir_r(DIR *dirp, struct dirent *entry, struct dirent **result) {
+    if (!dirp || !entry || !result)
+        return EINVAL;
+    struct dirent *de = readdir(dirp);
+    if (!de) {
+        *result = (void *)0;
+        return 0;
+    }
+    *entry = *de;
+    *result = entry;
+    return 0;
+}
+
+long telldir(DIR *dirp) {
+    if (!dirp) {
+        errno = EINVAL;
+        return -1;
+    }
+    off_t cur = lseek(dirp->fd, 0, SEEK_CUR);
+    if (cur < 0)
+        return -1;
+    return (long)(cur - (dirp->buf_len - dirp->buf_pos));
+}
+
+void seekdir(DIR *dirp, long loc) {
+    if (!dirp)
+        return;
+    if (loc < 0)
+        loc = 0;
+    if (lseek(dirp->fd, (off_t)loc, SEEK_SET) < 0)
+        return;
+    dirp->buf_pos = 0;
+    dirp->buf_len = 0;
 }
 
 /* closedir — release a DIR handle */
@@ -91,4 +191,55 @@ void rewinddir(DIR *dirp) {
     lseek(dirp->fd, 0, SEEK_SET);
     dirp->buf_pos = 0;
     dirp->buf_len = 0;
+}
+
+int alphasort(const struct dirent **a, const struct dirent **b) {
+    return strcmp((*a)->d_name, (*b)->d_name);
+}
+
+int scandir(const char *path, struct dirent ***namelist,
+            int (*filter)(const struct dirent *),
+            int (*compar)(const struct dirent **, const struct dirent **)) {
+    if (!path || !namelist) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    DIR *dp = opendir(path);
+    if (!dp)
+        return -1;
+
+    size_t cap = 16;
+    size_t count = 0;
+    struct dirent **list = (struct dirent **)malloc(cap * sizeof(*list));
+    if (!list) {
+        closedir(dp);
+        return -1;
+    }
+
+    struct dirent *de;
+    while ((de = readdir(dp)) != (void *)0) {
+        if (filter && !filter(de))
+            continue;
+        if (count == cap) {
+            size_t newcap = cap * 2;
+            struct dirent **tmp = (struct dirent **)realloc(list, newcap * sizeof(*tmp));
+            if (!tmp)
+                break;
+            list = tmp;
+            cap = newcap;
+        }
+        struct dirent *copy = (struct dirent *)malloc(sizeof(struct dirent));
+        if (!copy)
+            break;
+        *copy = *de;
+        list[count++] = copy;
+    }
+    closedir(dp);
+
+    if (compar && count > 1)
+        qsort(list, count, sizeof(*list), (int (*)(const void *, const void *))compar);
+
+    *namelist = list;
+    return (int)count;
 }

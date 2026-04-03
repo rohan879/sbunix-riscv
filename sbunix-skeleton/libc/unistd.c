@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <errno.h>
 
 ssize_t read(int fd, void *buf, size_t count) {
@@ -375,6 +376,46 @@ pid_t wait(int *status) {
     return waitpid(-1, status, 0);
 }
 
+int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options) {
+    pid_t ret;
+    int status = 0;
+
+    (void)options;
+
+    switch (idtype) {
+        case P_PID:
+            ret = waitpid((pid_t)id, &status, 0);
+            break;
+        case P_PGID:
+            ret = waitpid(-(pid_t)id, &status, 0);
+            break;
+        case P_ALL:
+            ret = waitpid(-1, &status, 0);
+            break;
+        default:
+            errno = EINVAL;
+            return -1;
+    }
+
+    if (ret < 0)
+        return -1;
+
+    if (infop) {
+        memset(infop, 0, sizeof(*infop));
+        infop->si_signo = SIGCHLD;
+        infop->si_pid = ret;
+        infop->si_status = status;
+        if (WIFEXITED(status))
+            infop->si_code = CLD_EXITED;
+        else if (WIFSIGNALED(status))
+            infop->si_code = CLD_KILLED;
+        else if (WIFSTOPPED(status))
+            infop->si_code = CLD_STOPPED;
+    }
+
+    return 0;
+}
+
 unsigned int alarm(unsigned int seconds) {
     return (unsigned int)syscall(SYS_alarm, seconds);
 }
@@ -470,6 +511,10 @@ long pathconf(const char *path, int name) {
     (void)path;
     if (name == _PC_FILESIZEBITS)
         return 64;
+    if (name == _PC_NAME_MAX)
+        return 255;
+    if (name == _PC_PATH_MAX)
+        return 4096;
     errno = EINVAL;
     return -1;
 }
@@ -478,6 +523,10 @@ long fpathconf(int fd, int name) {
     (void)fd;
     if (name == _PC_FILESIZEBITS)
         return 64;
+    if (name == _PC_NAME_MAX)
+        return 255;
+    if (name == _PC_PATH_MAX)
+        return 4096;
     errno = EINVAL;
     return -1;
 }

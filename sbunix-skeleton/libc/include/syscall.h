@@ -46,10 +46,19 @@
 #define SYS_rt_sigaction  134
 #define SYS_rt_sigprocmask 135
 #define SYS_rt_sigpending 136
+#define SYS_rt_sigtimedwait 137
+#define SYS_rt_sigqueueinfo 138
 
 /* Time */
 #define SYS_nanosleep   101
+#define SYS_timer_create 107
+#define SYS_timer_gettime 108
+#define SYS_timer_getoverrun 109
+#define SYS_timer_settime 110
+#define SYS_timer_delete 111
+#define SYS_clock_settime 112
 #define SYS_clock_gettime 113
+#define SYS_clock_getres 114
 #define SYS_clock_nanosleep 115
 #define SYS_gettimeofday  169
 
@@ -144,9 +153,6 @@
 #define SIGCHLD   17
 #define WNOHANG   1
 
-/* Wait macros (kept here for backward compatibility; also in <sys/wait.h>) */
-#define WEXITSTATUS(s)  (((s) >> 8) & 0xff)
-#define WTERMSIG(s)     ((s) & 0x7f)
-#define WIFEXITED(s)    (WTERMSIG(s) == 0)
+/* Wait macros live in <sys/wait.h> */
 
 long syscall(long num, ...);

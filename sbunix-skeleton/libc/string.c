@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdlib.h>
+#include <locale.h>
 
 size_t strlen(const char *s) {
     size_t i = 0;
@@ -424,4 +425,112 @@ int ffs(int i) {
     int pos = 1;
     while (!(i & 1)) { i >>= 1; pos++; }
     return pos;
+}
+
+int ffsl(long i) {
+    if (i == 0) return 0;
+    int pos = 1;
+    while (!(i & 1L)) { i >>= 1; pos++; }
+    return pos;
+}
+
+int ffsll(long long i) {
+    if (i == 0) return 0;
+    int pos = 1;
+    while (!(i & 1LL)) { i >>= 1; pos++; }
+    return pos;
+}
+
+void *memccpy(void *dst, const void *src, int c, size_t n) {
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    unsigned char ch = (unsigned char)c;
+    for (size_t i = 0; i < n; i++) {
+        d[i] = s[i];
+        if (s[i] == ch)
+            return d + i + 1;
+    }
+    return (void *)0;
+}
+
+void *memmem(const void *haystack, size_t haystacklen,
+             const void *needle, size_t needlelen) {
+    const unsigned char *h = (const unsigned char *)haystack;
+    const unsigned char *n = (const unsigned char *)needle;
+
+    if (needlelen == 0)
+        return (void *)h;
+    if (haystacklen < needlelen)
+        return (void *)0;
+
+    for (size_t i = 0; i + needlelen <= haystacklen; i++) {
+        if (h[i] == n[0] && memcmp(h + i, n, needlelen) == 0)
+            return (void *)(h + i);
+    }
+    return (void *)0;
+}
+
+size_t strlcpy(char *dst, const char *src, size_t size) {
+    size_t slen = strlen(src);
+    if (size != 0) {
+        size_t n = (slen >= size) ? (size - 1) : slen;
+        memcpy(dst, src, n);
+        dst[n] = '\0';
+    }
+    return slen;
+}
+
+size_t strlcat(char *dst, const char *src, size_t size) {
+    size_t dlen = strnlen(dst, size);
+    size_t slen = strlen(src);
+
+    if (dlen == size)
+        return size + slen;
+
+    size_t n = size - dlen - 1;
+    if (n > 0) {
+        size_t cpy = slen < n ? slen : n;
+        memcpy(dst + dlen, src, cpy);
+        dst[dlen + cpy] = '\0';
+    }
+    return dlen + slen;
+}
+
+int strcoll(const char *s1, const char *s2) {
+    return strcmp(s1, s2);
+}
+
+int strcoll_l(const char *s1, const char *s2, locale_t locale) {
+    (void)locale;
+    return strcmp(s1, s2);
+}
+
+size_t strxfrm(char *dst, const char *src, size_t n) {
+    size_t len = strlen(src);
+    if (n > 0) {
+        size_t cpy = len < (n - 1) ? len : (n - 1);
+        memcpy(dst, src, cpy);
+        dst[cpy] = '\0';
+    }
+    return len;
+}
+
+size_t strxfrm_l(char *dst, const char *src, size_t n, locale_t locale) {
+    (void)locale;
+    return strxfrm(dst, src, n);
+}
+
+char *strerror_l(int errnum, locale_t locale) {
+    (void)locale;
+    return strerror(errnum);
+}
+
+int strcasecmp_l(const char *s1, const char *s2, locale_t locale) {
+    (void)locale;
+    return strcasecmp(s1, s2);
+}
+
+int strncasecmp_l(const char *s1, const char *s2, size_t n, locale_t locale) {
+    (void)locale;
+    return strncasecmp(s1, s2, n);
 }

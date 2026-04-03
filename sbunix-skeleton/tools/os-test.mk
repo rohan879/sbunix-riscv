@@ -95,6 +95,7 @@ setup:
 	@echo "OS_TEST_SRC=$(OS_TEST_SRC)"
 	@echo ""
 	@mkdir -p $(OUT_DIRECTORY)
+	@rm -rf $(COMPILE_LOG_DIR)
 	@mkdir -p $(COMPILE_LOG_DIR)
 	@mkdir -p $(OS_TEST_DEST)
 	@echo "os-test build summary for SBUnix" > $(SUMMARY_FILE)
@@ -111,26 +112,24 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 	suite=$$(echo $$dir | cut -d'/' -f1); \
 	mkdir -p $(OUT_DIRECTORY)/$$dir; \
 	mkdir -p $(OS_TEST_DEST)/$$dir; \
-	mkdir -p $(COMPILE_LOG_DIR)/$$dir; \
 	outbin=$(OUT_DIRECTORY)/$$relpath; \
 	compile_log=$(COMPILE_LOG_DIR)/$$relpath.log; \
 	rm -f $$outbin $(OUT_DIRECTORY)/$$relpath.o; \
 	_tmpc=$$(mktemp); \
 	_tmpl=$$(mktemp); \
-	_keep_log=0; \
 	if $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -c $< -o $(OUT_DIRECTORY)/$$relpath.o 2>$$_tmpc; then \
-		if [ -s $$_tmpc ]; then _keep_log=1; fi; \
-		cat $$_tmpc > $$compile_log; \
 		if $(CC) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; then \
-			if [ -s $$_tmpl ]; then _keep_log=1; fi; \
-			cat $$_tmpl >> $$compile_log; \
-			if [ $$_keep_log -eq 0 ] && [ "$(OS_TEST_SUPPRESS_OK_LOGS)" = "1" ]; then \
-				rm -f $$compile_log; \
+			if [ -s $$_tmpc ] || [ -s $$_tmpl ]; then \
+				mkdir -p $$(dirname $$compile_log); \
+				cat $$_tmpc > $$compile_log; \
+				cat $$_tmpl >> $$compile_log; \
 			fi; \
 			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
 			cp $$outbin $@; \
 			echo "  OK: $$relpath"; \
 		else \
+			mkdir -p $$(dirname $$compile_log); \
+			cat $$_tmpc > $$compile_log; \
 			cat $$_tmpl >> $$compile_log; \
 			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
 			echo "undefined" > $(OUT_DIRECTORY)/$$relpath.out; \
@@ -139,6 +138,7 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 			touch $@.failed; \
 		fi; \
 	else \
+		mkdir -p $$(dirname $$compile_log); \
 		cat $$_tmpc > $$compile_log; \
 		rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
 		if grep -qE 'fatal error' $$compile_log 2>/dev/null; then \

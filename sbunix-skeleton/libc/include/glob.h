@@ -14,6 +14,7 @@ typedef struct {
 #define GLOB_NOCHECK  0x08
 #define GLOB_APPEND   0x10
 #define GLOB_NOESCAPE 0x20
+#define GLOB_DOOFFS   0x40
 
 #define GLOB_NOSPACE  1
 #define GLOB_ABORTED  2

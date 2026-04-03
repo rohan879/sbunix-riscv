@@ -7,6 +7,8 @@
 
 #include <termios.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
+#include <errno.h>
 
 /* TCGETS = 0x5401, TCSETS = 0x5402, TCSETSW = 0x5403, TCSETSF = 0x5404 */
 #define TCGETS  0x5401
@@ -65,4 +67,27 @@ int tcflow(int fd, int action) {
 
 int tcsendbreak(int fd, int duration) {
     return ioctl(fd, 0x5409 /* TCSBRK */, duration);
+}
+
+pid_t tcgetsid(int fd) {
+    pid_t pgrp = tcgetpgrp(fd);
+    if (pgrp < 0)
+        return -1;
+    return getsid(pgrp);
+}
+
+int tcgetwinsize(int fd, struct winsize *ws) {
+    if (!ws) {
+        errno = EINVAL;
+        return -1;
+    }
+    return ioctl(fd, TIOCGWINSZ, ws);
+}
+
+int tcsetwinsize(int fd, const struct winsize *ws) {
+    if (!ws) {
+        errno = EINVAL;
+        return -1;
+    }
+    return ioctl(fd, TIOCSWINSZ, (void *)ws);
 }

@@ -2,6 +2,8 @@
 #define _TERMIOS_H
 
 #include <stdint.h>
+#include <sys/types.h>
+#include <sys/ioctl.h>
 
 /* Type aliases */
 typedef unsigned int tcflag_t;
@@ -15,7 +17,11 @@ typedef unsigned char cc_t;
 #define VEOF     4
 #define VTIME    5
 #define VMIN     6
+#define VSTART   8
+#define VSTOP    9
 #define VSUSP    10
+#define VEOL     11
+#define VKILL    3
 #define NCCS     20
 
 /* c_iflag bits */
@@ -36,6 +42,39 @@ typedef unsigned char cc_t;
 /* c_oflag bits */
 #define OPOST    0x0001
 #define ONLCR    0x0004
+#define OCRNL    0x0008
+#define ONOCR    0x0010
+#define ONLRET   0x0020
+#define OFILL    0x0040
+#define OFDEL    0x0080
+
+#define NLDLY    0x0100
+#define NL0      0x0000
+#define NL1      0x0100
+
+#define CRDLY    0x0600
+#define CR0      0x0000
+#define CR1      0x0200
+#define CR2      0x0400
+#define CR3      0x0600
+
+#define TABDLY   0x1800
+#define TAB0     0x0000
+#define TAB1     0x0800
+#define TAB2     0x1000
+#define TAB3     0x1800
+
+#define BSDLY    0x2000
+#define BS0      0x0000
+#define BS1      0x2000
+
+#define VTDLY    0x4000
+#define VT0      0x0000
+#define VT1      0x4000
+
+#define FFDLY    0x8000
+#define FF0      0x0000
+#define FF1      0x8000
 
 /* c_cflag bits */
 #define CSIZE    0x0030
@@ -68,6 +107,18 @@ typedef unsigned char cc_t;
 
 /* Baud rates (placeholders) */
 #define B0       0
+#define B50      50
+#define B75      75
+#define B110     110
+#define B134     134
+#define B150     150
+#define B200     200
+#define B300     300
+#define B600     600
+#define B1200    1200
+#define B1800    1800
+#define B2400    2400
+#define B4800    4800
 #define B9600    9600
 #define B19200   19200
 #define B38400   38400
@@ -95,6 +146,9 @@ int tcflush(int fd, int queue_selector);
 int tcdrain(int fd);
 int tcflow(int fd, int action);
 int tcsendbreak(int fd, int duration);
+pid_t tcgetsid(int fd);
+int tcgetwinsize(int fd, struct winsize *ws);
+int tcsetwinsize(int fd, const struct winsize *ws);
 
 /* Queue selector constants for tcflush */
 #define TCIFLUSH  0

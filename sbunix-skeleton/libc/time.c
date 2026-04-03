@@ -6,6 +6,8 @@
 #include <syscall.h>
 #include <errno.h>
 #include <string.h>
+#include <signal.h>
+#include <stdio.h>
 
 /* ------------------------------------------------------------------ */
 /*  Internal helpers                                                   */
@@ -34,6 +36,11 @@ static const char *_mon_abbr[] = {
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
 };
+
+int getdate_err;
+int daylight = 0;
+long timezone = 0;
+char *tzname[2] = {"UTC", "UTC"};
 
 /*
  * _append — append src to buf at *pos, respecting max.
@@ -135,6 +142,8 @@ struct tm *gmtime(const time_t *timep)
     result.tm_mon  = mon;
     result.tm_mday = (int)days + 1;
     result.tm_isdst = 0;
+    result.tm_gmtoff = 0;
+    result.tm_zone = "UTC";
 
     return &result;
 }
@@ -146,6 +155,72 @@ struct tm *gmtime(const time_t *timep)
 struct tm *localtime(const time_t *timep)
 {
     return gmtime(timep);
+}
+
+struct tm *gmtime_r(const time_t *timep, struct tm *result)
+{
+    struct tm *tmp = gmtime(timep);
+    if (!tmp || !result)
+        return (struct tm *)0;
+    *result = *tmp;
+    return result;
+}
+
+struct tm *localtime_r(const time_t *timep, struct tm *result)
+{
+    struct tm *tmp = localtime(timep);
+    if (!tmp || !result)
+        return (struct tm *)0;
+    *result = *tmp;
+    return result;
+}
+
+char *asctime(const struct tm *tm)
+{
+    static char buf[32];
+    if (!tm)
+        return (char *)0;
+    snprintf(buf, sizeof(buf), "%s %s %2d %02d:%02d:%02d %d\n",
+             _wday_abbr[tm->tm_wday < 0 ? 0 : tm->tm_wday % 7],
+             _mon_abbr[tm->tm_mon < 0 ? 0 : tm->tm_mon % 12],
+             tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec,
+             tm->tm_year + 1900);
+    return buf;
+}
+
+char *ctime(const time_t *timep)
+{
+    struct tm *tm = localtime(timep);
+    if (!tm)
+        return (char *)0;
+    return asctime(tm);
+}
+
+char *strptime(const char *s, const char *format, struct tm *tm)
+{
+    (void)format;
+    (void)tm;
+    return (char *)s;
+}
+
+void tzset(void)
+{
+    daylight = 0;
+    timezone = 0;
+    tzname[0] = (char *)"UTC";
+    tzname[1] = (char *)"UTC";
+}
+
+struct tm *getdate(const char *string)
+{
+    static struct tm out;
+    char *end = strptime(string, "%Y-%m-%d %H:%M:%S", &out);
+    if (!end) {
+        getdate_err = 7;
+        return (struct tm *)0;
+    }
+    getdate_err = 0;
+    return &out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -232,6 +307,8 @@ time_t mktime(struct tm *tm)
     if (tm->tm_wday < 0)
         tm->tm_wday += 7;
     tm->tm_isdst = 0;
+    tm->tm_gmtoff = 0;
+    tm->tm_zone = "UTC";
 
     return (time_t)(days * 86400 + hour * 3600 + min * 60 + sec);
 }
@@ -339,6 +416,13 @@ done:
     return pos;
 }
 
+size_t strftime_l(char *s, size_t max, const char *fmt,
+                  const struct tm *tm, locale_t locale)
+{
+    (void)locale;
+    return strftime(s, max, fmt, tm);
+}
+
 /*
  * nanosleep() — sleep for at least the duration specified by *req.
  * If interrupted, the remaining time is written to *rem (if non-NULL).
@@ -355,6 +439,28 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
 int clock_gettime(int clk_id, struct timespec *tp) {
     long ret = syscall(SYS_clock_gettime, clk_id, tp);
     return (ret < 0) ? -1 : 0;
+}
+
+int clock_getres(clockid_t clockid, struct timespec *res) {
+    long ret = syscall(SYS_clock_getres, clockid, res);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return 0;
+}
+
+int clock_settime(clockid_t clockid, const struct timespec *tp) {
+    long ret = syscall(SYS_clock_settime, clockid, tp);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return 0;
+}
+
+int clock_getcpuclockid(pid_t pid, clockid_t *clock_id) {
+    (void)pid;
+    if (!clock_id) {
+        errno = EINVAL;
+        return -1;
+    }
+    *clock_id = CLOCK_PROCESS_CPUTIME_ID;
+    return 0;
 }
 
 /*
@@ -405,5 +511,48 @@ clock_t clock(void) {
 }
 
 double difftime(time_t time1, time_t time0) {
-    return (double)(time1 - time0);
+  if (time1 >= time0) {
+    return (double)(long)(time1 - time0);
+  }
+  return -(double)(long)(time0 - time1);
+}
+
+int timer_create(clockid_t clockid, struct sigevent *evp, timer_t *timerid) {
+    long ret = syscall(SYS_timer_create, clockid, evp, timerid);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return 0;
+}
+
+int timer_delete(timer_t timerid) {
+    long ret = syscall(SYS_timer_delete, timerid);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return 0;
+}
+
+int timer_getoverrun(timer_t timerid) {
+    long ret = syscall(SYS_timer_getoverrun, timerid);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return (int)ret;
+}
+
+int timer_gettime(timer_t timerid, struct itimerspec *value) {
+    long ret = syscall(SYS_timer_gettime, timerid, value);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return 0;
+}
+
+int timer_settime(timer_t timerid, int flags,
+                  const struct itimerspec *value,
+                  struct itimerspec *ovalue) {
+    long ret = syscall(SYS_timer_settime, timerid, flags, value, ovalue);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return 0;
+}
+
+int timespec_get(struct timespec *ts, int base) {
+    if (!ts || base != TIME_UTC)
+        return 0;
+    if (clock_gettime(CLOCK_REALTIME, ts) < 0)
+        return 0;
+    return base;
 }

@@ -13,6 +13,9 @@
 #include <errno.h>
 #include <stdarg.h>
 
+extern void __sbunix_memstream_sync(FILE *stream);
+extern void __sbunix_memstream_close(FILE *stream);
+
 /* Static FILE objects for stdin, stdout, stderr */
 static FILE __stdin  = { .fd = 0, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0 };
 static FILE __stdout = { .fd = 1, .eof = 0, .error = 0, .buf_mode = _IOLBF, .wpos = 0 };
@@ -386,6 +389,7 @@ ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream) {
 int fclose(FILE *stream) {
     if (!stream) return EOF;
     __fflush_stream(stream);
+    __sbunix_memstream_close(stream);
     __stream_unregister(stream);
     int ret = close(stream->fd);
     /* Return slot to pool if it's from the pool */
@@ -399,8 +403,11 @@ int fclose(FILE *stream) {
 }
 
 int fflush(FILE *stream) {
-    if (stream)
-        return __fflush_stream(stream);
+    if (stream) {
+        int r = __fflush_stream(stream);
+        __sbunix_memstream_sync(stream);
+        return r;
+    }
     /* fflush(NULL): flush all registered streams */
     if (!__streams_init) {
         __open_streams[0] = stdin;
