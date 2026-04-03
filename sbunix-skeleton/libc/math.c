@@ -13,6 +13,8 @@
 #include <math.h>
 #include <stdint.h>
 
+int signgam = 0;
+
 /* ===================================================================
  * Internal helpers: IEEE 754 bit access
  * =================================================================== */
@@ -763,7 +765,7 @@ double tanh(double x)
  * ---------------------------------------------------------------------- */
 
 double remainder(double x, double y) {
-    if (y == 0.0) return __math_nan();
+    if (y == 0.0) return qnan();
     double n = round(x / y);
     return x - n * y;
 }
@@ -822,3 +824,338 @@ double log1p(double x) {
         return x - 0.5 * x * x + x * x * x / 3.0;
     return log(1.0 + x);
 }
+
+double asinh(double x) {
+    return log(x + sqrt(x * x + 1.0));
+}
+
+double acosh(double x) {
+    if (x < 1.0)
+        return qnan();
+    return log(x + sqrt((x - 1.0) * (x + 1.0)));
+}
+
+double atanh(double x) {
+    if (x <= -1.0 || x >= 1.0)
+        return qnan();
+    return 0.5 * log((1.0 + x) / (1.0 - x));
+}
+
+double fdim(double x, double y) {
+    return (x > y) ? (x - y) : 0.0;
+}
+
+double fma(double x, double y, double z) {
+    return x * y + z;
+}
+
+double logb(double x) {
+    if (x == 0.0)
+        return -pos_inf();
+    if (__math_isnan(x))
+        return x;
+    if (__math_isinf(x))
+        return pos_inf();
+    int e;
+    (void)frexp(fabs(x), &e);
+    return (double)(e - 1);
+}
+
+int ilogb(double x) {
+    if (x == 0.0)
+        return FP_ILOGB0;
+    if (__math_isnan(x))
+        return FP_ILOGBNAN;
+    if (__math_isinf(x))
+        return INT32_MAX;
+    int e;
+    (void)frexp(fabs(x), &e);
+    return e - 1;
+}
+
+double scalbln(double x, long n) {
+    return scalbn(x, (int)n);
+}
+
+double remquo(double x, double y, int *quo) {
+    if (y == 0.0)
+        return qnan();
+    double q = round(x / y);
+    long qi = (long)q;
+    if (quo)
+        *quo = (int)(qi & 0x7f);
+    return x - q * y;
+}
+
+double nextafter(double x, double y) {
+    if (__math_isnan(x) || __math_isnan(y))
+        return qnan();
+    if (x == y)
+        return y;
+
+    f64_bits b;
+    b.d = x;
+
+    if (x == 0.0) {
+        b.u = 1ULL;
+        if (y < 0.0)
+            b.u |= 0x8000000000000000ULL;
+        return b.d;
+    }
+
+    if ((x < y) == (x > 0.0))
+        b.u++;
+    else
+        b.u--;
+
+    return b.d;
+}
+
+double nexttoward(double x, long double y) {
+    return nextafter(x, (double)y);
+}
+
+double nan(const char *tagp) {
+    (void)tagp;
+    return qnan();
+}
+
+double erf(double x) {
+    if (__math_isnan(x))
+        return x;
+    int sign = x < 0.0 ? -1 : 1;
+    x = fabs(x);
+
+    double t = 1.0 / (1.0 + 0.5 * x);
+    double poly = -1.26551223 +
+                  t * (1.00002368 +
+                  t * (0.37409196 +
+                  t * (0.09678418 +
+                  t * (-0.18628806 +
+                  t * (0.27886807 +
+                  t * (-1.13520398 +
+                  t * (1.48851587 +
+                  t * (-0.82215223 +
+                  t * 0.17087277))))))));
+    double tau = t * exp(-x * x + poly);
+    return sign > 0 ? 1.0 - tau : tau - 1.0;
+}
+
+double erfc(double x) {
+    return 1.0 - erf(x);
+}
+
+double lgamma(double x) {
+    signgam = 1;
+    if (x <= 0.0)
+        return qnan();
+    if (x < 12.0) {
+        double y = x;
+        double p = 0.0;
+        while (y < 12.0) {
+            p -= log(y);
+            y += 1.0;
+        }
+        x = y;
+        return p + lgamma(x);
+    }
+    double inv = 1.0 / x;
+    double inv2 = inv * inv;
+    double series = inv / 12.0 - inv2 * inv / 360.0 + inv2 * inv2 * inv / 1260.0;
+    return (x - 0.5) * log(x) - x + 0.91893853320467274178 + series;
+}
+
+double tgamma(double x) {
+    if (x <= 0.0)
+        return qnan();
+    return exp(lgamma(x));
+}
+
+double j0(double x) {
+    double ax = fabs(x);
+    if (ax < 1e-4) {
+        double x2 = x * x;
+        return 1.0 - x2 / 4.0 + (x2 * x2) / 64.0;
+    }
+    return sqrt(2.0 / (M_PI * ax)) * cos(ax - M_PI_4);
+}
+
+double j1(double x) {
+    double ax = fabs(x);
+    if (ax < 1e-4) {
+        double x2 = x * x;
+        return x * (0.5 - x2 / 16.0 + (x2 * x2) / 384.0);
+    }
+    double v = sqrt(2.0 / (M_PI * ax)) * cos(ax - 3.0 * M_PI_4);
+    return x < 0.0 ? -v : v;
+}
+
+double jn(int n, double x) {
+    if (n == 0)
+        return j0(x);
+    if (n == 1)
+        return j1(x);
+    if (x == 0.0)
+        return 0.0;
+    int sign = 1;
+    if (n < 0) {
+        n = -n;
+        if (n & 1)
+            sign = -1;
+    }
+    double jm1 = j0(x);
+    double jcur = j1(x);
+    for (int k = 1; k < n; k++) {
+        double jn1 = (2.0 * k / x) * jcur - jm1;
+        jm1 = jcur;
+        jcur = jn1;
+    }
+    return sign * jcur;
+}
+
+double y0(double x) {
+    if (x <= 0.0)
+        return qnan();
+    return sqrt(2.0 / (M_PI * x)) * sin(x - M_PI_4);
+}
+
+double y1(double x) {
+    if (x <= 0.0)
+        return qnan();
+    return sqrt(2.0 / (M_PI * x)) * sin(x - 3.0 * M_PI_4);
+}
+
+double yn(int n, double x) {
+    if (n == 0)
+        return y0(x);
+    if (n == 1)
+        return y1(x);
+    if (x <= 0.0)
+        return qnan();
+    double ym1 = y0(x);
+    double ycur = y1(x);
+    for (int k = 1; k < n; k++) {
+        double yn1 = (2.0 * k / x) * ycur - ym1;
+        ym1 = ycur;
+        ycur = yn1;
+    }
+    return ycur;
+}
+
+float fabsf(float x) { return (float)fabs((double)x); }
+long double fabsl(long double x) { return (long double)fabs((double)x); }
+float fmodf(float x, float y) { return (float)fmod((double)x, (double)y); }
+long double fmodl(long double x, long double y) { return (long double)fmod((double)x, (double)y); }
+float copysignf(float x, float y) { return (float)copysign((double)x, (double)y); }
+long double copysignl(long double x, long double y) { return (long double)copysign((double)x, (double)y); }
+float fmaxf(float x, float y) { return (float)fmax((double)x, (double)y); }
+long double fmaxl(long double x, long double y) { return (long double)fmax((double)x, (double)y); }
+float fminf(float x, float y) { return (float)fmin((double)x, (double)y); }
+long double fminl(long double x, long double y) { return (long double)fmin((double)x, (double)y); }
+float ceilf(float x) { return (float)ceil((double)x); }
+long double ceill(long double x) { return (long double)ceil((double)x); }
+float floorf(float x) { return (float)floor((double)x); }
+long double floorl(long double x) { return (long double)floor((double)x); }
+float roundf(float x) { return (float)round((double)x); }
+long double roundl(long double x) { return (long double)round((double)x); }
+float truncf(float x) { return (float)trunc((double)x); }
+long double truncl(long double x) { return (long double)trunc((double)x); }
+float frexpf(float x, int *exp) { return (float)frexp((double)x, exp); }
+long double frexpl(long double x, int *exp) { return (long double)frexp((double)x, exp); }
+float ldexpf(float x, int n) { return (float)ldexp((double)x, n); }
+long double ldexpl(long double x, int n) { return (long double)ldexp((double)x, n); }
+float modff(float x, float *iptr) { double i; float r = (float)modf((double)x, &i); if (iptr) *iptr = (float)i; return r; }
+long double modfl(long double x, long double *iptr) { double i; long double r = (long double)modf((double)x, &i); if (iptr) *iptr = (long double)i; return r; }
+float sqrtf(float x) { return (float)sqrt((double)x); }
+long double sqrtl(long double x) { return (long double)sqrt((double)x); }
+float expf(float x) { return (float)exp((double)x); }
+long double expl(long double x) { return (long double)exp((double)x); }
+double exp2(double x) { return exp(x * M_LN2); }
+float exp2f(float x) { return (float)exp2((double)x); }
+long double exp2l(long double x) { return (long double)exp2((double)x); }
+float expm1f(float x) { return (float)expm1((double)x); }
+long double expm1l(long double x) { return (long double)expm1((double)x); }
+float logf(float x) { return (float)log((double)x); }
+long double logl(long double x) { return (long double)log((double)x); }
+float log10f(float x) { return (float)log10((double)x); }
+long double log10l(long double x) { return (long double)log10((double)x); }
+float log2f(float x) { return (float)log2((double)x); }
+long double log2l(long double x) { return (long double)log2((double)x); }
+float log1pf(float x) { return (float)log1p((double)x); }
+long double log1pl(long double x) { return (long double)log1p((double)x); }
+float logbf(float x) { return (float)logb((double)x); }
+long double logbl(long double x) { return (long double)logb((double)x); }
+float powf(float x, float y) { return (float)pow((double)x, (double)y); }
+long double powl(long double x, long double y) { return (long double)pow((double)x, (double)y); }
+float sinf(float x) { return (float)sin((double)x); }
+long double sinl(long double x) { return (long double)sin((double)x); }
+float cosf(float x) { return (float)cos((double)x); }
+long double cosl(long double x) { return (long double)cos((double)x); }
+float tanf(float x) { return (float)tan((double)x); }
+long double tanl(long double x) { return (long double)tan((double)x); }
+float asinf(float x) { return (float)asin((double)x); }
+long double asinl(long double x) { return (long double)asin((double)x); }
+float acosf(float x) { return (float)acos((double)x); }
+long double acosl(long double x) { return (long double)acos((double)x); }
+float atanf(float x) { return (float)atan((double)x); }
+long double atanl(long double x) { return (long double)atan((double)x); }
+float atan2f(float y, float x) { return (float)atan2((double)y, (double)x); }
+long double atan2l(long double y, long double x) { return (long double)atan2((double)y, (double)x); }
+float sinhf(float x) { return (float)sinh((double)x); }
+long double sinhl(long double x) { return (long double)sinh((double)x); }
+float coshf(float x) { return (float)cosh((double)x); }
+long double coshl(long double x) { return (long double)cosh((double)x); }
+float tanhf(float x) { return (float)tanh((double)x); }
+long double tanhl(long double x) { return (long double)tanh((double)x); }
+float asinhf(float x) { return (float)asinh((double)x); }
+long double asinhl(long double x) { return (long double)asinh((double)x); }
+float acoshf(float x) { return (float)acosh((double)x); }
+long double acoshl(long double x) { return (long double)acosh((double)x); }
+float atanhf(float x) { return (float)atanh((double)x); }
+long double atanhl(long double x) { return (long double)atanh((double)x); }
+float remainderf(float x, float y) { return (float)remainder((double)x, (double)y); }
+long double remainderl(long double x, long double y) { return (long double)remainder((double)x, (double)y); }
+float nearbyintf(float x) { return (float)nearbyint((double)x); }
+long double nearbyintl(long double x) { return (long double)nearbyint((double)x); }
+float rintf(float x) { return (float)rint((double)x); }
+long double rintl(long double x) { return (long double)rint((double)x); }
+long lrintf(float x) { return lrint((double)x); }
+long lrintl(long double x) { return lrint((double)x); }
+long long llrintf(float x) { return llrint((double)x); }
+long long llrintl(long double x) { return llrint((double)x); }
+long lround(double x) { return (long)round(x); }
+long lroundf(float x) { return (long)round((double)x); }
+long lroundl(long double x) { return (long)round((double)x); }
+long long llround(double x) { return (long long)round(x); }
+long long llroundf(float x) { return (long long)round((double)x); }
+long long llroundl(long double x) { return (long long)round((double)x); }
+float scalbnf(float x, int n) { return (float)scalbn((double)x, n); }
+long double scalbnl(long double x, int n) { return (long double)scalbn((double)x, n); }
+float scalblnf(float x, long n) { return (float)scalbln((double)x, n); }
+long double scalblnl(long double x, long n) { return (long double)scalbln((double)x, n); }
+float cbrtf(float x) { return (float)cbrt((double)x); }
+long double cbrtl(long double x) { return (long double)cbrt((double)x); }
+float hypotf(float x, float y) { return (float)hypot((double)x, (double)y); }
+long double hypotl(long double x, long double y) { return (long double)hypot((double)x, (double)y); }
+float fdimf(float x, float y) { return (float)fdim((double)x, (double)y); }
+long double fdiml(long double x, long double y) { return (long double)fdim((double)x, (double)y); }
+float fmaf(float x, float y, float z) { return (float)fma((double)x, (double)y, (double)z); }
+long double fmal(long double x, long double y, long double z) { return (long double)fma((double)x, (double)y, (double)z); }
+float remquof(float x, float y, int *q) { return (float)remquo((double)x, (double)y, q); }
+long double remquol(long double x, long double y, int *q) { return (long double)remquo((double)x, (double)y, q); }
+float nextafterf(float x, float y) { return (float)nextafter((double)x, (double)y); }
+long double nextafterl(long double x, long double y) { return (long double)nextafter((double)x, (double)y); }
+float nexttowardf(float x, long double y) { return (float)nexttoward((double)x, y); }
+long double nexttowardl(long double x, long double y) { return (long double)nexttoward((double)x, y); }
+float nanf(const char *tagp) { return (float)nan(tagp); }
+long double nanl(const char *tagp) { return (long double)nan(tagp); }
+float erff(float x) { return (float)erf((double)x); }
+long double erfl(long double x) { return (long double)erf((double)x); }
+float erfcf(float x) { return (float)erfc((double)x); }
+long double erfcl(long double x) { return (long double)erfc((double)x); }
+float lgammaf(float x) { return (float)lgamma((double)x); }
+long double lgammal(long double x) { return (long double)lgamma((double)x); }
+float tgammaf(float x) { return (float)tgamma((double)x); }
+long double tgammal(long double x) { return (long double)tgamma((double)x); }
+int ilogbf(float x) { return ilogb((double)x); }
+int ilogbl(long double x) { return ilogb((double)x); }

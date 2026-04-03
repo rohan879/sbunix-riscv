@@ -2,6 +2,11 @@
 #define _REGEX_H
 
 #include <sys/types.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* regex compilation flags */
 #define REG_EXTENDED  1
@@ -12,6 +17,10 @@
 /* regexec flags */
 #define REG_NOTBOL    1
 #define REG_NOTEOL    2
+#define REG_STARTEND  4
+
+/* non-standard extension accepted by some environments */
+#define REG_MINIMAL   0x1000
 
 /* Error codes */
 #define REG_NOMATCH   1
@@ -33,14 +42,20 @@ typedef struct {
     void  *__priv;        /* internal compiled regex data */
 } regex_t;
 
+typedef ptrdiff_t regoff_t;
+
 typedef struct {
-    int rm_so;   /* byte offset from start of string to start of match */
-    int rm_eo;   /* byte offset from start of string to end of match */
+    regoff_t rm_so;   /* byte offset from start of string to start of match */
+    regoff_t rm_eo;   /* byte offset from start of string to end of match */
 } regmatch_t;
 
 int    regcomp(regex_t *preg, const char *pattern, int cflags);
 int    regexec(const regex_t *preg, const char *string, size_t nmatch, regmatch_t pmatch[], int eflags);
 size_t regerror(int errcode, const regex_t *preg, char *errbuf, size_t errbuf_size);
 void   regfree(regex_t *preg);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

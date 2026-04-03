@@ -2,10 +2,13 @@
 #define _ERRNO_H
 
 /*
- * errno — the thread-local error number set by syscall wrappers.
- * Since SBUnix is single-threaded per process this is a simple global.
+ * errno is exposed as a macro per POSIX/C so #ifndef errno checks pass.
+ * SBUnix is single-threaded per process, so it maps to one process-global
+ * storage slot.
  */
-extern int errno;
+extern int __errno_value;
+static inline int *__errno_location(void) { return &__errno_value; }
+#define errno (*__errno_location())
 
 /* Error numbers (Linux RISC-V ABI — matches <asm-generic/errno-base.h>) */
 #define EPERM    1   /* operation not permitted */

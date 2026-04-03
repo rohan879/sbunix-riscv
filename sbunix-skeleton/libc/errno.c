@@ -10,4 +10,4 @@
 
 #include <errno.h>
 
-int errno = 0;
+int __errno_value = 0;

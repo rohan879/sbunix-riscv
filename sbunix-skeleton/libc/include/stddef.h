@@ -8,5 +8,10 @@ typedef long          ptrdiff_t;
 typedef int wchar_t;
 #endif
 
+typedef struct {
+  long long __max_align_ll;
+  long double __max_align_ld;
+} max_align_t;
+
 #define NULL ((void *)0)
 #define offsetof(type, member) __builtin_offsetof(type, member)

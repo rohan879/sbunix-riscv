@@ -116,7 +116,7 @@ static const struct dl_symbol dl_symtab[] = {
     SYM(setjmp), SYM(longjmp),
 
     /* errno */
-    { "errno", (void *)&errno },
+    { "errno", (void *)&__errno_value },
 
     /* sentinel */
     { NULL, NULL }
