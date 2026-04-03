@@ -86,6 +86,7 @@ all: setup $(COMPILE_TARGETS)
 	echo ""; \
 	echo "Binaries installed to: $(OS_TEST_DEST)"; \
 	echo "Compilation logs: $(COMPILE_LOG_DIR)/<suite>/<test>.log"; \
+	echo "Warnings logs:    $(COMPILE_LOG_DIR)/<suite>/<test>.exit0-warnings.log"; \
 	echo "Test manifest: $(MANIFEST_FILE) ($$ok_count entries)"
 
 setup:
@@ -98,6 +99,7 @@ setup:
 	@rm -rf $(COMPILE_LOG_DIR)
 	@mkdir -p $(COMPILE_LOG_DIR)
 	@mkdir -p $(OS_TEST_DEST)
+	@find $(OS_TEST_DEST) -name '*.failed' -type f -delete 2>/dev/null || true
 	@mkdir -p $(OUT_DIRECTORY)/.helpers
 	@printf 'int main(void){return 0;}\n' > $(OUT_DIRECTORY)/.helpers/namespace-main.c
 	@$(CC) $(CFLAGS) $(CPPFLAGS) -c $(OUT_DIRECTORY)/.helpers/namespace-main.c -o $(OUT_DIRECTORY)/.helpers/namespace-main.o
@@ -121,7 +123,6 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 	rm -f $$outbin $(OUT_DIRECTORY)/$$relpath.o; \
 	_tmpc=$$(mktemp); \
 	_tmpl=$$(mktemp); \
-	_tmpe=$$(mktemp); \
 	if $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -c $< -o $(OUT_DIRECTORY)/$$relpath.o 2>$$_tmpc; then \
 		if [ "$$suite" = "namespace" ]; then \
 			$(CC) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(OUT_DIRECTORY)/.helpers/namespace-main.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; \
@@ -129,19 +130,35 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 			$(CC) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; \
 		fi; \
 		if [ $$? -eq 0 ]; then \
-			cat $$_tmpc $$_tmpl | grep -v 'warning:' > $$_tmpe || true; \
-			if [ -s $$_tmpe ]; then \
+			warn_count=$$(grep -c 'warning:' $$_tmpc 2>/dev/null || true); \
+			warn_count=$$((warn_count + $$(grep -c 'warning:' $$_tmpl 2>/dev/null || true))); \
+			if [ $$warn_count -gt 0 ]; then \
+				compile_log_warn=$(COMPILE_LOG_DIR)/$$relpath.exit0-warnings.log; \
+				mkdir -p $$(dirname $$compile_log_warn); \
+				{ \
+					echo "COMPILED WITH WARNINGS (exit=0)"; \
+					echo "warning_count=$$warn_count"; \
+					echo ""; \
+					echo "--- compiler diagnostics ---"; \
+					cat $$_tmpc; \
+					echo ""; \
+					echo "--- linker diagnostics ---"; \
+					cat $$_tmpl; \
+				} > $$compile_log_warn; \
+			elif [ -s $$_tmpc ] || [ -s $$_tmpl ]; then \
 				mkdir -p $$(dirname $$compile_log); \
-				cat $$_tmpe > $$compile_log; \
+				cat $$_tmpc > $$compile_log; \
+				cat $$_tmpl >> $$compile_log; \
 			fi; \
-			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl $$_tmpe; \
+			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
 			cp $$outbin $@; \
+			rm -f $@.failed; \
 			echo "  OK: $$relpath"; \
 		else \
 			mkdir -p $$(dirname $$compile_log); \
 			cat $$_tmpc > $$compile_log; \
 			cat $$_tmpl >> $$compile_log; \
-			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl $$_tmpe; \
+			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
 			echo "undefined" > $(OUT_DIRECTORY)/$$relpath.out; \
 			echo "  SKIP (undefined): $$relpath"; \
 			echo "  SKIP (undefined): $$relpath" >> $(SUMMARY_FILE); \
@@ -150,7 +167,7 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 	else \
 		mkdir -p $$(dirname $$compile_log); \
 		cat $$_tmpc > $$compile_log; \
-		rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl $$_tmpe; \
+		rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
 		if grep -qE 'fatal error' $$compile_log 2>/dev/null; then \
 			reason="missing_header"; \
 		elif grep -qE 'undeclared|no member named' $$compile_log 2>/dev/null; then \
