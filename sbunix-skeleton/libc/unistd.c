@@ -322,6 +322,10 @@ int setpgid(pid_t pid, pid_t pgid) {
     return (int)__syscall_ret(syscall(SYS_setpgid, pid, pgid));
 }
 
+int setpgrp(void) {
+    return setpgid(0, 0);
+}
+
 pid_t tcgetpgrp(int fd) {
     pid_t pgrp;
     int ret = ioctl(fd, 0x540F, &pgrp); /* TIOCGPGRP */
@@ -516,6 +520,13 @@ long sysconf(int name) {
     case 2:  return 100;           /* _SC_CLK_TCK */
     case 0:  return 131072;        /* _SC_ARG_MAX */
     case 3:  return 0;             /* _SC_NGROUPS_MAX */
+    case 31: return 32;            /* _SC_TIMER_MAX */
+    case 32: return 1;             /* _SC_REALTIME_SIGNALS */
+    case 33: return 1;             /* _SC_MONOTONIC_CLOCK */
+    case 34: return 1;             /* _SC_CPUTIME */
+    case 35: return 1;             /* _SC_THREAD_CPUTIME */
+    case 36: return 32;            /* _SC_SIGQUEUE_MAX */
+    case 37: return 32;            /* _SC_DELAYTIMER_MAX */
     default: errno = EINVAL; return -1;
     }
 }

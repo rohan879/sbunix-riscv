@@ -42,6 +42,7 @@ struct timespec {
 #define SIGPROF   27
 #define SIGWINCH  28
 #define SIGIO     29
+#define SIGPOLL   SIGIO
 #define SIGPWR    30
 #define SIGSYS    31
 #define SIGRTMIN  32
@@ -99,6 +100,7 @@ struct timespec {
 #define SIG_DFL  ((void (*)(int))0)
 #define SIG_IGN  ((void (*)(int))1)
 #define SIG_ERR  ((void (*)(int))-1)
+#define SIG_HOLD ((void (*)(int))2)
 
 #ifndef __sigset_t_defined
 typedef unsigned long sigset_t;
@@ -215,6 +217,11 @@ int sigqueue(pid_t pid, int sig, const union sigval value);
 int sigtimedwait(const sigset_t *set, siginfo_t *info,
                  const struct timespec *timeout);
 int sigwaitinfo(const sigset_t *set, siginfo_t *info);
+int sigpause(int sig);
+int sigignore(int sig);
+int sighold(int sig);
+int sigrelse(int sig);
+void (*sigset(int sig, void (*disp)(int)))(int);
 
 
 

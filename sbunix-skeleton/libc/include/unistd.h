@@ -3,11 +3,28 @@
 
 #include <sys/types.h>
 #include <sys/time.h>
+#include <stdint.h>
 
 #ifndef SEEK_SET
 #define SEEK_SET  0
 #define SEEK_CUR  1
 #define SEEK_END  2
+#endif
+
+#ifndef SEEK_DATA
+#define SEEK_DATA 3
+#endif
+
+#ifndef SEEK_HOLE
+#define SEEK_HOLE 4
+#endif
+
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 02000000
+#endif
+
+#ifndef O_CLOFORK
+#define O_CLOFORK 040000000
 #endif
 
 #define STDIN_FILENO  0
@@ -83,6 +100,7 @@ int     isatty(int fd);
 pid_t   setsid(void);
 pid_t   getpgrp(void);
 int     setpgid(pid_t pid, pid_t pgid);
+int     setpgrp(void);
 pid_t   tcgetpgrp(int fd);
 int     tcsetpgrp(int fd, pid_t pgrp);
 pid_t   getpgid(pid_t pid);
@@ -157,6 +175,13 @@ int     nice(int inc);
 #define _SC_CLK_TCK        2
 #define _SC_ARG_MAX        0
 #define _SC_NGROUPS_MAX    3
+#define _SC_TIMER_MAX      31
+#define _SC_REALTIME_SIGNALS 32
+#define _SC_MONOTONIC_CLOCK 33
+#define _SC_CPUTIME 34
+#define _SC_THREAD_CPUTIME 35
+#define _SC_SIGQUEUE_MAX 36
+#define _SC_DELAYTIMER_MAX 37
 
 /* pathconf names */
 #define _PC_FILESIZEBITS   18

@@ -8,6 +8,10 @@
 
 long syscall(long num, ...);
 
+#ifndef SIG_HOLD
+#define SIG_HOLD ((void (*)(int))2)
+#endif
+
 int killpg(pid_t pgrp, int sig) {
   if (pgrp <= 0) {
     errno = EINVAL;
@@ -105,6 +109,68 @@ int sigwaitinfo(const sigset_t *set, siginfo_t *info) {
     return -1;
   }
   return (int)ret;
+}
+
+int sigpause(int sig) {
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, sig);
+  return sigsuspend(&set);
+}
+
+int sigignore(int sig) {
+  return (signal(sig, SIG_IGN) == SIG_ERR) ? -1 : 0;
+}
+
+int sighold(int sig) {
+  sigset_t set;
+  if (sigemptyset(&set) < 0)
+    return -1;
+  if (sigaddset(&set, sig) < 0)
+    return -1;
+  return sigprocmask(SIG_BLOCK, &set, (sigset_t *)0);
+}
+
+int sigrelse(int sig) {
+  sigset_t set;
+  if (sigemptyset(&set) < 0)
+    return -1;
+  if (sigaddset(&set, sig) < 0)
+    return -1;
+  return sigprocmask(SIG_UNBLOCK, &set, (sigset_t *)0);
+}
+
+void (*sigset(int sig, void (*disp)(int)))(int) {
+  struct sigaction sa;
+  struct sigaction old;
+  sigset_t set;
+
+  if (disp == SIG_HOLD) {
+    if (sigemptyset(&set) < 0)
+      return SIG_ERR;
+    if (sigaddset(&set, sig) < 0)
+      return SIG_ERR;
+    if (sigprocmask(SIG_BLOCK, &set, &set) < 0)
+      return SIG_ERR;
+    return sigismember(&set, sig) == 1 ? SIG_HOLD : SIG_DFL;
+  }
+
+  if (sigemptyset(&sa.sa_mask) < 0)
+    return SIG_ERR;
+  sa.sa_flags = SA_RESTART;
+  sa.sa_handler = disp;
+  sa.sa_restorer = (void (*)(void))0;
+  if (sigaction(sig, &sa, &old) < 0)
+    return SIG_ERR;
+
+  if (sigemptyset(&set) < 0)
+    return old.sa_handler;
+  if (sigaddset(&set, sig) < 0)
+    return old.sa_handler;
+  if (sigprocmask(SIG_UNBLOCK, &set, (sigset_t *)0) < 0)
+    return SIG_ERR;
+
+  return old.sa_handler;
 }
 
 /* pthread_sigmask intentionally removed. callers should use sigprocmask()

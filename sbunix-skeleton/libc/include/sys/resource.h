@@ -8,6 +8,8 @@
 typedef uint64_t rlim_t;
 
 #define RLIM_INFINITY ((rlim_t)-1)
+#define RLIM_SAVED_MAX RLIM_INFINITY
+#define RLIM_SAVED_CUR RLIM_INFINITY
 
 /* Resource limit indices */
 #define RLIMIT_CPU     0

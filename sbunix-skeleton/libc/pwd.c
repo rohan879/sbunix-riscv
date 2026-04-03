@@ -23,6 +23,8 @@ static struct group root_gr = {
     root_name, root_passwd, 0, root_mem
 };
 
+static int pw_iter_used;
+
 struct passwd *getpwuid(uid_t uid) {
     if (uid == 0) return &root_pw;
     return (void *)0;
@@ -31,6 +33,21 @@ struct passwd *getpwuid(uid_t uid) {
 struct passwd *getpwnam(const char *name) {
     if (name && strcmp(name, "root") == 0) return &root_pw;
     return (void *)0;
+}
+
+struct passwd *getpwent(void) {
+    if (pw_iter_used)
+        return (void *)0;
+    pw_iter_used = 1;
+    return &root_pw;
+}
+
+void setpwent(void) {
+    pw_iter_used = 0;
+}
+
+void endpwent(void) {
+    pw_iter_used = 1;
 }
 
 struct group *getgrgid(gid_t gid) {

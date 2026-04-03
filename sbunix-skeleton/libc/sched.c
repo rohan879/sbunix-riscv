@@ -75,3 +75,10 @@ int sched_rr_get_interval(pid_t pid, struct timespec *interval) {
   interval->tv_nsec = 10000000;
   return 0;
 }
+
+int sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask) {
+  (void)pid;
+  (void)cpusetsize;
+  (void)mask;
+  return 0;
+}

@@ -11,13 +11,13 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#define MAX_INPUT (1024 * 1024)  /* 1 MiB max buffered input */
+#define TAIL_MAX_INPUT (1024 * 1024)  /* 1 MiB max buffered input */
 
-static char gbuf[MAX_INPUT];
+static char gbuf[TAIL_MAX_INPUT];
 
 static int tail_bytes(int fd, long n) {
     ssize_t total = 0, r;
-    while (total < MAX_INPUT && (r = read(fd, gbuf + total, MAX_INPUT - total)) > 0)
+    while (total < TAIL_MAX_INPUT && (r = read(fd, gbuf + total, TAIL_MAX_INPUT - total)) > 0)
         total += r;
     long start = total > n ? total - n : 0;
     if (total - start > 0)
@@ -27,7 +27,7 @@ static int tail_bytes(int fd, long n) {
 
 static int tail_lines(int fd, long n) {
     ssize_t total = 0, r;
-    while (total < MAX_INPUT && (r = read(fd, gbuf + total, MAX_INPUT - total)) > 0)
+    while (total < TAIL_MAX_INPUT && (r = read(fd, gbuf + total, TAIL_MAX_INPUT - total)) > 0)
         total += r;
 
     /* Count newlines from end */

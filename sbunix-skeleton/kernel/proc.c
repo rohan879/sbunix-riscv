@@ -160,6 +160,10 @@ found:
   p->killed_by_signal = 0;
   p->stopped_signal = 0;
 
+  // Initialize POSIX timers
+  for (int i = 0; i < NPTIMER; i++)
+    p->timers[i].used = 0;
+
   // Initialize exec tracking (for POSIX setpgid restrictions)
   p->has_execed = 0;
 

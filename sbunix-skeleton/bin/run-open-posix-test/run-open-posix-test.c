@@ -284,7 +284,27 @@ int main(int argc, char *argv[]) {
 
         printf("Running: %s\n", argv[1]);
         char output[MAX_OUTPUT];
+        
+        /* Install timeout alarm handler */
+        struct sigaction old_alrm;
+        struct sigaction sa;
+        timed_out = 0;
+        sa.sa_handler = alarm_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sa.sa_restorer = NULL;
+        sigaction(SIGALRM, &sa, &old_alrm);
+        alarm(5);
+        
         int exit_code = run_test_capture(single_test.path, output, sizeof(output));
+        
+        alarm(0);
+        sigaction(SIGALRM, &old_alrm, NULL);
+        
+        if (timed_out) {
+            snprintf(output, sizeof(output), "exit: %d\n", 124);
+        }
+        
         write_out_file(single_test.name, output);
         enum test_result result = classify_from_exit(exit_code);
         const char *rstr = (result == RESULT_PASS) ? "PASS" :

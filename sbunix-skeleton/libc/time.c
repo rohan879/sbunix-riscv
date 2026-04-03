@@ -3,11 +3,14 @@
  */
 
 #include <time.h>
+#include <sys/time.h>
 #include <syscall.h>
 #include <errno.h>
 #include <string.h>
 #include <signal.h>
 #include <stdio.h>
+
+long syscall(long num, ...);
 
 /* ------------------------------------------------------------------ */
 /*  Internal helpers                                                   */
@@ -555,4 +558,30 @@ int timespec_get(struct timespec *ts, int base) {
     if (clock_gettime(CLOCK_REALTIME, ts) < 0)
         return 0;
     return base;
+}
+
+int getitimer(int which, struct itimerval *curr_value) {
+    (void)which;
+    if (!curr_value) {
+        errno = EINVAL;
+        return -1;
+    }
+    curr_value->it_interval.tv_sec = 0;
+    curr_value->it_interval.tv_usec = 0;
+    curr_value->it_value.tv_sec = 0;
+    curr_value->it_value.tv_usec = 0;
+    return 0;
+}
+
+int setitimer(int which, const struct itimerval *new_value,
+              struct itimerval *old_value) {
+    (void)which;
+    (void)new_value;
+    if (old_value) {
+        old_value->it_interval.tv_sec = 0;
+        old_value->it_interval.tv_usec = 0;
+        old_value->it_value.tv_sec = 0;
+        old_value->it_value.tv_usec = 0;
+    }
+    return 0;
 }

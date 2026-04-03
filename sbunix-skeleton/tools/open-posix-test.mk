@@ -38,7 +38,8 @@ CPPFLAGS := -D_POSIX_C_SOURCE=200112L -D_GNU_SOURCE -D_BSD_SOURCE \
 CFLAGS_WARN := -Wall -Wextra -Werror=implicit-function-declaration
 
 # Linker flags - CRT must be first, libc last
-LDFLAGS := $(CRT_OBJ) $(LIBC_A) -Wl,--gc-sections -nostdlib
+LDFLAGS_PRE := $(CRT_OBJ)
+LDFLAGS_POST := $(LIBC_A) -Wl,--gc-sections -nostdlib
 
 # Install target: copy compiled binaries to build/testfs
 OPEN_POSIX_TEST_DEST ?= $(SBUNIX_ROOT)/build/testfs/bin/open-posix-test
@@ -98,6 +99,9 @@ setup:
 	@rm -rf $(COMPILE_LOG_DIR)
 	@mkdir -p $(COMPILE_LOG_DIR)
 	@mkdir -p $(OPEN_POSIX_TEST_DEST)
+	@mkdir -p $(OUT_DIRECTORY)/.helpers
+	@printf 'int main(void){return 0;}\n' > $(OUT_DIRECTORY)/.helpers/definitions-main.c
+	@$(CC) $(CFLAGS) $(CPPFLAGS) -c $(OUT_DIRECTORY)/.helpers/definitions-main.c -o $(OUT_DIRECTORY)/.helpers/definitions-main.o
 	@echo "open-posix-test build summary for SBUnix" > $(SUMMARY_FILE)
 	@echo "=========================================" >> $(SUMMARY_FILE)
 	@echo "" >> $(SUMMARY_FILE)
@@ -106,7 +110,7 @@ install: all
 
 # Pattern rule for compiling individual tests
 # Each conformance test gets -I<its own directory> so it can find testfrmw.c/.h
-$(OPEN_POSIX_TEST_DEST)/%: $(POSIXTEST_SRC)/%.c | setup
+$(OPEN_POSIX_TEST_DEST)/%: $(POSIXTEST_SRC)/%.c $(CRT_OBJ) $(LIBC_A) | setup
 	@relpath=$*; \
 	dir=$$(dirname $$relpath); \
 	name=$$(basename $$relpath); \
@@ -115,24 +119,32 @@ $(OPEN_POSIX_TEST_DEST)/%: $(POSIXTEST_SRC)/%.c | setup
 	outbin=$(OUT_DIRECTORY)/$$relpath; \
 	compile_log=$(COMPILE_LOG_DIR)/$$relpath.log; \
 	test_src_dir=$$(dirname $<); \
+	rm -f $(OUT_DIRECTORY)/$$relpath.out; \
 	rm -f $$outbin $(OUT_DIRECTORY)/$$relpath.o; \
 	_tmpc=$$(mktemp); \
 	_tmpl=$$(mktemp); \
+	_tmpe=$$(mktemp); \
 	if $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -I$$test_src_dir -I$(POSIXTEST_SRC)/include -c $< -o $(OUT_DIRECTORY)/$$relpath.o 2>$$_tmpc; then \
-		if $(CC) $(LDFLAGS) $(OUT_DIRECTORY)/$$relpath.o -o $$outbin 2>$$_tmpl; then \
-			if [ -s $$_tmpc ] || [ -s $$_tmpl ]; then \
-				mkdir -p $$(dirname $$compile_log); \
-				cat $$_tmpc > $$compile_log; \
-				cat $$_tmpl >> $$compile_log; \
+		link_objs="$(OUT_DIRECTORY)/$$relpath.o"; \
+		if echo $$relpath | grep -q '^conformance/definitions/'; then \
+			if ! grep -Eq '(^|[[:space:]])main[[:space:]]*\(' $<; then \
+				link_objs="$$link_objs $(OUT_DIRECTORY)/.helpers/definitions-main.o"; \
 			fi; \
-			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
+		fi; \
+		if $(CC) $(LDFLAGS_PRE) $$link_objs $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; then \
+			cat $$_tmpc $$_tmpl | grep -v 'warning:' > $$_tmpe || true; \
+			if [ -s $$_tmpe ]; then \
+				mkdir -p $$(dirname $$compile_log); \
+				cat $$_tmpe > $$compile_log; \
+			fi; \
+			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl $$_tmpe; \
 			cp $$outbin $@; \
 			echo "  OK: $$relpath"; \
 		else \
 			mkdir -p $$(dirname $$compile_log); \
 			cat $$_tmpc > $$compile_log; \
 			cat $$_tmpl >> $$compile_log; \
-			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
+			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl $$_tmpe; \
 			echo "undefined" > $(OUT_DIRECTORY)/$$relpath.out; \
 			echo "  SKIP (undefined): $$relpath"; \
 			echo "  SKIP (undefined): $$relpath" >> $(SUMMARY_FILE); \
@@ -141,7 +153,7 @@ $(OPEN_POSIX_TEST_DEST)/%: $(POSIXTEST_SRC)/%.c | setup
 	else \
 		mkdir -p $$(dirname $$compile_log); \
 		cat $$_tmpc > $$compile_log; \
-		rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
+		rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl $$_tmpe; \
 		if grep -qE 'fatal error' $$compile_log 2>/dev/null; then \
 			reason="missing_header"; \
 		elif grep -qE 'undeclared|no member named' $$compile_log 2>/dev/null; then \

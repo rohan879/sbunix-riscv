@@ -32,7 +32,14 @@
 
 /* Time */
 #define SYS_nanosleep   101
+#define SYS_timer_create 107
+#define SYS_timer_gettime 108
+#define SYS_timer_getoverrun 109
+#define SYS_timer_settime 110
+#define SYS_timer_delete 111
+#define SYS_clock_settime 112
 #define SYS_clock_gettime 113
+#define SYS_clock_getres 114
 #define SYS_clock_nanosleep 115
 
 /* File control / access */
@@ -67,12 +74,16 @@
 #define SYS_getsid      156
 #define SYS_setsid      157
 
+/* Process accounting */
+#define SYS_times       153
+
 /* Signal */
 #define SYS_sigaltstack    132
 #define SYS_rt_sigsuspend  133
 #define SYS_rt_sigaction   134
 #define SYS_rt_sigprocmask 135
 #define SYS_rt_sigpending  136
+#define SYS_rt_sigtimedwait 137
 #define SYS_rt_sigreturn   139
 
 /* Time */

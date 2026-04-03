@@ -11,6 +11,8 @@
 #include <sys/mman.h>
 #include <syscall.h>
 
+long syscall(long num, ...);
+
 void *mmap(void *addr, size_t length, int prot, int flags,
            int fd, off_t offset) {
     void *ret = (void *)syscall(SYS_mmap, addr, length, prot, flags, fd, offset);

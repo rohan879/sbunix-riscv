@@ -76,6 +76,17 @@ enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 struct vm_area;
 struct open_file;
 
+/* POSIX timer entry */
+#define NPTIMER 32  /* max POSIX timers per process */
+struct posix_timer {
+  int used;                    /* 1 if this timer slot is active */
+  int clockid;                 /* CLOCK_REALTIME, CLOCK_MONOTONIC, etc. */
+  uint64_t interval_ticks;     /* 0 for one-shot, >0 for repeating */
+  uint64_t next_expiry_ticks;  /* absolute tick when timer next fires */
+  int signo;                   /* signal to deliver on expiry */
+  int overrun;                 /* overrun count (for periodic timers) */
+};
+
 /* Signal action descriptor (defined here so shared_sigactions can use it) */
 struct kern_sigaction {
   uint64_t handler;   /* sa_handler function pointer */
@@ -185,6 +196,8 @@ struct proc {
   uint64_t saved_a3;
   uint64_t saved_a4;
   uint64_t saved_a5;
+  /* POSIX timers */
+  struct posix_timer timers[NPTIMER];
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,

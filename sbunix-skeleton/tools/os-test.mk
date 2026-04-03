@@ -117,9 +117,11 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 	mkdir -p $(OS_TEST_DEST)/$$dir; \
 	outbin=$(OUT_DIRECTORY)/$$relpath; \
 	compile_log=$(COMPILE_LOG_DIR)/$$relpath.log; \
+	rm -f $(OUT_DIRECTORY)/$$relpath.out; \
 	rm -f $$outbin $(OUT_DIRECTORY)/$$relpath.o; \
 	_tmpc=$$(mktemp); \
 	_tmpl=$$(mktemp); \
+	_tmpe=$$(mktemp); \
 	if $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -c $< -o $(OUT_DIRECTORY)/$$relpath.o 2>$$_tmpc; then \
 		if [ "$$suite" = "namespace" ]; then \
 			$(CC) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(OUT_DIRECTORY)/.helpers/namespace-main.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; \
@@ -127,19 +129,19 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 			$(CC) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; \
 		fi; \
 		if [ $$? -eq 0 ]; then \
-			if [ -s $$_tmpc ] || [ -s $$_tmpl ]; then \
+			cat $$_tmpc $$_tmpl | grep -v 'warning:' > $$_tmpe || true; \
+			if [ -s $$_tmpe ]; then \
 				mkdir -p $$(dirname $$compile_log); \
-				cat $$_tmpc > $$compile_log; \
-				cat $$_tmpl >> $$compile_log; \
+				cat $$_tmpe > $$compile_log; \
 			fi; \
-			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
+			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl $$_tmpe; \
 			cp $$outbin $@; \
 			echo "  OK: $$relpath"; \
 		else \
 			mkdir -p $$(dirname $$compile_log); \
 			cat $$_tmpc > $$compile_log; \
 			cat $$_tmpl >> $$compile_log; \
-			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
+			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl $$_tmpe; \
 			echo "undefined" > $(OUT_DIRECTORY)/$$relpath.out; \
 			echo "  SKIP (undefined): $$relpath"; \
 			echo "  SKIP (undefined): $$relpath" >> $(SUMMARY_FILE); \
@@ -148,7 +150,7 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 	else \
 		mkdir -p $$(dirname $$compile_log); \
 		cat $$_tmpc > $$compile_log; \
-		rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
+		rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl $$_tmpe; \
 		if grep -qE 'fatal error' $$compile_log 2>/dev/null; then \
 			reason="missing_header"; \
 		elif grep -qE 'undeclared|no member named' $$compile_log 2>/dev/null; then \

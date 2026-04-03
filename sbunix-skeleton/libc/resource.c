@@ -16,9 +16,7 @@ int setrlimit(int resource, const struct rlimit *rlim) {
 }
 
 int getrusage(int who, struct rusage *usage) {
-    (void)who;
-    memset(usage, 0, sizeof(*usage));
-    return 0;
+    return (int)__syscall_ret(syscall(SYS_getrusage, who, usage));
 }
 
 int getpriority(int which, id_t who) {
