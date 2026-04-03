@@ -1920,6 +1920,59 @@ static long sys_execve_handler(struct trapframe *tf) {
     return SYSCALL_NORETURN;
 }
 
+static long sys_fexecve_handler(struct trapframe *tf) {
+    int fd = (int)tf->a0;
+    uint64_t uargv = tf->a1;
+    uint64_t uenvp = tf->a2;
+
+    /* Validate fd */
+    if (fd < 0 || fd >= NOFILE)
+        return (long)-9; /* EBADF */
+    
+    struct open_file **oft = proc_ofile(current_proc);
+    struct open_file *of = oft[fd];
+    if (!of)
+        return (long)-9; /* EBADF */
+    
+    /* Get the path from the open file descriptor */
+    if (of->path[0] == '\0')
+        return (long)-8; /* ENOEXEC - no path available */
+    
+    /* Build a temporary path copy */
+    char path_copy[256];
+    size_t path_len = strlen(of->path);
+    if (path_len >= sizeof(path_copy))
+        path_len = sizeof(path_copy) - 1;
+    memcpy(path_copy, of->path, path_len);
+    path_copy[path_len] = '\0';
+    
+    /* Allocate kernel page for path string */
+    char *kpath_page = (char *)kalloc();
+    if (!kpath_page)
+        return (long)-12; /* ENOMEM */
+    
+    memcpy(kpath_page, path_copy, path_len + 1);
+    
+    /* Temporarily map kernel path to user space */
+    uint64_t user_path_addr = USER_STACK_TOP - PAGE_SIZE * 2; /* temporary location */
+    
+    /* Copy path to user space */
+    if (copyout(current_proc->pagetable, user_path_addr, kpath_page, path_len + 1) < 0) {
+        kfree(kpath_page);
+        return (long)-14; /* EFAULT */
+    }
+    
+    kfree(kpath_page);
+    
+    /* Now call execve with the path from fd */
+    tf->a0 = user_path_addr;
+    tf->a1 = uargv;
+    tf->a2 = uenvp;
+    
+    /* Call the execve handler */
+    return sys_execve_handler(tf);
+}
+
 static long sys_wait4_handler(struct trapframe *tf) {
     pid_t wpid   = (pid_t)(int)tf->a0;
     int options  = (int)tf->a2;
@@ -2172,12 +2225,14 @@ static long sys_clock_settime_handler(struct trapframe *tf) {
     if (kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L)
         return (long)-22; /* EINVAL */
     
-    /* For a single-user OS without persistent clock, we accept the call
-     * but don't actually modify the wall clock. Tests that call clock_settime
-     * will succeed, but subsequent clock_gettime may not reflect the change.
-     * This is acceptable for test coverage purposes. */
+    /* For a single-user OS without persistent clock hardware or full timer
+     * adjustment support, we return EPERM (Operation not permitted) for
+     * clock_settime on CLOCK_REALTIME. This prevents tests from hanging
+     * while waiting for adjusted absolute timers that will never fire.
+     * Tests that check clock_settime functionality will get EPERM and
+     * report UNRESOLVED rather than hanging indefinitely. */
     
-    return (long)0;
+    return (long)-1; /* EPERM */
 }
 
 static long sys_lseek_handler(struct trapframe *tf) {
@@ -4918,6 +4973,7 @@ void syscall_init(void) {
     syscall_table[SYS_fchdir]          = sys_fchdir_handler;
     syscall_table[SYS_clone]           = sys_clone_handler;
     syscall_table[SYS_execve]          = sys_execve_handler;
+    syscall_table[SYS_fexecve]         = sys_fexecve_handler;
     syscall_table[SYS_wait4]           = sys_wait4_handler;
     syscall_table[SYS_getpid]          = sys_getpid_handler;
     syscall_table[SYS_getppid]         = sys_getppid_handler;

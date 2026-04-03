@@ -74,11 +74,7 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
 }
 
 int fexecve(int fd, char *const argv[], char *const envp[]) {
-    (void)fd;
-    (void)argv;
-    (void)envp;
-    errno = ENOSYS;
-    return -1;
+    return (int)__syscall_ret(syscall(SYS_fexecve, fd, argv, envp));
 }
 
 int chdir(const char *path) {

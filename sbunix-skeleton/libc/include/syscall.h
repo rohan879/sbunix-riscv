@@ -37,6 +37,7 @@
 #define SYS_getppid     173
 #define SYS_clone       220
 #define SYS_execve      221
+#define SYS_fexecve     281
 #define SYS_wait4       260
 
 /* Signals */

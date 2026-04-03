@@ -157,6 +157,9 @@
 #define SYS_setgid      144
 #define SYS_setuid      146
 
+/* Execute */
+#define SYS_fexecve     281   /* fexecve(fd, argv, envp) */
+
 /* Custom / simple-OS extensions */
 #define SYS_alarm       200   /* alarm(seconds) — one-shot SIGALRM */
 #define SYS_ps          500   /* snapshot process table */
