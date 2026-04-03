@@ -18,4 +18,39 @@ typedef unsigned int   nlink_t;
 typedef int            blksize_t;
 typedef long           blkcnt_t;
 
+#ifndef __suseconds_t_defined
+typedef long suseconds_t;
+#define __suseconds_t_defined
+#endif
+
+#ifndef __clockid_t_defined
+typedef int clockid_t;
+#define __clockid_t_defined
+#endif
+
+#ifndef __timer_t_defined
+typedef void *timer_t;
+#define __timer_t_defined
+#endif
+
+#ifndef __fsblkcnt_t_defined
+typedef unsigned long fsblkcnt_t;
+#define __fsblkcnt_t_defined
+#endif
+
+#ifndef __fsfilcnt_t_defined
+typedef unsigned long fsfilcnt_t;
+#define __fsfilcnt_t_defined
+#endif
+
+#ifndef __key_t_defined
+typedef int key_t;
+#define __key_t_defined
+#endif
+
+#ifndef __reclen_t_defined
+typedef unsigned short reclen_t;
+#define __reclen_t_defined
+#endif
+
 #endif

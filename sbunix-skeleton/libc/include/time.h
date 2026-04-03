@@ -14,15 +14,21 @@ typedef union sigval {
 
 struct sigevent;
 
+#if !defined(__timespec_defined) && !defined(_STRUCT_TIMESPEC)
 struct timespec {
     time_t tv_sec;   /* seconds */
     long   tv_nsec;  /* nanoseconds [0, 999999999] */
 };
+#define __timespec_defined
+#endif
 
+#if !defined(__timeval_defined) && !defined(_STRUCT_TIMEVAL)
 struct timeval {
     time_t tv_sec;   /* seconds */
     long   tv_usec;  /* microseconds [0, 999999] */
 };
+#define __timeval_defined
+#endif
 
 struct tm {
     int tm_sec;    /* seconds [0, 60] (60 for leap second) */
@@ -38,8 +44,15 @@ struct tm {
     const char *tm_zone;
 };
 
+#ifndef __clockid_t_defined
 typedef int clockid_t;
+#define __clockid_t_defined
+#endif
+
+#ifndef __timer_t_defined
 typedef void *timer_t;
+#define __timer_t_defined
+#endif
 
 struct itimerspec {
     struct timespec it_interval;

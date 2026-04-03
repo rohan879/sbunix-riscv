@@ -1,11 +1,13 @@
 #ifndef _SYS_TIME_H
 #define _SYS_TIME_H
 
+#include <sys/select.h>
 #include <time.h>      /* struct timeval, struct timespec */
 #include <sys/types.h>
 
 /* gettimeofday() */
 int gettimeofday(struct timeval *tv, void *tz);
+int utimes(const char *path, const struct timeval times[2]);
 
 /* Timer arithmetic macros */
 #define timersub(a, b, result) \

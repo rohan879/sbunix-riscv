@@ -2,6 +2,7 @@
 #define _SYS_RESOURCE_H
 
 #include <sys/types.h>
+#include <sys/time.h>
 #include <stdint.h>
 
 typedef uint64_t rlim_t;
@@ -25,14 +26,13 @@ struct rlimit {
     rlim_t rlim_max;  /* hard limit */
 };
 
+#define PRIO_PROCESS 0
+#define PRIO_PGRP    1
+#define PRIO_USER    2
+
 /* rusage who values */
 #define RUSAGE_SELF     0
 #define RUSAGE_CHILDREN (-1)
-
-struct timeval {
-    long tv_sec;
-    long tv_usec;
-};
 
 struct rusage {
     struct timeval ru_utime;
@@ -56,5 +56,7 @@ struct rusage {
 int getrlimit(int resource, struct rlimit *rlim);
 int setrlimit(int resource, const struct rlimit *rlim);
 int getrusage(int who, struct rusage *usage);
+int getpriority(int which, id_t who);
+int setpriority(int which, id_t who, int prio);
 
 #endif /* _SYS_RESOURCE_H */

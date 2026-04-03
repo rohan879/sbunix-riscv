@@ -4,7 +4,13 @@
 #include <sys/types.h>
 #include <stddef.h>
 
-struct timespec;
+#if !defined(__timespec_defined) && !defined(_STRUCT_TIMESPEC)
+struct timespec {
+  time_t tv_sec;
+  long tv_nsec;
+};
+#define __timespec_defined
+#endif
 
 /* Signal numbers (Linux RISC-V ABI) */
 #define SIGHUP    1

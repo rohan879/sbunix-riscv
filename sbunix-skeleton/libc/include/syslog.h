@@ -34,6 +34,7 @@
 /* Option flags */
 #define LOG_PID      0x01
 #define LOG_CONS     0x02
+#define LOG_ODELAY   0x04
 #define LOG_NDELAY   0x08
 #define LOG_NOWAIT   0x10
 #define LOG_PERROR   0x20

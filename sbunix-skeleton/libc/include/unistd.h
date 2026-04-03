@@ -2,6 +2,7 @@
 #define _UNISTD_H
 
 #include <sys/types.h>
+#include <sys/time.h>
 
 #ifndef SEEK_SET
 #define SEEK_SET  0
@@ -69,6 +70,7 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 unsigned int sleep(unsigned int seconds);
 int          usleep(unsigned int usecs);
 unsigned int alarm(unsigned int seconds);
+int          utimes(const char *path, const struct timeval times[2]);
 
 /* Miscellaneous */
 uid_t   getuid(void);

@@ -50,6 +50,11 @@ struct stat {
 #define S_ISLNK(m)  (((m) & S_IFMT) == S_IFLNK)
 #define S_ISSOCK(m) (((m) & S_IFMT) == S_IFSOCK)
 
+#define S_TYPEISMQ(buf) 0
+#define S_TYPEISSEM(buf) 0
+#define S_TYPEISSHM(buf) 0
+#define S_TYPEISTMO(buf) 0
+
 /* Permission bits */
 #define S_ISUID  04000  /* set-UID bit */
 #define S_ISGID  02000  /* set-GID bit */
@@ -80,13 +85,24 @@ struct stat {
 #define major(dev)        (((unsigned long)(dev) >> 8) & 0xff)
 #define minor(dev)        ((unsigned long)(dev) & 0xff)
 
+#define UTIME_NOW  ((1L << 30) - 1)
+#define UTIME_OMIT ((1L << 30) - 2)
+
 int stat(const char *path, struct stat *buf);
 int fstat(int fd, struct stat *buf);
 int lstat(const char *path, struct stat *buf);
+int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 int mkdir(const char *path, mode_t mode);
+int mkdirat(int dirfd, const char *path, mode_t mode);
 int mknod(const char *path, mode_t mode, dev_t dev);
+int mknodat(int dirfd, const char *path, mode_t mode, dev_t dev);
+int mkfifo(const char *path, mode_t mode);
+int mkfifoat(int dirfd, const char *path, mode_t mode);
 mode_t umask(mode_t mask);
 int chmod(const char *path, mode_t mode);
 int fchmod(int fd, mode_t mode);
+int fchmodat(int dirfd, const char *path, mode_t mode, int flags);
+int utimensat(int dirfd, const char *path, const struct timespec times[2], int flags);
+int futimens(int fd, const struct timespec times[2]);
 
 #endif /* _SYS_STAT_H */

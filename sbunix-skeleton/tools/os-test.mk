@@ -98,6 +98,9 @@ setup:
 	@rm -rf $(COMPILE_LOG_DIR)
 	@mkdir -p $(COMPILE_LOG_DIR)
 	@mkdir -p $(OS_TEST_DEST)
+	@mkdir -p $(OUT_DIRECTORY)/.helpers
+	@printf 'int main(void){return 0;}\n' > $(OUT_DIRECTORY)/.helpers/namespace-main.c
+	@$(CC) $(CFLAGS) $(CPPFLAGS) -c $(OUT_DIRECTORY)/.helpers/namespace-main.c -o $(OUT_DIRECTORY)/.helpers/namespace-main.o
 	@echo "os-test build summary for SBUnix" > $(SUMMARY_FILE)
 	@echo "================================" >> $(SUMMARY_FILE)
 	@echo "" >> $(SUMMARY_FILE)
@@ -118,7 +121,12 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 	_tmpc=$$(mktemp); \
 	_tmpl=$$(mktemp); \
 	if $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -c $< -o $(OUT_DIRECTORY)/$$relpath.o 2>$$_tmpc; then \
-		if $(CC) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; then \
+		if [ "$$suite" = "namespace" ]; then \
+			$(CC) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(OUT_DIRECTORY)/.helpers/namespace-main.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; \
+		else \
+			$(CC) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; \
+		fi; \
+		if [ $$? -eq 0 ]; then \
 			if [ -s $$_tmpc ] || [ -s $$_tmpl ]; then \
 				mkdir -p $$(dirname $$compile_log); \
 				cat $$_tmpc > $$compile_log; \

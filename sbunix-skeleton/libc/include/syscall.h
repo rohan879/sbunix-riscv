@@ -49,6 +49,10 @@
 #define SYS_rt_sigtimedwait 137
 #define SYS_rt_sigqueueinfo 138
 
+/* Priorities */
+#define SYS_getpriority   140
+#define SYS_setpriority   141
+
 /* Time */
 #define SYS_nanosleep   101
 #define SYS_timer_create 107
@@ -61,6 +65,9 @@
 #define SYS_clock_getres 114
 #define SYS_clock_nanosleep 115
 #define SYS_gettimeofday  169
+
+/* Process times */
+#define SYS_times         153
 
 /* Memory */
 #define SYS_brk         214
@@ -139,6 +146,12 @@
 #define SYS_statfs      43
 #define SYS_fstatfs     44
 #define SYS_utimensat   88
+
+/* System V message queue */
+#define SYS_msgget      186
+#define SYS_msgctl      187
+#define SYS_msgrcv      188
+#define SYS_msgsnd      189
 
 /* Ownership / credentials (stubs for single-user OS) */
 #define SYS_fchownat    55

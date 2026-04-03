@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <errno.h>
 
 ssize_t read(int fd, void *buf, size_t count) {
@@ -358,6 +359,18 @@ int fsync(int fd) {
 
 int fdatasync(int fd) {
     return fsync(fd);
+}
+
+int utimes(const char *path, const struct timeval times[2]) {
+    struct timespec ts[2];
+    if (times) {
+        ts[0].tv_sec = times[0].tv_sec;
+        ts[0].tv_nsec = times[0].tv_usec * 1000L;
+        ts[1].tv_sec = times[1].tv_sec;
+        ts[1].tv_nsec = times[1].tv_usec * 1000L;
+        return utimensat(AT_FDCWD, path, ts, 0);
+    }
+    return utimensat(AT_FDCWD, path, NULL, 0);
 }
 
 void sync(void) {

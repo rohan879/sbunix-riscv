@@ -20,3 +20,17 @@ int getrusage(int who, struct rusage *usage) {
     memset(usage, 0, sizeof(*usage));
     return 0;
 }
+
+int getpriority(int which, id_t who) {
+    (void)which;
+    (void)who;
+    errno = 0;
+    return 0;
+}
+
+int setpriority(int which, id_t who, int prio) {
+    (void)which;
+    (void)who;
+    (void)prio;
+    return 0;
+}
