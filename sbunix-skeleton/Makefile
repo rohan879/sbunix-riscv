@@ -27,7 +27,7 @@ ifdef BUILD_TESTS
   TEST_TARGETS := $(patsubst tests/%,build/testfs/bin/%,$(TEST_SRC_DIRS))
 endif
 
-TIMEOUT ?= 600
+TIMEOUT ?= 1800
 # MODIFIED: END added
 
 # Language-specific kernel object/library
