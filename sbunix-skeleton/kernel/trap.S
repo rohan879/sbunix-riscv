@@ -4,6 +4,11 @@
 
 .extern trap_handler
 
+#ifdef __CHERI_PURE_CAPABILITY__
+.option push
+.option nocapmode
+#endif
+
 kernel_trap_handler:
   # Swap sp with sscratch
   csrrw sp, sscratch, sp
@@ -142,3 +147,7 @@ _ret_user:
   csrw sscratch, t1
   mv sp, t0
   sret
+
+#ifdef __CHERI_PURE_CAPABILITY__
+.option pop
+#endif

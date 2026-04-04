@@ -1,8 +1,14 @@
 .section .text.init
 .global _start
+
+#ifdef __CHERI_PURE_CAPABILITY__
+.option push
+.option nocapmode
+#endif
+
 _start:
   la sp, _stack_top
-  
+
   # Initialize sscratch to 0
   csrw sscratch, zero
 
@@ -25,3 +31,7 @@ _trap_handler:
   ld t0, 0(sp)
   addi sp, sp, 8
   sret
+
+#ifdef __CHERI_PURE_CAPABILITY__
+.option pop
+#endif

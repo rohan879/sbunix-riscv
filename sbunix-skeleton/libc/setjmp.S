@@ -6,6 +6,12 @@
 
 .global setjmp
 .type setjmp, @function
+
+#ifdef __CHERI_PURE_CAPABILITY__
+.option push
+.option nocapmode
+#endif
+
 setjmp:
     sd ra,   0(a0)
     sd sp,   8(a0)
@@ -47,3 +53,7 @@ longjmp:
     li a0, 1
 1:
     ret
+
+#ifdef __CHERI_PURE_CAPABILITY__
+.option pop
+#endif

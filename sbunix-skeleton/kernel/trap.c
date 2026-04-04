@@ -26,6 +26,138 @@
 static unsigned long boot_time;
 static unsigned long ticks;
 
+static const char *proc_name_or_unknown(struct proc *p);
+
+static const char *scause_name(unsigned long cause) {
+    switch (cause) {
+        case SCAUSE_INST_ADDR_MISALIGNED: return "inst_addr_misaligned";
+        case SCAUSE_INST_ACCESS_FAULT: return "inst_access_fault";
+        case SCAUSE_ILLEGAL_INSTRUCTION: return "illegal_instruction";
+        case SCAUSE_BREAKPOINT: return "breakpoint";
+        case SCAUSE_LOAD_ADDR_MISALIGNED: return "load_addr_misaligned";
+        case SCAUSE_LOAD_ACCESS_FAULT: return "load_access_fault";
+        case SCAUSE_STORE_ADDR_MISALIGNED: return "store_addr_misaligned";
+        case SCAUSE_STORE_ACCESS_FAULT: return "store_access_fault";
+        case SCAUSE_ECALL_U: return "ecall_u";
+        case SCAUSE_ECALL_S: return "ecall_s";
+        case SCAUSE_ECALL_M: return "ecall_m";
+        case SCAUSE_INST_PAGE_FAULT: return "inst_page_fault";
+        case SCAUSE_LOAD_PAGE_FAULT: return "load_page_fault";
+        case SCAUSE_STORE_PAGE_FAULT: return "store_page_fault";
+        case SCAUSE_SOFTWARE_CHECK: return "software_check";
+        case SCAUSE_HARDWARE_ERROR: return "hardware_error";
+        default: return "unknown";
+    }
+}
+
+static const char *signal_name(int sig) {
+    switch (sig) {
+        case SIGKILL: return "SIGKILL";
+        case SIGILL: return "SIGILL";
+        case SIGBUS: return "SIGBUS";
+        case SIGSEGV: return "SIGSEGV";
+        case SIGFPE: return "SIGFPE";
+        default: return "SIG?";
+    }
+}
+
+static int is_sv39_canonical_va(uint64_t va) {
+    uint64_t high = va >> 39;
+    return (high == 0) || (high == ((1UL << 25) - 1));
+}
+
+static const char *stval_hint(unsigned long stval) {
+    if (stval < MAXVA)
+        return "user_va";
+    if (!is_sv39_canonical_va(stval))
+        return "noncanonical_addr";
+    if (stval >= 0x80000000UL)
+        return "kernel_va";
+    return "out_of_user_range";
+}
+
+static int looks_like_fp_payload(uint64_t value) {
+    uint64_t exp = (value >> 52) & 0x7ff;
+    if (exp == 0 || exp == 0x7ff)
+        return 0;
+    if (is_sv39_canonical_va(value))
+        return 0;
+    return 1;
+}
+
+static void log_user_exception(struct trapframe *tf, unsigned long cause,
+                               unsigned long stval, int sig) {
+    int pid = current_proc ? current_proc->pid : -1;
+    const char *pname = proc_name_or_unknown(current_proc);
+    int cheri_scheck = (cause == SCAUSE_SOFTWARE_CHECK);
+
+    printk("trapfault pid=%d proc=%s cause=%s(%lu) sig=%s(%d) epc=0x%lx stval=0x%lx hint=%s cheri_scheck=%d fp_payload_hint=%d sp=0x%lx ra=0x%lx a0=0x%lx a1=0x%lx sstatus=0x%lx satp=0x%lx\n",
+           pid, pname, scause_name(cause), cause,
+           signal_name(sig), sig,
+           tf->epc, stval, stval_hint(stval), cheri_scheck,
+           looks_like_fp_payload(stval), tf->sp, tf->ra, tf->a0, tf->a1,
+           r_sstatus(), r_satp());
+}
+
+static const char *proc_name_or_unknown(struct proc *p) {
+    if (!p)
+        return "<none>";
+    if (p->name[0] == '\0')
+        return "<unnamed>";
+    return p->name;
+}
+
+static void log_user_memfault(struct trapframe *tf, unsigned long cause,
+                              unsigned long stval) {
+    const char *kind = "non_vma_or_bad_addr";
+    uint64_t pte_val = 0;
+    uint64_t vma_start = 0;
+    uint64_t vma_end = 0;
+    int vma_prot = 0;
+    int vma_flags = 0;
+    int vma_hit = 0;
+    int user_va = (stval < MAXVA);
+    int cheri_scheck = (cause == SCAUSE_SOFTWARE_CHECK);
+    int fp_payload_hint = looks_like_fp_payload(stval);
+
+    if (!current_proc) {
+        printk("memfault pid=-1 proc=<none> cause=%s(%lu) epc=0x%lx stval=0x%lx hint=%s cheri_scheck=%d fp_payload_hint=%d\n",
+               scause_name(cause), cause, tf->epc, stval,
+               stval_hint(stval), cheri_scheck, fp_payload_hint);
+        return;
+    }
+
+    if (cause == SCAUSE_INST_PAGE_FAULT)
+        kind = "execute";
+    else if (cause == SCAUSE_LOAD_PAGE_FAULT)
+        kind = "read";
+    else if (cause == SCAUSE_STORE_PAGE_FAULT)
+        kind = "write";
+
+    if (user_va) {
+        pte_t *pte = walk(current_proc->pagetable, PGROUNDDOWN(stval), 0);
+        if (pte)
+            pte_val = *pte;
+
+        struct vm_area *v = vma_find(current_proc, stval);
+        if (v) {
+            vma_hit = 1;
+            vma_start = v->start;
+            vma_end = v->end;
+            vma_prot = v->prot;
+            vma_flags = v->flags;
+        }
+    }
+
+    printk("memfault pid=%d proc=%s cause=%s(%lu) kind=%s epc=0x%lx stval=0x%lx hint=%s cheri_scheck=%d fp_payload_hint=%d user_va=%d pte=0x%lx vma_hit=%d vma=[0x%lx,0x%lx) prot=0x%x flags=0x%x sp=0x%lx ra=0x%lx sstatus=0x%lx satp=0x%lx\n",
+           current_proc->pid, proc_name_or_unknown(current_proc),
+           scause_name(cause), cause, kind, tf->epc, stval,
+           stval_hint(stval), cheri_scheck, fp_payload_hint,
+           user_va, pte_val, vma_hit, vma_start, vma_end,
+           vma_prot, vma_flags, tf->sp, tf->ra,
+           r_sstatus(), r_satp());
+}
+
 /* Get current tick count - accessible from other modules */
 unsigned long get_ticks(void) {
   return ticks;
@@ -5321,8 +5453,7 @@ pagefault_kill:
                 }
 
                 if (!suppress) {
-                    printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
-                           current_proc->pid, tf->epc, stval, cause);
+                    log_user_memfault(tf, cause, stval);
                 }
                 current_proc->sigpending |= signal_bit(SIGSEGV);
                 deliver_signal(tf, current_proc);
@@ -5336,11 +5467,19 @@ pagefault_kill:
         /* Handle other user-mode exceptions by delivering a signal */
         if (current_proc) {
             int sig = SIGKILL;
-            if (cause == 2)                    sig = SIGILL;  /* Illegal instruction */
-            else if (cause == 0 || cause == 4 || cause == 6) sig = SIGBUS; /* Misaligned */
-            else if (cause == 5 || cause == 7) sig = SIGBUS;  /* Access fault */
-            printk("trap pid=%d scause=0x%lx epc=0x%lx stval=0x%lx -> sig %d\n",
-                   current_proc->pid, cause, tf->epc, stval, sig);
+            if (cause == SCAUSE_ILLEGAL_INSTRUCTION) {
+                sig = SIGILL;
+            } else if (cause == SCAUSE_INST_ADDR_MISALIGNED ||
+                       cause == SCAUSE_LOAD_ADDR_MISALIGNED ||
+                       cause == SCAUSE_STORE_ADDR_MISALIGNED ||
+                       cause == SCAUSE_INST_ACCESS_FAULT ||
+                       cause == SCAUSE_LOAD_ACCESS_FAULT ||
+                       cause == SCAUSE_STORE_ACCESS_FAULT) {
+                sig = SIGBUS;
+            } else if (cause == SCAUSE_SOFTWARE_CHECK) {
+                sig = SIGSEGV;
+            }
+            log_user_exception(tf, cause, stval, sig);
             current_proc->sigpending |= signal_bit(sig);
             deliver_signal(tf, current_proc);
             return;

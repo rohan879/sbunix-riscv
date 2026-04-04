@@ -5,6 +5,12 @@
 environ: .quad 0
 
 .section .text
+
+#ifdef __CHERI_PURE_CAPABILITY__
+.option push
+.option nocapmode
+#endif
+
 _start:
 .option push
 .option norelax
@@ -20,3 +26,7 @@ _start:
     call main
     call exit
     j    .
+
+#ifdef __CHERI_PURE_CAPABILITY__
+.option pop
+#endif

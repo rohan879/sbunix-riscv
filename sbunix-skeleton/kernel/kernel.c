@@ -16,11 +16,19 @@
 #include <tty.h>
 #include <swap.h>
 
+#ifdef __CHERI_PURE_CAPABILITY__
+#include <cheri_init_globals.h>
+#endif
+
 // Declare symbols for the embedded tarfs
 extern char _tarfs_start[];
 extern char _tarfs_end[];
 
 void boot(uint64_t hartid, void *dtb) {
+#ifdef __CHERI_PURE_CAPABILITY__
+  cheri_init_globals();
+#endif
+
   printk("Booting SBUnix (hart %ld)\n", (long)hartid);
 
   /* Parse DTB before kinit — the DTB lives in memory that the page

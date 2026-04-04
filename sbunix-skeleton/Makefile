@@ -1,12 +1,138 @@
 KLANG ?= c
 SUBMIT_DIR ?= /submit
 
-CROSS   := riscv64-unknown-elf-
-CC      := $(CROSS)gcc
-LD      := $(CROSS)ld
-AR      := $(CROSS)ar
-OBJCOPY := $(CROSS)objcopy
-CFLAGS  := -gdwarf-4 -Wall -Werror -Os -ffreestanding -fno-builtin -nostdlib -nostdinc -isystem $(shell $(CC) -print-file-name=include) -mcmodel=medany -march=rv64imac_zicsr_zifencei -mabi=lp64 -ffunction-sections -fdata-sections -fno-tree-switch-conversion
+# MODIFIED: BEGIN added CHERI purecap build/run selector
+# ADDED (this session): primary user-facing CHERI toggle.
+# ADDED (this session): set CHERI=1 to build with CHERI Clang in purecap
+# mode and launch with CHERI QEMU.
+# ADDED (backward-compatible): USE_CHERI_PURECAP still works and overrides
+# the default when passed explicitly.
+# ADDED: Toolchain root is /home/steven/cheri/output by default.
+# ADDED: QEMU/BIOS defaults come from the CHERI SDK under that root.
+#
+# Example:
+#   CHERI=1 BUILD_TESTS=1 make qemu -j16
+CHERI ?= 0
+USE_CHERI_PURECAP ?= $(CHERI)
+# ADDED (this session): keep CHERI builds purecap by default and fail fast
+# if the purecap runtime is unavailable. Set CHERI_STRICT_PURECAP=0 to allow
+# explicit fallback to xcheri hybrid runtime.
+CHERI_STRICT_PURECAP ?= 1
+CHERI_OUTPUT ?= /home/steven/cheri/output
+CHERI_SDK ?= $(CHERI_OUTPUT)/sdk
+# ADDED: CHERIBuild launcher location provided by the user.
+CHERIBUILD_ROOT ?= /home/steven/College/Graduate_Spring_2026/CSE506/cheri
+CHERIBUILD_LAUNCHER ?= $(CHERIBUILD_ROOT)/cheribuild/cheribuild.py
+CHERI_QEMU ?= $(CHERI_SDK)/bin/qemu-system-riscv64cheristd
+CHERI_XCHERI_QEMU ?= $(CHERI_SDK)/bin/qemu-system-riscv64xcheri
+CHERI_PURECAP_BIOS ?= $(CHERI_SDK)/share/qemu/opensbi-riscv64cheristd-generic-fw_jump.bin
+CHERI_HYBRID_BIOS ?= $(CHERI_SDK)/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin
+# MODIFIED: prefer purecap firmware by default. If unavailable, optional
+# fallback to xcheri/generic OpenSBI is controlled by CHERI_STRICT_PURECAP.
+CHERI_BIOS ?= $(CHERI_PURECAP_BIOS)
+CHERI_CC ?= $(CHERI_SDK)/bin/clang-17
+CHERI_AR ?= $(CHERI_SDK)/bin/llvm-ar
+CHERI_OBJCOPY ?= $(CHERI_SDK)/bin/llvm-objcopy
+CHERI_TARGET ?= riscv64-unknown-elf
+CHERI_ARCH ?= rv64imafdcxcheri
+CHERI_ABI ?= l64pc128d
+
+CROSS   ?= riscv64-unknown-elf-
+CC      ?= $(CROSS)gcc
+LD      ?= $(CROSS)ld
+AR      ?= $(CROSS)ar
+OBJCOPY ?= $(CROSS)objcopy
+QEMU_SYSTEM ?= qemu-system-riscv64
+QEMU_BIOS_ARGS ?= -bios default
+
+ifeq ($(USE_CHERI_PURECAP),1)
+  CC := $(CHERI_CC)
+  LD := $(CC)
+  AR := $(CHERI_AR)
+  OBJCOPY := $(CHERI_OBJCOPY)
+  QEMU_SYSTEM := $(CHERI_QEMU)
+
+  # MODIFIED: fallback to xcheri only when explicitly allowed.
+  # CHERI=1 / USE_CHERI_PURECAP=1 remains purecap-by-default.
+  ifeq ($(wildcard $(QEMU_SYSTEM)),)
+    ifeq ($(CHERI_STRICT_PURECAP),1)
+      $(error CHERI purecap QEMU not found at $(QEMU_SYSTEM). Set CHERI_QEMU to a valid purecap binary or set CHERI_STRICT_PURECAP=0 to allow xcheri fallback)
+    endif
+    QEMU_SYSTEM := $(CHERI_XCHERI_QEMU)
+    CHERI_BIOS := $(CHERI_HYBRID_BIOS)
+  endif
+
+  # If purecap firmware is unavailable, optionally fall back to xcheri.
+  ifneq ($(notdir $(QEMU_SYSTEM)),qemu-system-riscv64xcheri)
+    ifneq ($(CHERI_BIOS),default)
+      ifeq ($(wildcard $(CHERI_BIOS)),)
+        ifeq ($(CHERI_STRICT_PURECAP),1)
+          $(error CHERI purecap firmware not found at $(CHERI_BIOS). Install/provide a cheristd OpenSBI firmware or set CHERI_STRICT_PURECAP=0 for xcheri fallback)
+        endif
+        QEMU_SYSTEM := $(CHERI_XCHERI_QEMU)
+        CHERI_BIOS := $(CHERI_HYBRID_BIOS)
+      endif
+    endif
+  endif
+
+  ifeq ($(wildcard $(QEMU_SYSTEM)),)
+    $(error CHERI QEMU not found at $(QEMU_SYSTEM))
+  endif
+
+  # Only switch ABI when we intentionally enter xcheri fallback mode.
+  ifeq ($(notdir $(QEMU_SYSTEM)),qemu-system-riscv64xcheri)
+    CHERI_ABI := lp64d
+    ifeq ($(CHERI_BIOS),$(CHERI_PURECAP_BIOS))
+      CHERI_BIOS := $(CHERI_HYBRID_BIOS)
+    endif
+  else
+    CHERI_ABI := l64pc128d
+  endif
+
+  ifneq ($(CHERI_BIOS),default)
+    ifeq ($(wildcard $(CHERI_BIOS)),)
+      $(error CHERI firmware not found at $(CHERI_BIOS))
+    endif
+  endif
+
+  ifeq ($(CHERI_BIOS),default)
+    QEMU_BIOS_ARGS := -bios default
+  else
+    QEMU_BIOS_ARGS := -bios $(CHERI_BIOS)
+  endif
+  CHERI_CFLAGS := --target=$(CHERI_TARGET) -march=$(CHERI_ARCH) -mabi=$(CHERI_ABI) -mno-relax -mxcheri-norvc
+  BASE_ARCH_ABI_CFLAGS :=
+  # MODIFIED: Clang does not support this GCC-specific flag.
+  # MODIFIED: Keep purecap builds usable for debugging by suppressing
+  # provenance warnings that are expected in this non-CHERI-native codebase.
+  COMPILER_SPECIFIC_CFLAGS := -Wno-cheri-capability-misuse
+  # MODIFIED: Third-party/local test sources can trigger warnings that are
+  # unrelated to CHERI bring-up. Avoid failing the full BUILD_TESTS path.
+  CHERI_TEST_CFLAGS := -Wno-error
+  # MODIFIED: Forward CHERI toolchain/cflags into os-test/open-posix sub-makes.
+  # ADDED: use recursive '=' (not ':=') so this sees the final CFLAGS value
+  # assigned later in this file.
+  CHERI_SUITE_CFLAGS = $(filter-out -Werror,$(CFLAGS)) -Wno-error -I$(CURDIR)/libc/include
+  # ADDED (this session): recursive '=' so test-suite args see final CFLAGS,
+  # including CHERI target/ABI flags defined later in this Makefile.
+  TEST_SUITE_MAKE_ARGS = CC="$(CC)" CFLAGS="$(CHERI_SUITE_CFLAGS)" \
+                         LD="$(CC)" \
+                         LDFLAGS_PRE="$(CURDIR)/build/libc/crt.S.o" \
+                         LDFLAGS_POST="$(CURDIR)/build/libc.a -Wl,--gc-sections -nostdlib"
+  KERNEL_LDFLAGS := $(CHERI_CFLAGS) -nostdlib -fuse-ld=lld -Wl,-T,kernel/kernel.ld
+else
+  CHERI_CFLAGS :=
+  BASE_ARCH_ABI_CFLAGS := -march=rv64imac_zicsr_zifencei -mabi=lp64
+  COMPILER_SPECIFIC_CFLAGS := -fno-tree-switch-conversion
+  CHERI_TEST_CFLAGS :=
+  TEST_SUITE_MAKE_ARGS :=
+  KERNEL_LDFLAGS := -T kernel/kernel.ld
+endif
+# MODIFIED: END added CHERI purecap build/run selector
+
+# MODIFIED: common flags + compiler-specific flags are split so CHERI/Clang
+# builds can drop unsupported GCC-only flags.
+CFLAGS  := -gdwarf-4 -Wall -Werror -Os -ffreestanding -fno-builtin -nostdlib -nostdinc -isystem $(shell $(CC) -print-file-name=include) -mcmodel=medany $(BASE_ARCH_ABI_CFLAGS) -ffunction-sections -fdata-sections $(COMPILER_SPECIFIC_CFLAGS) $(CHERI_CFLAGS)
 RUSTFLAGS := --target riscv64imac-unknown-none-elf -C panic=abort -C linker=$(CC) -C code-model=medium -C link-arg=-nostartfiles -C link-arg=-march=rv64imac -C link-arg=-mabi=lp64
 
 KERN_ASM := $(patsubst %,build/%.o,$(wildcard kernel/*.S))
@@ -46,6 +172,8 @@ DISK_SIZE ?= 16
 DISK_IMG  := build/disk.img
 # MODIFIED: added
 TEST_DISK_SIZE ?= 128
+# MODIFIED: inode budget for build/test-disk.img generation
+TEST_DISK_INODES ?= 131072
 # MODIFIED: added
 TEST_DISK_IMG  := build/test-disk.img
 
@@ -122,7 +250,7 @@ build/testfs/.dirs:
 ifdef BUILD_TESTS
 $(TEST_TARGETS): build/testfs/bin/%: build/libc/crt.S.o build/libc.a | build/testfs/.dirs
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
+	$(CC) $(CFLAGS) $(CHERI_TEST_CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 endif
 
 # Prepare base rootfs before building os-tests
@@ -146,7 +274,7 @@ endif
 ifdef BUILD_TESTS
 $(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/testfs/.dirs $(TEST_TARGETS)
 	@echo "=== Building os-test suite ==="
-	$(MAKE) -f tools/os-test.mk SBUNIX_ROOT=$(CURDIR) -j16 install
+	$(MAKE) -f tools/os-test.mk SBUNIX_ROOT=$(CURDIR) $(TEST_SUITE_MAKE_ARGS) -j16 install
 	# Copy test manifest and expected outputs into testfs
 	@if [ -f build/os-test-out/sbunix/test-manifest.txt ]; then \
 		cp build/os-test-out/sbunix/test-manifest.txt build/testfs/os-test-manifest; \
@@ -170,7 +298,7 @@ endif
 ifdef BUILD_TESTS
 $(OPEN_POSIX_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/testfs/.dirs $(TEST_TARGETS)
 	@echo "=== Building open-posix-test suite ==="
-	$(MAKE) -f tools/open-posix-test.mk SBUNIX_ROOT=$(CURDIR) -j16 install
+	$(MAKE) -f tools/open-posix-test.mk SBUNIX_ROOT=$(CURDIR) $(TEST_SUITE_MAKE_ARGS) -j16 install
 	# Copy test manifest into testfs
 	@if [ -f build/open-posix-test-out/sbunix/test-manifest.txt ]; then \
 		cp build/open-posix-test-out/sbunix/test-manifest.txt build/testfs/open-posix-test-manifest; \
@@ -191,15 +319,31 @@ endif
 
 build/tarfs.o: build/rootfs/.prepared # MODIFIED: originally just : $(USER_BIN)
 	tar cf build/rootfs.tar -C build/rootfs .
+
+ifeq ($(USE_CHERI_PURECAP),1)
+	# MODIFIED: In CHERI purecap mode, build tarfs object via assembler
+	# .incbin so the object carries CHERI ELF flags compatible with kernel objects.
+	@printf '%s\n' \
+		'.section .tarfs,"a"' \
+		'.global _tarfs_start' \
+		'.global _tarfs_end' \
+		'.global _tarfs_size' \
+		'_tarfs_start:' \
+		'.incbin "build/rootfs.tar"' \
+		'_tarfs_end:' \
+		'.set _tarfs_size, _tarfs_end - _tarfs_start' > build/tarfs.S
+	$(CC) $(CFLAGS) -Ikernel/include -c build/tarfs.S -o $@
+else
 	cd build && $(OBJCOPY) -I binary -O elf64-littleriscv -B riscv \
 		--rename-section .data=.tarfs \
 		--redefine-sym _binary_rootfs_tar_start=_tarfs_start \
 		--redefine-sym _binary_rootfs_tar_end=_tarfs_end \
 		--redefine-sym _binary_rootfs_tar_size=_tarfs_size \
 		rootfs.tar tarfs.o
+endif
 
 build/kernel.elf: $(KERN_ALL) build/tarfs.o
-	$(LD) -T kernel/kernel.ld $(KERN_ALL) build/tarfs.o -o $@
+	$(LD) $(KERNEL_LDFLAGS) $(KERN_ALL) build/tarfs.o -o $@
 
 thirdparty: build/libc/crt.S.o build/libc.a
 	$(MAKE) -C thirdparty install
@@ -230,8 +374,8 @@ $(TEST_DISK_IMG): build/tools/mkext2img build/testfs/.prepared
 	if [ $$auto_mb -gt $$size_mb ]; then \
 		size_mb=$$auto_mb; \
 	fi; \
-	echo "Building test disk image ($${size_mb}MB for $${used_mb}MB staged testfs)"; \
-	build/tools/mkext2img $@ $$size_mb build/testfs
+	echo "Building test disk image ($${size_mb}MB, inodes=$(TEST_DISK_INODES), staged=$${used_mb}MB)"; \
+	build/tools/mkext2img $@ $$size_mb build/testfs $(TEST_DISK_INODES)
 endif
 
 ifdef BUILD_TESTS
@@ -242,7 +386,7 @@ endif
 
 # MODIFIED: added " $(if $(BUILD_TESTS),$(TEST_DISK_IMG))", "$(QEMU_TEST_DRIVE_ARGS) \"
 qemu: build/kernel.elf $(DISK_IMG) $(if $(BUILD_TESTS),$(TEST_DISK_IMG))
-	qemu-system-riscv64 -machine virt -bios default -kernel $< \
+	$(QEMU_SYSTEM) -machine virt $(QEMU_BIOS_ARGS) -kernel $< \
 		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-pci-non-transitional,drive=hd0 \
 		$(QEMU_TEST_DRIVE_ARGS) \

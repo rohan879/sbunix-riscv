@@ -1,4 +1,10 @@
 .global syscall
+
+#ifdef __CHERI_PURE_CAPABILITY__
+.option push
+.option nocapmode
+#endif
+
 syscall:
     mv a7, a0      # syscall number -> a7
     mv a0, a1      # shift args down
@@ -9,3 +15,7 @@ syscall:
     mv a5, a6
     ecall
     ret
+
+#ifdef __CHERI_PURE_CAPABILITY__
+.option pop
+#endif

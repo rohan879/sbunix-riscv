@@ -132,7 +132,7 @@ $(OPEN_POSIX_TEST_DEST)/%: $(POSIXTEST_SRC)/%.c $(CRT_OBJ) $(LIBC_A) | setup
 				link_objs="$$link_objs $(OUT_DIRECTORY)/.helpers/definitions-main.o"; \
 			fi; \
 		fi; \
-		if $(CC) $(LDFLAGS_PRE) $$link_objs $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; then \
+		if $(CC) $(CFLAGS) $(LDFLAGS_PRE) $$link_objs $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; then \
 			warn_count=$$(grep -c 'warning:' $$_tmpc 2>/dev/null || true); \
 			warn_count=$$((warn_count + $$(grep -c 'warning:' $$_tmpl 2>/dev/null || true))); \
 			if [ $$warn_count -gt 0 ]; then \

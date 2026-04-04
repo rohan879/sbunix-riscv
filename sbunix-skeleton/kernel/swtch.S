@@ -5,6 +5,12 @@
 # Save current registers in old, then load from new.
 
 .globl swtch
+
+#ifdef __CHERI_PURE_CAPABILITY__
+.option push
+.option nocapmode
+#endif
+
 swtch:
         sd ra, 0(a0)
         sd sp, 8(a0)
@@ -37,3 +43,7 @@ swtch:
         ld s11, 104(a1)
         
         ret
+
+#ifdef __CHERI_PURE_CAPABILITY__
+.option pop
+#endif

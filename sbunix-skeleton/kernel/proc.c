@@ -26,7 +26,13 @@ void procinit(void) {
 void forkret(void) {
     /* Set stvec to kernel_trap_handler for traps during kernel execution */
     extern char kernel_trap_handler[];
+#ifdef __CHERI_PURE_CAPABILITY__
+    uint64_t stvec_addr = (uint64_t)__builtin_cheri_address_get(
+        (void *__capability)kernel_trap_handler);
+    asm volatile("csrw stvec, %0" : : "r"(stvec_addr));
+#else
     asm volatile("csrw stvec, %0" : : "r"(kernel_trap_handler));
+#endif
 
     /* Set sstatus: clear SPP (return to user mode), set SPIE (enable interrupts) */
     unsigned long x = r_sstatus();

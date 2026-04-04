@@ -349,7 +349,7 @@ static void import_path(const char *host_path, uint32_t parent_ino,
   fprintf(stderr, "mkext2img: skipping unsupported file type: %s\n", host_path);
 }
 
-static void format_image(uint64_t size_bytes) {
+static void format_image(uint64_t size_bytes, uint32_t requested_inodes) {
   uint32_t total_blocks = (uint32_t)(size_bytes / EXT2_BLOCK_SIZE);
   uint32_t total_inodes;
   uint32_t bitmap_blocks;
@@ -362,8 +362,12 @@ static void format_image(uint64_t size_bytes) {
     die_msg("mkext2img: disk too small");
 
   memset(&sb, 0, sizeof(sb));
-  total_inodes = total_blocks / 4U;
-  if (total_inodes < 16U) total_inodes = 16U;
+  if (requested_inodes != 0U) {
+    total_inodes = requested_inodes;
+  } else {
+    total_inodes = total_blocks / 4U;
+    if (total_inodes < 16U) total_inodes = 16U;
+  }
 
   bitmap_blocks = (total_blocks + 32767U) / 32768U;
   itable_blocks =
@@ -418,10 +422,12 @@ int main(int argc, char **argv) {
   const char *image_path;
   const char *src_dir;
   long size_mb;
+  long requested_inodes;
   FILE *f;
 
-  if (argc != 4) {
-    fprintf(stderr, "usage: mkext2img <image> <size_mb> <source_dir>\n");
+  if (argc != 4 && argc != 5) {
+    fprintf(stderr,
+            "usage: mkext2img <image> <size_mb> <source_dir> [inodes]\n");
     return 1;
   }
 
@@ -431,12 +437,19 @@ int main(int argc, char **argv) {
   if (size_mb <= 0)
     die_msg("mkext2img: invalid size");
 
+  requested_inodes = 0;
+  if (argc == 5) {
+    requested_inodes = atol(argv[4]);
+    if (requested_inodes <= 0)
+      die_msg("mkext2img: invalid inode count");
+  }
+
   image_bytes = (uint64_t)size_mb * 1024ULL * 1024ULL;
   image = calloc(1, (size_t)image_bytes);
   if (!image)
     die_errno("calloc");
 
-  format_image(image_bytes);
+  format_image(image_bytes, (uint32_t)requested_inodes);
   import_dir_contents(src_dir, EXT2_ROOT_INO);
   sync_superblock();
 

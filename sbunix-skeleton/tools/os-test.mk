@@ -125,9 +125,9 @@ $(OS_TEST_DEST)/%: $(OS_TEST_SRC)/%.c | setup
 	_tmpl=$$(mktemp); \
 	if $(CC) $(CFLAGS) $(CFLAGS_WARN) $(CPPFLAGS) -c $< -o $(OUT_DIRECTORY)/$$relpath.o 2>$$_tmpc; then \
 		if [ "$$suite" = "namespace" ]; then \
-			$(CC) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(OUT_DIRECTORY)/.helpers/namespace-main.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; \
+			$(CC) $(CFLAGS) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(OUT_DIRECTORY)/.helpers/namespace-main.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; \
 		else \
-			$(CC) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; \
+			$(CC) $(CFLAGS) $(LDFLAGS_PRE) $(OUT_DIRECTORY)/$$relpath.o $(LDFLAGS_POST) -o $$outbin 2>$$_tmpl; \
 		fi; \
 		if [ $$? -eq 0 ]; then \
 			warn_count=$$(grep -c 'warning:' $$_tmpc 2>/dev/null || true); \
