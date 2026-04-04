@@ -63,6 +63,71 @@ qemu-riscv64 build/rootfs/bin/sbush
 
 This is useful for quick shell-only experiments, but it does not test the SBUnix kernel.
 
+## Third-Party Test Suites (Git Submodules)
+
+The repository includes two POSIX compliance test suites as git submodules:
+
+- **Sortix os-test** (`sbunix-skeleton/tests/thirdparty/sortix/os-test/`) — POSIX compliance tests
+- **Open POSIX Test Suite** (`sbunix-skeleton/tests/thirdparty/open-posix-test-suite/posixtest/`) — IEEE conformance, functional, and stress tests
+
+### Pulling the Submodules
+
+After cloning the repository, initialize and fetch the submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
+To later pull upstream changes for the submodules:
+
+```bash
+git submodule update --remote --recursive
+```
+
+### Building with Submodule Tests
+
+The submodule tests are only compiled when `BUILD_TESTS=1` is set:
+
+```bash
+cd sbunix-skeleton
+source tools/sourceme.sh
+BUILD_TESTS=1 make -j$(nproc)
+```
+
+This compiles the os-test and open-posix suites via `tools/os-test.mk` and `tools/open-posix-test.mk`, and produces a `build/test-disk.img` containing the compiled test binaries.
+
+### Running the Submodule Tests
+
+Boot the OS with the test disk:
+
+```bash
+BUILD_TESTS=1 make qemu
+```
+
+Then from the `sbush` shell prompt inside QEMU:
+
+```
+run-os-test                              # Run all Sortix POSIX compliance tests
+run-os-test include/assert/assert        # Run a single os-test
+
+run-open-posix-test                      # Run all Open POSIX tests
+run-open-posix-test definitions/errno_h/4-1  # Run a single open-posix test
+```
+
+### Analyzing Build Failures
+
+Most submodule tests fail to compile due to missing headers (e.g., `pthread.h`, `sys/socket.h`). Analysis tools are provided:
+
+```bash
+./tools/analyze-os-test-failures headers    # Show missing headers for os-test
+./tools/analyze-os-test-failures symbols    # Show missing symbols
+./tools/analyze-os-test-failures suite      # Per-suite statistics
+
+./tools/analyze-open-posix-failures headers   # Show missing headers for open-posix
+./tools/analyze-open-posix-failures symbols   # Show missing symbols
+./tools/analyze-open-posix-failures category  # Per-category statistics
+```
+
 ## Automated Test Run
 
 Run the host-side regression suite:
@@ -74,8 +139,8 @@ bash tools/run_tests.sh
 What it does:
 
 - runs `make clean && make`
-- builds `build/disk.img`
-- boots the kernel in QEMU
+- builds `build/disk.img` and `build/test-disk.img`
+- boots the kernel in QEMU twice (Boot 1: all tests + persistence write; Boot 2: persistence verify)
 - parses `[PASS]` and `[FAIL]` lines from serial output
 - prints a pass/fail summary
 
