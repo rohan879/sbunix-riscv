@@ -27,3 +27,13 @@
 | **MERGE**| Merging branches/histories |
 
 > **Note:** Breaking changes should be indicated with an exclamation mark before the colon (e.g., `ENH!: some breaking enhancement`).
+
+# Commit Messages
+
+Commit messages should:
+- Start with any of the relevent prefixes shown above, e.g.: ENH: | BF: | RF: | DOC: | MNT: | TEST: | CHORE: etc.
+- Capitalize the first letter after the ':'
+- Be no more than 8 - 12 words max
+- Be in past-tense
+
+After the commit message one-line, a more descriptive message may be written if the changes are substantial (e.g. complex changes/control flow, large changes across multiple files, etc).
