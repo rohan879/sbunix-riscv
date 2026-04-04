@@ -1,5 +1,5 @@
 /*
- * procfstest.c -- /proc filesystem tests (matches autograder "13_procfs")
+ * procfstest.c -- /proc filesystem tests
  *
  * Exercises /proc/self/status, /proc/self/stat, /proc/self/exe,
  * /proc/self/cwd, /proc/self/maps, /proc/<pid>/status, /proc/meminfo,

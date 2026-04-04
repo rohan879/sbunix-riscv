@@ -1,8 +1,8 @@
 /*
  * fdiotest.c -- File descriptor I/O and error handling tests
- *               (matches autograder "04_fdio")
  *
- * Key autograder feedback: "kernel should distinguish between 'nothing
+ *
+ * Key design principle: "kernel should distinguish between 'nothing
  * happened' and 'request was invalid'. Invalid resource handles should
  * return errors, not succeed."
  *
@@ -350,7 +350,7 @@ int main(void)
 {
     printf("=== fdiotest: file descriptor I/O and error handling ===\n");
 
-    /* Bad fd error tests (the autograder cares most about these) */
+    /* Bad fd error tests (critical for POSIX compliance) */
     test_read_bad_fd();
     test_write_bad_fd();
     test_close_bad_fd();
