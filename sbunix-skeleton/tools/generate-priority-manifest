@@ -14,10 +14,10 @@ mkdir -p build/testfs
 
 # --- os-test manifest ---
 if [ -f "$OS_MANIFEST" ]; then
-  grep -E 'include/string/|io/|process/|paths/|signal/|malloc/' "$OS_MANIFEST" \
+  (grep -E 'include/string/|io/|process/|paths/|signal/|malloc/' "$OS_MANIFEST" || true) \
     | sed 's|^/test/bin/os-test/||' \
     | grep -v '^$' \
-    > "$OS_OUT"
+    > "$OS_OUT" || true
   echo "os-test priority manifest: $(wc -l < "$OS_OUT") tests"
 else
   echo "WARNING: $OS_MANIFEST not found; skipping os-test priority manifest"
@@ -25,12 +25,12 @@ fi
 
 # --- open-posix manifest ---
 if [ -f "$POSIX_MANIFEST" ]; then
-  grep -E \
+  (grep -E \
     'string_h/|interfaces/str|interfaces/mem|interfaces/read/|interfaces/write/|interfaces/open/|interfaces/close/|interfaces/lseek/|interfaces/dup/|interfaces/fork/|interfaces/waitpid/|interfaces/_exit/|interfaces/wait/|interfaces/execve/|interfaces/execvp/|interfaces/execl/|interfaces/opendir/|interfaces/readdir/|interfaces/closedir/|interfaces/mkdir/|interfaces/rmdir/|interfaces/getenv/|interfaces/setenv/|interfaces/unsetenv/|interfaces/putenv/|interfaces/pipe/|interfaces/kill/|interfaces/raise/|interfaces/signal/|interfaces/sigaction/|interfaces/sigprocmask/|interfaces/sigpending/|interfaces/mmap/|interfaces/sbrk/|interfaces/setpgid/|interfaces/getpgrp/|interfaces/setsid/|interfaces/symlink/|interfaces/readlink/|interfaces/lstat/|interfaces/clock_gettime/|interfaces/time/|interfaces/gettimeofday/|interfaces/chdir/|interfaces/getcwd/' \
-    "$POSIX_MANIFEST" \
+    "$POSIX_MANIFEST" || true) \
     | sed 's|^/test/bin/open-posix-test/||' \
     | grep -v '^$' \
-    > "$POSIX_OUT"
+    > "$POSIX_OUT" || true
   echo "open-posix priority manifest: $(wc -l < "$POSIX_OUT") tests"
 else
   echo "WARNING: $POSIX_MANIFEST not found; skipping open-posix priority manifest"

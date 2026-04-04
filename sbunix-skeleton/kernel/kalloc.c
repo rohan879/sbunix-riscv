@@ -141,9 +141,13 @@ void kfree(void *pa) {
         return;
     }
 
+    unsigned long old = r_sstatus();
+    w_sstatus(old & ~SSTATUS_SIE);
+
     if (idx >= 0 && idx < MAX_PAGES) {
         if (page_refcount[idx] > 1) {
             page_refcount[idx]--;
+            w_sstatus(old);
             return; /* still referenced */
         }
         if (page_refcount[idx] == 0) {
@@ -152,6 +156,7 @@ void kfree(void *pa) {
                        (uint64_t)pa, page_last_free_ra[idx], caller_ra, page_type[idx]);
                 kfree_debug_warn_count++;
             }
+            w_sstatus(old);
             return;
         }
         page_refcount[idx] = 0;
@@ -163,7 +168,8 @@ void kfree(void *pa) {
     r->next = kmem.freelist;
     kmem.freelist = r;
     free_page_count++;
-    
+
+    w_sstatus(old);
 }
 
 // Initializes the page allocator.
@@ -197,12 +203,17 @@ void *kalloc(void) {
     if (free_page_count < SWAP_LOW_WATERMARK && swap_enabled())
         swap_evict_pages(SWAP_EVICT_BATCH);
 
+    unsigned long old = r_sstatus();
+    w_sstatus(old & ~SSTATUS_SIE);
+
     r = kmem.freelist;
     if(r) {
         kmem.freelist = r->next;
         free_page_count--;
         page_refcount[pa_to_index((uint64_t)r)] = 1;
     }
+
+    w_sstatus(old);
     return r;
 }
 
