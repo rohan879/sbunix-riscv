@@ -8,7 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TIMEOUT=${TIMEOUT:-600}
+TIMEOUT=${TIMEOUT:-900}
 OUTPUT_FILE="$(mktemp /tmp/sbunix-test-output.XXXXXX)"
 QEMU_PID=""
 

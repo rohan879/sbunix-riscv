@@ -541,6 +541,11 @@ rm /mnt/dddst
 
 echo === POSIX Utility Tests Done ===
 
+echo "=== Priority Third-Party Tests ==="
+if test -f /bin/run-priority-tests; then
+    run-priority-tests
+fi
+
 echo ""
 echo "=== Summary ==="
 echo "Passed: $PASS"

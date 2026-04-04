@@ -221,6 +221,9 @@ $(DISK_IMG): build/tools/mkfs
 # MODIFIED: BEGIN added
 ifdef BUILD_TESTS
 build/testfs/.prepared: build/testfs/.dirs $(TEST_TARGETS) $(OS_TEST_MARKER) $(OPEN_POSIX_TEST_MARKER)
+	@if [ -x tools/generate-priority-manifest ]; then \
+		tools/generate-priority-manifest; \
+	fi
 	@touch $@
 
 $(TEST_DISK_IMG): build/tools/mkext2img build/testfs/.prepared
