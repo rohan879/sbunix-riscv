@@ -43,6 +43,8 @@ static int pa_to_index(uint64_t pa) {
 void page_mark_ptpage(uint64_t pa) {
     int idx = pa_to_index(pa);
     if (idx >= 0 && idx < MAX_PAGES) {
+        unsigned long old = r_sstatus();
+        w_sstatus(old & ~SSTATUS_SIE);
         if (page_type[idx] == PAGE_TYPE_PTPAGE) {
             /* Already marked as ptpage - this might indicate double-use */
             /* Only warn if we haven't seen too many warnings */
@@ -52,6 +54,7 @@ void page_mark_ptpage(uint64_t pa) {
             }
         }
         page_type[idx] = PAGE_TYPE_PTPAGE;
+        w_sstatus(old);
     }
 }
 
@@ -83,14 +86,25 @@ int get_proc_exhaustion_count(void) { return proc_exhaustion_count; }
 
 void page_ref_inc(uint64_t pa) {
     int idx = pa_to_index(pa);
-    if (idx >= 0 && idx < MAX_PAGES)
+    if (idx >= 0 && idx < MAX_PAGES) {
+        unsigned long old = r_sstatus();
+        w_sstatus(old & ~SSTATUS_SIE);
         page_refcount[idx]++;
+        w_sstatus(old);
+    }
 }
 
 void page_ref_dec(uint64_t pa) {
     int idx = pa_to_index(pa);
-    if (idx >= 0 && idx < MAX_PAGES)
-        page_refcount[idx]--;
+    if (idx >= 0 && idx < MAX_PAGES) {
+        unsigned long old = r_sstatus();
+        w_sstatus(old & ~SSTATUS_SIE);
+        if (page_refcount[idx] > 0)
+            page_refcount[idx]--;
+        else
+            printk("WARNING: page_ref_dec on pa 0x%lx with refcount=%d\n", pa, page_refcount[idx]);
+        w_sstatus(old);
+    }
 }
 
 int page_ref_get(uint64_t pa) {
@@ -102,8 +116,12 @@ int page_ref_get(uint64_t pa) {
 
 void page_ref_set(uint64_t pa, int val) {
     int idx = pa_to_index(pa);
-    if (idx >= 0 && idx < MAX_PAGES)
+    if (idx >= 0 && idx < MAX_PAGES) {
+        unsigned long old = r_sstatus();
+        w_sstatus(old & ~SSTATUS_SIE);
         page_refcount[idx] = val;
+        w_sstatus(old);
+    }
 }
 
 // Frees a page of physical memory.
@@ -198,8 +216,13 @@ int get_free_page_count(void) {
 // for a 2MB-aligned run of 512 consecutive free pages.
 void *kalloc_super(void) {
     /* Build a bitmap of which pages are on the free list.
-     * MAX_PAGES = 32768, so bitmap = 4096 bytes = 1 page. */
-    uint8_t free_bitmap[MAX_PAGES / 8];
+     * MAX_PAGES = 32768, so bitmap = 4096 bytes = 1 page.
+     * Static to avoid putting 4096 bytes on the 16KB kernel stack. */
+    static uint8_t free_bitmap[MAX_PAGES / 8];
+
+    unsigned long old = r_sstatus();
+    w_sstatus(old & ~SSTATUS_SIE);
+
     memset(free_bitmap, 0, sizeof(free_bitmap));
 
     struct run *r = kmem.freelist;
@@ -248,14 +271,17 @@ void *kalloc_super(void) {
 
         /* Set base page refcount to 1 */
         page_refcount[base] = 1;
+        w_sstatus(old);
         return (void *)base_pa;
     }
 
+    w_sstatus(old);
     return NULL; /* no contiguous 2MB block available */
 }
 
 // Free a 2MB contiguous block back to the free list.
-// pa must be 2MB-aligned.
+// pa must be 2MB-aligned.  After superpage_split, individual sub-pages
+// may have independent refcounts, so check each one before freeing.
 void kfree_super(void *pa) {
     uint64_t base_pa = (uint64_t)pa;
     if (!IS_SUPERPAGE_ALIGNED(base_pa))
@@ -264,27 +290,38 @@ void kfree_super(void *pa) {
         return;
     int base_idx = pa_to_index(base_pa);
 
-    /* Check base refcount -- only free when it reaches 0 */
-    if (base_idx >= 0 && base_idx < MAX_PAGES) {
-        if (page_refcount[base_idx] > 1) {
-            page_refcount[base_idx]--;
-            return; /* still referenced */
-        }
-        if (page_refcount[base_idx] == 0) {
-            printk("WARNING: double kfree_super of pa 0x%lx! Ignoring.\n", (uint64_t)base_pa);
-            return;
-        }
+    unsigned long old = r_sstatus();
+    w_sstatus(old & ~SSTATUS_SIE);
+
+    if (page_refcount[base_idx] > 1) {
+        page_refcount[base_idx]--;
+        w_sstatus(old);
+        return;
+    }
+    if (page_refcount[base_idx] == 0) {
+        printk("WARNING: double kfree_super on pa 0x%lx\n", base_pa);
+        w_sstatus(old);
+        return;
     }
 
-    /* Return all 512 constituent 4KB pages to the free list */
+    /* Return constituent 4KB pages to the free list, checking each
+     * sub-page's refcount individually (superpage_split may have
+     * given them independent tracking). */
     for (int i = 0; i < SUPERPAGE_NPAGES; i++) {
         uint64_t sub_pa = base_pa + (uint64_t)i * PAGE_SIZE;
         int idx = pa_to_index(sub_pa);
-        if (idx >= 0 && idx < MAX_PAGES)
+        if (idx >= 0 && idx < MAX_PAGES) {
+            if (page_refcount[idx] > 1) {
+                page_refcount[idx]--;  /* Still shared, just decrement */
+                continue;
+            }
             page_refcount[idx] = 0;
-        struct run *r = (struct run *)sub_pa;
-        r->next = kmem.freelist;
-        kmem.freelist = r;
-        free_page_count++;
+            page_type[idx] = PAGE_TYPE_FREE;
+            struct run *r = (struct run *)sub_pa;
+            r->next = kmem.freelist;
+            kmem.freelist = r;
+            free_page_count++;
+        }
     }
+    w_sstatus(old);
 }
