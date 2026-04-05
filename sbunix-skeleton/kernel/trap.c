@@ -5860,6 +5860,25 @@ void trap_handler(struct trapframe *tf) {
                     /* Check if page is already mapped */
                     pte_t *pte = walk(current_proc->pagetable, va, 0);
                     if (!pte || !(*pte & PTE_V)) {
+                        /* BF: POSIX requires SIGBUS for file-backed mmap access
+                         * beyond the end of the file (rounded up to page boundary).
+                         * Check file size via fstat before demand-paging. */
+                        if (fvma->file && fvma->file->ops && fvma->file->ops->fstat) {
+                            uint8_t stbuf[128];
+                            memset(stbuf, 0, sizeof(stbuf));
+                            if (fvma->file->ops->fstat(fvma->file->fs_data,
+                                                       fvma->file->private, stbuf) == 0) {
+                                int64_t file_sz = *(int64_t *)(stbuf + 48); /* st_size */
+                                uint64_t file_end_page = ((uint64_t)file_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+                                uint64_t page_file_off = fvma->file_offset + (va - fvma->start);
+                                if (page_file_off >= file_end_page) {
+                                    current_proc->sigpending |= signal_bit(SIGBUS);
+                                    deliver_signal(tf, current_proc);
+                                    return;
+                                }
+                            }
+                        }
+
                         /* Page not yet allocated — demand-page it */
                         char *pg = kalloc();
                         if (pg) {
