@@ -491,16 +491,19 @@ static void snp_emit_float_g(snp_ctx_t *ctx, double val, int width,
  * union array, then formats using positional indices.
  * ---------------------------------------------------------------------- */
 
-/* Union for positional argument storage */
+/* Union for positional argument storage.
+ * BF: Added long double member so %Lf with positional args extracts the
+ * correct number of bytes from va_list (long double may be wider than
+ * double on some targets). */
 union printarg {
   int i; unsigned u; long l; unsigned long ul;
   long long ll; unsigned long long ull;
-  double d; void *p; char *s;
+  double d; long double ld; void *p; char *s;
 };
 
 enum argtype {
   PA_INT = 0, PA_UINT, PA_LONG, PA_ULONG, PA_LLONG, PA_ULLONG,
-  PA_DOUBLE, PA_PTR, PA_STRING, PA_CHAR, PA_SSIZE, PA_SIZE,
+  PA_DOUBLE, PA_LDOUBLE, PA_PTR, PA_STRING, PA_CHAR, PA_SSIZE, PA_SIZE,
   PA_INTP, PA_LONGP, PA_LLONGP
 };
 
@@ -609,7 +612,9 @@ static int scan_positional(const char *fmt, enum argtype *types, int *max_pos) {
         else types[pos_idx - 1] = PA_UINT;
         break;
       case 'f': case 'F': case 'e': case 'E': case 'g': case 'G':
-        types[pos_idx - 1] = PA_DOUBLE;
+        /* BF: Distinguish long double (L modifier, is_long==2) from double
+         * so extract_args pulls the correct number of bytes from va_list. */
+        types[pos_idx - 1] = (is_long == 2) ? PA_LDOUBLE : PA_DOUBLE;
         break;
       case 'p':
         types[pos_idx - 1] = PA_PTR;
@@ -655,6 +660,9 @@ static void extract_args(va_list ap, enum argtype *types, union printarg *args, 
       args[i].ul = (unsigned long)va_arg(ap, size_t); break;
     case PA_DOUBLE:
       args[i].d = va_arg(ap, double); break;
+    case PA_LDOUBLE:
+      /* BF: Extract long double so positional %Lf reads the right bytes. */
+      args[i].ld = va_arg(ap, long double); break;
     case PA_PTR:
       args[i].p = va_arg(ap, void *); break;
     case PA_STRING:
@@ -934,7 +942,13 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
         case 'f': case 'F': {
             double dv;
             if (pos_idx > 0 && pos_idx <= max_pos) {
-                dv = pos_args[pos_idx - 1].d;
+                /* BF: Check for PA_LDOUBLE so positional %Lf reads from the
+                 * long double member instead of the double member, avoiding
+                 * misaligned extraction when long double is wider. */
+                if (pos_types[pos_idx - 1] == PA_LDOUBLE)
+                  dv = (double)pos_args[pos_idx - 1].ld;
+                else
+                  dv = pos_args[pos_idx - 1].d;
             } else {
                 if (is_longdouble) {
                   /* long double promoted to double on this platform */
@@ -951,7 +965,11 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
         case 'e': case 'E': {
             double dv;
             if (pos_idx > 0 && pos_idx <= max_pos) {
-                dv = pos_args[pos_idx - 1].d;
+                /* BF: Same PA_LDOUBLE check as %f above. */
+                if (pos_types[pos_idx - 1] == PA_LDOUBLE)
+                  dv = (double)pos_args[pos_idx - 1].ld;
+                else
+                  dv = pos_args[pos_idx - 1].d;
             } else {
                 if (is_longdouble) {
                   dv = (double)va_arg(ap, long double);
@@ -967,7 +985,11 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
         case 'g': case 'G': {
             double dv;
             if (pos_idx > 0 && pos_idx <= max_pos) {
-                dv = pos_args[pos_idx - 1].d;
+                /* BF: Same PA_LDOUBLE check as %f above. */
+                if (pos_types[pos_idx - 1] == PA_LDOUBLE)
+                  dv = (double)pos_args[pos_idx - 1].ld;
+                else
+                  dv = pos_args[pos_idx - 1].d;
             } else {
                 if (is_longdouble) {
                   dv = (double)va_arg(ap, long double);

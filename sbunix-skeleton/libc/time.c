@@ -463,7 +463,11 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
  */
 int clock_gettime(int clk_id, struct timespec *tp) {
     long ret = syscall(SYS_clock_gettime, clk_id, tp);
-    return (ret < 0) ? -1 : 0;
+    /* BF: Set errno from negative kernel return.  The clock_getres wrapper
+     * below does this correctly; clock_gettime was missing it, causing
+     * POSIX tests for invalid clock IDs to fail. */
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return 0;
 }
 
 int clock_getres(clockid_t clockid, struct timespec *res) {

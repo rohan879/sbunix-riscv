@@ -10,14 +10,20 @@
 
 #include <sys/mman.h>
 #include <syscall.h>
+#include <errno.h>
 
 long syscall(long num, ...);
 
 void *mmap(void *addr, size_t length, int prot, int flags,
            int fd, off_t offset) {
     void *ret = (void *)syscall(SYS_mmap, addr, length, prot, flags, fd, offset);
-    if ((long)ret < 0 && (long)ret > -4096)
+    if ((long)ret < 0 && (long)ret > -4096) {
+        /* BF: Set errno from negative kernel return value.  Without this,
+         * POSIX tests that check errno after MAP_FAILED never see the
+         * correct error code (EINVAL, EACCES, EBADF, etc.). */
+        errno = (int)(-(long)ret);
         return MAP_FAILED;
+    }
     return ret;
 }
 
