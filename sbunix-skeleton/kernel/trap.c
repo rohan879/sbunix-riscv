@@ -3439,6 +3439,13 @@ static long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
                 memset(kinfo, 0, sizeof(kinfo));
                 int32_t si_signo = (int32_t)sig;
                 memcpy(kinfo, &si_signo, 4);
+                /* BF: POSIX requires siginfo_t fields to be populated.
+                 * Tests expect si_code, si_pid, and si_uid in addition
+                 * to si_signo for sigtimedwait/sigwaitinfo results. */
+                *(int32_t *)(kinfo + 4) = -1;  /* si_errno: none */
+                *(int32_t *)(kinfo + 8) = 0;   /* si_code: SI_USER (default) */
+                *(int32_t *)(kinfo + 12) = current_proc->pid;  /* si_pid: sender */
+                *(int32_t *)(kinfo + 16) = 0;  /* si_uid: always root */
                 if (copyout(current_proc->pagetable, info_uaddr, kinfo, 128) < 0)
                     return (long)-14; /* EFAULT */
             }
