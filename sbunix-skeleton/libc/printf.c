@@ -577,11 +577,12 @@ static int scan_positional(const char *fmt, enum argtype *types, int *max_pos) {
     }
 
     /* Length modifier */
-    int is_long = 0, is_longlong = 0, is_short = 0, is_size = 0;
+    int is_long = 0, is_longlong = 0, is_size = 0;
     if (*p == 'l') { p++; if (*p == 'l') { is_longlong = 1; p++; } else is_long = 1; }
-    else if (*p == 'h') { is_short = 1; p++; if (*p == 'h') p++; }
+    else if (*p == 'h') { p++; if (*p == 'h') p++; }
     else if (*p == 'z') { is_size = 1; p++; }
     else if (*p == 'L') { p++; is_long = 2; /* long double marker */ }
+    (void)is_longlong; (void)is_size; /* used in type classification below */
 
     if (pos_idx > 0 && pos_idx <= MAX_POS_ARGS) {
       if (pos_idx > *max_pos) *max_pos = pos_idx;

@@ -714,6 +714,44 @@ double __floatdidf(long long i)
   return out.d;
 }
 
+/* BF: Added __floatundidf (unsigned long long -> double) for printf
+ * float formatting.  Same algorithm as __floatdidf but without sign
+ * handling since the input is unsigned. */
+double __floatundidf(unsigned long long u)
+{
+  f64_u out;
+  uint64_t frac;
+  uint64_t bits;
+  int msb;
+
+  if (u == 0) {
+    out.u = 0;
+    return out.d;
+  }
+
+  msb = 63 - clz64(u);
+
+  if (msb <= 52) {
+    frac = (u << (52 - msb)) & 0x000FFFFFFFFFFFFFULL;
+  } else {
+    uint64_t r = shr_jam64(u, (unsigned)(msb - 52 - 3));
+    uint64_t rb = r & 0x7ULL;
+    uint64_t m = r >> 3;
+    if (rb > 4 || (rb == 4 && (m & 1ULL))) {
+      m++;
+      if (m & (1ULL << 53)) {
+        msb++;
+        m >>= 1;
+      }
+    }
+    frac = m & 0x000FFFFFFFFFFFFFULL;
+  }
+
+  bits = ((uint64_t)(msb + 1023) << 52) | frac;
+  out.u = bits;
+  return out.d;
+}
+
 long long __fixdfdi(double a)
 {
   f64_u ua;
@@ -822,6 +860,16 @@ long long __fixsfdi(float a)
 unsigned long long __fixunssfdi(float a)
 {
   return __fixunsdfdi(__extendsfdf2(a));
+}
+
+/* BF: Added __fixdfsi (double -> signed int) for printf float
+ * formatting.  Delegates to __fixdfdi then narrows to int. */
+int __fixdfsi(double a)
+{
+  long long v = __fixdfdi(a);
+  if (v > 2147483647LL) return 2147483647;
+  if (v < -2147483648LL) return -2147483647 - 1;
+  return (int)v;
 }
 
 unsigned int __fixunsdfsi(double a)
