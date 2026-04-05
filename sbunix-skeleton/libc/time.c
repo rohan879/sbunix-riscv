@@ -35,9 +35,21 @@ static const char *_wday_abbr[] = {
     "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
 };
 
+/* ENH: Full weekday names needed for %A strftime specifier */
+static const char *_wday_full[] = {
+    "Sunday", "Monday", "Tuesday", "Wednesday",
+    "Thursday", "Friday", "Saturday"
+};
+
 static const char *_mon_abbr[] = {
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+};
+
+/* ENH: Full month names needed for %B strftime specifier */
+static const char *_mon_full[] = {
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
 };
 
 int getdate_err;
@@ -356,33 +368,31 @@ size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm)
         }
 
         fmt++;  /* skip '%' */
+
+        /* ENH: POSIX E and O locale modifiers -- in the C/POSIX locale these
+         * produce the same output as the unmodified specifier, so just skip. */
+        if (*fmt == 'E' || *fmt == 'O') fmt++;
+
         switch (*fmt) {
-        case 'Y':   /* 4-digit year */
-            _append_num(s, max, &pos, tm->tm_year + 1900, 4);
-            break;
-        case 'm':   /* month 01-12 */
-            _append_num(s, max, &pos, tm->tm_mon + 1, 2);
-            break;
-        case 'd':   /* day 01-31 */
-            _append_num(s, max, &pos, tm->tm_mday, 2);
-            break;
-        case 'H':   /* hour 00-23 */
-            _append_num(s, max, &pos, tm->tm_hour, 2);
-            break;
-        case 'M':   /* minute 00-59 */
-            _append_num(s, max, &pos, tm->tm_min, 2);
-            break;
-        case 'S':   /* second 00-59 */
-            _append_num(s, max, &pos, tm->tm_sec, 2);
+        case 'A':   /* ENH: full weekday name (e.g. "Sunday") */
+            if (tm->tm_wday >= 0 && tm->tm_wday <= 6)
+                _append(s, max, &pos, _wday_full[tm->tm_wday]);
             break;
         case 'a':   /* abbreviated weekday name */
             if (tm->tm_wday >= 0 && tm->tm_wday <= 6)
                 _append(s, max, &pos, _wday_abbr[tm->tm_wday]);
             break;
+        case 'B':   /* ENH: full month name (e.g. "January") */
+            if (tm->tm_mon >= 0 && tm->tm_mon <= 11)
+                _append(s, max, &pos, _mon_full[tm->tm_mon]);
+            break;
         case 'b':   /* abbreviated month name */
         case 'h':   /* synonym for %b */
             if (tm->tm_mon >= 0 && tm->tm_mon <= 11)
                 _append(s, max, &pos, _mon_abbr[tm->tm_mon]);
+            break;
+        case 'C':   /* ENH: century number (year / 100), zero-padded */
+            _append_num(s, max, &pos, (tm->tm_year + 1900) / 100, 2);
             break;
         case 'c':   /* locale date and time: "Sun Jan  1 00:00:00 1970" */
             if (tm->tm_wday >= 0 && tm->tm_wday <= 6)
@@ -407,20 +417,135 @@ size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm)
             _append(s, max, &pos, " ");
             _append_num(s, max, &pos, tm->tm_year + 1900, 4);
             break;
-        case 'p':   /* AM/PM */
-            _append(s, max, &pos, tm->tm_hour < 12 ? "AM" : "PM");
+        case 'D':   /* ENH: equivalent to %m/%d/%y (US date format) */
+            _append_num(s, max, &pos, tm->tm_mon + 1, 2);
+            _append(s, max, &pos, "/");
+            _append_num(s, max, &pos, tm->tm_mday, 2);
+            _append(s, max, &pos, "/");
+            _append_num(s, max, &pos, (tm->tm_year + 1900) % 100, 2);
             break;
-        case 'Z':   /* timezone name */
-            _append(s, max, &pos, "UTC");
+        case 'd':   /* day 01-31 */
+            _append_num(s, max, &pos, tm->tm_mday, 2);
             break;
+        case 'e':   /* ENH: day of month, space-padded (e.g. " 5") */
+            if (tm->tm_mday < 10) {
+                _append(s, max, &pos, " ");
+                _append_num(s, max, &pos, tm->tm_mday, 1);
+            } else {
+                _append_num(s, max, &pos, tm->tm_mday, 2);
+            }
+            break;
+        case 'F':   /* ENH: ISO 8601 date: %Y-%m-%d */
+            _append_num(s, max, &pos, tm->tm_year + 1900, 4);
+            _append(s, max, &pos, "-");
+            _append_num(s, max, &pos, tm->tm_mon + 1, 2);
+            _append(s, max, &pos, "-");
+            _append_num(s, max, &pos, tm->tm_mday, 2);
+            break;
+        case 'G':   /* ENH: ISO week-based year (simplified: same as %Y) */
+            _append_num(s, max, &pos, tm->tm_year + 1900, 4);
+            break;
+        case 'H':   /* hour 00-23 */
+            _append_num(s, max, &pos, tm->tm_hour, 2);
+            break;
+        case 'I': { /* ENH: 12-hour clock hour, zero-padded 01-12 */
+            int h12 = tm->tm_hour % 12;
+            if (h12 == 0) h12 = 12;
+            _append_num(s, max, &pos, h12, 2);
+            break;
+        }
         case 'j':   /* day of year 001-366 */
             _append_num(s, max, &pos, tm->tm_yday + 1, 3);
+            break;
+        case 'M':   /* minute 00-59 */
+            _append_num(s, max, &pos, tm->tm_min, 2);
+            break;
+        case 'm':   /* month 01-12 */
+            _append_num(s, max, &pos, tm->tm_mon + 1, 2);
             break;
         case 'n':   /* newline */
             s[pos++] = '\n';
             break;
+        case 'p':   /* AM/PM */
+            _append(s, max, &pos, tm->tm_hour < 12 ? "AM" : "PM");
+            break;
+        case 'R':   /* ENH: 24-hour HH:MM, equivalent to %H:%M */
+            _append_num(s, max, &pos, tm->tm_hour, 2);
+            _append(s, max, &pos, ":");
+            _append_num(s, max, &pos, tm->tm_min, 2);
+            break;
+        case 'r': { /* ENH: 12-hour time, equivalent to %I:%M:%S %p */
+            int h12 = tm->tm_hour % 12;
+            if (h12 == 0) h12 = 12;
+            _append_num(s, max, &pos, h12, 2);
+            _append(s, max, &pos, ":");
+            _append_num(s, max, &pos, tm->tm_min, 2);
+            _append(s, max, &pos, ":");
+            _append_num(s, max, &pos, tm->tm_sec, 2);
+            _append(s, max, &pos, " ");
+            _append(s, max, &pos, tm->tm_hour < 12 ? "AM" : "PM");
+            break;
+        }
+        case 'S':   /* second 00-59 */
+            _append_num(s, max, &pos, tm->tm_sec, 2);
+            break;
+        case 'T':   /* ENH: full time, equivalent to %H:%M:%S */
+            _append_num(s, max, &pos, tm->tm_hour, 2);
+            _append(s, max, &pos, ":");
+            _append_num(s, max, &pos, tm->tm_min, 2);
+            _append(s, max, &pos, ":");
+            _append_num(s, max, &pos, tm->tm_sec, 2);
+            break;
         case 't':   /* tab */
             s[pos++] = '\t';
+            break;
+        case 'U':   /* ENH: week number, Sunday as first day (00-53) */
+            _append_num(s, max, &pos, (tm->tm_yday + 7 - tm->tm_wday) / 7, 2);
+            break;
+        case 'u':   /* ENH: day of week 1-7, Monday=1 */
+            _append_num(s, max, &pos, tm->tm_wday == 0 ? 7 : tm->tm_wday, 1);
+            break;
+        case 'V': { /* ENH: ISO 8601 week number 01-53 (simplified) */
+            int dow = (tm->tm_wday + 6) % 7;  /* Monday=0 */
+            int wk = (tm->tm_yday + 7 - dow) / 7;
+            /* ISO weeks are 01-53; week 0 belongs to previous year's last week */
+            if (wk == 0) wk = 53;
+            _append_num(s, max, &pos, wk, 2);
+            break;
+        }
+        case 'W': { /* ENH: week number, Monday as first day (00-53) */
+            int dow = (tm->tm_wday + 6) % 7;
+            _append_num(s, max, &pos, (tm->tm_yday + 7 - dow) / 7, 2);
+            break;
+        }
+        case 'w':   /* ENH: day of week 0-6, Sunday=0 */
+            _append_num(s, max, &pos, tm->tm_wday, 1);
+            break;
+        case 'X':   /* ENH: locale time, equivalent to %H:%M:%S in C locale */
+            _append_num(s, max, &pos, tm->tm_hour, 2);
+            _append(s, max, &pos, ":");
+            _append_num(s, max, &pos, tm->tm_min, 2);
+            _append(s, max, &pos, ":");
+            _append_num(s, max, &pos, tm->tm_sec, 2);
+            break;
+        case 'x':   /* ENH: locale date, equivalent to %m/%d/%y in C locale */
+            _append_num(s, max, &pos, tm->tm_mon + 1, 2);
+            _append(s, max, &pos, "/");
+            _append_num(s, max, &pos, tm->tm_mday, 2);
+            _append(s, max, &pos, "/");
+            _append_num(s, max, &pos, (tm->tm_year + 1900) % 100, 2);
+            break;
+        case 'Y':   /* 4-digit year */
+            _append_num(s, max, &pos, tm->tm_year + 1900, 4);
+            break;
+        case 'y':   /* ENH: 2-digit year (00-99) */
+            _append_num(s, max, &pos, (tm->tm_year + 1900) % 100, 2);
+            break;
+        case 'Z':   /* timezone name */
+            _append(s, max, &pos, "UTC");
+            break;
+        case 'z':   /* ENH: UTC offset -- hardcoded to +0000 (UTC only) */
+            _append(s, max, &pos, "+0000");
             break;
         case '%':   /* literal % */
             s[pos++] = '%';

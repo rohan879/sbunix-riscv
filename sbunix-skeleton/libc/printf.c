@@ -394,7 +394,10 @@ static void snp_emit_float_g(snp_ctx_t *ctx, double val, int width,
   }
 
   if (prec < 0) prec = 6;
-  if (prec == 0) prec = 1;
+  /* BF: %#g with precision 0 should display the decimal point but no
+   * fractional digits.  Only clamp prec to 1 when alt is not set,
+   * otherwise the '#' semantics are lost. */
+  if (prec == 0 && !alt) prec = 1;
 
   /* %g rule: use %e if exponent < -4 or >= prec, else %f.
    * prec specifies total significant digits (not fractional digits). */
@@ -764,6 +767,9 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
             while (*fmt >= '0' && *fmt <= '9')
                 width = width * 10 + (*fmt++ - '0');
         }
+        /* BF: POSIX requires that '-' flag (or implied by negative width from
+         * '*') overrides the '0' flag.  Left-aligned output must use spaces. */
+        if (left_align) zero_pad = 0;
 
         /* Precision -- ENH: added '*' precision and negative precision */
         int prec = -1;

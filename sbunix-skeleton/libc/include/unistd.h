@@ -1,6 +1,11 @@
 #ifndef _UNISTD_H
 #define _UNISTD_H
 
+/* ENH: Advertise POSIX memory protection support so that Open POSIX
+ * mmap tests 6-1, 6-2, 6-3 actually test PROT_NONE enforcement
+ * instead of returning PTS_UNRESOLVED. */
+#define _POSIX_MEMORY_PROTECTION 200112L
+
 #include <sys/types.h>
 #include <sys/time.h>
 #include <stdint.h>

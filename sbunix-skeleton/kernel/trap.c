@@ -1195,14 +1195,13 @@ static int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_fi
 /* ------------------------------------------------------------------ */
 
 static void deliver_signal(struct trapframe *tf, struct proc *p) {
-    /* Force unblock fatal/synchronous signals that shouldn't be blocked or ignored */
-    uint64_t force_unblock = signal_bit(SIGKILL) | signal_bit(SIGSTOP) |
-                             signal_bit(SIGILL) | signal_bit(SIGSEGV) |
-                             signal_bit(SIGBUS) | signal_bit(SIGFPE);
+    /* BF: Only SIGKILL and SIGSTOP are truly unblockable per POSIX.
+     * Synchronous fault signals (SIGILL, SIGSEGV, SIGBUS, SIGFPE) are
+     * unmasked at their exception handler sites, not here. */
+    uint64_t force_unblock = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
 
     /* Find lowest-numbered pending unblocked signal.  Unblockable signals
-     * (SIGKILL, synchronous faults) must be deliverable even if sa_mask
-     * has them blocked, so we temporarily unblock them for the check. */
+     * must be deliverable even if sa_mask has them blocked. */
     uint64_t saved_mask = p->sigmask;
     p->sigmask &= ~force_unblock;
     uint64_t deliverable = p->sigpending & ~p->sigmask;
@@ -1241,6 +1240,17 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
             p->stopped_signal = 0;
             p->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
                                signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
+            /* BF: Notify parent with CLD_CONTINUED so SA_SIGINFO handlers
+             * on SIGCHLD can detect child continuation. */
+            if (p->parent) {
+                struct kern_sigaction *psa = proc_sigactions(p->parent);
+                if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
+                    p->parent->sigchld_code = 6; /* CLD_CONTINUED */
+                    p->parent->sigpending |= signal_bit(SIGCHLD);
+                    if (p->parent->state == SLEEPING)
+                        p->parent->state = RUNNABLE;
+                }
+            }
             return;
         }
 
@@ -1255,6 +1265,7 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
                 /* SA_NOCLDSTOP: don't send SIGCHLD on child stop */
                 struct kern_sigaction *psa = proc_sigactions(p->parent);
                 if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
+                    p->parent->sigchld_code = 5; /* CLD_STOPPED */
                     p->parent->sigpending |= signal_bit(SIGCHLD);
                     if (p->parent->state == SLEEPING)
                         p->parent->state = RUNNABLE;
@@ -1313,7 +1324,13 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         memcpy(ksi + 0, &si_signo, 4);   /* offset 0: si_signo */
         int32_t si_errno = 0;
         memcpy(ksi + 4, &si_errno, 4);   /* offset 4: si_errno = 0 */
+        /* BF: Use process-specific sigchld_code for SIGCHLD so SA_SIGINFO
+         * handlers can distinguish CLD_STOPPED/CLD_CONTINUED/CLD_EXITED. */
         int32_t si_code = 0; /* SI_USER for kill-delivered signals */
+        if (signum == SIGCHLD && p->sigchld_code != 0) {
+            si_code = p->sigchld_code;
+            p->sigchld_code = 0; /* consumed */
+        }
         memcpy(ksi + 8, &si_code, 4);    /* offset 8: si_code */
         int32_t si_pid = current_proc ? (int32_t)current_proc->pid : 0;
         memcpy(ksi + 12, &si_pid, 4);    /* offset 12: si_pid (sender) */
@@ -1335,7 +1352,15 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     sp &= ~15UL; /* 16-byte align */
 
     struct signal_frame frame;
-    frame.saved_sigmask = p->sigmask;
+    /* BF: If ppoll/pselect6 deferred a mask restore (so the signal can be
+     * delivered under the temporary unblocked mask), save the ORIGINAL mask
+     * into the frame so sigreturn restores it after the handler completes. */
+    if (p->has_saved_sigmask) {
+        frame.saved_sigmask = p->saved_sigmask_restore;
+        p->has_saved_sigmask = 0;
+    } else {
+        frame.saved_sigmask = p->sigmask;
+    }
     memcpy(&frame.saved_tf, tf, sizeof(frame.saved_tf));
 
     /* SA_RESTART: if the process was in a blocking syscall that returned
@@ -2776,6 +2801,10 @@ static long sys_exit_handler(struct trapframe *tf) {
             struct proc *par = current_proc->parent;
             struct kern_sigaction *psa = proc_sigactions(par);
             current_proc->state = ZOMBIE;
+            /* BF: Set sigchld_code so SA_SIGINFO SIGCHLD handlers get the
+             * correct si_code (CLD_EXITED for normal exit, CLD_KILLED if
+             * terminated by a signal). */
+            par->sigchld_code = current_proc->killed_by_signal ? 2 : 1;
             par->sigpending |= signal_bit(SIGCHLD);
             if (par->state == SLEEPING)
                 par->state = RUNNABLE;
@@ -2882,6 +2911,9 @@ static long sys_reboot_handler(struct trapframe *tf) {
     return SYSCALL_NORETURN;
 }
 
+/* Forward declaration: used by MAP_FIXED in sys_mmap_handler */
+static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end);
+
 static long sys_mmap_handler(struct trapframe *tf) {
     uint64_t addr  = tf->a0;
     uint64_t len   = tf->a1;
@@ -2895,9 +2927,13 @@ static long sys_mmap_handler(struct trapframe *tf) {
         return (long)-22; /* EINVAL */
 
     /* BF: POSIX requires exactly one of MAP_SHARED or MAP_PRIVATE.
-     * Return EINVAL if neither is set. */
-    if (!(flags & (0x01 /* MAP_SHARED */ | MAP_PRIVATE)))
-        return (long)-22; /* EINVAL */
+     * Return EINVAL if neither or both are set. */
+    {
+        int shared = flags & 0x01; /* MAP_SHARED */
+        int priv   = flags & MAP_PRIVATE;
+        if ((!shared && !priv) || (shared && priv))
+            return (long)-22; /* EINVAL */
+    }
 
     /* BF: MAP_FIXED requires a page-aligned address.  POSIX says
      * the implementation must not silently round down. */
@@ -2910,6 +2946,10 @@ static long sys_mmap_handler(struct trapframe *tf) {
     if (!(flags & MAP_ANONYMOUS)) {
         if (fd < 0 || fd >= NOFILE || !ftab[fd])
             return (long)-9; /* EBADF */
+        /* BF: Pipes are not memory-mappable.  POSIX requires ENODEV when
+         * attempting to mmap a file descriptor that doesn't support it. */
+        if (ftab[fd]->is_pipe)
+            return (long)-19; /* ENODEV */
         /* BF: Check file permission vs requested prot.
          * MAP_SHARED + PROT_WRITE needs a writable fd.
          * PROT_READ needs a readable fd. */
@@ -2926,6 +2966,10 @@ static long sys_mmap_handler(struct trapframe *tf) {
         }
     }
 
+    /* BF: Check for overflow before rounding len up to page boundary.
+     * ULONG_MAX + PAGE_SIZE-1 wraps to 0, which would pass later checks. */
+    if (len > (uint64_t)-1 - (PAGE_SIZE - 1))
+        return (long)-75; /* EOVERFLOW */
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (len == 0) {
         return (long)-22; /* EINVAL: zero-length mapping */
@@ -2937,6 +2981,13 @@ static long sys_mmap_handler(struct trapframe *tf) {
         /* Reject kernel addresses for MAP_FIXED */
         if (va >= 0x80000000UL || va + len > 0x80000000UL)
             return (long)-22; /* EINVAL */
+        /* BF: POSIX requires MAP_FIXED to replace any existing mappings
+         * in the target range [va, va+len).  Without this, old PTEs and
+         * VMA entries persist, causing incorrect data reads. */
+        mmap_writeback_shared(current_proc, va, va + len);
+        uvmunmap(current_proc->pagetable, va, len);
+        sfence_vma();
+        vma_remove(current_proc, va, va + len);
     } else {
         if (current_proc->mmap_base == 0)
             current_proc->mmap_base = 0x20000000UL;
@@ -2952,7 +3003,9 @@ static long sys_mmap_handler(struct trapframe *tf) {
     if (prot & PROT_READ)  pte_flags |= PTE_R;
     if (prot & PROT_WRITE) pte_flags |= PTE_W;
     if (prot & PROT_EXEC)  pte_flags |= PTE_X;
-    if (pte_flags == 0) pte_flags = PTE_R; /* minimum readable */
+    /* BF: Removed forced PTE_R for PROT_NONE -- demand paging handles this
+     * correctly via the page fault handler which checks VMA prot flags
+     * and delivers SIGSEGV for PROT_NONE access attempts. */
 
     /* Register VMA — pages allocated lazily on first access. */
     if (vma_add(current_proc, va, va + len, prot, flags) < 0) {
@@ -3019,6 +3072,12 @@ static long sys_munmap_handler(struct trapframe *tf) {
 
     /* Remove VMA tracking (handles splits automatically) */
     vma_remove(current_proc, addr, addr + len);
+
+    /* BF: Reclaim virtual address space when the freed region is at the
+     * mmap allocation frontier.  Without this, 100k mmap/munmap cycles
+     * exhaust the address space since mmap_base only moves forward. */
+    if (addr + len == current_proc->mmap_base)
+        current_proc->mmap_base = addr;
 
     return 0;
 }
@@ -3213,6 +3272,15 @@ static long sys_rt_sigaction_handler(struct trapframe *tf) {
             if (act.handler == 1) { /* SIG_IGN */
                 current_proc->sigpending &= ~signal_bit(signum);
             }
+            /* BF: POSIX requires that setting SIG_DFL for signals whose default
+             * action is "ignore" (SIGCHLD, SIGURG, SIGWINCH, SIGCONT) also
+             * discards any pending instance.  Without this, a pending SIGCHLD
+             * can survive a SIG_DFL->handler->SIG_DFL transition and fire
+             * unexpectedly when unblocked. */
+            if (act.handler == 0 && (signum == SIGCHLD || signum == SIGURG ||
+                                     signum == SIGWINCH || signum == SIGCONT)) {
+                current_proc->sigpending &= ~signal_bit(signum);
+            }
         }
         return (long)0;
     }
@@ -3234,12 +3302,17 @@ static long sys_rt_sigprocmask_handler(struct trapframe *tf) {
         if (copyin(current_proc->pagetable, &newset, set_uaddr, sizeof(newset)) < 0) {
             return (long)-14;
         }
-        if (how == 0)
-            current_proc->sigmask |= newset;
-        else if (how == 1)
+        /* BF: POSIX forbids blocking SIGKILL or SIGSTOP.  Strip these from
+         * any mask modification.  Also return -EINVAL for invalid how. */
+        uint64_t unblockable = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
+        if (how == 0)       /* SIG_BLOCK */
+            current_proc->sigmask |= (newset & ~unblockable);
+        else if (how == 1)  /* SIG_UNBLOCK */
             current_proc->sigmask &= ~newset;
-        else if (how == 2)
-            current_proc->sigmask = newset;
+        else if (how == 2)  /* SIG_SETMASK */
+            current_proc->sigmask = (newset & ~unblockable);
+        else
+            return (long)-22; /* EINVAL for invalid how */
     }
     return (long)0;
 }
@@ -5115,6 +5188,8 @@ static long sys_ppoll_handler(struct trapframe *tf) {
     if (nfds < 0 || nfds > NOFILE)
         return (long)-22;
 
+    current_proc->has_saved_sigmask = 0;
+
     /* Copyin pollfd array: each entry is {int fd; short events; short revents} = 8 bytes */
     uint8_t kfds[NOFILE * 8];
     int fds_size = nfds * 8;
@@ -5135,8 +5210,13 @@ static long sys_ppoll_handler(struct trapframe *tf) {
      * the new mask unblocks it, ppoll must return -EINTR immediately
      * without entering the poll loop. */
     if (current_proc->sigpending & ~current_proc->sigmask) {
-        if (sigmask_uaddr != 0)
-            current_proc->sigmask = old_mask;
+        if (sigmask_uaddr != 0) {
+            /* BF: Defer mask restore so deliver_signal (at trap return) can
+             * deliver the handler under the ppoll-swapped mask.  sigreturn
+             * will restore old_mask from the signal frame. */
+            current_proc->saved_sigmask_restore = old_mask;
+            current_proc->has_saved_sigmask = 1;
+        }
         if (nfds > 0 && fds_size > 0)
             copyout(current_proc->pagetable, fds_uaddr, (void *)kfds, (uint64_t)fds_size);
         return (long)-4; /* EINTR */
@@ -5189,8 +5269,11 @@ static long sys_ppoll_handler(struct trapframe *tf) {
          * during the wait.  POSIX: "If ... a signal is caught, ppoll() shall
          * be interrupted... and shall return -1 with errno set to [EINTR]." */
         if (current_proc->sigpending & ~current_proc->sigmask) {
-            if (sigmask_uaddr != 0)
-                current_proc->sigmask = old_mask;
+            if (sigmask_uaddr != 0) {
+                /* BF: Defer mask restore -- same as early EINTR path above. */
+                current_proc->saved_sigmask_restore = old_mask;
+                current_proc->has_saved_sigmask = 1;
+            }
             if (fds_size > 0)
                 copyout(current_proc->pagetable, fds_uaddr, kfds, (uint64_t)fds_size);
             return (long)-4; /* EINTR */
@@ -5230,27 +5313,56 @@ static long sys_pselect6_handler(struct trapframe *tf) {
     if (nfds < 0 || nfds > NOFILE)
         nfds = NOFILE;
 
+    current_proc->has_saved_sigmask = 0;
+
+    /* BF: Handle sigmask from a5 (pselect6 ABI: a5 points to {sigmask_ptr, size}).
+     * This enables signal-driven interruption and SA_RESTART for select(). */
+    uint64_t sigmask_uaddr_raw = tf->a5;
+    uint64_t old_mask = current_proc->sigmask;
+    int has_sigmask = 0;
+    if (sigmask_uaddr_raw != 0) {
+        uint64_t sig_args[2]; /* {sigmask_ptr, sigsetsize} */
+        if (copyin(current_proc->pagetable, sig_args, sigmask_uaddr_raw, 16) == 0 &&
+            sig_args[0] != 0) {
+            uint64_t new_mask;
+            if (copyin(current_proc->pagetable, &new_mask, sig_args[0], 8) == 0) {
+                current_proc->sigmask = new_mask;
+                has_sigmask = 1;
+            }
+        }
+    }
+
     /* fd_set is 128 bytes but we only need first 8 bytes (64 fds) */
     uint64_t rfds = 0, wfds = 0, efds = 0;
-    if (readfds_uaddr && copyin(current_proc->pagetable, &rfds, readfds_uaddr, 8) < 0)
+    if (readfds_uaddr && copyin(current_proc->pagetable, &rfds, readfds_uaddr, 8) < 0) {
+        if (has_sigmask) current_proc->sigmask = old_mask;
         return (long)-14;
-    if (writefds_uaddr && copyin(current_proc->pagetable, &wfds, writefds_uaddr, 8) < 0)
+    }
+    if (writefds_uaddr && copyin(current_proc->pagetable, &wfds, writefds_uaddr, 8) < 0) {
+        if (has_sigmask) current_proc->sigmask = old_mask;
         return (long)-14;
-    if (exceptfds_uaddr && copyin(current_proc->pagetable, &efds, exceptfds_uaddr, 8) < 0)
+    }
+    if (exceptfds_uaddr && copyin(current_proc->pagetable, &efds, exceptfds_uaddr, 8) < 0) {
+        if (has_sigmask) current_proc->sigmask = old_mask;
         return (long)-14;
+    }
 
     /* Parse timeout */
     int has_timeout = (timeout_uaddr != 0);
     uint64_t sleep_until_val = 0;
     if (has_timeout) {
         uint64_t kts[2];
-        if (copyin(current_proc->pagetable, kts, timeout_uaddr, 16) < 0)
+        if (copyin(current_proc->pagetable, kts, timeout_uaddr, 16) < 0) {
+            if (has_sigmask) current_proc->sigmask = old_mask;
             return (long)-14;
+        }
         if (kts[0] == 0 && kts[1] == 0) {
             /* Non-blocking */
         } else {
-            if (kts[1] >= 1000000000UL)
+            if (kts[1] >= 1000000000UL) {
+                if (has_sigmask) current_proc->sigmask = old_mask;
                 return (long)-22;
+            }
             sleep_until_val = timespec_rel_deadline(kts[0], kts[1]);
         }
     }
@@ -5288,13 +5400,45 @@ static long sys_pselect6_handler(struct trapframe *tf) {
         }
     }
 
+    /* BF: Check for pending signals before blocking (POSIX atomicity). */
+    if (ready == 0 && (current_proc->sigpending & ~current_proc->sigmask)) {
+        if (has_sigmask) {
+            current_proc->saved_sigmask_restore = old_mask;
+            current_proc->has_saved_sigmask = 1;
+        }
+        out_rfds = out_wfds = out_efds = 0;
+        if (readfds_uaddr) copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8);
+        if (writefds_uaddr) copyout(current_proc->pagetable, writefds_uaddr, &out_wfds, 8);
+        if (exceptfds_uaddr) copyout(current_proc->pagetable, exceptfds_uaddr, &out_efds, 8);
+        return (long)-4; /* EINTR */
+    }
+
     /* Block if none ready and timeout allows */
     if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
-        if (sleep_until_val > 0) {
+        /* BF: Fix blocking for NULL timeout -- when !has_timeout,
+         * sleep_until_val is 0 so we need waiting_for_uart=1 (indefinite). */
+        if (has_timeout && sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
             current_proc->waiting_for_uart = 2;
+        } else if (!has_timeout) {
+            current_proc->waiting_for_uart = 1; /* block indefinitely */
+        }
+        if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+        }
+
+        /* BF: Check for signal after wakeup. */
+        if (current_proc->sigpending & ~current_proc->sigmask) {
+            if (has_sigmask) {
+                current_proc->saved_sigmask_restore = old_mask;
+                current_proc->has_saved_sigmask = 1;
+            }
+            out_rfds = out_wfds = out_efds = 0;
+            if (readfds_uaddr) copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8);
+            if (writefds_uaddr) copyout(current_proc->pagetable, writefds_uaddr, &out_wfds, 8);
+            if (exceptfds_uaddr) copyout(current_proc->pagetable, exceptfds_uaddr, &out_efds, 8);
+            return (long)-4; /* EINTR */
         }
 
         /* Re-check */
@@ -5317,6 +5461,10 @@ static long sys_pselect6_handler(struct trapframe *tf) {
             }
         }
     }
+
+    /* Restore sigmask on normal return */
+    if (has_sigmask)
+        current_proc->sigmask = old_mask;
 
     /* Copyout modified fd_sets */
     if (readfds_uaddr && copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8) < 0)
@@ -5575,10 +5723,10 @@ void trap_handler(struct trapframe *tf) {
          * Unblockable signals (SIGKILL, synchronous faults) must be
          * deliverable even if sa_mask has them blocked, so we
          * temporarily unblock them for the deliverability check. */
+        /* BF: Narrowed force_unblock to only SIGKILL/SIGSTOP (same as
+         * syscall return path) -- synchronous signals unmasked at fault. */
         if (current_proc) {
-            uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP) |
-                          signal_bit(SIGILL) | signal_bit(SIGSEGV) |
-                          signal_bit(SIGBUS) | signal_bit(SIGFPE);
+            uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
             uint64_t saved = current_proc->sigmask;
             current_proc->sigmask &= ~fu;
             int has = (current_proc->sigpending & ~current_proc->sigmask) != 0;
@@ -5918,21 +6066,24 @@ pagefault_kill:
         tf->a0 = (uint64_t)-38; /* -ENOSYS */
     }
 
-    if (current_proc) current_proc->in_syscall = 0;
+    /* BF: in_syscall must remain set through deliver_signal so the
+     * SA_RESTART check (which tests in_syscall && a0==-EINTR) fires
+     * correctly.  Cleared AFTER delivery. */
 
     /* Deliver pending signals before returning to user mode.
-     * Unblockable signals (SIGKILL, synchronous faults) must be
-     * deliverable even if sa_mask has them blocked, so we
-     * temporarily unblock them for the deliverability check. */
+     * BF: Narrowed force_unblock to only truly unblockable signals
+     * (SIGKILL, SIGSTOP).  Synchronous fault signals (SIGILL, SIGSEGV,
+     * SIGBUS, SIGFPE) are unmasked at their exception handler sites,
+     * not here -- force-unblocking them here breaks SA_SIGINFO tests
+     * that install handlers for these signals. */
     if (current_proc) {
-        uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP) |
-                      signal_bit(SIGILL) | signal_bit(SIGSEGV) |
-                      signal_bit(SIGBUS) | signal_bit(SIGFPE);
+        uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
         uint64_t saved = current_proc->sigmask;
         current_proc->sigmask &= ~fu;
         int has = (current_proc->sigpending & ~current_proc->sigmask) != 0;
         current_proc->sigmask = saved;
         if (has) deliver_signal(tf, current_proc);
+        current_proc->in_syscall = 0;
     }
     return;
 }

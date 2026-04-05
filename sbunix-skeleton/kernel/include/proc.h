@@ -214,6 +214,16 @@ struct proc {
    * Incremented by the timer interrupt handler each tick while this
    * process is current_proc.  Added at END to avoid shifting offsets. */
   uint64_t cputime_ticks;
+
+  /* BF: Deferred sigmask restore for ppoll/pselect6.  When these syscalls
+   * return -EINTR, the temporary mask must stay active so deliver_signal
+   * can deliver the handler.  sigreturn restores saved_sigmask_restore. */
+  uint64_t saved_sigmask_restore;
+  int      has_saved_sigmask;
+
+  /* BF: SIGCHLD si_code for SA_SIGINFO handlers.  Set by stop/continue/exit
+   * paths so deliver_signal can populate siginfo_t correctly. */
+  int sigchld_code;
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,
