@@ -1245,7 +1245,10 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
             if (p->parent) {
                 struct kern_sigaction *psa = proc_sigactions(p->parent);
                 if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
-                    p->parent->sigchld_code = 6; /* CLD_CONTINUED */
+                    /* BF: Don't overwrite sigchld_code if SIGCHLD is already
+                     * pending -- a prior child's exit/stop code would be lost. */
+                    if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
+                        p->parent->sigchld_code = 6; /* CLD_CONTINUED */
                     p->parent->sigpending |= signal_bit(SIGCHLD);
                     if (p->parent->state == SLEEPING)
                         p->parent->state = RUNNABLE;
@@ -1265,7 +1268,10 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
                 /* SA_NOCLDSTOP: don't send SIGCHLD on child stop */
                 struct kern_sigaction *psa = proc_sigactions(p->parent);
                 if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
-                    p->parent->sigchld_code = 5; /* CLD_STOPPED */
+                    /* BF: Don't overwrite sigchld_code if SIGCHLD is already
+                     * pending -- a prior child's exit/stop code would be lost. */
+                    if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
+                        p->parent->sigchld_code = 5; /* CLD_STOPPED */
                     p->parent->sigpending |= signal_bit(SIGCHLD);
                     if (p->parent->state == SLEEPING)
                         p->parent->state = RUNNABLE;
@@ -2807,7 +2813,10 @@ static long sys_exit_handler(struct trapframe *tf) {
             /* BF: Set sigchld_code so SA_SIGINFO SIGCHLD handlers get the
              * correct si_code (CLD_EXITED for normal exit, CLD_KILLED if
              * terminated by a signal). */
-            par->sigchld_code = current_proc->killed_by_signal ? 2 : 1;
+            /* BF: Don't overwrite sigchld_code if SIGCHLD is already
+             * pending -- a prior child's exit/stop code would be lost. */
+            if (!(par->sigpending & signal_bit(SIGCHLD)))
+                par->sigchld_code = current_proc->killed_by_signal ? 2 : 1;
             par->sigpending |= signal_bit(SIGCHLD);
             if (par->state == SLEEPING)
                 par->state = RUNNABLE;
