@@ -444,6 +444,15 @@ int virtio_blk_rw_on_dev(int dev_index, uint64_t sector, void *buf, int write) {
     if (dev_index < 0 || dev_index >= blkdev_count || !blkdevs[dev_index].present)
         return -1;
 
+    /* BF: Disable interrupts for the entire DMA operation.  The driver
+     * uses a single set of descriptors per device with no locking.
+     * If a timer interrupt fires during the poll loop and the scheduler
+     * switches to another process that does I/O on the same device,
+     * the descriptors get overwritten and the in-flight DMA corrupts
+     * memory.  Disabling interrupts prevents re-entrant access. */
+    unsigned long saved_sstatus = r_sstatus();
+    w_sstatus(saved_sstatus & ~SSTATUS_SIE);
+
     blkdev = &blkdevs[dev_index];
     req = &reqs[dev_index];
     status_byte = &status_bytes[dev_index];
@@ -510,6 +519,9 @@ int virtio_blk_rw_on_dev(int dev_index, uint64_t sector, void *buf, int write) {
     /* Guard: check kernel code PTE after DMA completion, since the
      * device DMA may have corrupted the L1 PTE during the I/O. */
     recursive_check_kcode_pte();
+
+    /* Restore interrupt state before returning */
+    w_sstatus(saved_sstatus);
 
     if (*status_byte != VIRTIO_BLK_S_OK) {
         printk("virtio_blk[%d]: I/O error, status=%d\n",
