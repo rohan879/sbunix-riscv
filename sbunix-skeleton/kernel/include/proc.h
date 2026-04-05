@@ -209,6 +209,11 @@ struct proc {
   /* BF: Track kernel stack size for proper free on process exit.
    * Added at the END of struct to avoid shifting field offsets. */
   int kstack_npages;
+
+  /* BF: Per-process CPU time in timer ticks for CLOCK_PROCESS_CPUTIME_ID.
+   * Incremented by the timer interrupt handler each tick while this
+   * process is current_proc.  Added at END to avoid shifting offsets. */
+  uint64_t cputime_ticks;
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,
