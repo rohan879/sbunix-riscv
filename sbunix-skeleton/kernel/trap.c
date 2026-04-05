@@ -2396,28 +2396,51 @@ static long sys_kill_handler(struct trapframe *tf) {
         /* Send to all processes in caller's process group */
         pid_t pgid = current_proc->pgid;
         int found = 0;
+        int eperm = 0;
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pgid == pgid) {
-                kill_deliver(&proc[i], sig);
+                /* BF: POSIX requires kill() to check UID permissions */
+                if (current_proc->uid != 0 &&
+                    current_proc->uid != proc[i].uid) {
+                    eperm = 1;
+                    continue;
+                }
                 found = 1;
+                /* BF: sig=0 is existence/permission check only -- no delivery.
+                 * Prevents undefined behavior from signal_bit(0) = 1 << -1. */
+                if (sig != 0)
+                    kill_deliver(&proc[i], sig);
             }
         }
-        return found ? 0 : (long)-3;
+        if (found)
+            return 0;
+        return eperm ? (long)-1 : (long)-3; /* EPERM or ESRCH */
     }
 
     if (target_pid < -1) {
         /* Send to all processes in process group abs(target_pid) */
         pid_t pgid = -target_pid;
         int found = 0;
+        int eperm = 0;
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pgid == pgid) {
-                kill_deliver(&proc[i], sig);
+                /* BF: POSIX requires kill() to check UID permissions */
+                if (current_proc->uid != 0 &&
+                    current_proc->uid != proc[i].uid) {
+                    eperm = 1;
+                    continue;
+                }
                 found = 1;
+                /* BF: sig=0 is existence/permission check only */
+                if (sig != 0)
+                    kill_deliver(&proc[i], sig);
             }
         }
-        return found ? 0 : (long)-3;
+        if (found)
+            return 0;
+        return eperm ? (long)-1 : (long)-3; /* EPERM or ESRCH */
     }
 
     if (target_pid == -1) {
@@ -2425,7 +2448,13 @@ static long sys_kill_handler(struct trapframe *tf) {
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pid != 1 && &proc[i] != current_proc) {
-                kill_deliver(&proc[i], sig);
+                /* BF: POSIX requires kill() to check UID permissions */
+                if (current_proc->uid != 0 &&
+                    current_proc->uid != proc[i].uid)
+                    continue;
+                /* BF: sig=0 is existence/permission check only */
+                if (sig != 0)
+                    kill_deliver(&proc[i], sig);
             }
         }
         return 0;
@@ -2441,6 +2470,15 @@ static long sys_kill_handler(struct trapframe *tf) {
     }
     if (!target)
         return (long)-3; /* -ESRCH */
+
+    /* BF: POSIX requires kill() to check UID permissions */
+    if (current_proc->uid != 0 && current_proc->uid != target->uid)
+        return (long)-1; /* -EPERM */
+
+    /* BF: sig=0 is existence/permission check only -- no signal sent.
+     * Prevents undefined behavior from signal_bit(0) = 1 << -1. */
+    if (sig == 0)
+        return 0;
 
     kill_deliver(target, sig);
     return 0;
@@ -5006,8 +5044,10 @@ static long sys_fchownat_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+/* BF: Store UID for kill() permission checking.
+ * Single-user OS -- just stores the UID without privilege checks. */
 static long sys_setuid_handler(struct trapframe *tf) {
-    (void)tf;
+    current_proc->uid = (int)tf->a0;
     return (long)0;
 }
 
