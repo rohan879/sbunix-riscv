@@ -37,6 +37,7 @@
 #define O_SEARCH    O_DIRECTORY
 #define O_TTY_INIT  0
 #define O_CLOFORK   040000000
+#define O_TMPFILE   (020000000 | O_DIRECTORY) /* ENH: O_TMPFILE for unnamed temp files */
 
 /* Special value for openat() — use CWD as base */
 #define AT_FDCWD    (-100)

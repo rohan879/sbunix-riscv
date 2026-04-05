@@ -110,8 +110,19 @@ static int alloc_fd(void) {
 /* Shallow copy fd table from src to dst (for clone), incrementing refcounts */
 static void copy_ofile(struct proc *dst, struct proc *src) {
   struct open_file **srctab = proc_ofile(src);
+  /* ENH: FD_CLOFORK (bit 2) causes the fd to be skipped during fork,
+   * per POSIX O_CLOFORK semantics.  Non-skipped fds inherit fd_flags. */
+  #define FD_CLOFORK 2
   for (int i = 0; i < NOFILE; i++) {
+    if (src->fd_flags[i] & FD_CLOFORK) {
+      /* ENH: Skip O_CLOFORK file descriptors during fork */
+      dst->ofile[i] = 0;
+      dst->fd_flags[i] = 0;
+      continue;
+    }
     dst->ofile[i] = srctab[i];
+    /* Copy fd_flags for non-skipped fds */
+    dst->fd_flags[i] = src->fd_flags[i];
     if (srctab[i]) {
       srctab[i]->refcount++;
       /* bump pipe refcounts too */
@@ -639,6 +650,8 @@ static void cleanup_proc_resources(struct proc *p) {
                 close_ofile(p, i);
         }
     }
+    /* ENH: Clear per-fd flags on process exit */
+    memset(p->fd_flags, 0, sizeof(p->fd_flags));
 
     /* ---- Signal actions ---- */
     if (p->shared_sa) {
@@ -1658,6 +1671,13 @@ static long sys_openat_handler(struct trapframe *tf) {
           f->path[plen] = '\0';
         }
         proc_ofile(current_proc)[fd] = f;
+        /* ENH: Propagate O_CLOEXEC and O_CLOFORK open flags to per-fd
+         * flags so that F_GETFD/F_SETFD and fork/exec use fd_flags. */
+        current_proc->fd_flags[fd] = 0;
+        if (flags & 02000000) /* O_CLOEXEC */
+            current_proc->fd_flags[fd] |= 1; /* FD_CLOEXEC */
+        if (flags & 040000000) /* O_CLOFORK */
+            current_proc->fd_flags[fd] |= 2; /* FD_CLOFORK */
         return (long)fd;
     }
 }
@@ -1666,6 +1686,8 @@ static long sys_close_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     if (fd >= 0 && fd < NOFILE && proc_ofile(current_proc)[fd]) {
         close_ofile(current_proc, fd);
+        /* ENH: Clear per-fd flags when fd is closed */
+        current_proc->fd_flags[fd] = 0;
         return (long)0;
     } else {
         return (long)-9; /* EBADF */
@@ -1692,6 +1714,17 @@ static long sys_dup3_handler(struct trapframe *tf) {
                 if (ftab[oldfd]->pipe_read)  pipes[pid].read_open++;
                 if (ftab[oldfd]->pipe_write) pipes[pid].write_open++;
             }
+        }
+        /* ENH: Process O_CLOEXEC/O_CLOFORK flags in dup3.
+         * POSIX: the new fd inherits only the flags passed in the
+         * third argument, not the flags of the old fd. */
+        {
+            int flags = (int)tf->a2;
+            current_proc->fd_flags[newfd] = 0;
+            if (flags & 02000000)  /* O_CLOEXEC */
+                current_proc->fd_flags[newfd] |= 1; /* FD_CLOEXEC */
+            if (flags & 040000000) /* O_CLOFORK */
+                current_proc->fd_flags[newfd] |= 2; /* FD_CLOFORK */
         }
         return (long)newfd;
     }
@@ -1736,6 +1769,18 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             wf->ops = NULL;
             wf->flags = (pipe_flags & 02000000) ? (1 | 02000000) : 1; /* O_WRONLY + O_CLOEXEC */
             ftab[wfd] = wf;
+            /* ENH: Set per-fd flags for pipe fds based on pipe_flags.
+             * O_CLOEXEC and O_CLOFORK propagate to fd_flags. */
+            current_proc->fd_flags[rfd] = 0;
+            current_proc->fd_flags[wfd] = 0;
+            if (pipe_flags & 02000000) { /* O_CLOEXEC */
+                current_proc->fd_flags[rfd] |= 1;
+                current_proc->fd_flags[wfd] |= 1;
+            }
+            if (pipe_flags & 040000000) { /* O_CLOFORK */
+                current_proc->fd_flags[rfd] |= 2;
+                current_proc->fd_flags[wfd] |= 2;
+            }
             int kfds[2] = { rfd, wfd };
             if (copyout(current_proc->pagetable, tf->a0, kfds, sizeof(kfds)) < 0) {
                 close_ofile(current_proc, rfd);
@@ -2002,13 +2047,19 @@ static long sys_execve_handler(struct trapframe *tf) {
         return (long)(shebang_file_found ? -8 : -2);
     }
 
-    /* POSIX: close file descriptors marked with O_CLOEXEC (FD_CLOEXEC) */
+    /* POSIX: close file descriptors marked with FD_CLOEXEC.
+     * ENH: Check per-fd fd_flags (bit 0 = FD_CLOEXEC) in addition to the
+     * legacy O_CLOEXEC check on the open file flags, so that both old and
+     * new paths are covered. */
     {
         #define KERN_O_CLOEXEC 02000000 /* matches libc O_CLOEXEC */
         struct open_file **oft = proc_ofile(current_proc);
         for (int fd = 0; fd < NOFILE; fd++) {
-            if (oft[fd] && (oft[fd]->flags & KERN_O_CLOEXEC))
+            if (oft[fd] && ((oft[fd]->flags & KERN_O_CLOEXEC) ||
+                            (current_proc->fd_flags[fd] & 1))) {
                 close_ofile(current_proc, fd);
+                current_proc->fd_flags[fd] = 0;
+            }
         }
     }
 
@@ -3251,8 +3302,9 @@ static long sys_fcntl_handler(struct trapframe *tf) {
     if (fd < 0 || fd >= NOFILE || !ftab[fd])
         return (long)-9; /* EBADF */
 
-    if (cmd == 0 || cmd == 1030) {
-        /* F_DUPFD (0) or F_DUPFD_CLOEXEC (1030) — dup to lowest fd >= arg */
+    if (cmd == 0 || cmd == 1030 || cmd == 1031) {
+        /* F_DUPFD (0), F_DUPFD_CLOEXEC (1030), or F_DUPFD_CLOFORK (1031)
+         * — dup to lowest fd >= arg */
         int minfd = (int)tf->a2;
         if (minfd < 0 || minfd >= NOFILE)
             return (long)-22; /* EINVAL */
@@ -3267,13 +3319,27 @@ static long sys_fcntl_handler(struct trapframe *tf) {
                         if (ftab[fd]->pipe_write) pipes[pid].write_open++;
                     }
                 }
+                /* ENH: Set per-fd flags based on F_DUPFD variant.
+                 * F_DUPFD clears all flags; CLOEXEC/CLOFORK set their bit. */
+                current_proc->fd_flags[i] = 0;
+                if (cmd == 1030) /* F_DUPFD_CLOEXEC */
+                    current_proc->fd_flags[i] |= 1; /* FD_CLOEXEC */
+                if (cmd == 1031) /* F_DUPFD_CLOFORK */
+                    current_proc->fd_flags[i] |= 2; /* FD_CLOFORK */
                 return (long)i;
             }
         }
         return (long)-24; /* EMFILE */
     } else if (cmd == 1) { /* F_GETFD */
-        return (ftab[fd]->flags & 02000000) ? 1 : 0; /* FD_CLOEXEC */
+        /* ENH: Return per-fd flags (FD_CLOEXEC | FD_CLOFORK) from fd_flags
+         * instead of deriving from open file flags.  POSIX requires F_GETFD
+         * to return file descriptor flags, not file status flags. */
+        return (long)current_proc->fd_flags[fd];
     } else if (cmd == 2) { /* F_SETFD */
+        /* ENH: Store per-fd flags (FD_CLOEXEC=1, FD_CLOFORK=2) directly in
+         * fd_flags.  Also sync O_CLOEXEC in the open file flags for backward
+         * compat with the O_CLOEXEC-based close-on-exec path in execve. */
+        current_proc->fd_flags[fd] = (uint8_t)((int)tf->a2 & 3);
         if ((int)tf->a2 & 1) /* FD_CLOEXEC */
             ftab[fd]->flags |= 02000000; /* O_CLOEXEC */
         else
