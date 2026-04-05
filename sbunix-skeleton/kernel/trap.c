@@ -1249,7 +1249,10 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
             if (p->parent) {
                 struct kern_sigaction *psa = proc_sigactions(p->parent);
                 if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
-                    p->parent->sigchld_code = 6; /* CLD_CONTINUED */
+                    /* BF: Don't overwrite sigchld_code if SIGCHLD is already
+                     * pending -- a prior child's exit/stop code would be lost. */
+                    if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
+                        p->parent->sigchld_code = 6; /* CLD_CONTINUED */
                     p->parent->sigpending |= signal_bit(SIGCHLD);
                     if (p->parent->state == SLEEPING)
                         p->parent->state = RUNNABLE;
@@ -1269,7 +1272,10 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
                 /* SA_NOCLDSTOP: don't send SIGCHLD on child stop */
                 struct kern_sigaction *psa = proc_sigactions(p->parent);
                 if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
-                    p->parent->sigchld_code = 5; /* CLD_STOPPED */
+                    /* BF: Don't overwrite sigchld_code if SIGCHLD is already
+                     * pending -- a prior child's exit/stop code would be lost. */
+                    if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
+                        p->parent->sigchld_code = 5; /* CLD_STOPPED */
                     p->parent->sigpending |= signal_bit(SIGCHLD);
                     if (p->parent->state == SLEEPING)
                         p->parent->state = RUNNABLE;
@@ -1286,9 +1292,25 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         cleanup_proc_resources(p);
         p->state = ZOMBIE;
         if (p->parent) {
+            /* BF: Don't overwrite sigchld_code if SIGCHLD is already pending */
+            if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
+                p->parent->sigchld_code = 2; /* CLD_KILLED */
             p->parent->sigpending |= signal_bit(SIGCHLD);
             if (p->parent->state == SLEEPING)
                 p->parent->state = RUNNABLE;
+            /* BF: SA_NOCLDWAIT on parent means auto-reap -- reparent to
+             * init so waitpid in parent doesn't block on this zombie.
+             * Mirrors the same logic in sys_exit_handler. */
+            struct kern_sigaction *psa = proc_sigactions(p->parent);
+            if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
+                struct proc *initproc = 0;
+                for (struct proc *q = proc; q < &proc[NPROC]; q++) {
+                    if (q->pid == 1 && q->state != UNUSED) { initproc = q; break; }
+                }
+                p->parent = initproc;
+                if (initproc && initproc->state == SLEEPING)
+                    initproc->state = RUNNABLE;
+            }
         }
         swtch(&p->context, &scheduler_context);
         return;
@@ -1408,6 +1430,9 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         handler = 0;
     }
     if (handler >= 2) {
+        /* BF: Bump epoch so ppoll/pselect6 can detect that a signal was
+         * handled between their mask swap and the blocking sleep. */
+        p->signal_handled_epoch++;
         tf->epc = handler;                   /* jump to signal handler */
         tf->a0 = (uint64_t)signum;           /* first arg: signal number */
         if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
@@ -2857,7 +2882,10 @@ static long sys_exit_handler(struct trapframe *tf) {
             /* BF: Set sigchld_code so SA_SIGINFO SIGCHLD handlers get the
              * correct si_code (CLD_EXITED for normal exit, CLD_KILLED if
              * terminated by a signal). */
-            par->sigchld_code = current_proc->killed_by_signal ? 2 : 1;
+            /* BF: Don't overwrite sigchld_code if SIGCHLD is already
+             * pending -- a prior child's exit/stop code would be lost. */
+            if (!(par->sigpending & signal_bit(SIGCHLD)))
+                par->sigchld_code = current_proc->killed_by_signal ? 2 : 1;
             par->sigpending |= signal_bit(SIGCHLD);
             if (par->state == SLEEPING)
                 par->state = RUNNABLE;
@@ -5285,6 +5313,11 @@ static long sys_ppoll_handler(struct trapframe *tf) {
 
     /* Handle sigmask swap */
     uint64_t old_mask = current_proc->sigmask;
+    /* BF: Snapshot signal_handled_epoch BEFORE mask swap so we can detect
+     * signals handled between raise() and the ppoll sleep.  If epoch
+     * changed after wakeup, a signal was already delivered and we must
+     * return -EINTR. */
+    uint64_t epoch_before = current_proc->signal_handled_epoch;
     if (sigmask_uaddr != 0) {
         uint64_t new_mask;
         if (copyin(current_proc->pagetable, &new_mask, sigmask_uaddr, 8) < 0)
@@ -5306,6 +5339,10 @@ static long sys_ppoll_handler(struct trapframe *tf) {
         }
         if (nfds > 0 && fds_size > 0)
             copyout(current_proc->pagetable, fds_uaddr, (void *)kfds, (uint64_t)fds_size);
+        /* BF: POSIX lists ppoll as a non-restartable syscall.  Clear
+         * in_syscall so deliver_signal does not rewind epc when
+         * SA_RESTART is set on the handler. */
+        current_proc->in_syscall = 0;
         return (long)-4; /* EINTR */
     }
 
@@ -5345,17 +5382,29 @@ static long sys_ppoll_handler(struct trapframe *tf) {
 
     /* If none ready and timeout allows blocking */
     if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
-        if (sleep_until_val > 0) {
+        /* BF: When !has_timeout (NULL timeout = infinite wait), use
+         * waiting_for_uart=1 to block indefinitely.  Previously
+         * sleep_until_val stayed 0 and the guard skipped swtch(),
+         * causing ppoll to return immediately instead of blocking. */
+        if (has_timeout && sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
             current_proc->waiting_for_uart = 2;
+        } else if (!has_timeout) {
+            current_proc->waiting_for_uart = 1; /* block indefinitely */
+        }
+        if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
         }
 
         /* BF: ppoll must return -EINTR when a deliverable signal is pending
          * during the wait.  POSIX: "If ... a signal is caught, ppoll() shall
-         * be interrupted... and shall return -1 with errno set to [EINTR]." */
-        if (current_proc->sigpending & ~current_proc->sigmask) {
+         * be interrupted... and shall return -1 with errno set to [EINTR]."
+         * Also check epoch: if a signal was handled between the mask swap
+         * and entering sleep, we must still return -EINTR even if
+         * sigpending is now clear. */
+        if ((current_proc->sigpending & ~current_proc->sigmask) ||
+            current_proc->signal_handled_epoch != epoch_before) {
             if (sigmask_uaddr != 0) {
                 /* BF: Defer mask restore -- same as early EINTR path above. */
                 current_proc->saved_sigmask_restore = old_mask;
@@ -5363,6 +5412,10 @@ static long sys_ppoll_handler(struct trapframe *tf) {
             }
             if (fds_size > 0)
                 copyout(current_proc->pagetable, fds_uaddr, kfds, (uint64_t)fds_size);
+            /* BF: POSIX lists ppoll as a non-restartable syscall.  Clear
+             * in_syscall so deliver_signal does not rewind epc when
+             * SA_RESTART is set on the handler. */
+            current_proc->in_syscall = 0;
             return (long)-4; /* EINTR */
         }
 
@@ -5406,6 +5459,9 @@ static long sys_pselect6_handler(struct trapframe *tf) {
      * This enables signal-driven interruption and SA_RESTART for select(). */
     uint64_t sigmask_uaddr_raw = tf->a5;
     uint64_t old_mask = current_proc->sigmask;
+    /* BF: Snapshot epoch before mask swap to detect signals handled
+     * between the swap and sleep (same race as ppoll). */
+    uint64_t epoch_before = current_proc->signal_handled_epoch;
     int has_sigmask = 0;
     if (sigmask_uaddr_raw != 0) {
         uint64_t sig_args[2]; /* {sigmask_ptr, sigsetsize} */
@@ -5497,6 +5553,10 @@ static long sys_pselect6_handler(struct trapframe *tf) {
         if (readfds_uaddr) copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8);
         if (writefds_uaddr) copyout(current_proc->pagetable, writefds_uaddr, &out_wfds, 8);
         if (exceptfds_uaddr) copyout(current_proc->pagetable, exceptfds_uaddr, &out_efds, 8);
+        /* BF: POSIX lists pselect as a non-restartable syscall.  Clear
+         * in_syscall so deliver_signal does not rewind epc when
+         * SA_RESTART is set on the handler. */
+        current_proc->in_syscall = 0;
         return (long)-4; /* EINTR */
     }
 
@@ -5515,6 +5575,17 @@ static long sys_pselect6_handler(struct trapframe *tf) {
             swtch(&current_proc->context, &scheduler_context);
         }
 
+        /* BF: If a signal handler ran between mask swap and here,
+         * return -EINTR even though sigpending is now clear. */
+        if (current_proc->signal_handled_epoch != epoch_before) {
+            if (has_sigmask) {
+                current_proc->saved_sigmask_restore = old_mask;
+                current_proc->has_saved_sigmask = 1;
+            }
+            current_proc->in_syscall = 0;
+            return (long)-4;  /* EINTR */
+        }
+
         /* BF: Check for signal after wakeup. */
         if (current_proc->sigpending & ~current_proc->sigmask) {
             if (has_sigmask) {
@@ -5525,6 +5596,10 @@ static long sys_pselect6_handler(struct trapframe *tf) {
             if (readfds_uaddr) copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8);
             if (writefds_uaddr) copyout(current_proc->pagetable, writefds_uaddr, &out_wfds, 8);
             if (exceptfds_uaddr) copyout(current_proc->pagetable, exceptfds_uaddr, &out_efds, 8);
+            /* BF: POSIX lists pselect as a non-restartable syscall.  Clear
+             * in_syscall so deliver_signal does not rewind epc when
+             * SA_RESTART is set on the handler. */
+            current_proc->in_syscall = 0;
             return (long)-4; /* EINTR */
         }
 
@@ -5592,8 +5667,17 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
     }
 
     if (new_addr != 0) {
-        /* Cannot change alt stack while executing on it */
-        if (current_proc->ss_flags & 1) /* SS_ONSTACK */
+        /* BF: Use dynamic SP check instead of stored ss_flags for the
+         * on-stack test. A handler that longjmp'd out (skipping sigreturn)
+         * would leave ss_flags with stale SS_ONSTACK, incorrectly blocking
+         * future sigaltstack calls. */
+        int on_stack = 0;
+        if (current_proc->ss_sp != 0 && current_proc->ss_size != 0) {
+            uint64_t sp = tf->sp;
+            if (sp >= current_proc->ss_sp && sp < current_proc->ss_sp + current_proc->ss_size)
+                on_stack = 1;
+        }
+        if (on_stack)
             return (long)-1; /* EPERM */
 
         uint8_t knew[24];
