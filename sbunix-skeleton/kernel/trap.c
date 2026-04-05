@@ -703,6 +703,10 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     p->parent = current_proc;
     p->pgid = current_proc->pgid;
     p->sid = current_proc->sid;
+    /* BF: Propagate UID/GID to child so kill() permission checks
+     * remain consistent after fork. */
+    p->uid = current_proc->uid;
+    p->gid = current_proc->gid;
     p->clone_flags = clone_flags;
 
     /* Copy stack bounds and mmap_base from parent */
@@ -2294,12 +2298,15 @@ static long sys_getppid_handler(struct trapframe *tf) {
 
 static long sys_getuid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual process UID instead of hardcoded 0 so that
+     * userspace identity checks (e.g. kill permission) are accurate. */
+    return (long)current_proc->uid;
 }
 
 static long sys_getgid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual process GID instead of hardcoded 0. */
+    return (long)current_proc->gid;
 }
 
 /* Helper: deliver signal to a single process */
@@ -2445,19 +2452,27 @@ static long sys_kill_handler(struct trapframe *tf) {
 
     if (target_pid == -1) {
         /* Send to all processes except init (pid 1) and self */
+        /* BF: Track found/eperm so we return correct POSIX error when
+         * all eligible processes were skipped due to UID mismatch. */
+        int found = 0;
+        int eperm = 0;
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pid != 1 && &proc[i] != current_proc) {
                 /* BF: POSIX requires kill() to check UID permissions */
                 if (current_proc->uid != 0 &&
-                    current_proc->uid != proc[i].uid)
+                    current_proc->uid != proc[i].uid) {
+                    eperm = 1;
                     continue;
+                }
                 /* BF: sig=0 is existence/permission check only */
                 if (sig != 0)
                     kill_deliver(&proc[i], sig);
+                found = 1;
             }
         }
-        return 0;
+        if (found) return 0;
+        return eperm ? (long)-1 : (long)-3; /* EPERM or ESRCH */
     }
 
     /* Positive pid: send to specific process */
@@ -3813,12 +3828,14 @@ static long sys_umask_handler(struct trapframe *tf) {
 
 static long sys_geteuid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual UID; in single-user OS, euid == uid. */
+    return (long)current_proc->uid;
 }
 
 static long sys_getegid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual GID; in single-user OS, egid == gid. */
+    return (long)current_proc->gid;
 }
 
 static long sys_set_tid_address_handler(struct trapframe *tf) {
