@@ -427,6 +427,12 @@ static void handle_timer_interrupt(void) {
     #endif
     timer_set_next();
 
+    /* BF: Track per-process CPU time for CLOCK_PROCESS_CPUTIME_ID.
+     * Each timer tick (~100ms at 10Hz) while a process is running
+     * increments that process's cputime_ticks counter. */
+    if (current_proc)
+        current_proc->cputime_ticks++;
+
     /* Fast per-tick check of critical kernel code PTE via self-referencing
      * gigapage window (single volatile load + conditional store).
      * Catches DMA-induced PTE_X corruption before it causes faults. */
@@ -1636,25 +1642,34 @@ static long sys_openat_handler(struct trapframe *tf) {
         return (long)-2; /* -ENOENT */
     }
 
+    /* BF: Pre-open directory/flag validation.  These checks run BEFORE
+     * ops->open() so that flags like O_TRUNC do not modify the file
+     * when the open should have failed (e.g., O_DIRECTORY on a regular
+     * file, or O_CREAT on an existing directory). */
+#define O_CREAT    0100
+#define O_TRUNC    01000
+#define O_DIRECTORY 0200000
+    {
+        int is_dir = vfs_is_dir(resolved);
+        /* Reject O_DIRECTORY on a non-directory before any side-effects */
+        if ((flags & O_DIRECTORY) && !is_dir)
+            return (long)-20; /* -ENOTDIR */
+        /* Reject O_WRONLY/O_RDWR on directories */
+        if (is_dir) {
+            int accmode = flags & 3;
+            if (accmode == 1 || accmode == 2) /* O_WRONLY or O_RDWR */
+                return (long)-21; /* -EISDIR */
+        }
+        /* Reject O_CREAT on an existing directory (POSIX: EISDIR) */
+        if (is_dir && (flags & O_CREAT))
+            return (long)-21; /* -EISDIR */
+    }
+
     void *priv = NULL;
     int ret = ops->open(mnt->fs_data, relpath, flags, &priv);
     if (ret < 0) {
         return (long)ret;
     } else {
-        /* Reject O_WRONLY/O_RDWR on directories */
-        if (vfs_is_dir(resolved)) {
-            int accmode = flags & 3;
-            if (accmode == 1 || accmode == 2) { /* O_WRONLY or O_RDWR */
-                if (ops->close) ops->close(mnt->fs_data, priv);
-                return (long)-21; /* -EISDIR */
-            }
-        }
-        /* Reject non-directory with O_DIRECTORY (ENOTDIR = -20) */
-#define O_DIRECTORY 0200000
-        if ((flags & O_DIRECTORY) && !vfs_is_dir(resolved)) {
-            if (ops->close) ops->close(mnt->fs_data, priv);
-            return (long)-20;
-        }
         struct open_file *f = vfs_alloc_file();
         if (!f) {
             if (ops->close) ops->close(mnt->fs_data, priv);
@@ -2414,12 +2429,18 @@ static long sys_clock_gettime_handler(struct trapframe *tf) {
         uint64_t elapsed = r_time() - boot_time;
         kts.tv_sec  = (int64_t)(elapsed / TIMER_FREQ);
         kts.tv_nsec = (int64_t)((elapsed % TIMER_FREQ) * 100);
-    } else if (clk_id == 2 || clk_id == 3) {
-        /* CLOCK_PROCESS_CPUTIME_ID (2) / CLOCK_THREAD_CPUTIME_ID (3):
-         * approximate with monotonic time since boot (single-hart CPU) */
-        uint64_t elapsed = r_time() - boot_time;
-        kts.tv_sec  = (int64_t)(elapsed / TIMER_FREQ);
-        kts.tv_nsec = (int64_t)((elapsed % TIMER_FREQ) * 100);
+    } else if (clk_id == 2) {
+        /* BF: Return actual per-process CPU time instead of wall-clock.
+         * cputime_ticks is incremented by the timer interrupt (~10Hz),
+         * so each tick represents ~100ms of CPU time. */
+        uint64_t cpu_ns = current_proc->cputime_ticks * 100000000ULL; /* 100ms per tick */
+        kts.tv_sec  = (int64_t)(cpu_ns / 1000000000ULL);
+        kts.tv_nsec = (int64_t)(cpu_ns % 1000000000ULL);
+    } else if (clk_id == 3) {
+        /* CLOCK_THREAD_CPUTIME_ID: single-hart, so same as process time */
+        uint64_t cpu_ns = current_proc->cputime_ticks * 100000000ULL;
+        kts.tv_sec  = (int64_t)(cpu_ns / 1000000000ULL);
+        kts.tv_nsec = (int64_t)(cpu_ns % 1000000000ULL);
     } else {
         return (long)-22; /* EINVAL */
     }
@@ -2829,22 +2850,62 @@ static long sys_mmap_handler(struct trapframe *tf) {
     int      fd    = (int)tf->a4;
     uint64_t offset = tf->a5;
 
+    /* BF: POSIX requires offset to be page-aligned for mmap. */
+    if (offset % PAGE_SIZE != 0)
+        return (long)-22; /* EINVAL */
+
+    /* BF: POSIX requires exactly one of MAP_SHARED or MAP_PRIVATE.
+     * Return EINVAL if neither is set. */
+    if (!(flags & (0x01 /* MAP_SHARED */ | MAP_PRIVATE)))
+        return (long)-22; /* EINVAL */
+
+    /* BF: MAP_FIXED requires a page-aligned address.  POSIX says
+     * the implementation must not silently round down. */
+    if ((flags & MAP_FIXED) && (addr & (PAGE_SIZE - 1)))
+        return (long)-22; /* EINVAL */
+
+    /* BF: Validate fd for non-anonymous (file-backed) mappings.
+     * POSIX requires a valid open file descriptor. */
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (!(flags & MAP_ANONYMOUS)) {
+        if (fd < 0 || fd >= NOFILE || !ftab[fd])
+            return (long)-9; /* EBADF */
+        /* BF: Check file permission vs requested prot.
+         * MAP_SHARED + PROT_WRITE needs a writable fd.
+         * PROT_READ needs a readable fd. */
+        int accmode = ftab[fd]->flags & 3; /* O_ACCMODE mask */
+        if ((flags & 0x01 /* MAP_SHARED */) && (prot & PROT_WRITE)) {
+            /* accmode 0 = O_RDONLY — not writable */
+            if (accmode == 0)
+                return (long)-13; /* EACCES */
+        }
+        if (prot & PROT_READ) {
+            /* accmode 1 = O_WRONLY — not readable */
+            if (accmode == 1)
+                return (long)-13; /* EACCES */
+        }
+    }
+
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (len == 0) {
-        return (long)-1;
+        return (long)-22; /* EINVAL: zero-length mapping */
     }
 
     uint64_t va;
     if (flags & MAP_FIXED) {
-        va = addr & ~(uint64_t)(PAGE_SIZE - 1);
+        va = addr; /* BF: addr already validated as page-aligned above */
         /* Reject kernel addresses for MAP_FIXED */
         if (va >= 0x80000000UL || va + len > 0x80000000UL)
-            return (long)-1;
+            return (long)-22; /* EINVAL */
     } else {
         if (current_proc->mmap_base == 0)
             current_proc->mmap_base = 0x20000000UL;
         va = current_proc->mmap_base;
-        current_proc->mmap_base += len;
+        /* BF: Ensure mmap never returns address 0 for anonymous mappings.
+         * A NULL return would be confused with MAP_FAILED by userspace. */
+        if (va == 0)
+            va = PAGE_SIZE;
+        current_proc->mmap_base = va + len;
     }
 
     int pte_flags = 0;
@@ -2858,8 +2919,8 @@ static long sys_mmap_handler(struct trapframe *tf) {
         return (long)-1;
     }
 
-    /* File-backed mapping: store file reference in VMA for demand paging */
-    struct open_file **ftab = proc_ofile(current_proc);
+    /* File-backed mapping: store file reference in VMA for demand paging.
+     * ftab was already retrieved above during fd validation. */
     if (!(flags & MAP_ANONYMOUS) && fd >= 0 && fd < NOFILE && ftab[fd]) {
         struct vm_area *vma = vma_find(current_proc, va);
         if (vma) {
@@ -3962,9 +4023,15 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     }
 
     tp->pgid = pgid;
-    if (tp->parent && tp->parent->state == SLEEPING &&
-        tp->parent->waiting_for_uart == 0)
-        tp->parent->state = RUNNABLE;
+    /* BF: Wake all sleeping processes after pgid change.  A parent
+     * blocked in waitpid(-pgid) needs to re-check whether any children
+     * remain in the target process group.  The previous code only woke
+     * the immediate parent, missing other ancestors or processes
+     * waiting on a specific process group. */
+    for (int i = 0; i < NPROC; i++) {
+        if (proc[i].state == SLEEPING)
+            proc[i].state = RUNNABLE;
+    }
     return 0;
 }
 
@@ -5541,6 +5608,18 @@ void trap_handler(struct trapframe *tf) {
             if (current_proc && stval < 0x80000000UL) {
                 struct vm_area *fvma = vma_find(current_proc, stval);
                 if (fvma) {
+                    /* BF: Enforce VMA protection flags -- deliver SIGSEGV if the fault
+                     * type doesn't match the VMA's prot bits.  POSIX requires SIGSEGV
+                     * for writes to PROT_READ-only, and any access to PROT_NONE. */
+                    if (fvma->prot == 0 /* PROT_NONE */) {
+                        /* PROT_NONE: no access allowed at all */
+                        goto pagefault_kill;
+                    }
+                    if (cause == SCAUSE_STORE_PAGE_FAULT && !(fvma->prot & PROT_WRITE)) {
+                        /* Write to non-writable mapping */
+                        goto pagefault_kill;
+                    }
+
                     uint64_t va = PGROUNDDOWN(stval);
                     /* Check if page is already mapped */
                     pte_t *pte = walk(current_proc->pagetable, va, 0);
