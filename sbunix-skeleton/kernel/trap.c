@@ -126,6 +126,151 @@ static void copy_ofile(struct proc *dst, struct proc *src) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* File lock support (POSIX and OFD record locks for fcntl)            */
+/* ------------------------------------------------------------------ */
+
+/* Global lock table -- teaching OS uses a flat array of lock entries.
+ * POSIX locks are keyed by (path, pid); OFD locks by (path, open_file *). */
+struct file_lock lock_table[MAX_FILE_LOCKS];
+
+/* Two ranges [s1, s1+l1) and [s2, s2+l2) overlap.
+ * l_len=0 means "to EOF" -- treat as infinite extent. */
+static int ranges_overlap(off_t s1, off_t l1, off_t s2, off_t l2) {
+  off_t e1 = (l1 == 0) ? (off_t)0x7FFFFFFFFFFFFFFFLL : s1 + l1;
+  off_t e2 = (l2 == 0) ? (off_t)0x7FFFFFFFFFFFFFFFLL : s2 + l2;
+  return s1 < e2 && s2 < e1;
+}
+
+/* Check whether an existing lock conflicts with a proposed lock.
+ * Locks conflict if: same file path, overlapping byte ranges,
+ * at least one is a write lock, and different owner. */
+static int lock_conflicts(struct file_lock *lk, const char *path,
+    short type, off_t start, off_t len, pid_t pid,
+    struct open_file *ofd, int is_ofd) {
+  if (!lk->used) return 0;
+  if (strncmp(lk->path, path, 256) != 0) return 0;
+  if (!ranges_overlap(lk->l_start, lk->l_len, start, len)) return 0;
+  /* Both read locks never conflict (F_RDLCK = 0) */
+  if (lk->l_type == 0 && type == 0) return 0;
+  /* Same owner = no conflict */
+  if (is_ofd) {
+    if (lk->ofd == ofd) return 0;
+  } else {
+    if (lk->l_pid == pid && lk->ofd == 0) return 0;
+  }
+  return 1;
+}
+
+/* Set or release a file lock.  F_UNLCK removes matching locks; F_RDLCK/F_WRLCK
+ * checks for conflicts then adds/replaces a lock entry.
+ * Returns 0 on success, -11 (EAGAIN) on conflict. */
+int do_file_setlk(const char *path, short type, off_t start, off_t len,
+                   pid_t pid, struct open_file *ofd, int is_ofd, int wait) {
+  if (type == 2) { /* F_UNLCK -- remove matching locks owned by caller */
+    for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+      struct file_lock *lk = &lock_table[i];
+      if (!lk->used) continue;
+      if (strncmp(lk->path, path, 256) != 0) continue;
+      if (!ranges_overlap(lk->l_start, lk->l_len, start, len)) continue;
+      /* Must be same owner */
+      if (is_ofd) {
+        if (lk->ofd != ofd) continue;
+      } else {
+        if (lk->l_pid != pid || lk->ofd != 0) continue;
+      }
+      lk->used = 0;
+    }
+    return 0;
+  }
+  /* F_RDLCK or F_WRLCK -- check for conflicts first */
+  for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+    if (lock_conflicts(&lock_table[i], path, type, start, len,
+                       pid, ofd, is_ofd))
+      return -11; /* EAGAIN (teaching OS: wait variant also returns EAGAIN) */
+  }
+  /* Replace existing lock from same owner on same range, or find free slot */
+  int free_slot = -1;
+  for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+    struct file_lock *lk = &lock_table[i];
+    if (!lk->used) {
+      if (free_slot < 0) free_slot = i;
+      continue;
+    }
+    /* Replace if same owner, same path, overlapping range */
+    if (strncmp(lk->path, path, 256) != 0) continue;
+    if (!ranges_overlap(lk->l_start, lk->l_len, start, len)) continue;
+    int same_owner = 0;
+    if (is_ofd && lk->ofd == ofd) same_owner = 1;
+    if (!is_ofd && lk->l_pid == pid && lk->ofd == 0) same_owner = 1;
+    if (same_owner) {
+      lk->l_type = type;
+      lk->l_start = start;
+      lk->l_len = len;
+      return 0;
+    }
+  }
+  if (free_slot < 0)
+    return -11; /* No free lock slots -- report EAGAIN */
+  struct file_lock *lk = &lock_table[free_slot];
+  lk->used = 1;
+  lk->l_type = type;
+  lk->l_start = start;
+  lk->l_len = len;
+  lk->l_pid = is_ofd ? -1 : pid;
+  lk->ofd = is_ofd ? ofd : 0;
+  {
+    int plen = strlen(path);
+    if (plen > 255) plen = 255;
+    memcpy(lk->path, path, plen);
+    lk->path[plen] = '\0';
+  }
+  return 0;
+}
+
+/* Query whether a hypothetical lock would conflict.  If a conflict is found,
+ * fills out_type/out_start/out_len/out_pid.  Otherwise sets *out_type = 2
+ * (F_UNLCK) meaning "no conflict". */
+int do_file_getlk(const char *path, short type, off_t start, off_t len,
+                   pid_t pid, struct open_file *ofd, int is_ofd,
+                   short *out_type, off_t *out_start, off_t *out_len,
+                   pid_t *out_pid) {
+  for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+    if (lock_conflicts(&lock_table[i], path, type, start, len,
+                       pid, ofd, is_ofd)) {
+      *out_type = lock_table[i].l_type;
+      *out_start = lock_table[i].l_start;
+      *out_len = lock_table[i].l_len;
+      *out_pid = lock_table[i].l_pid;
+      return 0;
+    }
+  }
+  /* No conflict */
+  *out_type = 2; /* F_UNLCK */
+  *out_start = 0;
+  *out_len = 0;
+  *out_pid = 0;
+  return 0;
+}
+
+/* Release all POSIX locks owned by pid -- called on process exit. */
+void file_locks_release_pid(pid_t pid) {
+  for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+    if (lock_table[i].used && lock_table[i].ofd == 0 &&
+        lock_table[i].l_pid == pid)
+      lock_table[i].used = 0;
+  }
+}
+
+/* Release all OFD locks owned by a specific open_file -- called when the
+ * last reference to an open_file is closed. */
+void file_locks_release_ofd(struct open_file *ofd) {
+  for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+    if (lock_table[i].used && lock_table[i].ofd == ofd)
+      lock_table[i].used = 0;
+  }
+}
+
 /* Close an open_file: decrement refcount, handle pipe cleanup, free when zero.
  * Also clears the slot in the given proc's ofile[fd] (or shared_ft). */
 static void close_ofile(struct proc *p, int fd) {
@@ -159,6 +304,10 @@ static void close_ofile(struct proc *p, int fd) {
 
   f->refcount--;
   if (f->refcount <= 0) {
+    /* Release any OFD locks held by this open_file before freeing it.
+     * POSIX: OFD locks are tied to the open file description, so they
+     * must be released when the last fd referencing it is closed. */
+    file_locks_release_ofd(f);
     /* Last reference -- call VFS close if applicable */
     if (!f->is_pipe && f->ops && f->ops->close)
       f->ops->close(f->fs_data, f->private);
@@ -425,6 +574,11 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
 /* Called from SYS_exit, signal default-kill, and SYS_kill SIGKILL.     */
 /* ------------------------------------------------------------------ */
 static void cleanup_proc_resources(struct proc *p) {
+    /* ---- POSIX file locks ---- */
+    /* POSIX: all locks held by a process are released on exit.
+     * OFD locks are released separately when the open_file refcount hits 0. */
+    file_locks_release_pid(p->pid);
+
     /* ---- Pagetable / VMAs ---- */
     /* Switch to kernel_pagetable before freeing the process's page table.
      * The kernel runs on the process's page table (shared kernel mapping),
