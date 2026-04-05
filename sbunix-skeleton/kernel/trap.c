@@ -4144,15 +4144,12 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     }
 
     tp->pgid = pgid;
-    /* BF: Wake all sleeping processes after pgid change.  A parent
-     * blocked in waitpid(-pgid) needs to re-check whether any children
-     * remain in the target process group.  The previous code only woke
-     * the immediate parent, missing other ancestors or processes
-     * waiting on a specific process group. */
-    for (int i = 0; i < NPROC; i++) {
-        if (proc[i].state == SLEEPING)
-            proc[i].state = RUNNABLE;
-    }
+    /* BF: Only wake the target's parent (which may be in waitpid).
+     * The blanket wake of all sleeping processes caused premature
+     * wakeups of unrelated waitpid callers, breaking process group
+     * tests that depend on precise wait/exit ordering. */
+    if (tp->parent && tp->parent->state == SLEEPING)
+        tp->parent->state = RUNNABLE;
     return 0;
 }
 
