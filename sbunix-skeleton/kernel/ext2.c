@@ -869,7 +869,9 @@ static int ext2_open(void *fs_data, const char *path, int flags,
   if (!ip && (flags & EXT2_O_CREAT)) {
     /* Create a new file */
     /* Find parent directory */
-    char parent_path[256];
+    /* BF: Reduced from 256 to 128 to prevent kernel stack overflow.
+     * Path components > 128 chars are rare; kernel paths are short. */
+    char parent_path[128];
     const char *basename = path_parent(path, parent_path, sizeof(parent_path));
     if (basename[0] == '\0')
       return -1;

@@ -967,9 +967,12 @@ static void normalize_path(const char *in, char *out) {
     memcpy(out, tmp, tlen + 1);
 }
 
-/* Resolve a path against cwd.  Result in out[256]. */
+/* Resolve a path against cwd.  Result in out[128]. */
+/* BF: Reduced raw[] from 256 to 128 to prevent kernel stack overflow.
+ * Deep call chains (openat -> resolve_path -> resolve_symlinks ->
+ * ext2_open -> bcache -> virtio_blk) on 4KB stacks caused corruption. */
 static void resolve_path(const char *cwd, const char *path, char *out) {
-    char raw[256]; /* intermediate buffer before normalization */
+    char raw[128]; /* intermediate buffer before normalization */
     int rlen;
 
     if (path[0] == '/') {
