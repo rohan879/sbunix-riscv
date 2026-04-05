@@ -68,14 +68,16 @@ int exec(char *path) {
         current_proc->clone_flags &= ~CLONE_SIGHAND;
     }
     /* BF: POSIX requires SIG_IGN to be preserved across exec.
-     * Only reset user-installed handlers (handler >= 2) to SIG_DFL. */
+     * Reset user-installed handlers (handler >= 2) to SIG_DFL.
+     * Clear flags/mask/restorer for all signals — stale flags
+     * like SA_NOCLDWAIT must not persist across exec. */
     for (int i = 0; i < 32; i++) {
         if (current_proc->sigactions[i].handler >= 2) {
             current_proc->sigactions[i].handler = 0;  /* SIG_DFL */
-            current_proc->sigactions[i].mask = 0;
-            current_proc->sigactions[i].flags = 0;
-            current_proc->sigactions[i].restorer = 0;
         }
+        current_proc->sigactions[i].mask = 0;
+        current_proc->sigactions[i].flags = 0;
+        current_proc->sigactions[i].restorer = 0;
     }
 
     /* Clear old VMAs before loading new binary */
@@ -276,14 +278,16 @@ int exec_vfs(const char *resolved_path) {
         current_proc->clone_flags &= ~0x00000800; /* CLONE_SIGHAND */
     }
     /* BF: POSIX requires SIG_IGN to be preserved across exec.
-     * Only reset user-installed handlers (handler >= 2) to SIG_DFL. */
+     * Reset user-installed handlers (handler >= 2) to SIG_DFL.
+     * Clear flags/mask/restorer for all signals — stale flags
+     * like SA_NOCLDWAIT must not persist across exec. */
     for (int i = 0; i < 32; i++) {
         if (current_proc->sigactions[i].handler >= 2) {
             current_proc->sigactions[i].handler = 0;  /* SIG_DFL */
-            current_proc->sigactions[i].mask = 0;
-            current_proc->sigactions[i].flags = 0;
-            current_proc->sigactions[i].restorer = 0;
         }
+        current_proc->sigactions[i].mask = 0;
+        current_proc->sigactions[i].flags = 0;
+        current_proc->sigactions[i].restorer = 0;
     }
     vma_free_all(current_proc);
 
