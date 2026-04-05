@@ -221,6 +221,83 @@ int get_free_page_count(void) {
     return free_page_count;
 }
 
+/* BF: Allocate npages contiguous 4KB pages.  Uses the same bitmap scan
+ * approach as kalloc_super but for small N (typically 2-4).  Returns the
+ * base address of the contiguous block, or NULL if none is available.
+ *
+ * Purpose: the kernel process stack needs 2+ contiguous pages (8KB+)
+ * because deep syscall call chains (openat -> resolve_path ->
+ * resolve_symlinks -> ext2_open -> bcache -> virtio_blk) overflow
+ * a single 4KB page, corrupting return addresses and causing
+ * instruction page faults at kernel addresses. */
+void *kalloc_contiguous(int npages) {
+    if (npages <= 0 || npages > 16)
+        return 0;
+    if (npages == 1)
+        return kalloc();
+
+    /* Reuse the static bitmap from kalloc_super to avoid stack usage */
+    static uint8_t free_bitmap[MAX_PAGES / 8];
+
+    unsigned long old = r_sstatus();
+    w_sstatus(old & ~SSTATUS_SIE);
+
+    /* Build bitmap of free pages */
+    memset(free_bitmap, 0, sizeof(free_bitmap));
+    struct run *r = kmem.freelist;
+    while (r) {
+        int idx = pa_to_index((uint64_t)r);
+        if (idx >= 0 && idx < MAX_PAGES)
+            free_bitmap[idx / 8] |= (uint8_t)(1 << (idx % 8));
+        r = r->next;
+    }
+
+    /* Scan for a run of npages consecutive free pages */
+    for (int base = 0; base + npages <= MAX_PAGES; base++) {
+        int all_free = 1;
+        for (int i = 0; i < npages; i++) {
+            int idx = base + i;
+            if (!(free_bitmap[idx / 8] & (1 << (idx % 8)))) {
+                all_free = 0;
+                base += i; /* skip ahead past the gap */
+                break;
+            }
+        }
+        if (!all_free)
+            continue;
+
+        /* Found a contiguous block -- remove these pages from the free list */
+        uint64_t base_pa = 0x80000000UL + (uint64_t)base * PAGE_SIZE;
+        struct run **pp = &kmem.freelist;
+        int removed = 0;
+        while (*pp && removed < npages) {
+            uint64_t addr = (uint64_t)*pp;
+            if (addr >= base_pa && addr < base_pa + (uint64_t)npages * PAGE_SIZE) {
+                *pp = (*pp)->next;
+                removed++;
+            } else {
+                pp = &(*pp)->next;
+            }
+        }
+        free_page_count -= removed;
+        /* Set refcount for all pages in the block */
+        for (int i = 0; i < npages; i++)
+            page_refcount[base + i] = 1;
+
+        w_sstatus(old);
+        return (void *)base_pa;
+    }
+
+    w_sstatus(old);
+    return 0;
+}
+
+/* Free npages contiguous pages starting at pa. */
+void kfree_contiguous(void *pa, int npages) {
+    for (int i = 0; i < npages; i++)
+        kfree((void *)((uint64_t)pa + (uint64_t)i * PAGE_SIZE));
+}
+
 // Allocate 512 contiguous 4KB pages (2MB) at a 2MB-aligned physical address.
 // Returns the base address or NULL if no contiguous block is available.
 // Strategy: scan the free list, build a bitmap of free pages, then search

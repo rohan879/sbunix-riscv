@@ -127,8 +127,18 @@ found:
     return 0;
   }
 
-  // Allocate a kernel stack page.
-  if((p->kstack = kalloc()) == 0){
+  /* BF: Allocate 2 contiguous pages (8KB) for kernel stack.  A single
+   * 4KB page overflows during deep syscall chains (openat -> resolve_path
+   * -> resolve_symlinks -> ext2_open -> bcache -> virtio_blk), corrupting
+   * return addresses.  Falls back to 1 page if contiguous unavailable. */
+  p->kstack = kalloc_contiguous(KSTACK_PAGES);
+  if (p->kstack) {
+    p->kstack_npages = KSTACK_PAGES;
+  } else {
+    p->kstack = kalloc();
+    p->kstack_npages = 1;
+  }
+  if (!p->kstack) {
     kfree(p->trapframe);
     p->state = UNUSED;
     return 0;
@@ -142,7 +152,8 @@ found:
   // Set up new context to start executing at forkret
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64_t)forkret;
-  p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
+  /* BF: sp points to TOP of the (potentially multi-page) kernel stack */
+  p->context.sp = (uint64_t)p->kstack + (uint64_t)p->kstack_npages * PAGE_SIZE;
 
   // Initialize open file table
   for (int i = 0; i < NOFILE; i++)
@@ -234,7 +245,8 @@ void scheduler(void) {
         w_sstatus(r_sstatus() & ~SSTATUS_SIE);
 
         /* Set sscratch and switch to process page table */
-                asm volatile("csrw sscratch, %0" : : "r"((uint64_t)p->kstack + PAGE_SIZE));
+                /* BF: sscratch = top of kernel stack (8KB if contiguous) */
+                asm volatile("csrw sscratch, %0" : : "r"((uint64_t)p->kstack + (uint64_t)p->kstack_npages * PAGE_SIZE));
                 if (p->pagetable != kernel_pagetable) {
                     w_satp(MAKE_SATP(p->pagetable));
                     sfence_vma();

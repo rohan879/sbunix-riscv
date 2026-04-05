@@ -789,7 +789,8 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
 
     /* Child's kernel context: resume at forkret */
     p->context.ra = (uint64_t)forkret;
-    p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
+    /* BF: Fork child inherits parent's kstack_npages for proper stack top */
+    p->context.sp = (uint64_t)p->kstack + (uint64_t)p->kstack_npages * PAGE_SIZE;
 
     p->state = RUNNABLE;
     return p->pid;
@@ -834,7 +835,11 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
                     }
                 }
                 /* free child resources */
-                if (p->kstack) { kfree(p->kstack); p->kstack = NULL; }
+                /* BF: Free all pages of the kernel stack (1 or 2 pages) */
+                if (p->kstack) {
+                    kfree_contiguous(p->kstack, p->kstack_npages);
+                    p->kstack = NULL;
+                }
                 if (p->trapframe) { kfree(p->trapframe); p->trapframe = NULL; }
                 p->state = UNUSED;
                 p->pid = 0;

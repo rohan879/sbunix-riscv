@@ -4,6 +4,12 @@
 #include <riscv.h>
 #include <vfs.h>
 
+/* BF: Kernel stack is 2 contiguous pages (8KB).  A single 4KB page
+ * overflows during deep syscall call chains (ext2 I/O path), corrupting
+ * return addresses and causing instruction page faults. */
+#define KSTACK_PAGES 2
+#define KSTACK_SIZE  (KSTACK_PAGES * PAGE_SIZE)
+
 // Saved registers for kernel context switches.
 struct context {
   uint64_t ra;
@@ -199,6 +205,10 @@ struct proc {
   uint64_t saved_a5;
   /* POSIX timers */
   struct posix_timer timers[NPTIMER];
+
+  /* BF: Track kernel stack size for proper free on process exit.
+   * Added at the END of struct to avoid shifting field offsets. */
+  int kstack_npages;
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,
