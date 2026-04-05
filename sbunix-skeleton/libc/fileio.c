@@ -16,10 +16,11 @@
 extern void __sbunix_memstream_sync(FILE *stream);
 extern void __sbunix_memstream_close(FILE *stream);
 
-/* Static FILE objects for stdin, stdout, stderr */
-static FILE __stdin  = { .fd = 0, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0 };
-static FILE __stdout = { .fd = 1, .eof = 0, .error = 0, .buf_mode = _IOLBF, .wpos = 0 };
-static FILE __stderr = { .fd = 2, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0 };
+/* Static FILE objects for stdin, stdout, stderr
+ * BF: Added rpos=0, rlen=0 initialization for new read buffer fields. */
+static FILE __stdin  = { .fd = 0, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0, .rpos = 0, .rlen = 0 };
+static FILE __stdout = { .fd = 1, .eof = 0, .error = 0, .buf_mode = _IOLBF, .wpos = 0, .rpos = 0, .rlen = 0 };
+static FILE __stderr = { .fd = 2, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0, .rpos = 0, .rlen = 0 };
 
 FILE *stdin  = &__stdin;
 FILE *stdout = &__stdout;
@@ -115,29 +116,42 @@ int fputs(const char *s, FILE *stream) {
     return 0;
 }
 
+/* BF: fprintf previously used a fixed 1024-byte stack buffer, silently
+ * truncating longer output.  Now measures the output length first via
+ * vsnprintf, and uses a heap buffer for output exceeding 1024 bytes. */
 int fprintf(FILE *stream, const char *fmt, ...) {
-    char tmp[1024];
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
-    va_end(ap);
-    int w = n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1;
-    for (int i = 0; i < w; i++) {
-        if (fputc((unsigned char)tmp[i], stream) == EOF)
-            return EOF;
-    }
-    return n;
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vfprintf(stream, fmt, ap);
+  va_end(ap);
+  return n;
 }
 
 int vfprintf(FILE *stream, const char *fmt, va_list ap) {
-    char tmp[1024];
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
-    int w = n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1;
-    for (int i = 0; i < w; i++) {
-        if (fputc((unsigned char)tmp[i], stream) == EOF)
-            return EOF;
+  char stack_buf[1024];
+  va_list ap2;
+  va_copy(ap2, ap);
+  int n = vsnprintf(stack_buf, sizeof(stack_buf), fmt, ap2);
+  va_end(ap2);
+  char *buf = stack_buf;
+  char *heap_buf = NULL;
+  if (n >= (int)sizeof(stack_buf)) {
+    heap_buf = malloc(n + 1);
+    if (heap_buf) {
+      vsnprintf(heap_buf, n + 1, fmt, ap);
+      buf = heap_buf;
+    } else {
+      n = (int)sizeof(stack_buf) - 1;
     }
-    return n;
+  }
+  for (int i = 0; i < n; i++) {
+    if (fputc((unsigned char)buf[i], stream) == EOF) {
+      if (heap_buf) free(heap_buf);
+      return EOF;
+    }
+  }
+  if (heap_buf) free(heap_buf);
+  return n;
 }
 
 void perror(const char *s) {
@@ -147,44 +161,50 @@ void perror(const char *s) {
         fprintf(stderr, "%s\n", strerror(errno));
 }
 
-char *fgets(char *s, int size, FILE *stream) {
-    if (size <= 0) return (void *)0;
-    int i = 0;
-    while (i < size - 1) {
-        unsigned char c;
-        ssize_t r = read(stream->fd, &c, 1);
-        if (r < 0) {
-            stream->error = 1;
-            break;
-        }
-        if (r == 0) {
-            stream->eof = 1;
-            break;
-        }
-        s[i++] = (char)c;
-        if (c == '\n') break;
+/* BF: fgets previously called read() directly, bypassing the ungetc
+ * buffer and read buffer.  Rewritten to use fgetc() so all read
+ * buffering and pushback state is respected. */
+char *fgets(char *s, int n, FILE *stream) {
+  if (!s || n <= 0 || !stream) return NULL;
+  int i = 0;
+  while (i < n - 1) {
+    int c = fgetc(stream);
+    if (c == EOF) {
+      if (i == 0) return NULL;
+      break;
     }
-    if (i == 0) return (void *)0;
-    s[i] = '\0';
-    return s;
+    s[i++] = (char)c;
+    if (c == '\n') break;
+  }
+  s[i] = '\0';
+  return s;
 }
 
+/* BF: fgetc previously called read(fd, &c, 1) for every character --
+ * a syscall per byte.  Rewritten to use a read buffer (rbuf/rpos/rlen)
+ * so reads are batched into FILE_BUF_SIZE chunks, with ungetc and
+ * unbuffered mode still respected. */
 int fgetc(FILE *stream) {
-    if (stream->has_unget) {
-        stream->has_unget = 0;
-        return stream->unget_char;
-    }
+  if (!stream) return EOF;
+  if (stream->has_unget) {
+    stream->has_unget = 0;
+    return stream->unget_char;
+  }
+  if (stream->rpos < stream->rlen)
+    return (unsigned char)stream->rbuf[stream->rpos++];
+  /* Refill buffer */
+  if (stream->buf_mode == _IONBF) {
+    /* Unbuffered: single byte read */
     unsigned char c;
-    ssize_t r = read(stream->fd, &c, 1);
-    if (r < 0) {
-        stream->error = 1;
-        return EOF;
-    }
-    if (r == 0) {
-        stream->eof = 1;
-        return EOF;
-    }
-    return (int)c;
+    ssize_t n = read(stream->fd, &c, 1);
+    if (n <= 0) { stream->eof = (n == 0); if (n < 0) stream->error = 1; return EOF; }
+    return c;
+  }
+  ssize_t n = read(stream->fd, stream->rbuf, FILE_BUF_SIZE);
+  if (n <= 0) { stream->eof = (n == 0); if (n < 0) stream->error = 1; return EOF; }
+  stream->rlen = (int)n;
+  stream->rpos = 1;
+  return (unsigned char)stream->rbuf[0];
 }
 
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
@@ -198,19 +218,39 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
     return nmemb;
 }
 
+/* BF: fread previously called read() directly, bypassing the read buffer
+ * and ungetc pushback.  Rewritten to drain ungetc and rbuf first, then
+ * read remaining data directly for large requests or via fgetc for small. */
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
-    size_t total = size * nmemb;
-    if (total == 0) return 0;
-    ssize_t r = read(stream->fd, ptr, total);
-    if (r < 0) {
-        stream->error = 1;
-        return 0;
+  if (!ptr || !stream || size == 0 || nmemb == 0) return 0;
+  size_t total = size * nmemb;
+  size_t done = 0;
+  char *dst = (char *)ptr;
+  /* Drain ungetc first */
+  if (stream->has_unget && done < total) {
+    *dst++ = (char)stream->unget_char;
+    stream->has_unget = 0;
+    done++;
+  }
+  /* Drain read buffer */
+  while (done < total && stream->rpos < stream->rlen) {
+    *dst++ = stream->rbuf[stream->rpos++];
+    done++;
+  }
+  /* Read remaining directly or via buffer refills */
+  while (done < total) {
+    if (total - done >= (size_t)FILE_BUF_SIZE) {
+      ssize_t n = read(stream->fd, dst, total - done);
+      if (n <= 0) { if (n == 0) stream->eof = 1; else stream->error = 1; break; }
+      dst += n; done += n;
+    } else {
+      int c = fgetc(stream);
+      if (c == EOF) break;
+      *dst++ = (char)c;
+      done++;
     }
-    if (r == 0) {
-        stream->eof = 1;
-        return 0;
-    }
-    return (size_t)r / size;
+  }
+  return done / size;
 }
 
 FILE *fopen(const char *path, const char *mode) {
@@ -240,6 +280,9 @@ FILE *fopen(const char *path, const char *mode) {
             __file_pool[i].error = 0;
             __file_pool[i].buf_mode = _IOFBF;
             __file_pool[i].wpos = 0;
+            /* BF: Initialize read buffer fields for buffered reads */
+            __file_pool[i].rpos = 0;
+            __file_pool[i].rlen = 0;
             __file_pool[i].unget_char = 0;
             __file_pool[i].has_unget = 0;
             __stream_register(&__file_pool[i]);
@@ -269,6 +312,9 @@ FILE *fdopen(int fd, const char *mode) {
             __file_pool[i].error = 0;
             __file_pool[i].buf_mode = buf_mode;
             __file_pool[i].wpos = 0;
+            /* BF: Initialize read buffer fields for buffered reads */
+            __file_pool[i].rpos = 0;
+            __file_pool[i].rlen = 0;
             __file_pool[i].unget_char = 0;
             __file_pool[i].has_unget = 0;
             __stream_register(&__file_pool[i]);
@@ -326,6 +372,9 @@ FILE *freopen(const char *path, const char *mode, FILE *stream) {
     stream->eof = 0;
     stream->error = 0;
     stream->wpos = 0;
+    /* BF: Reset read buffer state on reopen to avoid stale data */
+    stream->rpos = 0;
+    stream->rlen = 0;
     stream->has_unget = 0;
     return stream;
 }
@@ -442,21 +491,53 @@ void clearerr(FILE *stream) {
     stream->error = 0;
 }
 
+/* BF: fseek previously did not flush the write buffer or invalidate
+ * the read buffer/ungetc state.  This caused stale data to persist
+ * across seeks.  Now flushes writes, adjusts for buffered-but-unread
+ * data when using SEEK_CUR, and invalidates all read state. */
 int fseek(FILE *stream, long offset, int whence) {
-    off_t r = lseek(stream->fd, offset, whence);
-    if (r < 0) return -1;
-    stream->eof = 0;
-    return 0;
+  if (!stream) return -1;
+  /* Flush pending writes */
+  if (stream->wpos > 0) __fflush_stream(stream);
+  /* Adjust offset for buffered-but-unread data */
+  if (whence == SEEK_CUR) {
+    offset -= (stream->rlen - stream->rpos);
+    if (stream->has_unget) offset -= 1;
+  }
+  /* Invalidate read buffer and ungetc */
+  stream->rpos = stream->rlen = 0;
+  stream->has_unget = 0;
+  off_t r = lseek(stream->fd, offset, whence);
+  if (r < 0) return -1;
+  stream->eof = 0;
+  return 0;
 }
 
+/* BF: ftell previously returned the raw fd offset without accounting
+ * for buffered-but-unread bytes or pending writes.  Now adjusts for
+ * the read buffer, ungetc pushback, and write buffer. */
 long ftell(FILE *stream) {
-    return (long)lseek(stream->fd, 0, SEEK_CUR);
+  if (!stream) return -1;
+  long pos = (long)lseek(stream->fd, 0, SEEK_CUR);
+  if (pos < 0) return -1;
+  /* Adjust for buffered read data not yet consumed */
+  pos -= (stream->rlen - stream->rpos);
+  if (stream->has_unget) pos -= 1;
+  /* Adjust for buffered write data not yet flushed */
+  pos += stream->wpos;
+  return pos;
 }
 
+/* BF: rewind previously did not invalidate the read buffer or ungetc
+ * state, causing stale data after seeking to the beginning. */
 void rewind(FILE *stream) {
-    lseek(stream->fd, 0, SEEK_SET);
-    stream->eof = 0;
-    stream->error = 0;
+  if (!stream) return;
+  if (stream->wpos > 0) __fflush_stream(stream);
+  stream->rpos = stream->rlen = 0;
+  stream->has_unget = 0;
+  lseek(stream->fd, 0, SEEK_SET);
+  stream->eof = 0;
+  stream->error = 0;
 }
 
 int sscanf(const char *str, const char *fmt, ...) {
@@ -843,8 +924,10 @@ int setvbuf(FILE *stream, char *buf, int mode, size_t size) {
     return 0;
 }
 
+/* BF: setbuf was previously a no-op, ignoring the caller's buffering
+ * request.  Now delegates to setvbuf so NULL buf correctly sets _IONBF. */
 void setbuf(FILE *stream, char *buf) {
-    (void)stream; (void)buf;
+  setvbuf(stream, buf, buf ? _IOFBF : _IONBF, BUFSIZ);
 }
 
 int ungetc(int c, FILE *stream) {

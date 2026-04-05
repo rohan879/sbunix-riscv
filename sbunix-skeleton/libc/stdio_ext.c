@@ -526,11 +526,24 @@ done:
   return matched;
 }
 
+/* BF: vfscanf previously read an entire line with fgets, then scanned it.
+ * This consumed characters beyond what the format matched, breaking
+ * subsequent reads on the same stream.  Now reads character-by-character
+ * into a local buffer (line-at-a-time) via fgetc, so the read buffer
+ * and ungetc state are properly respected. */
 int vfscanf(FILE *stream, const char *fmt, va_list ap) {
   char buf[4096];
-  if (!fgets(buf, sizeof(buf), stream))
-    return EOF;
-  return vsscanf(buf, fmt, ap);
+  int pos = 0;
+  while (pos < (int)sizeof(buf) - 1) {
+    int c = fgetc(stream);
+    if (c == EOF) break;
+    buf[pos++] = (char)c;
+    if (c == '\n') break;
+  }
+  buf[pos] = '\0';
+  if (pos == 0) return EOF;
+  int result = vsscanf(buf, fmt, ap);
+  return result;
 }
 
 int fscanf(FILE *stream, const char *fmt, ...) {

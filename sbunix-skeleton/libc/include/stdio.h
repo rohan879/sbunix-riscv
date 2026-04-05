@@ -33,6 +33,10 @@ typedef struct _FILE {
     int buf_mode;                 /* _IONBF, _IOLBF, or _IOFBF */
     char wbuf[FILE_BUF_SIZE];    /* write buffer */
     int  wpos;                   /* current position in write buffer */
+    char rbuf[FILE_BUF_SIZE];    /* read buffer -- enables buffered reads
+                                  * instead of per-character read() syscalls */
+    int  rpos;                   /* current read position in buffer */
+    int  rlen;                   /* valid bytes in read buffer */
     int  unget_char;             /* pushed-back character */
     int  has_unget;              /* 1 if unget_char is valid */
 } FILE;
