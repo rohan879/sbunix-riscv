@@ -136,9 +136,9 @@ struct file_lock lock_table[MAX_FILE_LOCKS];
 
 /* Two ranges [s1, s1+l1) and [s2, s2+l2) overlap.
  * l_len=0 means "to EOF" -- treat as infinite extent. */
-static int ranges_overlap(off_t s1, off_t l1, off_t s2, off_t l2) {
-  off_t e1 = (l1 == 0) ? (off_t)0x7FFFFFFFFFFFFFFFLL : s1 + l1;
-  off_t e2 = (l2 == 0) ? (off_t)0x7FFFFFFFFFFFFFFFLL : s2 + l2;
+static int ranges_overlap(int64_t s1, int64_t l1, int64_t s2, int64_t l2) {
+  int64_t e1 = (l1 == 0) ? (int64_t)0x7FFFFFFFFFFFFFFFLL : s1 + l1;
+  int64_t e2 = (l2 == 0) ? (int64_t)0x7FFFFFFFFFFFFFFFLL : s2 + l2;
   return s1 < e2 && s2 < e1;
 }
 
@@ -146,7 +146,7 @@ static int ranges_overlap(off_t s1, off_t l1, off_t s2, off_t l2) {
  * Locks conflict if: same file path, overlapping byte ranges,
  * at least one is a write lock, and different owner. */
 static int lock_conflicts(struct file_lock *lk, const char *path,
-    short type, off_t start, off_t len, pid_t pid,
+    short type, int64_t start, int64_t len, pid_t pid,
     struct open_file *ofd, int is_ofd) {
   if (!lk->used) return 0;
   if (strncmp(lk->path, path, 256) != 0) return 0;
@@ -165,7 +165,7 @@ static int lock_conflicts(struct file_lock *lk, const char *path,
 /* Set or release a file lock.  F_UNLCK removes matching locks; F_RDLCK/F_WRLCK
  * checks for conflicts then adds/replaces a lock entry.
  * Returns 0 on success, -11 (EAGAIN) on conflict. */
-int do_file_setlk(const char *path, short type, off_t start, off_t len,
+int do_file_setlk(const char *path, short type, int64_t start, int64_t len,
                    pid_t pid, struct open_file *ofd, int is_ofd, int wait) {
   if (type == 2) { /* F_UNLCK -- remove matching locks owned by caller */
     for (int i = 0; i < MAX_FILE_LOCKS; i++) {
@@ -231,9 +231,9 @@ int do_file_setlk(const char *path, short type, off_t start, off_t len,
 /* Query whether a hypothetical lock would conflict.  If a conflict is found,
  * fills out_type/out_start/out_len/out_pid.  Otherwise sets *out_type = 2
  * (F_UNLCK) meaning "no conflict". */
-int do_file_getlk(const char *path, short type, off_t start, off_t len,
+int do_file_getlk(const char *path, short type, int64_t start, int64_t len,
                    pid_t pid, struct open_file *ofd, int is_ofd,
-                   short *out_type, off_t *out_start, off_t *out_len,
+                   short *out_type, int64_t *out_start, int64_t *out_len,
                    pid_t *out_pid) {
   for (int i = 0; i < MAX_FILE_LOCKS; i++) {
     if (lock_conflicts(&lock_table[i], path, type, start, len,
@@ -3235,6 +3235,65 @@ static long sys_fcntl_handler(struct trapframe *tf) {
     } else if (cmd == 4) { /* F_SETFL */
         ftab[fd]->flags = (int)tf->a2;
         return (long)0;
+    } else if (cmd == 5 || cmd == 36) {
+        /* F_GETLK (5) / F_OFD_GETLK (36) -- query whether a lock would
+         * conflict with existing locks.  Returns the conflicting lock info
+         * in the user-supplied struct flock, or sets l_type=F_UNLCK if no
+         * conflict exists. */
+        struct { short l_type; short l_whence; int64_t l_start;
+                 int64_t l_len; pid_t l_pid; } kfl;
+        if (copyin(current_proc->pagetable, &kfl, tf->a2, sizeof(kfl)) < 0)
+            return (long)-14; /* EFAULT */
+        int is_ofd = (cmd == 36);
+        /* Convert l_whence-relative offset to absolute (SEEK_CUR=1, SEEK_END=2) */
+        if (kfl.l_whence == 1) { /* SEEK_CUR */
+            kfl.l_start += ftab[fd]->offset;
+        } else if (kfl.l_whence == 2) { /* SEEK_END */
+            uint8_t stbuf[128];
+            if (ftab[fd]->ops && ftab[fd]->ops->fstat &&
+                ftab[fd]->ops->fstat(ftab[fd]->fs_data, ftab[fd]->private, stbuf) == 0) {
+                int64_t file_size = *(int64_t *)(stbuf + 48);
+                kfl.l_start += file_size;
+            }
+        }
+        kfl.l_whence = 0;
+        short ot; int64_t os, ol; pid_t op;
+        do_file_getlk(ftab[fd]->path, kfl.l_type, kfl.l_start, kfl.l_len,
+                       current_proc->pid, ftab[fd], is_ofd, &ot, &os, &ol, &op);
+        kfl.l_type = ot; kfl.l_start = os; kfl.l_len = ol;
+        kfl.l_pid = is_ofd ? -1 : op;
+        kfl.l_whence = 0;
+        if (copyout(current_proc->pagetable, tf->a2, &kfl, sizeof(kfl)) < 0)
+            return (long)-14;
+        return (long)0;
+    } else if (cmd == 6 || cmd == 7 || cmd == 37 || cmd == 38) {
+        /* F_SETLK (6) / F_SETLKW (7) / F_OFD_SETLK (37) / F_OFD_SETLKW (38)
+         * -- set, upgrade, or release a file lock.  Wait variants also return
+         * EAGAIN in this teaching OS (no blocking lock support). */
+        struct { short l_type; short l_whence; int64_t l_start;
+                 int64_t l_len; pid_t l_pid; } kfl;
+        if (copyin(current_proc->pagetable, &kfl, tf->a2, sizeof(kfl)) < 0)
+            return (long)-14;
+        int is_ofd = (cmd == 37 || cmd == 38);
+        int wait = (cmd == 7 || cmd == 38);
+        /* Convert l_whence-relative offset to absolute */
+        if (kfl.l_whence == 1) { /* SEEK_CUR */
+            kfl.l_start += ftab[fd]->offset;
+        } else if (kfl.l_whence == 2) { /* SEEK_END */
+            uint8_t stbuf[128];
+            if (ftab[fd]->ops && ftab[fd]->ops->fstat &&
+                ftab[fd]->ops->fstat(ftab[fd]->fs_data, ftab[fd]->private, stbuf) == 0) {
+                int64_t file_size = *(int64_t *)(stbuf + 48);
+                kfl.l_start += file_size;
+            }
+        }
+        return (long)do_file_setlk(ftab[fd]->path, kfl.l_type, kfl.l_start,
+                                    kfl.l_len, current_proc->pid, ftab[fd],
+                                    is_ofd, wait);
+    } else if (cmd == 8) { /* F_SETOWN -- store owning pid (stub) */
+        return (long)0;
+    } else if (cmd == 9) { /* F_GETOWN -- return owning pid (stub) */
+        return (long)current_proc->pid;
     } else {
         return (long)-22; /* EINVAL */
     }
