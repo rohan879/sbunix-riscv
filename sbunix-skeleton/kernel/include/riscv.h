@@ -53,6 +53,35 @@ typedef int            pid_t;
 #define PXSHIFT(level)  (12 + (level) * 9)
 #define PX(level, va)   ((((uint64_t)(va)) >> PXSHIFT(level)) & PXMASK)
 
+/* ---- Sv39 self-referencing page table window ---- */
+/* A 1GB leaf gigapage at L2 index 510 maps all of kernel RAM through
+ * a dedicated VA window.  Unlike x86, RISC-V Sv39 determines leaf
+ * vs. non-leaf by R/W/X bits at ALL levels (including L0), so
+ * x86-style multi-level recursive MMU walks don't work.  Instead,
+ * the gigapage gives the MMU a one-step translation, and software
+ * computes PTE offsets within the window.
+ *
+ * Purpose: the kernel code PTE at 0x87ffa008 intermittently loses
+ * PTE_X during heavy virtio_blk DMA.  The identity-mapped L1
+ * superpages (kvminit line 191) ARE the corrupted PTEs, so the
+ * identity mapping itself may become unreliable.  This gigapage
+ * provides a redundant access path via a separate L2 entry
+ * (root[510] vs root[2]) that is never touched by DMA. */
+#define RECURSIVE_INDEX   510
+#define RECURSIVE_BASE    0xFFFFFFFF80000000UL  /* VPN[2]=510, sign-extended */
+#define PHYS_RAM_BASE     0x80000000UL
+
+/* Convert a physical address (in kernel RAM) to a VA in the
+ * self-referencing gigapage window.  Works for any PA in
+ * [0x80000000, 0xC0000000). */
+#define RECURSIVE_PA2VA(pa) \
+    (RECURSIVE_BASE + ((uint64_t)(pa) - PHYS_RAM_BASE))
+
+/* Read an L2 (root) PTE for the given VPN[2] index.
+ * Single-step: kernel_pagetable is at a known PA. */
+#define RECURSIVE_L2_PTE_VA(vpn2) \
+    RECURSIVE_PA2VA((uint64_t)kernel_pagetable + (vpn2) * sizeof(pte_t))
+
 // User address space boundary. 
 // Set to 1GB to stay safely below kernel space (0x80000000).
 #define MAXVA 0x40000000L

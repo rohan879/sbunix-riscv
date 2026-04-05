@@ -266,6 +266,17 @@ static void handle_timer_interrupt(void) {
     display_time();
     #endif
     timer_set_next();
+
+    /* Fast per-tick check of critical kernel code PTE via self-referencing
+     * gigapage window (single volatile load + conditional store).
+     * Catches DMA-induced PTE_X corruption before it causes faults. */
+    recursive_check_kcode_pte();
+    /* Full scan every 100 ticks (~10s at 10Hz) */
+    if (ticks % 100 == 50) {
+      int repairs = recursive_check_all_kernel_ptes();
+      if (repairs > 0)
+        printk("timer: repaired %d kernel PTE(s)\n", repairs);
+    }
     
     /* Enhanced memory management: age pages periodically */
     if (ticks % 10 == 0) {  /* Age pages every 10 ticks to reduce overhead */
@@ -5277,17 +5288,40 @@ void trap_handler(struct trapframe *tf) {
                 }
             }
 
-            /* Workaround: if instruction page fault at kernel address,
-             * the kernel code PTE may have lost PTE_X.  Restore it and
-             * retry the instruction.  This handles corruption that
-             * occurs during boot tests (after the initial restore). */
+            /* Use self-referencing gigapage window to repair PTE without
+             * walk() and without depending on the identity-mapped superpages
+             * (which are the PTEs being corrupted by DMA). */
             if (cause == SCAUSE_INST_PAGE_FAULT && stval >= 0x80000000UL) {
-                pte_t *kpte = walk(kernel_pagetable, PGROUNDDOWN(stval), 0);
-                if (kpte && (*kpte & PTE_V)) {
-                    /* Always ensure PTE_X is set and flush TLB */
-                    *kpte |= PTE_X;
-                    asm volatile("sfence.vma %0, zero" : : "r"(stval));
-                    return; /* retry faulting instruction */
+                if (kernel_pagetable[RECURSIVE_INDEX] & PTE_V) {
+                    volatile pte_t *ppte = recursive_l1_pte(PGROUNDDOWN(stval));
+                    if (ppte) {
+                        pte_t pte = *ppte;
+                        if ((pte & PTE_V) && !(pte & PTE_X)) {
+                            *ppte = pte | PTE_X;
+                            asm volatile("sfence.vma %0, zero" : : "r"(stval));
+                            return;
+                        }
+                        if (!(pte & PTE_V)) {
+                            uint64_t pa = SPGROUNDDOWN(stval);
+                            *ppte = PA2PTE(pa) | PTE_V | PTE_R | PTE_W | PTE_X;
+                            asm volatile("sfence.vma %0, zero" : : "r"(stval));
+                            return;
+                        }
+                    }
+                }
+                /* Fallback: direct identity-map access (works if identity
+                 * map is not corrupted) */
+                {
+                    pte_t l2pte = kernel_pagetable[2];
+                    if (l2pte & PTE_V) {
+                        pagetable_t l1 = (pagetable_t)PTE2PA(l2pte);
+                        int idx = PX(1, stval);
+                        if ((l1[idx] & PTE_V) && !(l1[idx] & PTE_X)) {
+                            l1[idx] |= PTE_X;
+                            asm volatile("sfence.vma %0, zero" : : "r"(stval));
+                            return;
+                        }
+                    }
                 }
             }
 
