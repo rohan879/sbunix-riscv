@@ -3023,6 +3023,12 @@ static long sys_mmap_handler(struct trapframe *tf) {
      * ULONG_MAX + PAGE_SIZE-1 wraps to 0, which would pass later checks. */
     if (len > (uint64_t)-1 - (PAGE_SIZE - 1))
         return (long)-75; /* EOVERFLOW */
+
+    /* BF: POSIX requires EOVERFLOW when off + len would overflow.
+     * File-backed mappings with large offset can wrap around. */
+    if (offset != 0 && offset + len < offset)
+        return (long)-75; /* EOVERFLOW */
+
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (len == 0) {
         return (long)-22; /* EINVAL: zero-length mapping */
@@ -3126,11 +3132,23 @@ static long sys_munmap_handler(struct trapframe *tf) {
     /* Remove VMA tracking (handles splits automatically) */
     vma_remove(current_proc, addr, addr + len);
 
-    /* BF: Reclaim virtual address space when the freed region is at the
-     * mmap allocation frontier.  Without this, 100k mmap/munmap cycles
-     * exhaust the address space since mmap_base only moves forward. */
-    if (addr + len == current_proc->mmap_base)
-        current_proc->mmap_base = addr;
+    /* BF: Scan VMA list for highest allocated address.
+     * Resets mmap_base to allow address space reuse after munmap.
+     * Without this, 100k mmap/munmap cycles exhaust the address space
+     * since mmap_base only moves forward.  The simple frontier check
+     * (addr + len == mmap_base) only reclaims when unmapping at the
+     * exact frontier, missing non-contiguous free regions. */
+    {
+        uint64_t highest = 0x20000000;
+        struct vm_area *v = current_proc->vma_list;
+        while (v) {
+            uint64_t end = v->end;
+            if (end > highest)
+                highest = end;
+            v = v->next;
+        }
+        current_proc->mmap_base = highest;
+    }
 
     return 0;
 }
@@ -3496,6 +3514,17 @@ static long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
                 memset(kinfo, 0, sizeof(kinfo));
                 int32_t si_signo = (int32_t)sig;
                 memcpy(kinfo, &si_signo, 4);
+                /* BF: POSIX requires siginfo_t fields to be populated.
+                 * Tests expect si_code, si_pid, and si_uid in addition
+                 * to si_signo for sigtimedwait/sigwaitinfo results. */
+                /* BF: POSIX specifies si_errno = 0 when no error is associated */
+                *(int32_t *)(kinfo + 4) = 0;   /* si_errno: no error */
+                *(int32_t *)(kinfo + 8) = 0;   /* si_code: SI_USER (default) */
+                /* BF: si_pid should be the sender's PID, but this OS only tracks
+                 * signals as pending bits without recording the sender.  Use 0
+                 * (unknown) rather than the misleading receiver PID. */
+                *(int32_t *)(kinfo + 12) = 0;  /* si_pid: unknown (no sender tracking) */
+                *(int32_t *)(kinfo + 16) = 0;  /* si_uid: always root */
                 if (copyout(current_proc->pagetable, info_uaddr, kinfo, 128) < 0)
                     return (long)-14; /* EFAULT */
             }
@@ -4196,15 +4225,12 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     }
 
     tp->pgid = pgid;
-    /* BF: Wake all sleeping processes after pgid change.  A parent
-     * blocked in waitpid(-pgid) needs to re-check whether any children
-     * remain in the target process group.  The previous code only woke
-     * the immediate parent, missing other ancestors or processes
-     * waiting on a specific process group. */
-    for (int i = 0; i < NPROC; i++) {
-        if (proc[i].state == SLEEPING)
-            proc[i].state = RUNNABLE;
-    }
+    /* BF: Only wake the target's parent (which may be in waitpid).
+     * The blanket wake of all sleeping processes caused premature
+     * wakeups of unrelated waitpid callers, breaking process group
+     * tests that depend on precise wait/exit ordering. */
+    if (tp->parent && tp->parent->state == SLEEPING)
+        tp->parent->state = RUNNABLE;
     return 0;
 }
 
@@ -5899,6 +5925,25 @@ void trap_handler(struct trapframe *tf) {
                     /* Check if page is already mapped */
                     pte_t *pte = walk(current_proc->pagetable, va, 0);
                     if (!pte || !(*pte & PTE_V)) {
+                        /* BF: POSIX requires SIGBUS for file-backed mmap access
+                         * beyond the end of the file (rounded up to page boundary).
+                         * Check file size via fstat before demand-paging. */
+                        if (fvma->file && fvma->file->ops && fvma->file->ops->fstat) {
+                            uint8_t stbuf[128];
+                            memset(stbuf, 0, sizeof(stbuf));
+                            if (fvma->file->ops->fstat(fvma->file->fs_data,
+                                                       fvma->file->private, stbuf) == 0) {
+                                int64_t file_sz = *(int64_t *)(stbuf + 48); /* st_size */
+                                uint64_t file_end_page = ((uint64_t)file_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+                                uint64_t page_file_off = fvma->file_offset + (va - fvma->start);
+                                if (page_file_off >= file_end_page) {
+                                    current_proc->sigpending |= signal_bit(SIGBUS);
+                                    deliver_signal(tf, current_proc);
+                                    return;
+                                }
+                            }
+                        }
+
                         /* Page not yet allocated — demand-page it */
                         char *pg = kalloc();
                         if (pg) {
