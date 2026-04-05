@@ -3073,11 +3073,23 @@ static long sys_munmap_handler(struct trapframe *tf) {
     /* Remove VMA tracking (handles splits automatically) */
     vma_remove(current_proc, addr, addr + len);
 
-    /* BF: Reclaim virtual address space when the freed region is at the
-     * mmap allocation frontier.  Without this, 100k mmap/munmap cycles
-     * exhaust the address space since mmap_base only moves forward. */
-    if (addr + len == current_proc->mmap_base)
-        current_proc->mmap_base = addr;
+    /* BF: Scan VMA list for highest allocated address.
+     * Resets mmap_base to allow address space reuse after munmap.
+     * Without this, 100k mmap/munmap cycles exhaust the address space
+     * since mmap_base only moves forward.  The simple frontier check
+     * (addr + len == mmap_base) only reclaims when unmapping at the
+     * exact frontier, missing non-contiguous free regions. */
+    {
+        uint64_t highest = 0x20000000;
+        struct vm_area *v = current_proc->vma_list;
+        while (v) {
+            uint64_t end = v->end;
+            if (end > highest)
+                highest = end;
+            v = v->next;
+        }
+        current_proc->mmap_base = highest;
+    }
 
     return 0;
 }
