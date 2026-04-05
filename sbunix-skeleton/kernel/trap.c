@@ -3262,6 +3262,10 @@ static long sys_rt_sigaction_handler(struct trapframe *tf) {
                 return (long)-14;
             }
             sig_sa[signum].handler = act.handler;
+            /* BF: POSIX forbids blocking SIGKILL or SIGSTOP via sa_mask.
+             * Strip these before storing so deliver_signal never masks them
+             * when applying the handler's sa_mask to the process sigmask. */
+            act.mask &= ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
             sig_sa[signum].mask = act.mask;
             sig_sa[signum].flags = act.flags;
             sig_sa[signum].restorer = act.restorer;
