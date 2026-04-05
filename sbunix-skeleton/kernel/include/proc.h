@@ -224,6 +224,16 @@ struct proc {
   /* BF: SIGCHLD si_code for SA_SIGINFO handlers.  Set by stop/continue/exit
    * paths so deliver_signal can populate siginfo_t correctly. */
   int sigchld_code;
+
+  /* BF: Epoch counter incremented each time deliver_signal dispatches a
+   * user handler.  ppoll/pselect6 snapshot this before the mask swap
+   * to detect signals handled between raise() and ppoll(). */
+  uint64_t signal_handled_epoch;
+
+  /* BF: Per-process UID/GID for kill() permission checks.
+   * Default 0 (root) in single-user OS. */
+  int uid;
+  int gid;
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,
