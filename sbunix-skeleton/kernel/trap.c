@@ -2001,6 +2001,24 @@ static long sys_execve_handler(struct trapframe *tf) {
         }
     }
 
+    /* BF: POSIX requires caught signal dispositions (user handlers) to be
+     * reset to SIG_DFL on exec.  SIG_IGN dispositions are preserved.
+     * Also reset the alternate signal stack to SS_DISABLE since the old
+     * stack memory is gone after exec. */
+    {
+        struct kern_sigaction *sa = proc_sigactions(current_proc);
+        for (int i = 1; i < 32; i++) {
+            if (sa[i].handler > 1) { /* user handler, not SIG_DFL(0) or SIG_IGN(1) */
+                sa[i].handler = 0;  /* reset to SIG_DFL */
+                sa[i].flags = 0;
+                sa[i].mask = 0;
+            }
+        }
+    }
+    current_proc->ss_sp = 0;
+    current_proc->ss_size = 0;
+    current_proc->ss_flags = 2; /* SS_DISABLE */
+
     /* Mark that this process has exec'd (for POSIX setpgid restrictions) */
     current_proc->has_execed = 1;
 
@@ -3017,6 +3035,13 @@ static long sys_rt_sigaction_handler(struct trapframe *tf) {
             sig_sa[signum].mask = act.mask;
             sig_sa[signum].flags = act.flags;
             sig_sa[signum].restorer = act.restorer;
+
+            /* BF: POSIX: setting SIG_IGN for a signal clears any pending
+             * instance of that signal.  Without this, a pending signal could
+             * be delivered even after the process explicitly ignored it. */
+            if (act.handler == 1) { /* SIG_IGN */
+                current_proc->sigpending &= ~signal_bit(signum);
+            }
         }
         return (long)0;
     }
@@ -3059,6 +3084,19 @@ static long sys_rt_sigreturn_handler(struct trapframe *tf) {
 
     current_proc->sigmask = frame.saved_sigmask;
     memcpy(tf, &frame.saved_tf, sizeof(frame.saved_tf));
+
+    /* BF: Clear SS_ONSTACK if the restored sp is outside the alternate
+     * signal stack.  POSIX requires SS_ONSTACK to reflect whether the
+     * thread is currently executing on the alt stack; without this,
+     * a second signal after sigreturn would incorrectly think we're
+     * still on the alt stack. */
+    if (current_proc->ss_sp != 0 && current_proc->ss_size != 0) {
+        uint64_t sp = tf->sp;
+        if (sp < current_proc->ss_sp ||
+            sp >= current_proc->ss_sp + current_proc->ss_size)
+            current_proc->ss_flags &= ~1; /* clear SS_ONSTACK */
+    }
+
     return SYSCALL_NORETURN;
 }
 
@@ -4940,6 +4978,17 @@ static long sys_ppoll_handler(struct trapframe *tf) {
             current_proc->waiting_for_uart = 2;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+        }
+
+        /* BF: ppoll must return -EINTR when a deliverable signal is pending
+         * during the wait.  POSIX: "If ... a signal is caught, ppoll() shall
+         * be interrupted... and shall return -1 with errno set to [EINTR]." */
+        if (current_proc->sigpending & ~current_proc->sigmask) {
+            if (sigmask_uaddr != 0)
+                current_proc->sigmask = old_mask;
+            if (fds_size > 0)
+                copyout(current_proc->pagetable, fds_uaddr, kfds, (uint64_t)fds_size);
+            return (long)-4; /* EINTR */
         }
 
         /* Re-check after wakeup */
