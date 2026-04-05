@@ -703,6 +703,10 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     p->parent = current_proc;
     p->pgid = current_proc->pgid;
     p->sid = current_proc->sid;
+    /* BF: Propagate UID/GID to child so kill() permission checks
+     * remain consistent after fork. */
+    p->uid = current_proc->uid;
+    p->gid = current_proc->gid;
     p->clone_flags = clone_flags;
 
     /* Copy stack bounds and mmap_base from parent */
@@ -2294,12 +2298,15 @@ static long sys_getppid_handler(struct trapframe *tf) {
 
 static long sys_getuid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual process UID instead of hardcoded 0 so that
+     * userspace identity checks (e.g. kill permission) are accurate. */
+    return (long)current_proc->uid;
 }
 
 static long sys_getgid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual process GID instead of hardcoded 0. */
+    return (long)current_proc->gid;
 }
 
 /* Helper: deliver signal to a single process */
@@ -2396,39 +2403,76 @@ static long sys_kill_handler(struct trapframe *tf) {
         /* Send to all processes in caller's process group */
         pid_t pgid = current_proc->pgid;
         int found = 0;
+        int eperm = 0;
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pgid == pgid) {
-                kill_deliver(&proc[i], sig);
+                /* BF: POSIX requires kill() to check UID permissions */
+                if (current_proc->uid != 0 &&
+                    current_proc->uid != proc[i].uid) {
+                    eperm = 1;
+                    continue;
+                }
                 found = 1;
+                /* BF: sig=0 is existence/permission check only -- no delivery.
+                 * Prevents undefined behavior from signal_bit(0) = 1 << -1. */
+                if (sig != 0)
+                    kill_deliver(&proc[i], sig);
             }
         }
-        return found ? 0 : (long)-3;
+        if (found)
+            return 0;
+        return eperm ? (long)-1 : (long)-3; /* EPERM or ESRCH */
     }
 
     if (target_pid < -1) {
         /* Send to all processes in process group abs(target_pid) */
         pid_t pgid = -target_pid;
         int found = 0;
+        int eperm = 0;
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pgid == pgid) {
-                kill_deliver(&proc[i], sig);
+                /* BF: POSIX requires kill() to check UID permissions */
+                if (current_proc->uid != 0 &&
+                    current_proc->uid != proc[i].uid) {
+                    eperm = 1;
+                    continue;
+                }
                 found = 1;
+                /* BF: sig=0 is existence/permission check only */
+                if (sig != 0)
+                    kill_deliver(&proc[i], sig);
             }
         }
-        return found ? 0 : (long)-3;
+        if (found)
+            return 0;
+        return eperm ? (long)-1 : (long)-3; /* EPERM or ESRCH */
     }
 
     if (target_pid == -1) {
         /* Send to all processes except init (pid 1) and self */
+        /* BF: Track found/eperm so we return correct POSIX error when
+         * all eligible processes were skipped due to UID mismatch. */
+        int found = 0;
+        int eperm = 0;
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pid != 1 && &proc[i] != current_proc) {
-                kill_deliver(&proc[i], sig);
+                /* BF: POSIX requires kill() to check UID permissions */
+                if (current_proc->uid != 0 &&
+                    current_proc->uid != proc[i].uid) {
+                    eperm = 1;
+                    continue;
+                }
+                /* BF: sig=0 is existence/permission check only */
+                if (sig != 0)
+                    kill_deliver(&proc[i], sig);
+                found = 1;
             }
         }
-        return 0;
+        if (found) return 0;
+        return eperm ? (long)-1 : (long)-3; /* EPERM or ESRCH */
     }
 
     /* Positive pid: send to specific process */
@@ -2441,6 +2485,15 @@ static long sys_kill_handler(struct trapframe *tf) {
     }
     if (!target)
         return (long)-3; /* -ESRCH */
+
+    /* BF: POSIX requires kill() to check UID permissions */
+    if (current_proc->uid != 0 && current_proc->uid != target->uid)
+        return (long)-1; /* -EPERM */
+
+    /* BF: sig=0 is existence/permission check only -- no signal sent.
+     * Prevents undefined behavior from signal_bit(0) = 1 << -1. */
+    if (sig == 0)
+        return 0;
 
     kill_deliver(target, sig);
     return 0;
@@ -3262,6 +3315,10 @@ static long sys_rt_sigaction_handler(struct trapframe *tf) {
                 return (long)-14;
             }
             sig_sa[signum].handler = act.handler;
+            /* BF: POSIX forbids blocking SIGKILL or SIGSTOP via sa_mask.
+             * Strip these before storing so deliver_signal never masks them
+             * when applying the handler's sa_mask to the process sigmask. */
+            act.mask &= ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
             sig_sa[signum].mask = act.mask;
             sig_sa[signum].flags = act.flags;
             sig_sa[signum].restorer = act.restorer;
@@ -3771,12 +3828,14 @@ static long sys_umask_handler(struct trapframe *tf) {
 
 static long sys_geteuid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual UID; in single-user OS, euid == uid. */
+    return (long)current_proc->uid;
 }
 
 static long sys_getegid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual GID; in single-user OS, egid == gid. */
+    return (long)current_proc->gid;
 }
 
 static long sys_set_tid_address_handler(struct trapframe *tf) {
@@ -5002,8 +5061,10 @@ static long sys_fchownat_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+/* BF: Store UID for kill() permission checking.
+ * Single-user OS -- just stores the UID without privilege checks. */
 static long sys_setuid_handler(struct trapframe *tf) {
-    (void)tf;
+    current_proc->uid = (int)tf->a0;
     return (long)0;
 }
 

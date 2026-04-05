@@ -6,6 +6,11 @@
  * instead of returning PTS_UNRESOLVED. */
 #define _POSIX_MEMORY_PROTECTION 200112L
 
+/* BF: Advertise POSIX CPU-time clock support.  The kernel tracks
+ * per-process CPU time via cputime_ticks and services
+ * CLOCK_PROCESS_CPUTIME_ID (clk_id 2) in clock_gettime. */
+#define _POSIX_CPUTIME 200112L
+
 #include <sys/types.h>
 #include <sys/time.h>
 #include <stdint.h>
