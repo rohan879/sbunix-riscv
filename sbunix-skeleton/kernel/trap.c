@@ -2970,6 +2970,12 @@ static long sys_mmap_handler(struct trapframe *tf) {
      * ULONG_MAX + PAGE_SIZE-1 wraps to 0, which would pass later checks. */
     if (len > (uint64_t)-1 - (PAGE_SIZE - 1))
         return (long)-75; /* EOVERFLOW */
+
+    /* BF: POSIX requires EOVERFLOW when off + len would overflow.
+     * File-backed mappings with large offset can wrap around. */
+    if (offset != 0 && offset + len < offset)
+        return (long)-75; /* EOVERFLOW */
+
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (len == 0) {
         return (long)-22; /* EINVAL: zero-length mapping */
