@@ -1404,6 +1404,9 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         handler = 0;
     }
     if (handler >= 2) {
+        /* BF: Bump epoch so ppoll/pselect6 can detect that a signal was
+         * handled between their mask swap and the blocking sleep. */
+        p->signal_handled_epoch++;
         tf->epc = handler;                   /* jump to signal handler */
         tf->a0 = (uint64_t)signum;           /* first arg: signal number */
         if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
@@ -5198,6 +5201,11 @@ static long sys_ppoll_handler(struct trapframe *tf) {
 
     /* Handle sigmask swap */
     uint64_t old_mask = current_proc->sigmask;
+    /* BF: Snapshot signal_handled_epoch BEFORE mask swap so we can detect
+     * signals handled between raise() and the ppoll sleep.  If epoch
+     * changed after wakeup, a signal was already delivered and we must
+     * return -EINTR. */
+    uint64_t epoch_before = current_proc->signal_handled_epoch;
     if (sigmask_uaddr != 0) {
         uint64_t new_mask;
         if (copyin(current_proc->pagetable, &new_mask, sigmask_uaddr, 8) < 0)
@@ -5219,6 +5227,10 @@ static long sys_ppoll_handler(struct trapframe *tf) {
         }
         if (nfds > 0 && fds_size > 0)
             copyout(current_proc->pagetable, fds_uaddr, (void *)kfds, (uint64_t)fds_size);
+        /* BF: POSIX lists ppoll as a non-restartable syscall.  Clear
+         * in_syscall so deliver_signal does not rewind epc when
+         * SA_RESTART is set on the handler. */
+        current_proc->in_syscall = 0;
         return (long)-4; /* EINTR */
     }
 
@@ -5258,17 +5270,29 @@ static long sys_ppoll_handler(struct trapframe *tf) {
 
     /* If none ready and timeout allows blocking */
     if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
-        if (sleep_until_val > 0) {
+        /* BF: When !has_timeout (NULL timeout = infinite wait), use
+         * waiting_for_uart=1 to block indefinitely.  Previously
+         * sleep_until_val stayed 0 and the guard skipped swtch(),
+         * causing ppoll to return immediately instead of blocking. */
+        if (has_timeout && sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
             current_proc->waiting_for_uart = 2;
+        } else if (!has_timeout) {
+            current_proc->waiting_for_uart = 1; /* block indefinitely */
+        }
+        if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
         }
 
         /* BF: ppoll must return -EINTR when a deliverable signal is pending
          * during the wait.  POSIX: "If ... a signal is caught, ppoll() shall
-         * be interrupted... and shall return -1 with errno set to [EINTR]." */
-        if (current_proc->sigpending & ~current_proc->sigmask) {
+         * be interrupted... and shall return -1 with errno set to [EINTR]."
+         * Also check epoch: if a signal was handled between the mask swap
+         * and entering sleep, we must still return -EINTR even if
+         * sigpending is now clear. */
+        if ((current_proc->sigpending & ~current_proc->sigmask) ||
+            current_proc->signal_handled_epoch != epoch_before) {
             if (sigmask_uaddr != 0) {
                 /* BF: Defer mask restore -- same as early EINTR path above. */
                 current_proc->saved_sigmask_restore = old_mask;
@@ -5276,6 +5300,10 @@ static long sys_ppoll_handler(struct trapframe *tf) {
             }
             if (fds_size > 0)
                 copyout(current_proc->pagetable, fds_uaddr, kfds, (uint64_t)fds_size);
+            /* BF: POSIX lists ppoll as a non-restartable syscall.  Clear
+             * in_syscall so deliver_signal does not rewind epc when
+             * SA_RESTART is set on the handler. */
+            current_proc->in_syscall = 0;
             return (long)-4; /* EINTR */
         }
 
@@ -5410,6 +5438,10 @@ static long sys_pselect6_handler(struct trapframe *tf) {
         if (readfds_uaddr) copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8);
         if (writefds_uaddr) copyout(current_proc->pagetable, writefds_uaddr, &out_wfds, 8);
         if (exceptfds_uaddr) copyout(current_proc->pagetable, exceptfds_uaddr, &out_efds, 8);
+        /* BF: POSIX lists pselect as a non-restartable syscall.  Clear
+         * in_syscall so deliver_signal does not rewind epc when
+         * SA_RESTART is set on the handler. */
+        current_proc->in_syscall = 0;
         return (long)-4; /* EINTR */
     }
 
@@ -5438,6 +5470,10 @@ static long sys_pselect6_handler(struct trapframe *tf) {
             if (readfds_uaddr) copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8);
             if (writefds_uaddr) copyout(current_proc->pagetable, writefds_uaddr, &out_wfds, 8);
             if (exceptfds_uaddr) copyout(current_proc->pagetable, exceptfds_uaddr, &out_efds, 8);
+            /* BF: POSIX lists pselect as a non-restartable syscall.  Clear
+             * in_syscall so deliver_signal does not rewind epc when
+             * SA_RESTART is set on the handler. */
+            current_proc->in_syscall = 0;
             return (long)-4; /* EINTR */
         }
 
