@@ -171,6 +171,13 @@ found:
   p->killed_by_signal = 0;
   p->stopped_signal = 0;
 
+  /* BF: Initialize alternate signal stack to SS_DISABLE.  Without this,
+   * recycled process slots retain stale ss_flags from the previous
+   * occupant, and sigaltstack(NULL, &old) reports wrong flags. */
+  p->ss_sp = 0;
+  p->ss_size = 0;
+  p->ss_flags = 2; /* SS_DISABLE */
+
   // Initialize POSIX timers
   for (int i = 0; i < NPTIMER; i++)
     p->timers[i].used = 0;
