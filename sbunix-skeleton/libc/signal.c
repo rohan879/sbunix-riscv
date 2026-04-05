@@ -69,9 +69,11 @@ int sigismember(const sigset_t *set, int signum) {
 /*
  * sigprocmask() — examine/change the calling thread's signal mask.
  * Routes through SYS_rt_sigprocmask; the kernel may not implement this.
+ * BF: Must use __syscall_ret to translate kernel error codes (e.g. -22)
+ * to -1 + errno format, matching POSIX convention for all wrappers.
  */
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-    return (int)syscall(SYS_rt_sigprocmask, how, set, oldset, sizeof(sigset_t));
+    return (int)__syscall_ret(syscall(SYS_rt_sigprocmask, how, set, oldset, sizeof(sigset_t)));
 }
 
 /*
