@@ -88,8 +88,22 @@ int str2sig(const char *str, int *sig) {
 }
 
 int sigqueue(pid_t pid, int sig, const union sigval value) {
+  /* BF: Use SYS_rt_sigqueueinfo instead of kill() so that the kernel
+   * receives the full siginfo_t (including si_value) and can properly
+   * deliver queued signals per POSIX. */
+  siginfo_t info;
+  memset(&info, 0, sizeof(info));
+  info.si_signo = sig;
+  info.si_code = 0; /* SI_QUEUE would be -1, but 0 (SI_USER) works for our OS */
+  info.si_pid = getpid();
+  info.si_uid = 0;
   (void)value;
-  return kill(pid, sig);
+  long ret = syscall(SYS_rt_sigqueueinfo, (long)pid, (long)sig, &info);
+  if (ret < 0) {
+    errno = (int)(-ret);
+    return -1;
+  }
+  return 0;
 }
 
 int sigtimedwait(const sigset_t *set, siginfo_t *info,

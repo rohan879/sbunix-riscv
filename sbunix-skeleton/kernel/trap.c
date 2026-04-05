@@ -1296,16 +1296,23 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
      * siginfo first, then the signal frame on top. */
     uint64_t siginfo_uaddr = 0;
     if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
-        /* siginfo_t: { int si_signo, si_errno, si_code; pid_t si_pid; uid_t si_uid; ... }
-         * Minimal: 128 bytes (Linux RISC-V siginfo_t is 128 bytes) */
+        /* BF: Populate all required siginfo_t fields at their correct offsets.
+         * siginfo_t layout: { int si_signo(0), si_errno(4), si_code(8);
+         *   pid_t si_pid(12); uid_t si_uid(16); int si_status(20); ... }
+         * Previously only si_signo and si_code were set, and si_pid was at
+         * the wrong offset (16 instead of 12). */
         uint8_t ksi[128];
         memset(ksi, 0, sizeof(ksi));
         int32_t si_signo = (int32_t)signum;
-        memcpy(ksi + 0, &si_signo, 4);
-        int32_t si_code = 0; /* SI_USER */
-        memcpy(ksi + 8, &si_code, 4);
+        memcpy(ksi + 0, &si_signo, 4);   /* offset 0: si_signo */
+        int32_t si_errno = 0;
+        memcpy(ksi + 4, &si_errno, 4);   /* offset 4: si_errno = 0 */
+        int32_t si_code = 0; /* SI_USER for kill-delivered signals */
+        memcpy(ksi + 8, &si_code, 4);    /* offset 8: si_code */
         int32_t si_pid = current_proc ? (int32_t)current_proc->pid : 0;
-        memcpy(ksi + 16, &si_pid, 4);
+        memcpy(ksi + 12, &si_pid, 4);    /* offset 12: si_pid (sender) */
+        int32_t si_uid = 0;
+        memcpy(ksi + 16, &si_uid, 4);    /* offset 16: si_uid = 0 (single-user OS) */
 
         sp -= 128;
         sp &= ~15UL;
@@ -1377,7 +1384,11 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
 
         /* Block this signal during handler execution */
         p->sigmask |= sa[signum].mask;
-        if (!(sa[signum].flags & 0x40000000)) /* SA_NODEFER */
+        /* BF: SA_RESETHAND implies SA_NODEFER per POSIX -- when the handler
+         * resets to SIG_DFL after one invocation, the signal should not be
+         * blocked during that invocation. */
+        if (!(sa[signum].flags & 0x40000000) &&      /* SA_NODEFER */
+            !(sa[signum].flags & (int)0x80000000))    /* SA_RESETHAND */
             p->sigmask |= signal_bit(signum);
 
         /* SA_RESETHAND: reset handler to SIG_DFL after delivery */
@@ -2395,6 +2406,35 @@ static long sys_kill_handler(struct trapframe *tf) {
     return 0;
 }
 
+/* ENH: rt_sigqueueinfo handler -- delivers a signal with siginfo_t data.
+ * POSIX sigqueue() requires this syscall to send queued signals with
+ * user-provided siginfo_t (including si_value). */
+static long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
+    pid_t target_pid = (pid_t)(int)tf->a0;
+    int sig = (int)tf->a1;
+    /* a2 = user pointer to siginfo_t (unused for now; signal delivery
+     * populates its own siginfo on the target's stack) */
+
+    if (sig < 0 || (!signal_is_valid(sig) && sig != 0))
+        return (long)-22; /* -EINVAL */
+
+    if (sig == 0)
+        return 0; /* permission check only */
+
+    struct proc *target = NULL;
+    for (int i = 0; i < NPROC; i++) {
+        if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
+            target = &proc[i];
+            break;
+        }
+    }
+    if (!target)
+        return (long)-3; /* -ESRCH */
+
+    kill_deliver(target, sig);
+    return 0;
+}
+
 static long sys_clock_gettime_handler(struct trapframe *tf) {
     uint64_t clk_id   = tf->a0;
     uint64_t ts_uaddr = tf->a1;
@@ -3272,9 +3312,10 @@ static long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
             return (long)sig;
         }
         
-        /* Check timeout */
+        /* BF: POSIX specifies EAGAIN (not ETIMEDOUT) when sigtimedwait
+         * times out without a signal becoming pending. */
         if (has_timeout && r_time() >= deadline_ticks)
-            return (long)-110; /* ETIMEDOUT */
+            return (long)-11; /* EAGAIN */
         
         /* Sleep and retry */
         current_proc->state = SLEEPING;
@@ -5022,6 +5063,18 @@ static long sys_ppoll_handler(struct trapframe *tf) {
         current_proc->sigmask = new_mask;
     }
 
+    /* BF: POSIX requires ppoll to atomically replace the mask and check
+     * for deliverable signals.  If a signal was pending but blocked, and
+     * the new mask unblocks it, ppoll must return -EINTR immediately
+     * without entering the poll loop. */
+    if (current_proc->sigpending & ~current_proc->sigmask) {
+        if (sigmask_uaddr != 0)
+            current_proc->sigmask = old_mask;
+        if (nfds > 0 && fds_size > 0)
+            copyout(current_proc->pagetable, fds_uaddr, (void *)kfds, (uint64_t)fds_size);
+        return (long)-4; /* EINTR */
+    }
+
     /* Parse timeout */
     int has_timeout = (timeout_uaddr != 0);
     uint64_t sleep_until_val = 0;
@@ -5218,7 +5271,19 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
         uint8_t kold[24];
         memset(kold, 0, sizeof(kold));
         *(uint64_t *)(kold + 0) = current_proc->ss_sp;
-        *(int32_t *)(kold + 8) = (int32_t)current_proc->ss_flags;
+        int32_t old_flags = (int32_t)current_proc->ss_flags;
+        /* BF: Dynamically compute SS_ONSTACK by checking if the current sp
+         * is within the alt stack range.  The stored ss_flags may be stale
+         * if deliver_signal set it but sigreturn didn't clear it properly. */
+        if (current_proc->ss_sp != 0 && current_proc->ss_size != 0) {
+            uint64_t sp = tf->sp;
+            if (sp >= current_proc->ss_sp &&
+                sp < current_proc->ss_sp + current_proc->ss_size)
+                old_flags |= 1; /* SS_ONSTACK */
+            else
+                old_flags &= ~1;
+        }
+        *(int32_t *)(kold + 8) = old_flags;
         *(uint64_t *)(kold + 16) = current_proc->ss_size;
         if (copyout(current_proc->pagetable, old_addr, kold, 24) < 0)
             return (long)-14;
@@ -5353,6 +5418,7 @@ void syscall_init(void) {
     syscall_table[SYS_rt_sigsuspend]   = sys_rt_sigsuspend_handler;
     syscall_table[SYS_rt_sigpending]   = sys_rt_sigpending_handler;
     syscall_table[SYS_rt_sigtimedwait] = sys_rt_sigtimedwait_handler;
+    syscall_table[SYS_rt_sigqueueinfo] = sys_rt_sigqueueinfo_handler;
     syscall_table[SYS_gettimeofday]    = sys_gettimeofday_handler;
     syscall_table[SYS_fcntl]           = sys_fcntl_handler;
     syscall_table[SYS_faccessat]       = sys_faccessat_handler;
