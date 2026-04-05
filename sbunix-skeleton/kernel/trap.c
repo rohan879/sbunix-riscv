@@ -5626,13 +5626,15 @@ void trap_handler(struct trapframe *tf) {
                         pte_t pte = *ppte;
                         if ((pte & PTE_V) && !(pte & PTE_X)) {
                             *ppte = pte | PTE_X;
-                            asm volatile("sfence.vma %0, zero" : : "r"(stval));
+                            asm volatile("sfence.vma zero, zero" ::: "memory");
+                            asm volatile("fence.i" ::: "memory");
                             return;
                         }
                         if (!(pte & PTE_V)) {
                             uint64_t pa = SPGROUNDDOWN(stval);
                             *ppte = PA2PTE(pa) | PTE_V | PTE_R | PTE_W | PTE_X;
-                            asm volatile("sfence.vma %0, zero" : : "r"(stval));
+                            asm volatile("sfence.vma zero, zero" ::: "memory");
+                            asm volatile("fence.i" ::: "memory");
                             return;
                         }
                     }
@@ -5646,10 +5648,35 @@ void trap_handler(struct trapframe *tf) {
                         int idx = PX(1, stval);
                         if ((l1[idx] & PTE_V) && !(l1[idx] & PTE_X)) {
                             l1[idx] |= PTE_X;
-                            asm volatile("sfence.vma %0, zero" : : "r"(stval));
+                            asm volatile("sfence.vma zero, zero" ::: "memory");
+                            asm volatile("fence.i" ::: "memory");
                             return;
                         }
                     }
+                }
+                /* BF: If we reach here, the PTE already has PTE_X -- the timer
+                 * interrupt may have repaired it between the CPU fault and our
+                 * handler entry.  Retry the faulting instruction, but limit
+                 * retries to avoid infinite loops from persistent corruption. */
+                {
+                    static int kpte_retry_count;
+                    static uint64_t kpte_retry_epc;
+                    if (tf->epc == kpte_retry_epc) {
+                        kpte_retry_count++;
+                    } else {
+                        kpte_retry_epc = tf->epc;
+                        kpte_retry_count = 1;
+                    }
+                    if (kpte_retry_count <= 3) {
+                        /* Full TLB flush + instruction cache sync -- the
+                         * targeted sfence.vma may not suffice if the stale
+                         * translation is cached in the I-TLB. */
+                        asm volatile("sfence.vma zero, zero" ::: "memory");
+                        asm volatile("fence.i" ::: "memory");
+                        return;
+                    }
+                    /* Too many retries at same EPC -- fall through to kill */
+                    kpte_retry_count = 0;
                 }
             }
 
