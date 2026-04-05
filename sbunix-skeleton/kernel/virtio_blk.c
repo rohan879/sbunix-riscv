@@ -2,6 +2,7 @@
 #include <kalloc.h>
 #include <printk.h>
 #include <string.h>
+#include <vm.h>
 
 #define MAX_VIRTIO_BLK_DEVS 4
 
@@ -490,6 +491,11 @@ int virtio_blk_rw_on_dev(int dev_index, uint64_t sector, void *buf, int write) {
     notify_reg = (volatile uint16_t *)(blkdev->notify_base +
                   (uint64_t)blkdev->queue_notify_off *
                   blkdev->notify_off_multiplier);
+    /* Guard: check kernel code PTE before DMA notify, since the
+     * virtio DMA path is known to intermittently corrupt PTE_X.
+     * Uses the self-referencing gigapage window (not walk). */
+    recursive_check_kcode_pte();
+
     /* Notify device by writing the queue index into the notify register.
      * The notify register is addressed as: notify_base + (queue * multiplier)
      * A short 16-bit write is sufficient. After notifying, poll the used
@@ -500,6 +506,10 @@ int virtio_blk_rw_on_dev(int dev_index, uint64_t sector, void *buf, int write) {
     while (blkdev->used->idx == blkdev->last_used_idx)
         mb();
     blkdev->last_used_idx++;
+
+    /* Guard: check kernel code PTE after DMA completion, since the
+     * device DMA may have corrupted the L1 PTE during the I/O. */
+    recursive_check_kcode_pte();
 
     if (*status_byte != VIRTIO_BLK_S_OK) {
         printk("virtio_blk[%d]: I/O error, status=%d\n",

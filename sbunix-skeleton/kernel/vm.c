@@ -191,11 +191,62 @@ void kvminit(void) {
     kvmmap_super(0x80000000, 0x80000000, PHYSTOP - 0x80000000,
                  PTE_R | PTE_W | PTE_X);
 
+    /* Sv39 self-referencing page table: install a 1GB leaf gigapage
+     * at L2[510] that maps physical RAM [0x80000000, 0xC0000000) to
+     * a dedicated VA window.  This provides a redundant access path
+     * to page table pages that is independent of the L1 superpages
+     * (which are the PTEs being corrupted by DMA).
+     *
+     * Leaf gigapage: PTE_R | PTE_W makes this a leaf at L2 level.
+     * No PTE_X (page table data should not be executable).
+     * No PTE_U (kernel-only access). */
+    kernel_pagetable[RECURSIVE_INDEX] =
+        PA2PTE(0x80000000UL) | PTE_V | PTE_R | PTE_W;
+
     // Install the kernel page table (write to satp)
     w_satp(MAKE_SATP(kernel_pagetable));
     sfence_vma(); // flush TLB
 
     printk("kvminit: paging enabled (with 2MB super pages).\n");
+}
+
+/* Check and repair the kernel code L1 PTE via the self-referencing
+ * gigapage window.  Returns 1 if repair was needed, 0 if PTE was
+ * correct.  Does NOT call walk(). */
+int recursive_check_kcode_pte(void) {
+  volatile pte_t *ppte = recursive_l1_pte(0x80200000UL);
+  if (!ppte) return 0;
+  pte_t pte = *ppte;
+  if ((pte & PTE_V) && !(pte & PTE_X)) {
+    *ppte = pte | PTE_X;
+    asm volatile("sfence.vma zero, zero" ::: "memory");
+    return 1;
+  }
+  if (!(pte & PTE_V)) {
+    *ppte = PA2PTE(0x80200000UL) | PTE_V | PTE_R | PTE_W | PTE_X;
+    asm volatile("sfence.vma zero, zero" ::: "memory");
+    return 1;
+  }
+  return 0;
+}
+
+/* Scan all 64 kernel RAM L1 PTEs (0x80000000-0x87FFFFFF) via the
+ * self-referencing window.  Fix any that lost PTE_X. */
+int recursive_check_all_kernel_ptes(void) {
+  int repairs = 0;
+  for (int i = 0; i < 64; i++) {
+    uint64_t va = 0x80000000UL + (uint64_t)i * SUPERPAGE_SIZE;
+    volatile pte_t *ppte = recursive_l1_pte(va);
+    if (!ppte) continue;
+    pte_t pte = *ppte;
+    if ((pte & PTE_V) && !(pte & PTE_X)) {
+      *ppte = pte | PTE_X;
+      repairs++;
+    }
+  }
+  if (repairs > 0)
+    asm volatile("sfence.vma zero, zero" ::: "memory");
+  return repairs;
 }
 
 /* Map kernel page table entries into a user page table by sharing
