@@ -5372,6 +5372,9 @@ static long sys_pselect6_handler(struct trapframe *tf) {
      * This enables signal-driven interruption and SA_RESTART for select(). */
     uint64_t sigmask_uaddr_raw = tf->a5;
     uint64_t old_mask = current_proc->sigmask;
+    /* BF: Snapshot epoch before mask swap to detect signals handled
+     * between the swap and sleep (same race as ppoll). */
+    uint64_t epoch_before = current_proc->signal_handled_epoch;
     int has_sigmask = 0;
     if (sigmask_uaddr_raw != 0) {
         uint64_t sig_args[2]; /* {sigmask_ptr, sigsetsize} */
@@ -5485,6 +5488,17 @@ static long sys_pselect6_handler(struct trapframe *tf) {
             swtch(&current_proc->context, &scheduler_context);
         }
 
+        /* BF: If a signal handler ran between mask swap and here,
+         * return -EINTR even though sigpending is now clear. */
+        if (current_proc->signal_handled_epoch != epoch_before) {
+            if (has_sigmask) {
+                current_proc->saved_sigmask_restore = old_mask;
+                current_proc->has_saved_sigmask = 1;
+            }
+            current_proc->in_syscall = 0;
+            return (long)-4;  /* EINTR */
+        }
+
         /* BF: Check for signal after wakeup. */
         if (current_proc->sigpending & ~current_proc->sigmask) {
             if (has_sigmask) {
@@ -5566,8 +5580,17 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
     }
 
     if (new_addr != 0) {
-        /* Cannot change alt stack while executing on it */
-        if (current_proc->ss_flags & 1) /* SS_ONSTACK */
+        /* BF: Use dynamic SP check instead of stored ss_flags for the
+         * on-stack test. A handler that longjmp'd out (skipping sigreturn)
+         * would leave ss_flags with stale SS_ONSTACK, incorrectly blocking
+         * future sigaltstack calls. */
+        int on_stack = 0;
+        if (current_proc->ss_sp != 0 && current_proc->ss_size != 0) {
+            uint64_t sp = tf->sp;
+            if (sp >= current_proc->ss_sp && sp < current_proc->ss_sp + current_proc->ss_size)
+                on_stack = 1;
+        }
+        if (on_stack)
             return (long)-1; /* EPERM */
 
         uint8_t knew[24];

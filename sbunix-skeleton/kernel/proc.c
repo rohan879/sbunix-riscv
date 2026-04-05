@@ -178,6 +178,12 @@ found:
   p->ss_size = 0;
   p->ss_flags = 2; /* SS_DISABLE */
 
+  /* BF: Zero epoch and sigchld_code to prevent stale values from
+   * recycled process slots affecting ppoll epoch detection or
+   * SIGCHLD si_code delivery. */
+  p->signal_handled_epoch = 0;
+  p->sigchld_code = 0;
+
   // Initialize POSIX timers
   for (int i = 0; i < NPTIMER; i++)
     p->timers[i].used = 0;
