@@ -1288,9 +1288,25 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         cleanup_proc_resources(p);
         p->state = ZOMBIE;
         if (p->parent) {
+            /* BF: Don't overwrite sigchld_code if SIGCHLD is already pending */
+            if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
+                p->parent->sigchld_code = 2; /* CLD_KILLED */
             p->parent->sigpending |= signal_bit(SIGCHLD);
             if (p->parent->state == SLEEPING)
                 p->parent->state = RUNNABLE;
+            /* BF: SA_NOCLDWAIT on parent means auto-reap -- reparent to
+             * init so waitpid in parent doesn't block on this zombie.
+             * Mirrors the same logic in sys_exit_handler. */
+            struct kern_sigaction *psa = proc_sigactions(p->parent);
+            if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
+                struct proc *initproc = 0;
+                for (struct proc *q = proc; q < &proc[NPROC]; q++) {
+                    if (q->pid == 1 && q->state != UNUSED) { initproc = q; break; }
+                }
+                p->parent = initproc;
+                if (initproc && initproc->state == SLEEPING)
+                    initproc->state = RUNNABLE;
+            }
         }
         swtch(&p->context, &scheduler_context);
         return;
