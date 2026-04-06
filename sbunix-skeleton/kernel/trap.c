@@ -3156,8 +3156,19 @@ static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) 
 }
 
 static long sys_munmap_handler(struct trapframe *tf) {
-    uint64_t addr = tf->a0 & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t addr = tf->a0;
     uint64_t len  = tf->a1;
+
+    /* BF: POSIX requires EINVAL when len is 0.  Previously len=0 was
+     * rounded up to 0 and silently accepted as a no-op. */
+    if (len == 0)
+        return -22; /* -EINVAL */
+
+    /* BF: POSIX requires addr to be a multiple of page size.  Previously
+     * non-aligned addresses were silently rounded down. */
+    if (addr & (PAGE_SIZE - 1))
+        return -22; /* -EINVAL */
+
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 
     if (addr >= MAXVA || addr + len > MAXVA)
