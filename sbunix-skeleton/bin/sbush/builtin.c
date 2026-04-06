@@ -322,9 +322,13 @@ static int builtin_which(struct command *cmd) {
 int run_builtin(struct command *cmd) {
     if (strcmp(cmd->argv[0], "cd") == 0) {
         const char *dir = cmd->argc > 1 ? cmd->argv[1] : var_get("HOME");
-        if (!dir)
-            dir = "/";
-        /* Handle "cd -": switch to OLDPWD */
+        if (!dir || dir[0] == '\0') {
+            /* BF: POSIX requires cd with no args to go to HOME; if HOME is
+             * unset, print an error rather than silently defaulting to "/". */
+            dprintf(2, "cd: HOME not set\n");
+            return 1;
+        }
+        /* Handle "cd -": switch to OLDPWD and print new directory */
         if (strcmp(dir, "-") == 0) {
             dir = var_get("OLDPWD");
             if (!dir) {
@@ -333,17 +337,27 @@ int run_builtin(struct command *cmd) {
             }
             printf("%s\n", dir);
         }
-        /* Save current directory as OLDPWD before changing */
+        /* BF: Save current directory BEFORE chdir, but only apply the
+         * OLDPWD update after chdir succeeds.  This prevents corrupting
+         * OLDPWD on a failed cd. */
         char oldcwd[256];
-        if (getcwd(oldcwd, sizeof(oldcwd)))
-            var_set("OLDPWD", oldcwd);
+        int have_old = (getcwd(oldcwd, sizeof(oldcwd)) != NULL);
         if (chdir(dir) < 0) {
             printf("cd: %s: No such file or directory\n", dir);
             return 1;
         }
+        /* chdir succeeded — update OLDPWD and PWD */
+        if (have_old) {
+            var_set("OLDPWD", oldcwd);
+            /* BF: Export OLDPWD so child processes can see it */
+            var_export("OLDPWD");
+        }
         char cwd[256];
-        if (getcwd(cwd, sizeof(cwd)))
+        if (getcwd(cwd, sizeof(cwd))) {
             var_set("PWD", cwd);
+            /* BF: Export PWD so child processes can see it */
+            var_export("PWD");
+        }
         return 0;
     }
 
