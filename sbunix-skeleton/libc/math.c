@@ -531,47 +531,59 @@ double pow(double base, double exponent)
 /* ===================================================================
  * Trigonometric functions
  *
- * Range-reduce to [-pi/4, pi/4] using the identity:
+ * Range-reduce to [-pi/4, pi/4] using Cody-Waite method:
  *   x = k*(pi/2) + r, compute sin/cos of r via Taylor.
+ *
+ * Cody-Waite splits pi/2 into high + low parts so that n*pi2_hi
+ * is exact in double precision for reasonable n, eliminating
+ * catastrophic cancellation during range reduction.
  * =================================================================== */
 
-/* Reduce x to [-pi, pi] first, then to a quadrant */
+/*
+ * Cody-Waite range reduction for trig functions.
+ *
+ * Split pi/2 into pi2_hi + pi2_lo where pi2_hi has only 30
+ * significant mantissa bits, so n*pi2_hi is exact in double for
+ * |n| up to ~2^22. The remainder is computed as:
+ *   r = (x - n*pi2_hi) - n*pi2_lo
+ * This avoids the catastrophic cancellation that occurs when
+ * subtracting n*pi/2 from x using a single-precision constant.
+ */
 static double trig_reduce(double x, int *quadrant)
 {
-    /* Handle very large values by reducing modulo 2*pi */
-    double two_pi   = 6.28318530717958647693;
-    double half_pi  = 1.57079632679489661923;
+    /* pi/2 = pi2_hi + pi2_lo, split for Cody-Waite exact subtraction */
+    static const double pi2_hi  = 1.5707963267341256;   /* 30 sig. mantissa bits */
+    static const double pi2_lo  = 6.077100506506192e-11; /* remainder of pi/2 */
+    static const double inv_pi2 = 0.6366197723675814;    /* 2/pi */
 
-    /* Reduce to [0, 2*pi) */
-    if (x < 0.0) {
-        double n = ceil(-x / two_pi);
-        x += n * two_pi;
-    }
-    if (x >= two_pi) {
-        double n = floor(x / two_pi);
-        x -= n * two_pi;
-    }
+    /* Compute n = round(x / (pi/2)) */
+    double fn = x * inv_pi2;
+    long n;
+    if (fn >= 0.0)
+        n = (long)(fn + 0.5);
+    else
+        n = (long)(fn - 0.5);
 
-    /* Now x is in [0, 2*pi). Determine quadrant. */
-    int q = 0;
-    if (x >= 0.0 && x < half_pi) {
-        q = 0;
-    } else if (x >= half_pi && x < 2.0 * half_pi) {
-        q = 1;
-        x -= half_pi;
-    } else if (x >= 2.0 * half_pi && x < 3.0 * half_pi) {
-        q = 2;
-        x -= 2.0 * half_pi;
-    } else {
-        q = 3;
-        x -= 3.0 * half_pi;
-    }
+    /*
+     * Cody-Waite two-step subtraction: the first subtraction is exact
+     * because n*pi2_hi fits in a double without rounding, leaving only
+     * the small pi2_lo correction in the second step.
+     */
+    double r = (x - (double)n * pi2_hi) - (double)n * pi2_lo;
+
+    /* quadrant = n mod 4 (handle negative n correctly via bitmask) */
+    int q = (int)(n & 3);
+    if (q < 0) q += 4;
 
     *quadrant = q;
-    return x; /* r in [0, pi/2) */
+    return r; /* r in approximately [-pi/4, pi/4] */
 }
 
-/* sin(r) for r in [0, pi/2] via Taylor series */
+/*
+ * sin(r) for r in [-pi/4, pi/4] via Taylor series.
+ * 12 iterative terms (up to r^25) are more than sufficient for
+ * double precision since |r| <= pi/4 ~ 0.785.
+ */
 static double sin_kern(double r)
 {
     double r2 = r * r;
@@ -584,7 +596,11 @@ static double sin_kern(double r)
     return sum;
 }
 
-/* cos(r) for r in [0, pi/2] via Taylor series */
+/*
+ * cos(r) for r in [-pi/4, pi/4] via Taylor series.
+ * 12 iterative terms (up to r^24) are more than sufficient for
+ * double precision since |r| <= pi/4 ~ 0.785.
+ */
 static double cos_kern(double r)
 {
     double r2 = r * r;
@@ -606,28 +622,27 @@ double sin(double x)
     }
     if (__math_isnan(x))
         return qnan();
+    /* sin(+/-0) = +/-0 exactly, preserving sign of zero */
     if (x == 0.0)
         return x;
 
-    int neg = 0;
-    if (x < 0.0) {
-        neg = 1;
-        x = -x;
-    }
-
+    /*
+     * Cody-Waite range reduction gives r in [-pi/4, pi/4] and
+     * quadrant q = n mod 4. The reduced argument can be negative,
+     * so the quadrant mapping handles all sign logic:
+     *   q=0: sin(r)    q=1: cos(r)
+     *   q=2: -sin(r)   q=3: -cos(r)
+     */
     int q;
     double r = trig_reduce(x, &q);
-    double result;
 
     switch (q) {
-    case 0: result =  sin_kern(r); break;
-    case 1: result =  cos_kern(r); break;
-    case 2: result = -sin_kern(r); break;
-    case 3: result = -cos_kern(r); break;
-    default: result = 0.0; break;
+    case 0: return  sin_kern(r);
+    case 1: return  cos_kern(r);
+    case 2: return -sin_kern(r);
+    case 3: return -cos_kern(r);
+    default: return 0.0;
     }
-
-    return neg ? -result : result;
 }
 
 double cos(double x)
@@ -640,9 +655,12 @@ double cos(double x)
     if (__math_isnan(x))
         return qnan();
 
-    if (x < 0.0)
-        x = -x;
-
+    /*
+     * cos(0) = 1 exactly. Cody-Waite handles the general case;
+     * quadrant mapping for cos:
+     *   q=0: cos(r)    q=1: -sin(r)
+     *   q=2: -cos(r)   q=3: sin(r)
+     */
     int q;
     double r = trig_reduce(x, &q);
 
@@ -676,9 +694,14 @@ double tan(double x)
 
 /*
  * atan(x) — arc tangent.
- * Uses the Taylor series for |x| <= 1:
- *   atan(x) = x - x^3/3 + x^5/5 - ...
+ *
+ * For |x| <= 0.4375, use Taylor series directly (fast convergence).
+ * For 0.4375 < |x| <= 1.0, use identity: atan(x) = pi/6 + atan((x*sqrt3-1)/(sqrt3+x))
+ *   which reduces the argument to |t| < 0.27.
  * For |x| > 1, use atan(x) = pi/2 - atan(1/x).
+ *
+ * This three-range approach avoids slow convergence of the Taylor
+ * series near x=1, which was causing precision loss.
  */
 double atan(double x)
 {
@@ -693,26 +716,55 @@ double atan(double x)
         x = -x;
     }
 
-    int invert = 0;
+    double offset = 0.0;
+
     if (x > 1.0) {
-        invert = 1;
+        /* atan(x) = pi/2 - atan(1/x) for |x| > 1 */
+        offset = 1.57079632679489661923; /* pi/2 */
         x = 1.0 / x;
+        /* Now x is in (0, 1). We'll subtract the atan result from offset. */
+        /* Compute atan(x) for the reduced argument and negate before adding offset */
+
+        /* Further reduce if needed */
+        if (x > 0.4375) {
+            /* Use sqrt(3) reduction: atan(x) = pi/6 + atan((x*sqrt3-1)/(sqrt3+x)) */
+            double sqrt3 = 1.7320508075688772;
+            double t = (x * sqrt3 - 1.0) / (sqrt3 + x);
+            x = t;
+            offset -= 0.52359877559829887308; /* subtract pi/6 */
+        }
+
+        /* Taylor series for reduced x (now |x| <= ~0.44) */
+        double x2 = x * x;
+        double term = x;
+        double sum = x;
+        for (int i = 1; i <= 22; i++) {
+            term *= -x2;
+            sum += term / (double)(2 * i + 1);
+        }
+
+        double result = offset - sum;
+        return neg ? -result : result;
     }
 
-    /* For moderate x, use identity: atan(x) = 2*atan(x/(1+sqrt(1+x^2)))
-     * or just a long Taylor series. We use Taylor with enough terms. */
+    if (x > 0.4375) {
+        /* Use sqrt(3) reduction: atan(x) = pi/6 + atan((x*sqrt3-1)/(sqrt3+x)) */
+        double sqrt3 = 1.7320508075688772;
+        double t = (x * sqrt3 - 1.0) / (sqrt3 + x);
+        x = t;
+        offset = 0.52359877559829887308; /* pi/6 */
+    }
+
+    /* Taylor series for |x| <= 0.4375 (or reduced argument) */
     double x2 = x * x;
     double term = x;
     double sum = x;
-    for (int i = 1; i <= 30; i++) {
+    for (int i = 1; i <= 22; i++) {
         term *= -x2;
         sum += term / (double)(2 * i + 1);
     }
 
-    double result = sum;
-    if (invert)
-        result = 1.57079632679489661923 - result; /* pi/2 - atan(1/x) */
-
+    double result = offset + sum;
     return neg ? -result : result;
 }
 
