@@ -59,8 +59,10 @@ long long llabs(long long x) {
   return x < 0 ? -x : x;
 }
 
+/* ENH: Delegate to strtod and cast, since on this RISC-V target
+ * long double == double (both 64-bit IEEE 754). */
 long double strtold(const char *s, char **endptr) {
-  return 42.1L;
+  return (long double)strtod(s, endptr);
 }
 
 double drand48(void) {
