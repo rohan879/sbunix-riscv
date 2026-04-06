@@ -197,6 +197,10 @@ found:
   p->shared_ft = NULL;
   p->shared_sa = NULL;
 
+  /* BF: Initialize waiting_for_child so recycled slots don't carry
+   * stale values from previous process occupants. */
+  p->waiting_for_child = 0;
+
   return p;
 }
 
@@ -222,7 +226,9 @@ void userinit(void) {
 void uart_wakeup(void) {
   struct proc *p;
   for (p = proc; p < &proc[NPROC]; p++) {
-    if (p->state == SLEEPING && p->waiting_for_uart == 1) {
+    /* BF: Skip wait4 sleepers — UART input is irrelevant for processes
+     * blocked in waitpid; waking them causes spurious wakeups. */
+    if (p->state == SLEEPING && p->waiting_for_uart == 1 && !p->waiting_for_child) {
       p->waiting_for_uart = 0;
       p->state = RUNNABLE;
     }

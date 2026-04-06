@@ -234,6 +234,11 @@ struct proc {
    * Default 0 (root) in single-user OS. */
   int uid;
   int gid;
+
+  /* BF: Set to 1 while sleeping in sys_wait4 (waitpid/wait4).  Allows
+   * setpgid to wake only wait4 sleepers without disturbing pipe/poll/
+   * futex sleepers that also have waiting_for_uart unset. */
+  int waiting_for_child;
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,

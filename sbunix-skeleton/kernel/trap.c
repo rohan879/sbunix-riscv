@@ -709,6 +709,15 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     p->gid = current_proc->gid;
     p->clone_flags = clone_flags;
 
+    /* BF: POSIX requires fork to inherit the parent's alternate signal
+     * stack settings.  Without this, allocproc's default SS_DISABLE
+     * overwrites the parent's configured alt stack, causing sigaltstack
+     * GET in the child to report SS_DISABLE instead of the inherited
+     * flags. */
+    p->ss_sp = current_proc->ss_sp;
+    p->ss_size = current_proc->ss_size;
+    p->ss_flags = current_proc->ss_flags;
+
     /* Copy stack bounds and mmap_base from parent */
     p->stack_top = current_proc->stack_top;
     p->stack_bottom = current_proc->stack_bottom;
@@ -872,8 +881,14 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
         /* Otherwise sleep until a child exits */
         if (current_proc) {
             current_proc->waiting_for_uart = 0;
+            /* BF: Mark this process as a wait4 sleeper so setpgid can
+             * selectively wake only waitpid callers, not pipe/poll/futex. */
+            current_proc->waiting_for_child = 1;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* BF: Clear wait4 sleeper flag after waking — process is no
+             * longer blocked in wait4. */
+            current_proc->waiting_for_child = 0;
             /* Check for pending signals after waking up:
              * - User handler (handler > 1): return -EINTR
              * - SIG_DFL terminating signal: return -EINTR to let deliver_signal kill us
@@ -4253,12 +4268,15 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     }
 
     tp->pgid = pgid;
-    /* BF: Only wake the target's parent (which may be in waitpid).
-     * The blanket wake of all sleeping processes caused premature
-     * wakeups of unrelated waitpid callers, breaking process group
-     * tests that depend on precise wait/exit ordering. */
-    if (tp->parent && tp->parent->state == SLEEPING)
-        tp->parent->state = RUNNABLE;
+    /* BF: Wake all wait4 sleepers — they need to re-evaluate match
+     * criteria after pgid change.  The previous parent-only wake was
+     * too narrow (non-parent waitpid(-pgid) callers missed the wake).
+     * A blanket wake was too broad (hit pipe/poll sleepers).  The
+     * waiting_for_child flag precisely targets wait4 sleepers. */
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        if (p->state == SLEEPING && p->waiting_for_child)
+            p->state = RUNNABLE;
+    }
     return 0;
 }
 
@@ -5395,6 +5413,10 @@ static long sys_ppoll_handler(struct trapframe *tf) {
         if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* BF: Clear on ALL post-sleep paths — stale waiting_for_uart
+             * value (1 or 2) causes scheduler to mistrack process state
+             * in subsequent syscalls. */
+            current_proc->waiting_for_uart = 0;
         }
 
         /* BF: ppoll must return -EINTR when a deliverable signal is pending
@@ -5573,6 +5595,10 @@ static long sys_pselect6_handler(struct trapframe *tf) {
         if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* BF: Clear on ALL post-sleep paths — stale waiting_for_uart
+             * value (1 or 2) causes scheduler to mistrack process state
+             * in subsequent syscalls. */
+            current_proc->waiting_for_uart = 0;
         }
 
         /* BF: If a signal handler ran between mask swap and here,
@@ -5684,9 +5710,24 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
         if (copyin(current_proc->pagetable, knew, new_addr, 24) < 0)
             return (long)-14;
 
+        int new_flags = (int)(*(int32_t *)(knew + 8));
+        uint64_t new_size = *(uint64_t *)(knew + 16);
+
+        /* BF: POSIX requires EINVAL if ss_flags contains values other
+         * than SS_DISABLE (or zero).  SS_ONSTACK is not a valid input
+         * flag — it is output-only.  Without this check, tests that
+         * verify EINVAL for invalid flags would fail. */
+        if (new_flags & ~2) /* any bit other than SS_DISABLE set */
+            return (long)-22; /* EINVAL */
+
+        /* BF: POSIX requires ENOMEM if enabling the alt stack with
+         * ss_size < MINSIGSTKSZ.  Skip check when disabling. */
+        if (!(new_flags & 2) && new_size < 2048) /* MINSIGSTKSZ = 2048 */
+            return (long)-12; /* ENOMEM */
+
         current_proc->ss_sp = *(uint64_t *)(knew + 0);
-        current_proc->ss_flags = (int)(*(int32_t *)(knew + 8));
-        current_proc->ss_size = *(uint64_t *)(knew + 16);
+        current_proc->ss_flags = new_flags;
+        current_proc->ss_size = new_size;
     }
 
     return 0;
