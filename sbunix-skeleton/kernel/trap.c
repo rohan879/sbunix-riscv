@@ -872,8 +872,14 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
         /* Otherwise sleep until a child exits */
         if (current_proc) {
             current_proc->waiting_for_uart = 0;
+            /* BF: Mark this process as a wait4 sleeper so setpgid can
+             * selectively wake only waitpid callers, not pipe/poll/futex. */
+            current_proc->waiting_for_child = 1;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* BF: Clear wait4 sleeper flag after waking — process is no
+             * longer blocked in wait4. */
+            current_proc->waiting_for_child = 0;
             /* Check for pending signals after waking up:
              * - User handler (handler > 1): return -EINTR
              * - SIG_DFL terminating signal: return -EINTR to let deliver_signal kill us
@@ -4253,12 +4259,15 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     }
 
     tp->pgid = pgid;
-    /* BF: Only wake the target's parent (which may be in waitpid).
-     * The blanket wake of all sleeping processes caused premature
-     * wakeups of unrelated waitpid callers, breaking process group
-     * tests that depend on precise wait/exit ordering. */
-    if (tp->parent && tp->parent->state == SLEEPING)
-        tp->parent->state = RUNNABLE;
+    /* BF: Wake all wait4 sleepers — they need to re-evaluate match
+     * criteria after pgid change.  The previous parent-only wake was
+     * too narrow (non-parent waitpid(-pgid) callers missed the wake).
+     * A blanket wake was too broad (hit pipe/poll sleepers).  The
+     * waiting_for_child flag precisely targets wait4 sleepers. */
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        if (p->state == SLEEPING && p->waiting_for_child)
+            p->state = RUNNABLE;
+    }
     return 0;
 }
 
