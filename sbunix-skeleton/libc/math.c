@@ -1031,8 +1031,8 @@ double erfc(double x) {
 double lgamma(double x) {
     signgam = 1;
     if (x == 0.0 || (__math_isfinite(x) && x < 0.0 && x == trunc(x))) {
-        /* POSIX: lgamma at 0 or negative integer is a pole/domain error */
-        errno = EDOM;
+        /* POSIX: lgamma at 0 or negative integer is a pole error (ERANGE, not EDOM) */
+        errno = ERANGE;
         return pos_inf();
     }
     if (x <= 0.0 && !__math_isnan(x) && !__math_isinf(x)) {
