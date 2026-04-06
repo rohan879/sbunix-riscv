@@ -12,6 +12,7 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <errno.h>  /* errno / EDOM / ERANGE — needed for math_errhandling == MATH_ERRNO */
 
 int signgam = 0;
 
@@ -313,8 +314,11 @@ double modf(double x, double *iptr)
 
 double sqrt(double x)
 {
-    if (x < 0.0)
+    if (x < 0.0) {
+        /* POSIX: sqrt of negative value is domain error */
+        errno = EDOM;
         return qnan();
+    }
     if (x == 0.0 || __math_isnan(x) || __math_isinf(x))
         return x;
 
@@ -349,10 +353,16 @@ double exp(double x)
 {
     if (__math_isnan(x))
         return x;
-    if (x > 709.7)
+    if (x > 709.7) {
+        /* POSIX: exp overflow is a range error */
+        errno = ERANGE;
         return pos_inf();
-    if (x < -745.0)
+    }
+    if (x < -745.0) {
+        /* POSIX: exp underflow toward zero is a range error */
+        errno = ERANGE;
         return pos_zero();
+    }
 
     /* k = round(x / ln2) */
     double inv_ln2 = 1.4426950408889634; /* 1/ln(2) */
@@ -398,10 +408,18 @@ double exp(double x)
  */
 double log(double x)
 {
-    if (__math_isnan(x) || x < 0.0)
+    if (x < 0.0) {
+        /* POSIX: log of negative value is domain error */
+        errno = EDOM;
         return qnan();
-    if (x == 0.0)
+    }
+    if (__math_isnan(x))
+        return qnan();
+    if (x == 0.0) {
+        /* POSIX: log(0) is a pole error — return -HUGE_VAL, set ERANGE */
+        errno = ERANGE;
         return neg_inf();
+    }
     if (__math_isinf(x))
         return pos_inf();
 
@@ -435,11 +453,13 @@ double log(double x)
 
 double log10(double x)
 {
+    /* errno is set by log() for x < 0 (EDOM) and x == 0 (ERANGE) */
     return log(x) * 0.4342944819032518; /* 1/ln(10) */
 }
 
 double log2(double x)
 {
+    /* errno is set by log() for x < 0 (EDOM) and x == 0 (ERANGE) */
     return log(x) * 1.4426950408889634; /* 1/ln(2) */
 }
 
@@ -482,16 +502,30 @@ double pow(double base, double exponent)
             b *= b;
             n >>= 1;
         }
-        return neg_exp ? 1.0 / result : result;
+        double final = neg_exp ? 1.0 / result : result;
+        /* POSIX: pow overflow/underflow is a range error */
+        if (__math_isinf(final) || (final == 0.0 && base != 0.0))
+            errno = ERANGE;
+        return final;
     }
 
     /* General case: base^exp = exp(exp * log(base)) */
     if (base < 0.0) {
-        /* Negative base with non-integer exponent: NaN */
+        /* POSIX: negative base with non-integer exponent is domain error */
+        errno = EDOM;
         return qnan();
     }
 
-    return exp(exponent * log(base));
+    {
+        double result = exp(exponent * log(base));
+        /* POSIX: pow overflow/underflow is a range error */
+        if (__math_isinf(result) && __math_isfinite(base) && __math_isfinite(exponent)) {
+            errno = ERANGE;
+        } else if (result == 0.0 && base != 0.0 && __math_isfinite(exponent)) {
+            errno = ERANGE;
+        }
+        return result;
+    }
 }
 
 /* ===================================================================
@@ -565,7 +599,12 @@ static double cos_kern(double r)
 
 double sin(double x)
 {
-    if (__math_isnan(x) || __math_isinf(x))
+    if (__math_isinf(x)) {
+        /* POSIX: sin(inf) is domain error */
+        errno = EDOM;
+        return qnan();
+    }
+    if (__math_isnan(x))
         return qnan();
     if (x == 0.0)
         return x;
@@ -593,7 +632,12 @@ double sin(double x)
 
 double cos(double x)
 {
-    if (__math_isnan(x) || __math_isinf(x))
+    if (__math_isinf(x)) {
+        /* POSIX: cos(inf) is domain error */
+        errno = EDOM;
+        return qnan();
+    }
+    if (__math_isnan(x))
         return qnan();
 
     if (x < 0.0)
@@ -613,6 +657,13 @@ double cos(double x)
 
 double tan(double x)
 {
+    if (__math_isinf(x)) {
+        /* POSIX: tan(inf) is domain error */
+        errno = EDOM;
+        return qnan();
+    }
+    if (__math_isnan(x))
+        return qnan();
     double c = cos(x);
     if (c == 0.0)
         return copysign(pos_inf(), sin(x));
@@ -700,7 +751,12 @@ double atan2(double y, double x)
 
 double asin(double x)
 {
-    if (__math_isnan(x) || fabs(x) > 1.0)
+    if (fabs(x) > 1.0) {
+        /* POSIX: asin(|x|>1) is domain error */
+        errno = EDOM;
+        return qnan();
+    }
+    if (__math_isnan(x))
         return qnan();
     if (x == 0.0)
         return x;
@@ -710,7 +766,12 @@ double asin(double x)
 
 double acos(double x)
 {
-    if (__math_isnan(x) || fabs(x) > 1.0)
+    if (fabs(x) > 1.0) {
+        /* POSIX: acos(|x|>1) is domain error */
+        errno = EDOM;
+        return qnan();
+    }
+    if (__math_isnan(x))
         return qnan();
     /* acos(x) = pi/2 - asin(x) */
     return 1.57079632679489661923 - asin(x);
@@ -729,8 +790,11 @@ double sinh(double x)
 
     /* sinh(x) = (e^x - e^-x) / 2 */
     double ex = exp(x);
-    if (__math_isinf(ex))
-        return ex; /* overflow */
+    if (__math_isinf(ex)) {
+        /* POSIX: sinh overflow is a range error */
+        errno = ERANGE;
+        return ex;
+    }
     return (ex - 1.0 / ex) * 0.5;
 }
 
@@ -741,8 +805,11 @@ double cosh(double x)
 
     /* cosh(x) = (e^x + e^-x) / 2 */
     double ex = exp(fabs(x));
-    if (__math_isinf(ex))
+    if (__math_isinf(ex)) {
+        /* POSIX: cosh overflow is a range error */
+        errno = ERANGE;
         return ex;
+    }
     return (ex + 1.0 / ex) * 0.5;
 }
 
@@ -830,14 +897,30 @@ double asinh(double x) {
 }
 
 double acosh(double x) {
-    if (x < 1.0)
+    if (x < 1.0) {
+        /* POSIX: acosh(x<1) is domain error */
+        errno = EDOM;
         return qnan();
+    }
     return log(x + sqrt((x - 1.0) * (x + 1.0)));
 }
 
 double atanh(double x) {
-    if (x <= -1.0 || x >= 1.0)
+    if (fabs(x) > 1.0) {
+        /* POSIX: atanh(|x|>1) is domain error */
+        errno = EDOM;
         return qnan();
+    }
+    if (x == 1.0) {
+        /* POSIX: atanh(1) is a pole error — return +HUGE_VAL */
+        errno = ERANGE;
+        return pos_inf();
+    }
+    if (x == -1.0) {
+        /* POSIX: atanh(-1) is a pole error — return -HUGE_VAL */
+        errno = ERANGE;
+        return neg_inf();
+    }
     return 0.5 * log((1.0 + x) / (1.0 - x));
 }
 
@@ -947,8 +1030,39 @@ double erfc(double x) {
 
 double lgamma(double x) {
     signgam = 1;
-    if (x <= 0.0)
+    if (x == 0.0 || (__math_isfinite(x) && x < 0.0 && x == trunc(x))) {
+        /* POSIX: lgamma at 0 or negative integer is a pole/domain error */
+        errno = EDOM;
+        return pos_inf();
+    }
+    if (x <= 0.0 && !__math_isnan(x) && !__math_isinf(x)) {
+        /*
+         * Negative non-integer: use reflection formula
+         *   lgamma(x) = log(pi / |x * sin(pi*x)|) - lgamma(1 - x)
+         * For simplicity, compute via the positive side.
+         */
+        double ax = -x;
+        double sinpx = sin(M_PI * x);
+        if (sinpx < 0.0) {
+            sinpx = -sinpx;
+            signgam = -1;
+        }
+        if (sinpx == 0.0) {
+            errno = EDOM;
+            return pos_inf();
+        }
+        double lnpi = 1.1447298858494002; /* log(pi) */
+        double result = lnpi - log(ax * sinpx) - lgamma(1.0 - x);
+        /* POSIX: lgamma can overflow for large results */
+        if (__math_isinf(result)) {
+            errno = ERANGE;
+        }
+        return result;
+    }
+    if (__math_isnan(x))
         return qnan();
+    if (__math_isinf(x))
+        return pos_inf();
     if (x < 12.0) {
         double y = x;
         double p = 0.0;
@@ -957,18 +1071,57 @@ double lgamma(double x) {
             y += 1.0;
         }
         x = y;
-        return p + lgamma(x);
+        /* Inline the Stirling approximation instead of recursing */
+        double inv = 1.0 / x;
+        double inv2 = inv * inv;
+        double series = inv / 12.0 - inv2 * inv / 360.0 + inv2 * inv2 * inv / 1260.0;
+        double result = p + (x - 0.5) * log(x) - x + 0.91893853320467274178 + series;
+        if (__math_isinf(result)) {
+            /* POSIX: lgamma overflow is a range error */
+            errno = ERANGE;
+        }
+        return result;
     }
     double inv = 1.0 / x;
     double inv2 = inv * inv;
     double series = inv / 12.0 - inv2 * inv / 360.0 + inv2 * inv2 * inv / 1260.0;
-    return (x - 0.5) * log(x) - x + 0.91893853320467274178 + series;
+    double result = (x - 0.5) * log(x) - x + 0.91893853320467274178 + series;
+    if (__math_isinf(result)) {
+        /* POSIX: lgamma overflow is a range error */
+        errno = ERANGE;
+    }
+    return result;
 }
 
 double tgamma(double x) {
-    if (x <= 0.0)
+    if (x == 0.0) {
+        /* POSIX: tgamma(0) is a pole error */
+        errno = ERANGE;
+        return copysign(pos_inf(), x);
+    }
+    if (__math_isfinite(x) && x < 0.0 && x == trunc(x)) {
+        /* POSIX: tgamma at negative integer is domain error */
+        errno = EDOM;
         return qnan();
-    return exp(lgamma(x));
+    }
+    if (__math_isnan(x))
+        return qnan();
+    if (__math_isinf(x)) {
+        if (x < 0.0) {
+            errno = EDOM;
+            return qnan();
+        }
+        return pos_inf();
+    }
+    double result = exp(lgamma(x));
+    /* Apply sign from lgamma's signgam */
+    if (signgam < 0)
+        result = -result;
+    /* POSIX: tgamma overflow/underflow is a range error */
+    if (__math_isinf(result) || (result == 0.0 && x != 0.0)) {
+        errno = ERANGE;
+    }
+    return result;
 }
 
 double j0(double x) {
@@ -1070,6 +1223,7 @@ float sqrtf(float x) { return (float)sqrt((double)x); }
 long double sqrtl(long double x) { return (long double)sqrt((double)x); }
 float expf(float x) { return (float)exp((double)x); }
 long double expl(long double x) { return (long double)exp((double)x); }
+/* exp2 delegates to exp(); overflow/underflow errno set by exp() */
 double exp2(double x) { return exp(x * M_LN2); }
 float exp2f(float x) { return (float)exp2((double)x); }
 long double exp2l(long double x) { return (long double)exp2((double)x); }
