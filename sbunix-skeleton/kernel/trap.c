@@ -5035,11 +5035,77 @@ static long sys_inotify_rm_watch_handler(struct trapframe *tf) {
     return (long)-22; /* EINVAL */
 }
 
-/* utimensat — update file timestamps (ext2 mtime) */
+/* BF: Mirror of ramfs inode and private structs from ramfs.c.
+ * Needed by utimensat/fchmod handlers to access ramfs inode fields
+ * (timestamps, mode) directly from trap.c.  Layout must exactly match
+ * the real struct in ramfs.c (field order, sizes, padding). */
+struct ramfs_inode_trap {
+  uint64_t ino;             /* offset 0 */
+  int      type;            /* offset 8 (enum ramfs_type = int) */
+  uint32_t mode;            /* offset 12 */
+  int      nlink;           /* offset 16 */
+  uint64_t size;            /* offset 24 (after 4-byte padding) */
+  uint64_t atime_sec;       /* offset 32 */
+  uint64_t mtime_sec;       /* offset 40 */
+  uint64_t ctime_sec;       /* offset 48 */
+  /* remaining fields (blocks[], nblocks, children[], etc.) omitted */
+};
+struct ramfs_private {
+  struct ramfs_inode_trap *inode;
+};
+
+/* utimensat — update file timestamps (ext2 mtime, ramfs atime/mtime) */
 static long sys_utimensat_handler(struct trapframe *tf) {
     /* a0 = dirfd (AT_FDCWD), a1 = path (NULL = use fd), a2 = times, a3 = flags */
+    int dirfd = (int)tf->a0;
     uint64_t path_uva = tf->a1;
-    if (!path_uva) return 0; /* NULL path with fd — not supported, succeed silently */
+    uint64_t times_uaddr = tf->a2;
+
+    /* BF: UTIME_NOW and UTIME_OMIT constants per POSIX */
+    #define UTIME_NOW  0x3fffffff
+    #define UTIME_OMIT 0x3ffffffe
+
+    /* Get current wall-clock time for UTIME_NOW */
+    int64_t now_sec, now_nsec;
+    get_wall_time(&now_sec, &now_nsec);
+
+    /* Parse times array if provided (2 x struct timespec = 32 bytes) */
+    struct { int64_t sec; int64_t nsec; } ktimes[2];
+    int has_times = 0;
+    if (times_uaddr) {
+        if (copyin(current_proc->pagetable, ktimes, times_uaddr, 32) < 0)
+            return (long)-14; /* EFAULT */
+        has_times = 1;
+    }
+
+    /* BF: Handle NULL path (futimens): look up file by fd */
+    if (!path_uva) {
+        struct open_file **ftab = proc_ofile(current_proc);
+        if (dirfd < 0 || dirfd >= NOFILE || !ftab[dirfd])
+            return (long)-9; /* EBADF */
+        struct open_file *f = ftab[dirfd];
+
+        /* For ramfs files: update timestamps on the inode directly */
+        if (f->ops == &ramfs_ops && f->private) {
+            struct ramfs_private *rp = (struct ramfs_private *)f->private;
+            if (has_times) {
+                if (ktimes[0].nsec != UTIME_OMIT) {
+                    rp->inode->atime_sec = (ktimes[0].nsec == UTIME_NOW) ?
+                        (uint64_t)now_sec : (uint64_t)ktimes[0].sec;
+                }
+                if (ktimes[1].nsec != UTIME_OMIT) {
+                    rp->inode->mtime_sec = (ktimes[1].nsec == UTIME_NOW) ?
+                        (uint64_t)now_sec : (uint64_t)ktimes[1].sec;
+                }
+            } else {
+                /* NULL times = set both to current time */
+                rp->inode->atime_sec = (uint64_t)now_sec;
+                rp->inode->mtime_sec = (uint64_t)now_sec;
+            }
+            rp->inode->ctime_sec = (uint64_t)now_sec;
+        }
+        return 0;
+    }
 
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, path_uva, sizeof(kpath)) < 0)
@@ -5053,15 +5119,35 @@ static long sys_utimensat_handler(struct trapframe *tf) {
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops || !ops->open) return (long)-2; /* ENOENT */
 
-    /* Open file to get inode, update mtime, close */
+    /* Open file to get inode, update timestamps, close */
     void *priv = NULL;
     if (ops->open(mnt->fs_data, relpath, 0, &priv) < 0) return (long)-2;
 
-    /* For ext2 files, touch the inode to update mtime */
-    (void)priv; /* ext2 mtime update handled by icache dirty flag on close */
+    /* BF: For ramfs files, update atime/mtime on the inode.  Without
+     * this, utimensat was a no-op for ramfs, causing stat tests to fail. */
+    if (ops == &ramfs_ops && priv) {
+        struct ramfs_private *rp = (struct ramfs_private *)priv;
+        if (has_times) {
+            if (ktimes[0].nsec != UTIME_OMIT) {
+                rp->inode->atime_sec = (ktimes[0].nsec == UTIME_NOW) ?
+                    (uint64_t)now_sec : (uint64_t)ktimes[0].sec;
+            }
+            if (ktimes[1].nsec != UTIME_OMIT) {
+                rp->inode->mtime_sec = (ktimes[1].nsec == UTIME_NOW) ?
+                    (uint64_t)now_sec : (uint64_t)ktimes[1].sec;
+            }
+        } else {
+            rp->inode->atime_sec = (uint64_t)now_sec;
+            rp->inode->mtime_sec = (uint64_t)now_sec;
+        }
+        rp->inode->ctime_sec = (uint64_t)now_sec;
+    }
 
     if (ops->close) ops->close(mnt->fs_data, priv);
-    return 0; /* Success — timestamps updated (or no-op for non-ext2) */
+    return 0;
+
+    #undef UTIME_NOW
+    #undef UTIME_OMIT
 }
 
 /* statfs/fstatfs — filesystem statistics */
@@ -5186,6 +5272,16 @@ static long sys_fchmodat_handler(struct trapframe *tf) {
             if (ops->close) ops->close(mnt->fs_data, priv);
         }
     }
+    /* BF: For ramfs files, update inode mode in memory.  Without this,
+     * fchmodat on /tmp paths was a no-op. */
+    if (ops == &ramfs_ops && ops->open) {
+        void *priv = NULL;
+        if (ops->open(mnt->fs_data, relpath, 0, &priv) >= 0) {
+            struct ramfs_private *rp = (struct ramfs_private *)priv;
+            rp->inode->mode = (uint32_t)tf->a2 & 07777;
+            if (ops->close) ops->close(mnt->fs_data, priv);
+        }
+    }
     return 0;
 }
 
@@ -5201,6 +5297,14 @@ static long sys_fchmod_handler(struct trapframe *tf) {
     if (ext2_is_ops(f->ops) && f->private) {
         struct ext2_open_private *priv = (struct ext2_open_private *)f->private;
         return (long)ext2_fchmod_ino(f->fs_data, priv->ino, mode);
+    }
+    /* BF: For ramfs files, update the in-memory inode mode.  Without
+     * this, fchmod on /tmp files was a silent no-op, causing tests
+     * that verify permission changes to fail. */
+    if (f->ops == &ramfs_ops && f->private) {
+        struct ramfs_private *rp = (struct ramfs_private *)f->private;
+        rp->inode->mode = mode & 07777; /* keep only permission bits */
+        return 0;
     }
     return 0; /* other filesystems: no-op */
 }
