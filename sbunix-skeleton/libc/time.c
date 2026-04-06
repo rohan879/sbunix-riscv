@@ -233,10 +233,167 @@ char *ctime_r(const time_t *timep, char *buf)
     return asctime_r(&tmp, buf);
 }
 
+/*
+ * strptime — parse date/time string according to format.
+ *
+ * Supports core POSIX specifiers: %Y, %m, %d, %H, %M, %S, %j, %n, %t, %%.
+ * Returns pointer to first unconsumed character, or NULL on mismatch.
+ */
 char *strptime(const char *s, const char *format, struct tm *tm)
 {
-    (void)format;
-    (void)tm;
+    if (!s || !format || !tm)
+        return (char *)0;
+
+    while (*format) {
+        if (*format == '%') {
+            format++;
+            switch (*format) {
+            case 'Y': {
+                /* 4-digit year — parse up to 4 digits */
+                int val = 0;
+                int digits = 0;
+                while (*s >= '0' && *s <= '9' && digits < 4) {
+                    val = val * 10 + (*s - '0');
+                    s++;
+                    digits++;
+                }
+                if (digits == 0)
+                    return (char *)0;
+                /* tm_year is years since 1900 */
+                tm->tm_year = val - 1900;
+                break;
+            }
+            case 'm': {
+                /* Month [01,12] */
+                int val = 0;
+                int digits = 0;
+                /* Skip leading whitespace for %m per POSIX */
+                while (*s == ' ')
+                    s++;
+                while (*s >= '0' && *s <= '9' && digits < 2) {
+                    val = val * 10 + (*s - '0');
+                    s++;
+                    digits++;
+                }
+                if (digits == 0 || val < 1 || val > 12)
+                    return (char *)0;
+                /* tm_mon is 0-based */
+                tm->tm_mon = val - 1;
+                break;
+            }
+            case 'd': {
+                /* Day of month [01,31] */
+                int val = 0;
+                int digits = 0;
+                while (*s == ' ')
+                    s++;
+                while (*s >= '0' && *s <= '9' && digits < 2) {
+                    val = val * 10 + (*s - '0');
+                    s++;
+                    digits++;
+                }
+                if (digits == 0 || val < 1 || val > 31)
+                    return (char *)0;
+                tm->tm_mday = val;
+                break;
+            }
+            case 'H': {
+                /* Hour [00,23] */
+                int val = 0;
+                int digits = 0;
+                while (*s == ' ')
+                    s++;
+                while (*s >= '0' && *s <= '9' && digits < 2) {
+                    val = val * 10 + (*s - '0');
+                    s++;
+                    digits++;
+                }
+                if (digits == 0 || val > 23)
+                    return (char *)0;
+                tm->tm_hour = val;
+                break;
+            }
+            case 'M': {
+                /* Minute [00,59] */
+                int val = 0;
+                int digits = 0;
+                while (*s == ' ')
+                    s++;
+                while (*s >= '0' && *s <= '9' && digits < 2) {
+                    val = val * 10 + (*s - '0');
+                    s++;
+                    digits++;
+                }
+                if (digits == 0 || val > 59)
+                    return (char *)0;
+                tm->tm_min = val;
+                break;
+            }
+            case 'S': {
+                /* Second [00,60] (60 for leap second) */
+                int val = 0;
+                int digits = 0;
+                while (*s == ' ')
+                    s++;
+                while (*s >= '0' && *s <= '9' && digits < 2) {
+                    val = val * 10 + (*s - '0');
+                    s++;
+                    digits++;
+                }
+                if (digits == 0 || val > 60)
+                    return (char *)0;
+                tm->tm_sec = val;
+                break;
+            }
+            case 'j': {
+                /* Day of year [001,366] */
+                int val = 0;
+                int digits = 0;
+                while (*s >= '0' && *s <= '9' && digits < 3) {
+                    val = val * 10 + (*s - '0');
+                    s++;
+                    digits++;
+                }
+                if (digits == 0 || val < 1 || val > 366)
+                    return (char *)0;
+                /* tm_yday is 0-based */
+                tm->tm_yday = val - 1;
+                break;
+            }
+            case 'n':
+            case 't':
+                /* Match any whitespace */
+                while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')
+                    s++;
+                break;
+            case '%':
+                /* Literal percent */
+                if (*s != '%')
+                    return (char *)0;
+                s++;
+                break;
+            default:
+                /* Unknown specifier — treat as literal */
+                if (*s != *format)
+                    return (char *)0;
+                s++;
+                break;
+            }
+            format++;
+        } else if (*format == ' ') {
+            /* Whitespace in format matches zero or more whitespace in input */
+            while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')
+                s++;
+            format++;
+        } else {
+            /* Literal character must match */
+            if (*s != *format)
+                return (char *)0;
+            s++;
+            format++;
+        }
+    }
+
     return (char *)s;
 }
 
