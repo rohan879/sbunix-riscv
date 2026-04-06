@@ -126,9 +126,23 @@ void *malloc(size_t size) {
     return (char *)hdr + HDR_SIZE;
 }
 
+/* BF: Sentinel magic used by posix_memalign for over-aligned blocks.
+ * Must match the value in stdlib_ext.c. */
+#define ALIGNED_SENTINEL 0xA110CA7ED5E1F000ULL
+
 void free(void *ptr) {
     if (!ptr)
         return;
+
+    /* BF: Check for over-aligned block from posix_memalign.
+     * If the sentinel magic is present 2 words before ptr, the real
+     * allocation pointer is stored 1 word before ptr.  We must free
+     * the original pointer instead of the aligned one, otherwise the
+     * heap free list would be corrupted. */
+    uint64_t *sentinel = (uint64_t *)ptr;
+    if (sentinel[-2] == ALIGNED_SENTINEL) {
+        ptr = ((void **)ptr)[-1];
+    }
 
     block_hdr_t *hdr = (block_hdr_t *)((char *)ptr - HDR_SIZE);
     if (hdr->free) return; /* double-free protection */
