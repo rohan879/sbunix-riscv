@@ -709,6 +709,15 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     p->gid = current_proc->gid;
     p->clone_flags = clone_flags;
 
+    /* BF: POSIX requires fork to inherit the parent's alternate signal
+     * stack settings.  Without this, allocproc's default SS_DISABLE
+     * overwrites the parent's configured alt stack, causing sigaltstack
+     * GET in the child to report SS_DISABLE instead of the inherited
+     * flags. */
+    p->ss_sp = current_proc->ss_sp;
+    p->ss_size = current_proc->ss_size;
+    p->ss_flags = current_proc->ss_flags;
+
     /* Copy stack bounds and mmap_base from parent */
     p->stack_top = current_proc->stack_top;
     p->stack_bottom = current_proc->stack_bottom;
@@ -5701,9 +5710,24 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
         if (copyin(current_proc->pagetable, knew, new_addr, 24) < 0)
             return (long)-14;
 
+        int new_flags = (int)(*(int32_t *)(knew + 8));
+        uint64_t new_size = *(uint64_t *)(knew + 16);
+
+        /* BF: POSIX requires EINVAL if ss_flags contains values other
+         * than SS_DISABLE (or zero).  SS_ONSTACK is not a valid input
+         * flag — it is output-only.  Without this check, tests that
+         * verify EINVAL for invalid flags would fail. */
+        if (new_flags & ~2) /* any bit other than SS_DISABLE set */
+            return (long)-22; /* EINVAL */
+
+        /* BF: POSIX requires ENOMEM if enabling the alt stack with
+         * ss_size < MINSIGSTKSZ.  Skip check when disabling. */
+        if (!(new_flags & 2) && new_size < 2048) /* MINSIGSTKSZ = 2048 */
+            return (long)-12; /* ENOMEM */
+
         current_proc->ss_sp = *(uint64_t *)(knew + 0);
-        current_proc->ss_flags = (int)(*(int32_t *)(knew + 8));
-        current_proc->ss_size = *(uint64_t *)(knew + 16);
+        current_proc->ss_flags = new_flags;
+        current_proc->ss_size = new_size;
     }
 
     return 0;
