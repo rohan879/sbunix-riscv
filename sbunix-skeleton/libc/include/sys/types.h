@@ -53,4 +53,72 @@ typedef unsigned short reclen_t;
 #define __reclen_t_defined
 #endif
 
+/* ENH: POSIX requires pthread types to be available from <sys/types.h>.
+ * These are minimal type definitions for a single-threaded OS that allow
+ * test binaries and POSIX-conformant code to compile. */
+#ifndef __pthread_t_defined
+typedef unsigned long pthread_t;
+#define __pthread_t_defined
+#endif
+
+#ifndef __pthread_attr_t_defined
+typedef struct { int __detachstate; size_t __stacksize; } pthread_attr_t;
+#define __pthread_attr_t_defined
+#endif
+
+#ifndef __pthread_mutex_t_defined
+typedef struct { int __lock; } pthread_mutex_t;
+#define __pthread_mutex_t_defined
+#endif
+
+#ifndef __pthread_mutexattr_t_defined
+typedef struct { int __type; } pthread_mutexattr_t;
+#define __pthread_mutexattr_t_defined
+#endif
+
+#ifndef __pthread_cond_t_defined
+typedef struct { int __dummy; } pthread_cond_t;
+#define __pthread_cond_t_defined
+#endif
+
+#ifndef __pthread_condattr_t_defined
+typedef struct { int __clock; } pthread_condattr_t;
+#define __pthread_condattr_t_defined
+#endif
+
+#ifndef __pthread_rwlock_t_defined
+typedef struct { int __lock; } pthread_rwlock_t;
+#define __pthread_rwlock_t_defined
+#endif
+
+#ifndef __pthread_rwlockattr_t_defined
+typedef struct { int __pshared; } pthread_rwlockattr_t;
+#define __pthread_rwlockattr_t_defined
+#endif
+
+#ifndef __pthread_key_t_defined
+typedef unsigned int pthread_key_t;
+#define __pthread_key_t_defined
+#endif
+
+#ifndef __pthread_once_t_defined
+typedef int pthread_once_t;
+#define __pthread_once_t_defined
+#endif
+
+#ifndef __pthread_barrier_t_defined
+typedef struct { int __count; } pthread_barrier_t;
+#define __pthread_barrier_t_defined
+#endif
+
+#ifndef __pthread_barrierattr_t_defined
+typedef struct { int __pshared; } pthread_barrierattr_t;
+#define __pthread_barrierattr_t_defined
+#endif
+
+#ifndef __pthread_spinlock_t_defined
+typedef volatile int pthread_spinlock_t;
+#define __pthread_spinlock_t_defined
+#endif
+
 #endif
