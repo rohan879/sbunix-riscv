@@ -214,6 +214,12 @@ void *kalloc(void) {
     }
 
     w_sstatus(old);
+    /* BF: Defense-in-depth — zero recycled pages before returning.
+     * POSIX requires user-space pages contain zeroes. While all known
+     * call sites already zero, this prevents future regressions and
+     * catches the exec_vfs stale-page cascade bug. */
+    if (r)
+        memset((void *)r, 0, PAGE_SIZE);
     return r;
 }
 
@@ -285,6 +291,9 @@ void *kalloc_contiguous(int npages) {
             page_refcount[base + i] = 1;
 
         w_sstatus(old);
+        /* BF: Zero contiguous pages — same rationale as kalloc(). */
+        for (int zi = 0; zi < npages; zi++)
+            memset((void *)(base_pa + (uint64_t)zi * PAGE_SIZE), 0, PAGE_SIZE);
         return (void *)base_pa;
     }
 
