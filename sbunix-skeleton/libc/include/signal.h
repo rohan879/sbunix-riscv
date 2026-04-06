@@ -110,9 +110,18 @@ typedef unsigned long sigset_t;
 typedef volatile int sig_atomic_t;
 typedef void (*sighandler_t)(int);
 
-/* pthread types intentionally omitted - pthreads runtime is out of scope
-   for this libc. Keep pthread types/decls out to avoid accidentally
-   depending on pthread internals. */
+/* ENH: POSIX requires pthread_t and pthread_attr_t to be visible from
+ * <signal.h> for pthread_kill(), pthread_sigmask(), and struct sigevent.
+ * We forward-declare the types here with include guards so pthread.h
+ * can share the same definitions without conflict. */
+#ifndef __pthread_t_defined
+typedef unsigned long pthread_t;
+#define __pthread_t_defined
+#endif
+#ifndef __pthread_attr_t_defined
+typedef struct { int __detachstate; size_t __stacksize; } pthread_attr_t;
+#define __pthread_attr_t_defined
+#endif
 
 #ifndef __sigval_t_defined
 typedef union sigval {
@@ -127,7 +136,9 @@ struct sigevent {
   int sigev_signo;
   union sigval sigev_value;
   void (*sigev_notify_function)(union sigval);
-  void *sigev_notify_attributes; /* opaque pointer, not pthread_attr_t */
+  /* ENH: POSIX requires sigev_notify_attributes to be pthread_attr_t*,
+   * not void*.  The os-test checks the exact type. */
+  pthread_attr_t *sigev_notify_attributes;
 };
 
 /* Alternate signal stack */
@@ -223,6 +234,11 @@ int sighold(int sig);
 int sigrelse(int sig);
 void (*sigset(int sig, void (*disp)(int)))(int);
 
-
+/* ENH: POSIX requires pthread_kill and pthread_sigmask to be declared
+ * in <signal.h> so that programs can send signals to threads and
+ * manipulate per-thread signal masks without including <pthread.h>. */
+int pthread_kill(pthread_t thread, int sig);
+int pthread_sigmask(int how, const sigset_t *restrict set,
+                    sigset_t *restrict oldset);
 
 #endif /* _SIGNAL_H */

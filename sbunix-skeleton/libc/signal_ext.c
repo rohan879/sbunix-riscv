@@ -193,5 +193,16 @@ void (*sigset(int sig, void (*disp)(int)))(int) {
   return old.sa_handler;
 }
 
-/* pthread_sigmask intentionally removed. callers should use sigprocmask()
-   directly. */
+/* ENH: Added pthread_kill and pthread_sigmask stubs.  POSIX requires
+ * these to be available from <signal.h>.  Since SBUnix is single-threaded,
+ * pthread_kill delegates to kill() and pthread_sigmask delegates to
+ * sigprocmask(). */
+int pthread_kill(pthread_t thread, int sig) {
+  (void)thread;
+  return kill(getpid(), sig);
+}
+
+int pthread_sigmask(int how, const sigset_t *restrict set,
+                    sigset_t *restrict oldset) {
+  return sigprocmask(how, set, oldset);
+}
