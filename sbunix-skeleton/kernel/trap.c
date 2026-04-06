@@ -5404,6 +5404,10 @@ static long sys_ppoll_handler(struct trapframe *tf) {
         if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* BF: Clear on ALL post-sleep paths — stale waiting_for_uart
+             * value (1 or 2) causes scheduler to mistrack process state
+             * in subsequent syscalls. */
+            current_proc->waiting_for_uart = 0;
         }
 
         /* BF: ppoll must return -EINTR when a deliverable signal is pending
@@ -5582,6 +5586,10 @@ static long sys_pselect6_handler(struct trapframe *tf) {
         if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* BF: Clear on ALL post-sleep paths — stale waiting_for_uart
+             * value (1 or 2) causes scheduler to mistrack process state
+             * in subsequent syscalls. */
+            current_proc->waiting_for_uart = 0;
         }
 
         /* BF: If a signal handler ran between mask swap and here,
