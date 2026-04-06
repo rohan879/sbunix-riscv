@@ -4491,8 +4491,44 @@ static long sys_timer_settime_handler(struct trapframe *tf) {
         uint64_t value_ticks = (uint64_t)kispec.val_sec * TIMER_FREQ +
                                (uint64_t)kispec.val_nsec / 100;
         if (flags & 1) { /* TIMER_ABSTIME */
-            /* Absolute time based on the timer's clockid */
-            current_proc->timers[tid].next_expiry_ticks = value_ticks;
+            /* BF: The old code used value_ticks (user epoch time in
+             * 10MHz ticks) directly as next_expiry_ticks (boot ticks).
+             * This caused the timer to never fire because epoch seconds
+             * (~1.7 billion) as boot ticks is far in the future.
+             * Fix: convert absolute wall-clock time to a delta from now,
+             * then add that delta to the current boot tick count.
+             * This mirrors the clock_nanosleep ABSTIME pattern. */
+            int clockid = current_proc->timers[tid].clockid;
+            if (clockid == 0) {
+                /* CLOCK_REALTIME: compare against wall-clock time */
+                int64_t now_sec, now_nsec;
+                get_wall_time(&now_sec, &now_nsec);
+                uint64_t now_total_ns = (uint64_t)now_sec * 1000000000UL +
+                                        (uint64_t)now_nsec;
+                uint64_t target_ns = (uint64_t)kispec.val_sec * 1000000000UL +
+                                     (uint64_t)kispec.val_nsec;
+                if (target_ns <= now_total_ns) {
+                    /* Already past: fire immediately */
+                    current_proc->timers[tid].next_expiry_ticks = r_time();
+                } else {
+                    uint64_t diff_ns = target_ns - now_total_ns;
+                    current_proc->timers[tid].next_expiry_ticks =
+                        r_time() + ns_to_time_ticks(diff_ns);
+                }
+            } else if (clockid == 1) {
+                /* CLOCK_MONOTONIC: compare against boot-relative time */
+                uint64_t elapsed = r_time() - boot_time;
+                if (value_ticks <= elapsed) {
+                    current_proc->timers[tid].next_expiry_ticks = r_time();
+                } else {
+                    current_proc->timers[tid].next_expiry_ticks =
+                        r_time() + (value_ticks - elapsed);
+                }
+            } else {
+                /* Other clocks: treat as relative for safety */
+                current_proc->timers[tid].next_expiry_ticks =
+                    r_time() + value_ticks;
+            }
         } else {
             /* Relative time from now */
             current_proc->timers[tid].next_expiry_ticks = r_time() + value_ticks;
