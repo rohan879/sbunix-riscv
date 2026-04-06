@@ -2545,8 +2545,7 @@ static long sys_kill_handler(struct trapframe *tf) {
 static long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
-    /* a2 = user pointer to siginfo_t (unused for now; signal delivery
-     * populates its own siginfo on the target's stack) */
+    uint64_t info_uaddr = tf->a2;
 
     if (sig < 0 || (!signal_is_valid(sig) && sig != 0))
         return (long)-22; /* -EINVAL */
@@ -2563,6 +2562,30 @@ static long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
     }
     if (!target)
         return (long)-3; /* -ESRCH */
+
+    /* BF: Store the user-provided siginfo_t in the target's queue so
+     * that sigtimedwait can later retrieve si_value / si_code.  Without
+     * this, sigqueue data was discarded and sigtimedwait returned empty
+     * siginfo. */
+    if (info_uaddr) {
+        int slot = -1;
+        for (int i = 0; i < NSIGQUEUE; i++) {
+            if (!target->sigqueue_buf[i].valid) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot >= 0) {
+            uint8_t kinfo[128];
+            if (copyin(current_proc->pagetable, kinfo, info_uaddr, 128) >= 0) {
+                memcpy(target->sigqueue_buf[slot].info, kinfo, 128);
+                target->sigqueue_buf[slot].signum = sig;
+                target->sigqueue_buf[slot].valid = 1;
+            }
+        }
+        /* If queue is full, signal is still delivered but info is lost
+         * (POSIX allows EAGAIN but we prefer delivery over rejection) */
+    }
 
     kill_deliver(target, sig);
     return 0;
@@ -3563,22 +3586,29 @@ static long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
             
             /* Fill siginfo_t if requested */
             if (info_uaddr) {
-                /* siginfo_t is at least 128 bytes; zero it and set si_signo */
                 uint8_t kinfo[128];
-                memset(kinfo, 0, sizeof(kinfo));
-                int32_t si_signo = (int32_t)sig;
-                memcpy(kinfo, &si_signo, 4);
-                /* BF: POSIX requires siginfo_t fields to be populated.
-                 * Tests expect si_code, si_pid, and si_uid in addition
-                 * to si_signo for sigtimedwait/sigwaitinfo results. */
-                /* BF: POSIX specifies si_errno = 0 when no error is associated */
-                *(int32_t *)(kinfo + 4) = 0;   /* si_errno: no error */
-                *(int32_t *)(kinfo + 8) = 0;   /* si_code: SI_USER (default) */
-                /* BF: si_pid should be the sender's PID, but this OS only tracks
-                 * signals as pending bits without recording the sender.  Use 0
-                 * (unknown) rather than the misleading receiver PID. */
-                *(int32_t *)(kinfo + 12) = 0;  /* si_pid: unknown (no sender tracking) */
-                *(int32_t *)(kinfo + 16) = 0;  /* si_uid: always root */
+                int found_queued = 0;
+                /* BF: Search sigqueue_buf for stored siginfo from sigqueue().
+                 * This preserves si_value and si_code that the sender set.
+                 * Without this, sigtimedwait always returned empty siginfo. */
+                for (int qi = 0; qi < NSIGQUEUE; qi++) {
+                    if (current_proc->sigqueue_buf[qi].valid &&
+                        current_proc->sigqueue_buf[qi].signum == sig) {
+                        memcpy(kinfo, current_proc->sigqueue_buf[qi].info, 128);
+                        current_proc->sigqueue_buf[qi].valid = 0;
+                        found_queued = 1;
+                        break;
+                    }
+                }
+                if (!found_queued) {
+                    /* No queued info: build minimal siginfo */
+                    memset(kinfo, 0, sizeof(kinfo));
+                    *(int32_t *)(kinfo + 0) = (int32_t)sig; /* si_signo */
+                    *(int32_t *)(kinfo + 4) = 0;            /* si_errno */
+                    *(int32_t *)(kinfo + 8) = 0;            /* si_code: SI_USER */
+                    *(int32_t *)(kinfo + 12) = 0;           /* si_pid */
+                    *(int32_t *)(kinfo + 16) = 0;           /* si_uid */
+                }
                 if (copyout(current_proc->pagetable, info_uaddr, kinfo, 128) < 0)
                     return (long)-14; /* EFAULT */
             }
@@ -5800,6 +5830,11 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
                 old_flags |= 1; /* SS_ONSTACK */
             else
                 old_flags &= ~1;
+        } else {
+            /* BF: When no alt stack is configured (ss_sp==0 && ss_size==0),
+             * POSIX requires SS_DISABLE (2) to be reported.  Without this,
+             * tests checking the initial sigaltstack state would fail. */
+            old_flags = 2; /* SS_DISABLE */
         }
         *(int32_t *)(kold + 8) = old_flags;
         *(uint64_t *)(kold + 16) = current_proc->ss_size;
