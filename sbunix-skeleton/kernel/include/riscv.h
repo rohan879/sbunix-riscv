@@ -86,6 +86,7 @@ typedef int            pid_t;
 // Set to 1GB to stay safely below kernel space (0x80000000).
 #define MAXVA 0x40000000L
 
+#define USER_MMAP_FLOOR 0x10200000UL
 #define USER_STACK_TOP  MAXVA   /* user stack grows down from top of VA space */
 
 typedef uint64_t pte_t;

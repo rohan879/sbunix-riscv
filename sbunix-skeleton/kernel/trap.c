@@ -3033,6 +3033,78 @@ static long sys_reboot_handler(struct trapframe *tf) {
 /* Forward declaration: used by MAP_FIXED in sys_mmap_handler */
 static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end);
 
+static uint64_t mmap_search_base(struct proc *p) {
+    uint64_t base = PGROUNDUP(p->sz) + PAGE_SIZE;
+    if (base < USER_MMAP_FLOOR)
+        base = USER_MMAP_FLOOR;
+    return base;
+}
+
+static int mmap_reserved_range(struct proc *p, uint64_t start, uint64_t len,
+                               uint64_t *next_va) {
+    uint64_t end = start + len;
+
+    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+        int level = -1;
+        pte_t *pte = walk_super(p->pagetable, va, &level);
+        if (!pte || !(*pte & PTE_V) || (*pte & PTE_U))
+            continue;
+
+        if (next_va) {
+            if (level == 1)
+                *next_va = SPGROUNDUP(va + 1);
+            else
+                *next_va = PGROUNDUP(va + 1);
+        }
+        return 1;
+    }
+
+    return 0;
+}
+
+static uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
+    uint64_t floor = mmap_search_base(p);
+    uint64_t candidate = p->mmap_base ? p->mmap_base : floor;
+
+    if (candidate < floor)
+        candidate = floor;
+    candidate = PGROUNDUP(candidate);
+
+    for (;;) {
+        if (candidate > USER_STACK_TOP || len > USER_STACK_TOP - candidate)
+            return 0;
+
+        {
+            uint64_t reserved_end = 0;
+            if (mmap_reserved_range(p, candidate, len, &reserved_end)) {
+                candidate = PGROUNDUP(reserved_end);
+                continue;
+            }
+        }
+
+        {
+            struct vm_area *v = p->vma_list;
+            int overlap = 0;
+
+            while (v) {
+                if (v->end <= candidate) {
+                    v = v->next;
+                    continue;
+                }
+                if (v->start >= candidate + len)
+                    break;
+                candidate = PGROUNDUP(v->end);
+                overlap = 1;
+                break;
+            }
+            if (overlap)
+                continue;
+        }
+
+        return candidate;
+    }
+}
+
 static long sys_mmap_handler(struct trapframe *tf) {
     uint64_t addr  = tf->a0;
     uint64_t len   = tf->a1;
@@ -3106,6 +3178,9 @@ static long sys_mmap_handler(struct trapframe *tf) {
         /* Reject kernel addresses for MAP_FIXED */
         if (va >= 0x80000000UL || va + len > 0x80000000UL)
             return (long)-22; /* EINVAL */
+        /* Reject ranges already claimed by shared kernel/MMIO PTEs. */
+        if (mmap_reserved_range(current_proc, va, len, 0))
+            return (long)-22; /* EINVAL */
         /* BF: POSIX requires MAP_FIXED to replace any existing mappings
          * in the target range [va, va+len).  Without this, old PTEs and
          * VMA entries persist, causing incorrect data reads. */
@@ -3114,13 +3189,9 @@ static long sys_mmap_handler(struct trapframe *tf) {
         sfence_vma();
         vma_remove(current_proc, va, va + len);
     } else {
-        if (current_proc->mmap_base == 0)
-            current_proc->mmap_base = 0x20000000UL;
-        va = current_proc->mmap_base;
-        /* BF: Ensure mmap never returns address 0 for anonymous mappings.
-         * A NULL return would be confused with MAP_FAILED by userspace. */
+        va = mmap_find_hole(current_proc, len);
         if (va == 0)
-            va = PAGE_SIZE;
+            return (long)-12; /* ENOMEM */
         current_proc->mmap_base = va + len;
     }
 
@@ -3198,6 +3269,8 @@ static long sys_munmap_handler(struct trapframe *tf) {
         return -22; /* -EINVAL */
     if (addr >= 0x80000000UL || addr + len > 0x80000000UL)
         return -22; /* -EINVAL: reject kernel addresses */
+    if (mmap_reserved_range(current_proc, addr, len, 0))
+        return -22; /* -EINVAL: reject shared kernel/MMIO mappings */
 
     /* Write back MAP_SHARED pages before unmapping */
     mmap_writeback_shared(current_proc, addr, addr + len);
@@ -3209,23 +3282,9 @@ static long sys_munmap_handler(struct trapframe *tf) {
     /* Remove VMA tracking (handles splits automatically) */
     vma_remove(current_proc, addr, addr + len);
 
-    /* BF: Scan VMA list for highest allocated address.
-     * Resets mmap_base to allow address space reuse after munmap.
-     * Without this, 100k mmap/munmap cycles exhaust the address space
-     * since mmap_base only moves forward.  The simple frontier check
-     * (addr + len == mmap_base) only reclaims when unmapping at the
-     * exact frontier, missing non-contiguous free regions. */
-    {
-        uint64_t highest = 0x20000000;
-        struct vm_area *v = current_proc->vma_list;
-        while (v) {
-            uint64_t end = v->end;
-            if (end > highest)
-                highest = end;
-            v = v->next;
-        }
-        current_proc->mmap_base = highest;
-    }
+    /* Reset the search hint so future mmaps can reuse newly freed holes
+     * without ever inheriting stack-top or shared-MMIO addresses. */
+    current_proc->mmap_base = mmap_search_base(current_proc);
 
     return 0;
 }
@@ -3246,6 +3305,8 @@ static long sys_mprotect_handler(struct trapframe *tf) {
     /* Reject kernel addresses — must not modify kernel page table entries */
     if (addr >= 0x80000000UL || addr + len > 0x80000000UL)
         return -22; /* -EINVAL */
+    if (mmap_reserved_range(current_proc, addr, len, 0))
+        return -22; /* -EINVAL: reject shared kernel/MMIO mappings */
 
     /* Build new PTE permission bits */
     int new_flags = 0;
@@ -4753,7 +4814,10 @@ static long sys_mremap_handler(struct trapframe *tf) {
     int can_expand = 1;
     for (uint64_t va = old_addr + old_size; va < old_addr + new_size; va += PAGE_SIZE) {
         struct vm_area *existing = vma_find(current_proc, va);
-        if (existing) { can_expand = 0; break; }
+        if (existing || mmap_reserved_range(current_proc, va, PAGE_SIZE, 0)) {
+            can_expand = 0;
+            break;
+        }
     }
     if (can_expand) {
         struct vm_area *v = vma_find(current_proc, old_addr);
@@ -4762,8 +4826,10 @@ static long sys_mremap_handler(struct trapframe *tf) {
     }
     /* Cannot expand in place; if MREMAP_MAYMOVE, allocate new region + copy */
     if (flags & 1) { /* MREMAP_MAYMOVE */
-        uint64_t new_va = current_proc->mmap_base;
-        current_proc->mmap_base += new_size;
+        uint64_t new_va = mmap_find_hole(current_proc, new_size);
+        if (new_va == 0)
+            return (long)-12; /* ENOMEM */
+        current_proc->mmap_base = new_va + new_size;
         vma_add(current_proc, new_va, new_va + new_size, 3 /* RW */, 0x22 /* PRIVATE|ANON */);
         /* Copy old pages to new location */
         for (uint64_t off = 0; off < old_size; off += PAGE_SIZE) {
