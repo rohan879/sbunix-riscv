@@ -146,8 +146,13 @@ double fmin(double x, double y)
 
 double fmod(double x, double y)
 {
-    if (__math_isnan(x) || __math_isnan(y) || __math_isinf(x) || y == 0.0)
+    if (__math_isnan(x) || __math_isnan(y))
         return qnan();
+    if (__math_isinf(x) || y == 0.0) {
+        /* POSIX: fmod(inf,y) or fmod(x,0) is domain error */
+        errno = EDOM;
+        return qnan();
+    }
     if (__math_isinf(y))
         return x;
     if (x == 0.0)
@@ -523,7 +528,7 @@ double log2(double x)
 
 double pow(double base, double exponent)
 {
-    /* Special cases */
+    /* Special cases per POSIX */
     if (__math_isnan(exponent))
         return qnan();
     if (exponent == 0.0)
@@ -538,6 +543,31 @@ double pow(double base, double exponent)
         if (exponent > 0.0)
             return 0.0;
         return pos_inf();
+    }
+    /* POSIX: pow(inf, y): inf^positive = inf, inf^negative = 0 */
+    if (__math_isinf(base) && base > 0.0) {
+        if (exponent > 0.0) return pos_inf();
+        if (exponent < 0.0) return 0.0;
+    }
+    /* POSIX: pow(-inf, y) depends on whether y is odd integer */
+    if (__math_isinf(base) && base < 0.0) {
+        if (exponent > 0.0) {
+            if (exponent == trunc(exponent) && fmod(exponent, 2.0) != 0.0)
+                return neg_inf(); /* odd integer */
+            return pos_inf();
+        }
+        if (exponent < 0.0) {
+            if (exponent == trunc(exponent) && fmod(exponent, 2.0) != 0.0)
+                return -0.0; /* odd integer */
+            return 0.0;
+        }
+    }
+    /* POSIX: pow(x, inf): |x|>1 -> inf, |x|<1 -> 0, |x|==1 -> 1 */
+    if (__math_isinf(exponent)) {
+        double ax = fabs(base);
+        if (ax > 1.0) return exponent > 0 ? pos_inf() : 0.0;
+        if (ax < 1.0) return exponent > 0 ? 0.0 : pos_inf();
+        return 1.0; /* |base| == 1 */
     }
 
     /* Check for integer exponent — use binary exponentiation */
@@ -1154,7 +1184,15 @@ double tanh(double x)
  * ---------------------------------------------------------------------- */
 
 double remainder(double x, double y) {
-    if (y == 0.0) return qnan();
+    if (__math_isnan(x) || __math_isnan(y))
+        return qnan();
+    if (__math_isinf(x) || y == 0.0) {
+        /* POSIX: remainder(inf,y) or remainder(x,0) is domain error */
+        errno = EDOM;
+        return qnan();
+    }
+    if (__math_isinf(y))
+        return x; /* remainder(x, inf) = x */
     double n = round(x / y);
     return x - n * y;
 }
@@ -1168,10 +1206,20 @@ double rint(double x) {
 }
 
 long lrint(double x) {
+    /* POSIX: lrint(NaN/inf) is domain error */
+    if (__math_isnan(x) || __math_isinf(x)) {
+        errno = EDOM;
+        return 0;
+    }
     return (long)round(x);
 }
 
 long long llrint(double x) {
+    /* POSIX: llrint(NaN/inf) is domain error */
+    if (__math_isnan(x) || __math_isinf(x)) {
+        errno = EDOM;
+        return 0;
+    }
     return (long long)round(x);
 }
 
@@ -1376,12 +1424,21 @@ double logb(double x) {
 }
 
 int ilogb(double x) {
-    if (x == 0.0)
+    if (x == 0.0) {
+        /* POSIX: ilogb(0) is domain error */
+        errno = EDOM;
         return FP_ILOGB0;
-    if (__math_isnan(x))
+    }
+    if (__math_isnan(x)) {
+        /* POSIX: ilogb(NaN) is domain error */
+        errno = EDOM;
         return FP_ILOGBNAN;
-    if (__math_isinf(x))
+    }
+    if (__math_isinf(x)) {
+        /* POSIX: ilogb(inf) is domain error */
+        errno = EDOM;
         return INT32_MAX;
+    }
     int e;
     (void)frexp(fabs(x), &e);
     return e - 1;
@@ -1392,12 +1449,22 @@ double scalbln(double x, long n) {
 }
 
 double remquo(double x, double y, int *quo) {
-    if (y == 0.0)
+    if (__math_isnan(x) || __math_isnan(y) || __math_isinf(x) || y == 0.0) {
+        if (quo) *quo = 0;
+        if (__math_isinf(x) || y == 0.0) errno = EDOM;
         return qnan();
+    }
+    if (__math_isinf(y)) {
+        if (quo) *quo = 0;
+        return x;
+    }
     double q = round(x / y);
     long qi = (long)q;
+    /* POSIX: quo gets the sign and low 7 bits of the quotient */
+    int sign = (qi < 0) ? -1 : 1;
+    long aqi = (qi < 0) ? -qi : qi;
     if (quo)
-        *quo = (int)(qi & 0x7f);
+        *quo = sign * (int)(aqi & 0x7f);
     return x - q * y;
 }
 
@@ -1987,12 +2054,13 @@ long lrintf(float x) { return lrint((double)x); }
 long lrintl(long double x) { return lrint((double)x); }
 long long llrintf(float x) { return llrint((double)x); }
 long long llrintl(long double x) { return llrint((double)x); }
-long lround(double x) { return (long)round(x); }
-long lroundf(float x) { return (long)round((double)x); }
-long lroundl(long double x) { return (long)round((double)x); }
-long long llround(double x) { return (long long)round(x); }
-long long llroundf(float x) { return (long long)round((double)x); }
-long long llroundl(long double x) { return (long long)round((double)x); }
+/* POSIX: lround/llround(NaN/inf) is domain error */
+long lround(double x) { if (__math_isnan(x)||__math_isinf(x)){errno=EDOM;return 0;} return (long)round(x); }
+long lroundf(float x) { return lround((double)x); }
+long lroundl(long double x) { return lround((double)x); }
+long long llround(double x) { if (__math_isnan(x)||__math_isinf(x)){errno=EDOM;return 0;} return (long long)round(x); }
+long long llroundf(float x) { return llround((double)x); }
+long long llroundl(long double x) { return llround((double)x); }
 float scalbnf(float x, int n) { return (float)scalbn((double)x, n); }
 long double scalbnl(long double x, int n) { return (long double)scalbn((double)x, n); }
 float scalblnf(float x, long n) { return (float)scalbln((double)x, n); }
