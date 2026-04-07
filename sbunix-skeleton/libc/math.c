@@ -340,11 +340,15 @@ double sqrt(double x)
 
     /*
      * Initial guess via bit manipulation:
-     * Halve the exponent roughly: (bits >> 1) + (1023/2 << 52)
+     * Halve the exponent: (bits >> 1) + (1023 << 51).
+     * The constant 0x1FF8000000000000 = (1023/2) << 52 ensures
+     * that sqrt(2^n) ~ 2^(n/2) as the initial guess.
+     * The old constant (0x1FF7A3BF << 21) was slightly too small,
+     * causing the Newton-Raphson to diverge for some inputs.
      */
     f64_bits b;
     b.d = x;
-    b.u = (b.u >> 1) + (0x1FF7A3BFULL << 21); /* magic constant */
+    b.u = (b.u >> 1) + 0x1FF8000000000000ULL;
 
     double guess = b.d;
 
