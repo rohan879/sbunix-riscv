@@ -239,6 +239,17 @@ struct proc {
    * setpgid to wake only wait4 sleepers without disturbing pipe/poll/
    * futex sleepers that also have waiting_for_uart unset. */
   int waiting_for_child;
+
+  /* BF: Per-process signal info queue for rt_sigqueueinfo / sigtimedwait.
+   * Stores the siginfo_t provided by sigqueue so that sigtimedwait can
+   * retrieve si_value and si_code.  Without this, queued signal data
+   * was discarded and sigtimedwait returned empty siginfo. */
+  #define NSIGQUEUE 16
+  struct {
+    int valid;
+    int signum;
+    uint8_t info[128]; /* raw siginfo_t bytes */
+  } sigqueue_buf[NSIGQUEUE];
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,

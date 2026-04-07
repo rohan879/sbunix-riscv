@@ -28,18 +28,45 @@ void *aligned_alloc(size_t alignment, size_t size) {
   return p;
 }
 
+/* BF: Rewrote posix_memalign to support alignments > 16 bytes.
+ * The old version returned ENOMEM for alignment > 16, breaking tests
+ * that request page-aligned or cache-line-aligned allocations.
+ * For alignment <= 16, malloc already returns 16-byte aligned memory.
+ * For larger alignments, we over-allocate and store the original
+ * pointer + a magic sentinel before the aligned address so free()
+ * can find the real allocation to release. */
+#define ALIGNED_SENTINEL 0xA110CA7ED5E1F000ULL
 int posix_memalign(void **memptr, size_t alignment, size_t size) {
   if (!memptr)
     return EINVAL;
   if (alignment == 0 || (alignment & (alignment - 1)) != 0 || alignment < sizeof(void *))
     return EINVAL;
 
-  if (alignment > 16)
+  if (alignment <= 16) {
+    /* malloc already guarantees 16-byte alignment */
+    *memptr = malloc(size);
+    if (!*memptr)
+      return ENOMEM;
+    return 0;
+  }
+
+  /* Over-allocate: need room for the data, alignment padding, and
+   * 2 pointer-sized values (sentinel + original pointer) stored
+   * immediately before the aligned address. */
+  size_t overhead = alignment + 2 * sizeof(uint64_t);
+  void *raw = malloc(size + overhead);
+  if (!raw)
     return ENOMEM;
 
-  *memptr = malloc(size);
-  if (!*memptr)
-    return ENOMEM;
+  /* Find the first aligned address that leaves room for our 2 words */
+  uintptr_t raw_addr = (uintptr_t)raw + 2 * sizeof(uint64_t);
+  uintptr_t aligned = (raw_addr + alignment - 1) & ~(uintptr_t)(alignment - 1);
+
+  /* Store sentinel magic and original pointer just before aligned addr */
+  ((uint64_t *)aligned)[-2] = ALIGNED_SENTINEL;
+  ((void **)aligned)[-1] = raw;
+
+  *memptr = (void *)aligned;
   return 0;
 }
 

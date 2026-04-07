@@ -94,10 +94,13 @@ int sigqueue(pid_t pid, int sig, const union sigval value) {
   siginfo_t info;
   memset(&info, 0, sizeof(info));
   info.si_signo = sig;
-  info.si_code = 0; /* SI_QUEUE would be -1, but 0 (SI_USER) works for our OS */
+  /* BF: si_code must be SI_QUEUE (-1) per POSIX.  The old code used 0
+   * (SI_USER) and discarded si_value with (void)value, so sigtimedwait
+   * tests that check si_value always got zero. */
+  info.si_code = -1; /* SI_QUEUE */
   info.si_pid = getpid();
   info.si_uid = 0;
-  (void)value;
+  memcpy(&info.si_value, &value, sizeof(value));
   long ret = syscall(SYS_rt_sigqueueinfo, (long)pid, (long)sig, &info);
   if (ret < 0) {
     errno = (int)(-ret);

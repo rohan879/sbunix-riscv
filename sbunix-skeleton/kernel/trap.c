@@ -2545,8 +2545,7 @@ static long sys_kill_handler(struct trapframe *tf) {
 static long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
-    /* a2 = user pointer to siginfo_t (unused for now; signal delivery
-     * populates its own siginfo on the target's stack) */
+    uint64_t info_uaddr = tf->a2;
 
     if (sig < 0 || (!signal_is_valid(sig) && sig != 0))
         return (long)-22; /* -EINVAL */
@@ -2563,6 +2562,30 @@ static long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
     }
     if (!target)
         return (long)-3; /* -ESRCH */
+
+    /* BF: Store the user-provided siginfo_t in the target's queue so
+     * that sigtimedwait can later retrieve si_value / si_code.  Without
+     * this, sigqueue data was discarded and sigtimedwait returned empty
+     * siginfo. */
+    if (info_uaddr) {
+        int slot = -1;
+        for (int i = 0; i < NSIGQUEUE; i++) {
+            if (!target->sigqueue_buf[i].valid) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot >= 0) {
+            uint8_t kinfo[128];
+            if (copyin(current_proc->pagetable, kinfo, info_uaddr, 128) >= 0) {
+                memcpy(target->sigqueue_buf[slot].info, kinfo, 128);
+                target->sigqueue_buf[slot].signum = sig;
+                target->sigqueue_buf[slot].valid = 1;
+            }
+        }
+        /* If queue is full, signal is still delivered but info is lost
+         * (POSIX allows EAGAIN but we prefer delivery over rejection) */
+    }
 
     kill_deliver(target, sig);
     return 0;
@@ -3563,22 +3586,29 @@ static long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
             
             /* Fill siginfo_t if requested */
             if (info_uaddr) {
-                /* siginfo_t is at least 128 bytes; zero it and set si_signo */
                 uint8_t kinfo[128];
-                memset(kinfo, 0, sizeof(kinfo));
-                int32_t si_signo = (int32_t)sig;
-                memcpy(kinfo, &si_signo, 4);
-                /* BF: POSIX requires siginfo_t fields to be populated.
-                 * Tests expect si_code, si_pid, and si_uid in addition
-                 * to si_signo for sigtimedwait/sigwaitinfo results. */
-                /* BF: POSIX specifies si_errno = 0 when no error is associated */
-                *(int32_t *)(kinfo + 4) = 0;   /* si_errno: no error */
-                *(int32_t *)(kinfo + 8) = 0;   /* si_code: SI_USER (default) */
-                /* BF: si_pid should be the sender's PID, but this OS only tracks
-                 * signals as pending bits without recording the sender.  Use 0
-                 * (unknown) rather than the misleading receiver PID. */
-                *(int32_t *)(kinfo + 12) = 0;  /* si_pid: unknown (no sender tracking) */
-                *(int32_t *)(kinfo + 16) = 0;  /* si_uid: always root */
+                int found_queued = 0;
+                /* BF: Search sigqueue_buf for stored siginfo from sigqueue().
+                 * This preserves si_value and si_code that the sender set.
+                 * Without this, sigtimedwait always returned empty siginfo. */
+                for (int qi = 0; qi < NSIGQUEUE; qi++) {
+                    if (current_proc->sigqueue_buf[qi].valid &&
+                        current_proc->sigqueue_buf[qi].signum == sig) {
+                        memcpy(kinfo, current_proc->sigqueue_buf[qi].info, 128);
+                        current_proc->sigqueue_buf[qi].valid = 0;
+                        found_queued = 1;
+                        break;
+                    }
+                }
+                if (!found_queued) {
+                    /* No queued info: build minimal siginfo */
+                    memset(kinfo, 0, sizeof(kinfo));
+                    *(int32_t *)(kinfo + 0) = (int32_t)sig; /* si_signo */
+                    *(int32_t *)(kinfo + 4) = 0;            /* si_errno */
+                    *(int32_t *)(kinfo + 8) = 0;            /* si_code: SI_USER */
+                    *(int32_t *)(kinfo + 12) = 0;           /* si_pid */
+                    *(int32_t *)(kinfo + 16) = 0;           /* si_uid */
+                }
                 if (copyout(current_proc->pagetable, info_uaddr, kinfo, 128) < 0)
                     return (long)-14; /* EFAULT */
             }
@@ -4461,8 +4491,44 @@ static long sys_timer_settime_handler(struct trapframe *tf) {
         uint64_t value_ticks = (uint64_t)kispec.val_sec * TIMER_FREQ +
                                (uint64_t)kispec.val_nsec / 100;
         if (flags & 1) { /* TIMER_ABSTIME */
-            /* Absolute time based on the timer's clockid */
-            current_proc->timers[tid].next_expiry_ticks = value_ticks;
+            /* BF: The old code used value_ticks (user epoch time in
+             * 10MHz ticks) directly as next_expiry_ticks (boot ticks).
+             * This caused the timer to never fire because epoch seconds
+             * (~1.7 billion) as boot ticks is far in the future.
+             * Fix: convert absolute wall-clock time to a delta from now,
+             * then add that delta to the current boot tick count.
+             * This mirrors the clock_nanosleep ABSTIME pattern. */
+            int clockid = current_proc->timers[tid].clockid;
+            if (clockid == 0) {
+                /* CLOCK_REALTIME: compare against wall-clock time */
+                int64_t now_sec, now_nsec;
+                get_wall_time(&now_sec, &now_nsec);
+                uint64_t now_total_ns = (uint64_t)now_sec * 1000000000UL +
+                                        (uint64_t)now_nsec;
+                uint64_t target_ns = (uint64_t)kispec.val_sec * 1000000000UL +
+                                     (uint64_t)kispec.val_nsec;
+                if (target_ns <= now_total_ns) {
+                    /* Already past: fire immediately */
+                    current_proc->timers[tid].next_expiry_ticks = r_time();
+                } else {
+                    uint64_t diff_ns = target_ns - now_total_ns;
+                    current_proc->timers[tid].next_expiry_ticks =
+                        r_time() + ns_to_time_ticks(diff_ns);
+                }
+            } else if (clockid == 1) {
+                /* CLOCK_MONOTONIC: compare against boot-relative time */
+                uint64_t elapsed = r_time() - boot_time;
+                if (value_ticks <= elapsed) {
+                    current_proc->timers[tid].next_expiry_ticks = r_time();
+                } else {
+                    current_proc->timers[tid].next_expiry_ticks =
+                        r_time() + (value_ticks - elapsed);
+                }
+            } else {
+                /* Other clocks: treat as relative for safety */
+                current_proc->timers[tid].next_expiry_ticks =
+                    r_time() + value_ticks;
+            }
         } else {
             /* Relative time from now */
             current_proc->timers[tid].next_expiry_ticks = r_time() + value_ticks;
@@ -5035,11 +5101,77 @@ static long sys_inotify_rm_watch_handler(struct trapframe *tf) {
     return (long)-22; /* EINVAL */
 }
 
-/* utimensat — update file timestamps (ext2 mtime) */
+/* BF: Mirror of ramfs inode and private structs from ramfs.c.
+ * Needed by utimensat/fchmod handlers to access ramfs inode fields
+ * (timestamps, mode) directly from trap.c.  Layout must exactly match
+ * the real struct in ramfs.c (field order, sizes, padding). */
+struct ramfs_inode_trap {
+  uint64_t ino;             /* offset 0 */
+  int      type;            /* offset 8 (enum ramfs_type = int) */
+  uint32_t mode;            /* offset 12 */
+  int      nlink;           /* offset 16 */
+  uint64_t size;            /* offset 24 (after 4-byte padding) */
+  uint64_t atime_sec;       /* offset 32 */
+  uint64_t mtime_sec;       /* offset 40 */
+  uint64_t ctime_sec;       /* offset 48 */
+  /* remaining fields (blocks[], nblocks, children[], etc.) omitted */
+};
+struct ramfs_private {
+  struct ramfs_inode_trap *inode;
+};
+
+/* utimensat — update file timestamps (ext2 mtime, ramfs atime/mtime) */
 static long sys_utimensat_handler(struct trapframe *tf) {
     /* a0 = dirfd (AT_FDCWD), a1 = path (NULL = use fd), a2 = times, a3 = flags */
+    int dirfd = (int)tf->a0;
     uint64_t path_uva = tf->a1;
-    if (!path_uva) return 0; /* NULL path with fd — not supported, succeed silently */
+    uint64_t times_uaddr = tf->a2;
+
+    /* BF: UTIME_NOW and UTIME_OMIT constants per POSIX */
+    #define UTIME_NOW  0x3fffffff
+    #define UTIME_OMIT 0x3ffffffe
+
+    /* Get current wall-clock time for UTIME_NOW */
+    int64_t now_sec, now_nsec;
+    get_wall_time(&now_sec, &now_nsec);
+
+    /* Parse times array if provided (2 x struct timespec = 32 bytes) */
+    struct { int64_t sec; int64_t nsec; } ktimes[2];
+    int has_times = 0;
+    if (times_uaddr) {
+        if (copyin(current_proc->pagetable, ktimes, times_uaddr, 32) < 0)
+            return (long)-14; /* EFAULT */
+        has_times = 1;
+    }
+
+    /* BF: Handle NULL path (futimens): look up file by fd */
+    if (!path_uva) {
+        struct open_file **ftab = proc_ofile(current_proc);
+        if (dirfd < 0 || dirfd >= NOFILE || !ftab[dirfd])
+            return (long)-9; /* EBADF */
+        struct open_file *f = ftab[dirfd];
+
+        /* For ramfs files: update timestamps on the inode directly */
+        if (f->ops == &ramfs_ops && f->private) {
+            struct ramfs_private *rp = (struct ramfs_private *)f->private;
+            if (has_times) {
+                if (ktimes[0].nsec != UTIME_OMIT) {
+                    rp->inode->atime_sec = (ktimes[0].nsec == UTIME_NOW) ?
+                        (uint64_t)now_sec : (uint64_t)ktimes[0].sec;
+                }
+                if (ktimes[1].nsec != UTIME_OMIT) {
+                    rp->inode->mtime_sec = (ktimes[1].nsec == UTIME_NOW) ?
+                        (uint64_t)now_sec : (uint64_t)ktimes[1].sec;
+                }
+            } else {
+                /* NULL times = set both to current time */
+                rp->inode->atime_sec = (uint64_t)now_sec;
+                rp->inode->mtime_sec = (uint64_t)now_sec;
+            }
+            rp->inode->ctime_sec = (uint64_t)now_sec;
+        }
+        return 0;
+    }
 
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, path_uva, sizeof(kpath)) < 0)
@@ -5053,15 +5185,35 @@ static long sys_utimensat_handler(struct trapframe *tf) {
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops || !ops->open) return (long)-2; /* ENOENT */
 
-    /* Open file to get inode, update mtime, close */
+    /* Open file to get inode, update timestamps, close */
     void *priv = NULL;
     if (ops->open(mnt->fs_data, relpath, 0, &priv) < 0) return (long)-2;
 
-    /* For ext2 files, touch the inode to update mtime */
-    (void)priv; /* ext2 mtime update handled by icache dirty flag on close */
+    /* BF: For ramfs files, update atime/mtime on the inode.  Without
+     * this, utimensat was a no-op for ramfs, causing stat tests to fail. */
+    if (ops == &ramfs_ops && priv) {
+        struct ramfs_private *rp = (struct ramfs_private *)priv;
+        if (has_times) {
+            if (ktimes[0].nsec != UTIME_OMIT) {
+                rp->inode->atime_sec = (ktimes[0].nsec == UTIME_NOW) ?
+                    (uint64_t)now_sec : (uint64_t)ktimes[0].sec;
+            }
+            if (ktimes[1].nsec != UTIME_OMIT) {
+                rp->inode->mtime_sec = (ktimes[1].nsec == UTIME_NOW) ?
+                    (uint64_t)now_sec : (uint64_t)ktimes[1].sec;
+            }
+        } else {
+            rp->inode->atime_sec = (uint64_t)now_sec;
+            rp->inode->mtime_sec = (uint64_t)now_sec;
+        }
+        rp->inode->ctime_sec = (uint64_t)now_sec;
+    }
 
     if (ops->close) ops->close(mnt->fs_data, priv);
-    return 0; /* Success — timestamps updated (or no-op for non-ext2) */
+    return 0;
+
+    #undef UTIME_NOW
+    #undef UTIME_OMIT
 }
 
 /* statfs/fstatfs — filesystem statistics */
@@ -5186,6 +5338,16 @@ static long sys_fchmodat_handler(struct trapframe *tf) {
             if (ops->close) ops->close(mnt->fs_data, priv);
         }
     }
+    /* BF: For ramfs files, update inode mode in memory.  Without this,
+     * fchmodat on /tmp paths was a no-op. */
+    if (ops == &ramfs_ops && ops->open) {
+        void *priv = NULL;
+        if (ops->open(mnt->fs_data, relpath, 0, &priv) >= 0) {
+            struct ramfs_private *rp = (struct ramfs_private *)priv;
+            rp->inode->mode = (uint32_t)tf->a2 & 07777;
+            if (ops->close) ops->close(mnt->fs_data, priv);
+        }
+    }
     return 0;
 }
 
@@ -5201,6 +5363,14 @@ static long sys_fchmod_handler(struct trapframe *tf) {
     if (ext2_is_ops(f->ops) && f->private) {
         struct ext2_open_private *priv = (struct ext2_open_private *)f->private;
         return (long)ext2_fchmod_ino(f->fs_data, priv->ino, mode);
+    }
+    /* BF: For ramfs files, update the in-memory inode mode.  Without
+     * this, fchmod on /tmp files was a silent no-op, causing tests
+     * that verify permission changes to fail. */
+    if (f->ops == &ramfs_ops && f->private) {
+        struct ramfs_private *rp = (struct ramfs_private *)f->private;
+        rp->inode->mode = mode & 07777; /* keep only permission bits */
+        return 0;
     }
     return 0; /* other filesystems: no-op */
 }
@@ -5696,6 +5866,11 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
                 old_flags |= 1; /* SS_ONSTACK */
             else
                 old_flags &= ~1;
+        } else {
+            /* BF: When no alt stack is configured (ss_sp==0 && ss_size==0),
+             * POSIX requires SS_DISABLE (2) to be reported.  Without this,
+             * tests checking the initial sigaltstack state would fail. */
+            old_flags = 2; /* SS_DISABLE */
         }
         *(int32_t *)(kold + 8) = old_flags;
         *(uint64_t *)(kold + 16) = current_proc->ss_size;

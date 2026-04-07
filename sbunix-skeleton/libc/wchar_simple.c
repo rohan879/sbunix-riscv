@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <time.h>
+#include <errno.h>
 
 extern int fgetc(FILE *stream);
 extern int fputc(int c, FILE *stream);
@@ -354,100 +355,301 @@ unsigned long long wcstoull(const wchar_t *nptr, wchar_t **endptr, int base) {
   return (unsigned long long)wcstoul(nptr, endptr, base);
 }
 
-wint_t btowc(int c) { return (wint_t)(unsigned char)c; }
-int wctob(wint_t c) { return (int)(unsigned int)c; }
+/* BF: btowc must return WEOF for values outside single-byte range,
+ * and treat EOF input as WEOF per POSIX. */
+wint_t btowc(int c) {
+  if (c == EOF) return WEOF;
+  /* In UTF-8, single-byte chars are 0x00-0x7F only */
+  if ((unsigned int)c > 0x7F) return WEOF;
+  return (wint_t)(unsigned char)c;
+}
 
+/* BF: wctob returns the single-byte representation if the wide char
+ * fits in one byte (0x00-0x7F in UTF-8), otherwise EOF. */
+int wctob(wint_t c) {
+  if (c == WEOF) return EOF;
+  if ((unsigned int)c > 0x7F) return EOF;
+  return (int)(unsigned int)c;
+}
+
+/* BF: mbrlen delegates to mbrtowc per POSIX.  The old stub always
+ * returned 1, breaking multibyte sequence handling. */
 size_t mbrlen(const char *s, size_t n, mbstate_t *ps) {
-  (void)n;
-  (void)ps;
-  if (!s || !*s)
-    return 0;
-  return 1;
+  static mbstate_t internal = {0};
+  return mbrtowc(NULL, s, n, ps ? ps : &internal);
 }
 
+/* BF: Rewrote mbrtowc with full UTF-8 decoding.  The old stub treated
+ * every byte as a single-character sequence, breaking all multibyte
+ * input (e.g. mbrtowc tests for 2/3/4-byte UTF-8 sequences). */
 size_t mbrtowc(wchar_t *pwc, const char *s, size_t n, mbstate_t *ps) {
-  (void)n;
-  (void)ps;
-  if (!s || !*s)
+  static mbstate_t internal = {0};
+  if (!ps) ps = &internal;
+
+  /* NULL s: reset shift state, return 0 (stateless encoding) */
+  if (!s) {
+    memset(ps, 0, sizeof(*ps));
     return 0;
-  if (pwc)
-    *pwc = (unsigned char)*s;
-  return 1;
+  }
+
+  /* If n is 0, cannot read any bytes — incomplete */
+  if (n == 0) return (size_t)-2;
+
+  unsigned char *partial = ps->partial;
+  int count = ps->count;
+  int expected = ps->expected;
+  size_t consumed = 0;
+
+  /* If no partial state, start a new sequence from first byte */
+  if (count == 0) {
+    unsigned char b = (unsigned char)s[0];
+    consumed = 1;
+    if (b <= 0x7F) {
+      /* ASCII: single byte */
+      if (pwc) *pwc = (wchar_t)b;
+      memset(ps, 0, sizeof(*ps));
+      return b == 0 ? 0 : 1;
+    } else if (b >= 0xC2 && b <= 0xDF) {
+      expected = 2;
+    } else if (b >= 0xE0 && b <= 0xEF) {
+      expected = 3;
+    } else if (b >= 0xF0 && b <= 0xF4) {
+      expected = 4;
+    } else {
+      /* Invalid lead byte (0x80-0xBF, 0xC0-0xC1, 0xF5+) */
+      errno = EILSEQ;
+      memset(ps, 0, sizeof(*ps));
+      return (size_t)-1;
+    }
+    partial[0] = b;
+    count = 1;
+  }
+
+  /* Consume continuation bytes */
+  while (count < expected && consumed < n) {
+    unsigned char b = (unsigned char)s[consumed];
+    /* Validate continuation byte 0x80-0xBF */
+    if ((b & 0xC0) != 0x80) {
+      errno = EILSEQ;
+      memset(ps, 0, sizeof(*ps));
+      return (size_t)-1;
+    }
+    partial[count++] = b;
+    consumed++;
+  }
+
+  /* Still need more bytes? */
+  if (count < expected) {
+    ps->count = count;
+    ps->expected = expected;
+    return (size_t)-2;
+  }
+
+  /* Decode the complete UTF-8 sequence */
+  uint32_t cp = 0;
+  if (expected == 2) {
+    cp = ((uint32_t)(partial[0] & 0x1F) << 6) |
+         ((uint32_t)(partial[1] & 0x3F));
+    /* Overlong: codepoints < 0x80 should be 1-byte (already rejected
+     * by requiring lead >= 0xC2) */
+  } else if (expected == 3) {
+    cp = ((uint32_t)(partial[0] & 0x0F) << 12) |
+         ((uint32_t)(partial[1] & 0x3F) << 6) |
+         ((uint32_t)(partial[2] & 0x3F));
+    /* Reject overlong 3-byte (< 0x800) */
+    if (cp < 0x800) {
+      errno = EILSEQ;
+      memset(ps, 0, sizeof(*ps));
+      return (size_t)-1;
+    }
+    /* Reject surrogates U+D800..U+DFFF */
+    if (cp >= 0xD800 && cp <= 0xDFFF) {
+      errno = EILSEQ;
+      memset(ps, 0, sizeof(*ps));
+      return (size_t)-1;
+    }
+  } else if (expected == 4) {
+    cp = ((uint32_t)(partial[0] & 0x07) << 18) |
+         ((uint32_t)(partial[1] & 0x3F) << 12) |
+         ((uint32_t)(partial[2] & 0x3F) << 6) |
+         ((uint32_t)(partial[3] & 0x3F));
+    /* Reject overlong 4-byte (< 0x10000) and above U+10FFFF */
+    if (cp < 0x10000 || cp > 0x10FFFF) {
+      errno = EILSEQ;
+      memset(ps, 0, sizeof(*ps));
+      return (size_t)-1;
+    }
+  }
+
+  if (pwc) *pwc = (wchar_t)cp;
+  memset(ps, 0, sizeof(*ps));
+  return cp == 0 ? 0 : consumed;
 }
 
+/* BF: Rewrote wcrtomb with full UTF-8 encoding.  The old stub truncated
+ * all wchar_t to a single byte, producing garbage for non-ASCII chars. */
 size_t wcrtomb(char *s, wchar_t wc, mbstate_t *ps) {
   (void)ps;
-  if (!s)
-    return 1;
-  *s = (char)(unsigned int)wc;
-  return 1;
-}
+  /* NULL s: ask how many bytes a shift-reset would need (always 1 for
+   * stateless UTF-8), equivalent to wcrtomb(buf, L'\0', ps). */
+  if (!s) return 1;
 
-int mbsinit(const mbstate_t *ps) {
-  (void)ps;
-  return 1;
-}
+  uint32_t cp = (uint32_t)wc;
 
-size_t mbsrtowcs(wchar_t *dst, const char **src, size_t len, mbstate_t *ps) {
-  (void)ps;
-  size_t i = 0;
-  const char *s = *src;
-  while (s[i] && i < len) {
-    if (dst)
-      dst[i] = (unsigned char)s[i];
-    i++;
+  /* Reject surrogates and values above U+10FFFF */
+  if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+    errno = EILSEQ;
+    return (size_t)-1;
   }
-  if (dst && i < len)
-    dst[i] = 0;
-  *src = s + i;
-  return i;
+
+  if (cp <= 0x7F) {
+    s[0] = (char)cp;
+    return 1;
+  } else if (cp <= 0x7FF) {
+    s[0] = (char)(0xC0 | (cp >> 6));
+    s[1] = (char)(0x80 | (cp & 0x3F));
+    return 2;
+  } else if (cp <= 0xFFFF) {
+    s[0] = (char)(0xE0 | (cp >> 12));
+    s[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    s[2] = (char)(0x80 | (cp & 0x3F));
+    return 3;
+  } else {
+    s[0] = (char)(0xF0 | (cp >> 18));
+    s[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    s[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    s[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+  }
 }
 
+/* BF: mbsinit must check if the mbstate_t is in the initial (reset)
+ * state.  The old stub always returned 1, hiding partial sequences. */
+int mbsinit(const mbstate_t *ps) {
+  if (!ps) return 1;
+  return (ps->count == 0 && ps->expected == 0) ? 1 : 0;
+}
+
+/* BF: Rewrote mbsrtowcs with proper UTF-8 decoding via mbrtowc.
+ * The old version treated each byte as one character and never set
+ * *src = NULL on completion (POSIX requires this). */
+size_t mbsrtowcs(wchar_t *dst, const char **src, size_t len, mbstate_t *ps) {
+  static mbstate_t internal = {0};
+  if (!ps) ps = &internal;
+  const char *s = *src;
+  size_t nconv = 0;
+
+  while (dst == NULL || nconv < len) {
+    wchar_t wc;
+    size_t r = mbrtowc(&wc, s, (size_t)-1, ps);
+    if (r == 0) {
+      /* Null terminator converted: POSIX requires *src = NULL */
+      if (dst) dst[nconv] = L'\0';
+      *src = NULL;
+      return nconv;
+    }
+    if (r == (size_t)-1) {
+      /* Invalid sequence */
+      return (size_t)-1;
+    }
+    /* r == (size_t)-2 should not happen with unlimited n */
+    if (dst) dst[nconv] = wc;
+    s += r;
+    nconv++;
+  }
+  *src = s;
+  return nconv;
+}
+
+/* BF: Rewrote mbsnrtowcs with proper UTF-8 decoding via mbrtowc,
+ * respecting the nms byte limit and setting *src=NULL on completion. */
 size_t mbsnrtowcs(wchar_t *dst, const char **src, size_t nms, size_t len,
                   mbstate_t *ps) {
-  (void)ps;
-  size_t i = 0;
+  static mbstate_t internal = {0};
+  if (!ps) ps = &internal;
   const char *s = *src;
-  while (i < nms && s[i] && i < len) {
-    if (dst)
-      dst[i] = (unsigned char)s[i];
-    i++;
+  size_t nconv = 0;
+  size_t bytes_used = 0;
+
+  while ((dst == NULL || nconv < len) && bytes_used < nms) {
+    wchar_t wc;
+    size_t remaining = nms - bytes_used;
+    size_t r = mbrtowc(&wc, s, remaining, ps);
+    if (r == 0) {
+      if (dst) dst[nconv] = L'\0';
+      *src = NULL;
+      return nconv;
+    }
+    if (r == (size_t)-1) return (size_t)-1;
+    if (r == (size_t)-2) break; /* incomplete at nms boundary */
+    if (dst) dst[nconv] = wc;
+    s += r;
+    bytes_used += r;
+    nconv++;
   }
-  if (dst && i < len)
-    dst[i] = 0;
-  *src = s + i;
-  return i;
+  *src = s;
+  return nconv;
 }
 
+/* BF: Rewrote wcsrtombs with proper UTF-8 encoding via wcrtomb.
+ * The old version truncated every wchar to one byte and never set
+ * *src = NULL on completion (POSIX requires this). */
 size_t wcsrtombs(char *dst, const wchar_t **src, size_t len, mbstate_t *ps) {
-  (void)ps;
-  size_t i = 0;
+  static mbstate_t internal = {0};
+  if (!ps) ps = &internal;
   const wchar_t *s = *src;
-  while (s[i] && i < len) {
-    if (dst)
-      dst[i] = (char)(unsigned int)s[i];
-    i++;
+  size_t total = 0;
+
+  while (1) {
+    if (*s == L'\0') {
+      /* Null terminator: POSIX requires *src = NULL */
+      if (dst) dst[total] = '\0';
+      *src = NULL;
+      return total;
+    }
+    char buf[4];
+    size_t r = wcrtomb(buf, *s, ps);
+    if (r == (size_t)-1) return (size_t)-1;
+    if (dst) {
+      if (total + r > len) break; /* would exceed buffer */
+      memcpy(dst + total, buf, r);
+    }
+    total += r;
+    s++;
   }
-  if (dst && i < len)
-    dst[i] = '\0';
-  *src = s + i;
-  return i;
+  *src = s;
+  return total;
 }
 
+/* BF: Rewrote wcsnrtombs with proper UTF-8 encoding via wcrtomb,
+ * respecting the nwc wide-char limit and setting *src=NULL on null. */
 size_t wcsnrtombs(char *dst, const wchar_t **src, size_t nwc, size_t len,
                   mbstate_t *ps) {
-  (void)ps;
-  size_t i = 0;
+  static mbstate_t internal = {0};
+  if (!ps) ps = &internal;
   const wchar_t *s = *src;
-  while (i < nwc && s[i] && i < len) {
-    if (dst)
-      dst[i] = (char)(unsigned int)s[i];
-    i++;
+  size_t total = 0;
+  size_t wchars_done = 0;
+
+  while (wchars_done < nwc) {
+    if (*s == L'\0') {
+      if (dst) dst[total] = '\0';
+      *src = NULL;
+      return total;
+    }
+    char buf[4];
+    size_t r = wcrtomb(buf, *s, ps);
+    if (r == (size_t)-1) return (size_t)-1;
+    if (dst) {
+      if (total + r > len) break;
+      memcpy(dst + total, buf, r);
+    }
+    total += r;
+    s++;
+    wchars_done++;
   }
-  if (dst && i < len)
-    dst[i] = '\0';
-  *src = s + i;
-  return i;
+  *src = s;
+  return total;
 }
 
 int fwide(FILE *stream, int mode) {

@@ -9,7 +9,17 @@
 #include <limits.h>
 
 typedef int wint_t;
-typedef int mbstate_t;
+
+/* BF: Changed mbstate_t from plain int to struct to hold partial UTF-8
+ * multibyte sequences across calls to mbrtowc/wcrtomb.  The old int
+ * type could not track byte count, expected length, or pending data
+ * needed for correct incremental decoding. */
+typedef struct {
+  unsigned char partial[4]; /* buffered bytes of incomplete sequence */
+  int count;                /* number of bytes stored in partial[] */
+  int expected;             /* total bytes expected for current sequence */
+  unsigned int pending_surrogate; /* pending high surrogate for c16rtomb */
+} mbstate_t;
 
 #define WEOF ((wint_t)-1)
 
