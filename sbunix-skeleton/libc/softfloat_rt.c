@@ -458,6 +458,32 @@ double __divdf3(double a, double b)
   }
 
   exp = ae - be;
+
+  /*
+   * Binary long division producing 56-bit quotient.
+   *
+   * FIX: The original code started with rem = asig (~2^53) and
+   * shifted left 56 times, causing 64-bit overflow after ~10 shifts.
+   * Fixed by normalizing both significands to the top of the word
+   * first, then extracting quotient bits from high to low.
+   *
+   * Normalize so bsig has its MSB at bit 62 (leaving bit 63 for
+   * the doubled remainder). This keeps rem < 2*bsig < 2^63
+   * throughout the loop, preventing overflow.
+   */
+  /* Count leading zeros to normalize bsig to bit 62 */
+  int nlz = 0;
+  {
+    uint64_t tmp = bsig;
+    while (!(tmp & (1ULL << 62))) {
+      tmp <<= 1;
+      nlz++;
+    }
+  }
+  bsig <<= nlz;
+  asig <<= nlz;
+
+  /* Adjust if asig < bsig (after normalization) */
   if (asig < bsig) {
     asig <<= 1;
     exp--;
@@ -466,14 +492,17 @@ double __divdf3(double a, double b)
   q = 0;
   rem = asig;
   for (i = 0; i < 56; i++) {
-    rem <<= 1;
     q <<= 1;
     if (rem >= bsig) {
       rem -= bsig;
       q |= 1ULL;
     }
+    rem <<= 1;
   }
-  if (rem != 0) {
+  /* Final comparison for sticky bit (rounding) */
+  if (rem >= bsig) {
+    q |= 1ULL;
+  } else if (rem != 0) {
     q |= 1ULL;
   }
 
