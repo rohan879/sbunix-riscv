@@ -553,23 +553,55 @@ int __nedf2(double a, double b)
   return dcmp(a, b) == 0 ? 0 : 1;
 }
 
+/*
+ * GCC soft-float comparison return conventions:
+ *   __ltdf2: returns < 0 if a < b, else >= 0. NaN -> >= 0 (not less).
+ *   __gtdf2: returns > 0 if a > b, else <= 0. NaN -> <= 0 (not greater).
+ *   __ledf2: returns <= 0 if a <= b, else > 0. NaN -> > 0 (not le).
+ *   __gedf2: returns >= 0 if a >= b, else < 0. NaN -> < 0 (not ge).
+ *
+ * FIX: The old dcmp returned 1 for NaN which made __gtdf2 return 1
+ * (meaning "greater"), violating IEEE 754 NaN ordering rules.
+ * Now each function checks for NaN explicitly and returns the correct
+ * "unordered" value per GCC conventions.
+ */
 int __ltdf2(double a, double b)
 {
-  return dcmp(a, b) < 0 ? -1 : 1;
+  f64_u ua, ub;
+  ua.d = a; ub.d = b;
+  /* NaN: return >= 0 so (a < b) is false */
+  if (is_nan_df(ua.u) || is_nan_df(ub.u))
+    return 1;
+  return dcmp(a, b) < 0 ? -1 : 0;
 }
 
 int __gtdf2(double a, double b)
 {
-  return dcmp(a, b) > 0 ? 1 : -1;
+  f64_u ua, ub;
+  ua.d = a; ub.d = b;
+  /* NaN: return <= 0 so (a > b) is false */
+  if (is_nan_df(ua.u) || is_nan_df(ub.u))
+    return -1;
+  return dcmp(a, b) > 0 ? 1 : 0;
 }
 
 int __ledf2(double a, double b)
 {
+  f64_u ua, ub;
+  ua.d = a; ub.d = b;
+  /* NaN: return > 0 so (a <= b) is false */
+  if (is_nan_df(ua.u) || is_nan_df(ub.u))
+    return 1;
   return dcmp(a, b);
 }
 
 int __gedf2(double a, double b)
 {
+  f64_u ua, ub;
+  ua.d = a; ub.d = b;
+  /* NaN: return < 0 so (a >= b) is false */
+  if (is_nan_df(ua.u) || is_nan_df(ub.u))
+    return -1;
   return dcmp(a, b);
 }
 
