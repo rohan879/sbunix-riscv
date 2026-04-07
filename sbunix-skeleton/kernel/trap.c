@@ -110,8 +110,19 @@ static int alloc_fd(void) {
 /* Shallow copy fd table from src to dst (for clone), incrementing refcounts */
 static void copy_ofile(struct proc *dst, struct proc *src) {
   struct open_file **srctab = proc_ofile(src);
+  /* ENH: FD_CLOFORK (bit 2) causes the fd to be skipped during fork,
+   * per POSIX O_CLOFORK semantics.  Non-skipped fds inherit fd_flags. */
+  #define FD_CLOFORK 2
   for (int i = 0; i < NOFILE; i++) {
+    if (src->fd_flags[i] & FD_CLOFORK) {
+      /* ENH: Skip O_CLOFORK file descriptors during fork */
+      dst->ofile[i] = 0;
+      dst->fd_flags[i] = 0;
+      continue;
+    }
     dst->ofile[i] = srctab[i];
+    /* Copy fd_flags for non-skipped fds */
+    dst->fd_flags[i] = src->fd_flags[i];
     if (srctab[i]) {
       srctab[i]->refcount++;
       /* bump pipe refcounts too */
@@ -123,6 +134,151 @@ static void copy_ofile(struct proc *dst, struct proc *src) {
           pipes[pid].write_open++;
       }
     }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* File lock support (POSIX and OFD record locks for fcntl)            */
+/* ------------------------------------------------------------------ */
+
+/* Global lock table -- teaching OS uses a flat array of lock entries.
+ * POSIX locks are keyed by (path, pid); OFD locks by (path, open_file *). */
+struct file_lock lock_table[MAX_FILE_LOCKS];
+
+/* Two ranges [s1, s1+l1) and [s2, s2+l2) overlap.
+ * l_len=0 means "to EOF" -- treat as infinite extent. */
+static int ranges_overlap(int64_t s1, int64_t l1, int64_t s2, int64_t l2) {
+  int64_t e1 = (l1 == 0) ? (int64_t)0x7FFFFFFFFFFFFFFFLL : s1 + l1;
+  int64_t e2 = (l2 == 0) ? (int64_t)0x7FFFFFFFFFFFFFFFLL : s2 + l2;
+  return s1 < e2 && s2 < e1;
+}
+
+/* Check whether an existing lock conflicts with a proposed lock.
+ * Locks conflict if: same file path, overlapping byte ranges,
+ * at least one is a write lock, and different owner. */
+static int lock_conflicts(struct file_lock *lk, const char *path,
+    short type, int64_t start, int64_t len, pid_t pid,
+    struct open_file *ofd, int is_ofd) {
+  if (!lk->used) return 0;
+  if (strncmp(lk->path, path, 256) != 0) return 0;
+  if (!ranges_overlap(lk->l_start, lk->l_len, start, len)) return 0;
+  /* Both read locks never conflict (F_RDLCK = 0) */
+  if (lk->l_type == 0 && type == 0) return 0;
+  /* Same owner = no conflict */
+  if (is_ofd) {
+    if (lk->ofd == ofd) return 0;
+  } else {
+    if (lk->l_pid == pid && lk->ofd == 0) return 0;
+  }
+  return 1;
+}
+
+/* Set or release a file lock.  F_UNLCK removes matching locks; F_RDLCK/F_WRLCK
+ * checks for conflicts then adds/replaces a lock entry.
+ * Returns 0 on success, -11 (EAGAIN) on conflict. */
+int do_file_setlk(const char *path, short type, int64_t start, int64_t len,
+                   pid_t pid, struct open_file *ofd, int is_ofd, int wait) {
+  if (type == 2) { /* F_UNLCK -- remove matching locks owned by caller */
+    for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+      struct file_lock *lk = &lock_table[i];
+      if (!lk->used) continue;
+      if (strncmp(lk->path, path, 256) != 0) continue;
+      if (!ranges_overlap(lk->l_start, lk->l_len, start, len)) continue;
+      /* Must be same owner */
+      if (is_ofd) {
+        if (lk->ofd != ofd) continue;
+      } else {
+        if (lk->l_pid != pid || lk->ofd != 0) continue;
+      }
+      lk->used = 0;
+    }
+    return 0;
+  }
+  /* F_RDLCK or F_WRLCK -- check for conflicts first */
+  for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+    if (lock_conflicts(&lock_table[i], path, type, start, len,
+                       pid, ofd, is_ofd))
+      return -11; /* EAGAIN (teaching OS: wait variant also returns EAGAIN) */
+  }
+  /* Replace existing lock from same owner on same range, or find free slot */
+  int free_slot = -1;
+  for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+    struct file_lock *lk = &lock_table[i];
+    if (!lk->used) {
+      if (free_slot < 0) free_slot = i;
+      continue;
+    }
+    /* Replace if same owner, same path, overlapping range */
+    if (strncmp(lk->path, path, 256) != 0) continue;
+    if (!ranges_overlap(lk->l_start, lk->l_len, start, len)) continue;
+    int same_owner = 0;
+    if (is_ofd && lk->ofd == ofd) same_owner = 1;
+    if (!is_ofd && lk->l_pid == pid && lk->ofd == 0) same_owner = 1;
+    if (same_owner) {
+      lk->l_type = type;
+      lk->l_start = start;
+      lk->l_len = len;
+      return 0;
+    }
+  }
+  if (free_slot < 0)
+    return -11; /* No free lock slots -- report EAGAIN */
+  struct file_lock *lk = &lock_table[free_slot];
+  lk->used = 1;
+  lk->l_type = type;
+  lk->l_start = start;
+  lk->l_len = len;
+  lk->l_pid = is_ofd ? -1 : pid;
+  lk->ofd = is_ofd ? ofd : 0;
+  {
+    int plen = strlen(path);
+    if (plen > 255) plen = 255;
+    memcpy(lk->path, path, plen);
+    lk->path[plen] = '\0';
+  }
+  return 0;
+}
+
+/* Query whether a hypothetical lock would conflict.  If a conflict is found,
+ * fills out_type/out_start/out_len/out_pid.  Otherwise sets *out_type = 2
+ * (F_UNLCK) meaning "no conflict". */
+int do_file_getlk(const char *path, short type, int64_t start, int64_t len,
+                   pid_t pid, struct open_file *ofd, int is_ofd,
+                   short *out_type, int64_t *out_start, int64_t *out_len,
+                   pid_t *out_pid) {
+  for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+    if (lock_conflicts(&lock_table[i], path, type, start, len,
+                       pid, ofd, is_ofd)) {
+      *out_type = lock_table[i].l_type;
+      *out_start = lock_table[i].l_start;
+      *out_len = lock_table[i].l_len;
+      *out_pid = lock_table[i].l_pid;
+      return 0;
+    }
+  }
+  /* No conflict */
+  *out_type = 2; /* F_UNLCK */
+  *out_start = 0;
+  *out_len = 0;
+  *out_pid = 0;
+  return 0;
+}
+
+/* Release all POSIX locks owned by pid -- called on process exit. */
+void file_locks_release_pid(pid_t pid) {
+  for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+    if (lock_table[i].used && lock_table[i].ofd == 0 &&
+        lock_table[i].l_pid == pid)
+      lock_table[i].used = 0;
+  }
+}
+
+/* Release all OFD locks owned by a specific open_file -- called when the
+ * last reference to an open_file is closed. */
+void file_locks_release_ofd(struct open_file *ofd) {
+  for (int i = 0; i < MAX_FILE_LOCKS; i++) {
+    if (lock_table[i].used && lock_table[i].ofd == ofd)
+      lock_table[i].used = 0;
   }
 }
 
@@ -159,6 +315,10 @@ static void close_ofile(struct proc *p, int fd) {
 
   f->refcount--;
   if (f->refcount <= 0) {
+    /* Release any OFD locks held by this open_file before freeing it.
+     * POSIX: OFD locks are tied to the open file description, so they
+     * must be released when the last fd referencing it is closed. */
+    file_locks_release_ofd(f);
     /* Last reference -- call VFS close if applicable */
     if (!f->is_pipe && f->ops && f->ops->close)
       f->ops->close(f->fs_data, f->private);
@@ -266,6 +426,23 @@ static void handle_timer_interrupt(void) {
     display_time();
     #endif
     timer_set_next();
+
+    /* BF: Track per-process CPU time for CLOCK_PROCESS_CPUTIME_ID.
+     * Each timer tick (~100ms at 10Hz) while a process is running
+     * increments that process's cputime_ticks counter. */
+    if (current_proc)
+        current_proc->cputime_ticks++;
+
+    /* Fast per-tick check of critical kernel code PTE via self-referencing
+     * gigapage window (single volatile load + conditional store).
+     * Catches DMA-induced PTE_X corruption before it causes faults. */
+    recursive_check_kcode_pte();
+    /* Full scan every 100 ticks (~10s at 10Hz) */
+    if (ticks % 100 == 50) {
+      int repairs = recursive_check_all_kernel_ptes();
+      if (repairs > 0)
+        printk("timer: repaired %d kernel PTE(s)\n", repairs);
+    }
     
     /* Enhanced memory management: age pages periodically */
     if (ticks % 10 == 0) {  /* Age pages every 10 ticks to reduce overhead */
@@ -425,6 +602,11 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
 /* Called from SYS_exit, signal default-kill, and SYS_kill SIGKILL.     */
 /* ------------------------------------------------------------------ */
 static void cleanup_proc_resources(struct proc *p) {
+    /* ---- POSIX file locks ---- */
+    /* POSIX: all locks held by a process are released on exit.
+     * OFD locks are released separately when the open_file refcount hits 0. */
+    file_locks_release_pid(p->pid);
+
     /* ---- Pagetable / VMAs ---- */
     /* Switch to kernel_pagetable before freeing the process's page table.
      * The kernel runs on the process's page table (shared kernel mapping),
@@ -474,6 +656,8 @@ static void cleanup_proc_resources(struct proc *p) {
                 close_ofile(p, i);
         }
     }
+    /* ENH: Clear per-fd flags on process exit */
+    memset(p->fd_flags, 0, sizeof(p->fd_flags));
 
     /* ---- Signal actions ---- */
     if (p->shared_sa) {
@@ -519,7 +703,20 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     p->parent = current_proc;
     p->pgid = current_proc->pgid;
     p->sid = current_proc->sid;
+    /* BF: Propagate UID/GID to child so kill() permission checks
+     * remain consistent after fork. */
+    p->uid = current_proc->uid;
+    p->gid = current_proc->gid;
     p->clone_flags = clone_flags;
+
+    /* BF: POSIX requires fork to inherit the parent's alternate signal
+     * stack settings.  Without this, allocproc's default SS_DISABLE
+     * overwrites the parent's configured alt stack, causing sigaltstack
+     * GET in the child to report SS_DISABLE instead of the inherited
+     * flags. */
+    p->ss_sp = current_proc->ss_sp;
+    p->ss_size = current_proc->ss_size;
+    p->ss_flags = current_proc->ss_flags;
 
     /* Copy stack bounds and mmap_base from parent */
     p->stack_top = current_proc->stack_top;
@@ -611,7 +808,8 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
 
     /* Child's kernel context: resume at forkret */
     p->context.ra = (uint64_t)forkret;
-    p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
+    /* BF: Fork child inherits parent's kstack_npages for proper stack top */
+    p->context.sp = (uint64_t)p->kstack + (uint64_t)p->kstack_npages * PAGE_SIZE;
 
     p->state = RUNNABLE;
     return p->pid;
@@ -656,7 +854,11 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
                     }
                 }
                 /* free child resources */
-                if (p->kstack) { kfree(p->kstack); p->kstack = NULL; }
+                /* BF: Free all pages of the kernel stack (1 or 2 pages) */
+                if (p->kstack) {
+                    kfree_contiguous(p->kstack, p->kstack_npages);
+                    p->kstack = NULL;
+                }
                 if (p->trapframe) { kfree(p->trapframe); p->trapframe = NULL; }
                 p->state = UNUSED;
                 p->pid = 0;
@@ -679,8 +881,14 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
         /* Otherwise sleep until a child exits */
         if (current_proc) {
             current_proc->waiting_for_uart = 0;
+            /* BF: Mark this process as a wait4 sleeper so setpgid can
+             * selectively wake only waitpid callers, not pipe/poll/futex. */
+            current_proc->waiting_for_child = 1;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* BF: Clear wait4 sleeper flag after waking — process is no
+             * longer blocked in wait4. */
+            current_proc->waiting_for_child = 0;
             /* Check for pending signals after waking up:
              * - User handler (handler > 1): return -EINTR
              * - SIG_DFL terminating signal: return -EINTR to let deliver_signal kill us
@@ -789,9 +997,12 @@ static void normalize_path(const char *in, char *out) {
     memcpy(out, tmp, tlen + 1);
 }
 
-/* Resolve a path against cwd.  Result in out[256]. */
+/* Resolve a path against cwd.  Result in out[128]. */
+/* BF: Reduced raw[] from 256 to 128 to prevent kernel stack overflow.
+ * Deep call chains (openat -> resolve_path -> resolve_symlinks ->
+ * ext2_open -> bcache -> virtio_blk) on 4KB stacks caused corruption. */
 static void resolve_path(const char *cwd, const char *path, char *out) {
-    char raw[256]; /* intermediate buffer before normalization */
+    char raw[128]; /* intermediate buffer before normalization */
     int rlen;
 
     if (path[0] == '/') {
@@ -1003,14 +1214,13 @@ static int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_fi
 /* ------------------------------------------------------------------ */
 
 static void deliver_signal(struct trapframe *tf, struct proc *p) {
-    /* Force unblock fatal/synchronous signals that shouldn't be blocked or ignored */
-    uint64_t force_unblock = signal_bit(SIGKILL) | signal_bit(SIGSTOP) |
-                             signal_bit(SIGILL) | signal_bit(SIGSEGV) |
-                             signal_bit(SIGBUS) | signal_bit(SIGFPE);
+    /* BF: Only SIGKILL and SIGSTOP are truly unblockable per POSIX.
+     * Synchronous fault signals (SIGILL, SIGSEGV, SIGBUS, SIGFPE) are
+     * unmasked at their exception handler sites, not here. */
+    uint64_t force_unblock = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
 
     /* Find lowest-numbered pending unblocked signal.  Unblockable signals
-     * (SIGKILL, synchronous faults) must be deliverable even if sa_mask
-     * has them blocked, so we temporarily unblock them for the check. */
+     * must be deliverable even if sa_mask has them blocked. */
     uint64_t saved_mask = p->sigmask;
     p->sigmask &= ~force_unblock;
     uint64_t deliverable = p->sigpending & ~p->sigmask;
@@ -1049,6 +1259,20 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
             p->stopped_signal = 0;
             p->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
                                signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
+            /* BF: Notify parent with CLD_CONTINUED so SA_SIGINFO handlers
+             * on SIGCHLD can detect child continuation. */
+            if (p->parent) {
+                struct kern_sigaction *psa = proc_sigactions(p->parent);
+                if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
+                    /* BF: Don't overwrite sigchld_code if SIGCHLD is already
+                     * pending -- a prior child's exit/stop code would be lost. */
+                    if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
+                        p->parent->sigchld_code = 6; /* CLD_CONTINUED */
+                    p->parent->sigpending |= signal_bit(SIGCHLD);
+                    if (p->parent->state == SLEEPING)
+                        p->parent->state = RUNNABLE;
+                }
+            }
             return;
         }
 
@@ -1063,6 +1287,10 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
                 /* SA_NOCLDSTOP: don't send SIGCHLD on child stop */
                 struct kern_sigaction *psa = proc_sigactions(p->parent);
                 if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
+                    /* BF: Don't overwrite sigchld_code if SIGCHLD is already
+                     * pending -- a prior child's exit/stop code would be lost. */
+                    if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
+                        p->parent->sigchld_code = 5; /* CLD_STOPPED */
                     p->parent->sigpending |= signal_bit(SIGCHLD);
                     if (p->parent->state == SLEEPING)
                         p->parent->state = RUNNABLE;
@@ -1079,9 +1307,25 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         cleanup_proc_resources(p);
         p->state = ZOMBIE;
         if (p->parent) {
+            /* BF: Don't overwrite sigchld_code if SIGCHLD is already pending */
+            if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
+                p->parent->sigchld_code = 2; /* CLD_KILLED */
             p->parent->sigpending |= signal_bit(SIGCHLD);
             if (p->parent->state == SLEEPING)
                 p->parent->state = RUNNABLE;
+            /* BF: SA_NOCLDWAIT on parent means auto-reap -- reparent to
+             * init so waitpid in parent doesn't block on this zombie.
+             * Mirrors the same logic in sys_exit_handler. */
+            struct kern_sigaction *psa = proc_sigactions(p->parent);
+            if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
+                struct proc *initproc = 0;
+                for (struct proc *q = proc; q < &proc[NPROC]; q++) {
+                    if (q->pid == 1 && q->state != UNUSED) { initproc = q; break; }
+                }
+                p->parent = initproc;
+                if (initproc && initproc->state == SLEEPING)
+                    initproc->state = RUNNABLE;
+            }
         }
         swtch(&p->context, &scheduler_context);
         return;
@@ -1110,16 +1354,29 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
      * siginfo first, then the signal frame on top. */
     uint64_t siginfo_uaddr = 0;
     if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
-        /* siginfo_t: { int si_signo, si_errno, si_code; pid_t si_pid; uid_t si_uid; ... }
-         * Minimal: 128 bytes (Linux RISC-V siginfo_t is 128 bytes) */
+        /* BF: Populate all required siginfo_t fields at their correct offsets.
+         * siginfo_t layout: { int si_signo(0), si_errno(4), si_code(8);
+         *   pid_t si_pid(12); uid_t si_uid(16); int si_status(20); ... }
+         * Previously only si_signo and si_code were set, and si_pid was at
+         * the wrong offset (16 instead of 12). */
         uint8_t ksi[128];
         memset(ksi, 0, sizeof(ksi));
         int32_t si_signo = (int32_t)signum;
-        memcpy(ksi + 0, &si_signo, 4);
-        int32_t si_code = 0; /* SI_USER */
-        memcpy(ksi + 8, &si_code, 4);
+        memcpy(ksi + 0, &si_signo, 4);   /* offset 0: si_signo */
+        int32_t si_errno = 0;
+        memcpy(ksi + 4, &si_errno, 4);   /* offset 4: si_errno = 0 */
+        /* BF: Use process-specific sigchld_code for SIGCHLD so SA_SIGINFO
+         * handlers can distinguish CLD_STOPPED/CLD_CONTINUED/CLD_EXITED. */
+        int32_t si_code = 0; /* SI_USER for kill-delivered signals */
+        if (signum == SIGCHLD && p->sigchld_code != 0) {
+            si_code = p->sigchld_code;
+            p->sigchld_code = 0; /* consumed */
+        }
+        memcpy(ksi + 8, &si_code, 4);    /* offset 8: si_code */
         int32_t si_pid = current_proc ? (int32_t)current_proc->pid : 0;
-        memcpy(ksi + 16, &si_pid, 4);
+        memcpy(ksi + 12, &si_pid, 4);    /* offset 12: si_pid (sender) */
+        int32_t si_uid = 0;
+        memcpy(ksi + 16, &si_uid, 4);    /* offset 16: si_uid = 0 (single-user OS) */
 
         sp -= 128;
         sp &= ~15UL;
@@ -1136,7 +1393,15 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
     sp &= ~15UL; /* 16-byte align */
 
     struct signal_frame frame;
-    frame.saved_sigmask = p->sigmask;
+    /* BF: If ppoll/pselect6 deferred a mask restore (so the signal can be
+     * delivered under the temporary unblocked mask), save the ORIGINAL mask
+     * into the frame so sigreturn restores it after the handler completes. */
+    if (p->has_saved_sigmask) {
+        frame.saved_sigmask = p->saved_sigmask_restore;
+        p->has_saved_sigmask = 0;
+    } else {
+        frame.saved_sigmask = p->sigmask;
+    }
     memcpy(&frame.saved_tf, tf, sizeof(frame.saved_tf));
 
     /* SA_RESTART: if the process was in a blocking syscall that returned
@@ -1180,6 +1445,9 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
         handler = 0;
     }
     if (handler >= 2) {
+        /* BF: Bump epoch so ppoll/pselect6 can detect that a signal was
+         * handled between their mask swap and the blocking sleep. */
+        p->signal_handled_epoch++;
         tf->epc = handler;                   /* jump to signal handler */
         tf->a0 = (uint64_t)signum;           /* first arg: signal number */
         if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
@@ -1191,7 +1459,11 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
 
         /* Block this signal during handler execution */
         p->sigmask |= sa[signum].mask;
-        if (!(sa[signum].flags & 0x40000000)) /* SA_NODEFER */
+        /* BF: SA_RESETHAND implies SA_NODEFER per POSIX -- when the handler
+         * resets to SIG_DFL after one invocation, the signal should not be
+         * blocked during that invocation. */
+        if (!(sa[signum].flags & 0x40000000) &&      /* SA_NODEFER */
+            !(sa[signum].flags & (int)0x80000000))    /* SA_RESETHAND */
             p->sigmask |= signal_bit(signum);
 
         /* SA_RESETHAND: reset handler to SIG_DFL after delivery */
@@ -1450,25 +1722,34 @@ static long sys_openat_handler(struct trapframe *tf) {
         return (long)-2; /* -ENOENT */
     }
 
+    /* BF: Pre-open directory/flag validation.  These checks run BEFORE
+     * ops->open() so that flags like O_TRUNC do not modify the file
+     * when the open should have failed (e.g., O_DIRECTORY on a regular
+     * file, or O_CREAT on an existing directory). */
+#define O_CREAT    0100
+#define O_TRUNC    01000
+#define O_DIRECTORY 0200000
+    {
+        int is_dir = vfs_is_dir(resolved);
+        /* Reject O_DIRECTORY on a non-directory before any side-effects */
+        if ((flags & O_DIRECTORY) && !is_dir)
+            return (long)-20; /* -ENOTDIR */
+        /* Reject O_WRONLY/O_RDWR on directories */
+        if (is_dir) {
+            int accmode = flags & 3;
+            if (accmode == 1 || accmode == 2) /* O_WRONLY or O_RDWR */
+                return (long)-21; /* -EISDIR */
+        }
+        /* Reject O_CREAT on an existing directory (POSIX: EISDIR) */
+        if (is_dir && (flags & O_CREAT))
+            return (long)-21; /* -EISDIR */
+    }
+
     void *priv = NULL;
     int ret = ops->open(mnt->fs_data, relpath, flags, &priv);
     if (ret < 0) {
         return (long)ret;
     } else {
-        /* Reject O_WRONLY/O_RDWR on directories */
-        if (vfs_is_dir(resolved)) {
-            int accmode = flags & 3;
-            if (accmode == 1 || accmode == 2) { /* O_WRONLY or O_RDWR */
-                if (ops->close) ops->close(mnt->fs_data, priv);
-                return (long)-21; /* -EISDIR */
-            }
-        }
-        /* Reject non-directory with O_DIRECTORY (ENOTDIR = -20) */
-#define O_DIRECTORY 0200000
-        if ((flags & O_DIRECTORY) && !vfs_is_dir(resolved)) {
-            if (ops->close) ops->close(mnt->fs_data, priv);
-            return (long)-20;
-        }
         struct open_file *f = vfs_alloc_file();
         if (!f) {
             if (ops->close) ops->close(mnt->fs_data, priv);
@@ -1493,6 +1774,13 @@ static long sys_openat_handler(struct trapframe *tf) {
           f->path[plen] = '\0';
         }
         proc_ofile(current_proc)[fd] = f;
+        /* ENH: Propagate O_CLOEXEC and O_CLOFORK open flags to per-fd
+         * flags so that F_GETFD/F_SETFD and fork/exec use fd_flags. */
+        current_proc->fd_flags[fd] = 0;
+        if (flags & 02000000) /* O_CLOEXEC */
+            current_proc->fd_flags[fd] |= 1; /* FD_CLOEXEC */
+        if (flags & 040000000) /* O_CLOFORK */
+            current_proc->fd_flags[fd] |= 2; /* FD_CLOFORK */
         return (long)fd;
     }
 }
@@ -1501,6 +1789,8 @@ static long sys_close_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     if (fd >= 0 && fd < NOFILE && proc_ofile(current_proc)[fd]) {
         close_ofile(current_proc, fd);
+        /* ENH: Clear per-fd flags when fd is closed */
+        current_proc->fd_flags[fd] = 0;
         return (long)0;
     } else {
         return (long)-9; /* EBADF */
@@ -1527,6 +1817,17 @@ static long sys_dup3_handler(struct trapframe *tf) {
                 if (ftab[oldfd]->pipe_read)  pipes[pid].read_open++;
                 if (ftab[oldfd]->pipe_write) pipes[pid].write_open++;
             }
+        }
+        /* ENH: Process O_CLOEXEC/O_CLOFORK flags in dup3.
+         * POSIX: the new fd inherits only the flags passed in the
+         * third argument, not the flags of the old fd. */
+        {
+            int flags = (int)tf->a2;
+            current_proc->fd_flags[newfd] = 0;
+            if (flags & 02000000)  /* O_CLOEXEC */
+                current_proc->fd_flags[newfd] |= 1; /* FD_CLOEXEC */
+            if (flags & 040000000) /* O_CLOFORK */
+                current_proc->fd_flags[newfd] |= 2; /* FD_CLOFORK */
         }
         return (long)newfd;
     }
@@ -1571,6 +1872,18 @@ static long sys_pipe2_handler(struct trapframe *tf) {
             wf->ops = NULL;
             wf->flags = (pipe_flags & 02000000) ? (1 | 02000000) : 1; /* O_WRONLY + O_CLOEXEC */
             ftab[wfd] = wf;
+            /* ENH: Set per-fd flags for pipe fds based on pipe_flags.
+             * O_CLOEXEC and O_CLOFORK propagate to fd_flags. */
+            current_proc->fd_flags[rfd] = 0;
+            current_proc->fd_flags[wfd] = 0;
+            if (pipe_flags & 02000000) { /* O_CLOEXEC */
+                current_proc->fd_flags[rfd] |= 1;
+                current_proc->fd_flags[wfd] |= 1;
+            }
+            if (pipe_flags & 040000000) { /* O_CLOFORK */
+                current_proc->fd_flags[rfd] |= 2;
+                current_proc->fd_flags[wfd] |= 2;
+            }
             int kfds[2] = { rfd, wfd };
             if (copyout(current_proc->pagetable, tf->a0, kfds, sizeof(kfds)) < 0) {
                 close_ofile(current_proc, rfd);
@@ -1837,15 +2150,39 @@ static long sys_execve_handler(struct trapframe *tf) {
         return (long)(shebang_file_found ? -8 : -2);
     }
 
-    /* POSIX: close file descriptors marked with O_CLOEXEC (FD_CLOEXEC) */
+    /* POSIX: close file descriptors marked with FD_CLOEXEC.
+     * ENH: Check per-fd fd_flags (bit 0 = FD_CLOEXEC) in addition to the
+     * legacy O_CLOEXEC check on the open file flags, so that both old and
+     * new paths are covered. */
     {
         #define KERN_O_CLOEXEC 02000000 /* matches libc O_CLOEXEC */
         struct open_file **oft = proc_ofile(current_proc);
         for (int fd = 0; fd < NOFILE; fd++) {
-            if (oft[fd] && (oft[fd]->flags & KERN_O_CLOEXEC))
+            if (oft[fd] && ((oft[fd]->flags & KERN_O_CLOEXEC) ||
+                            (current_proc->fd_flags[fd] & 1))) {
                 close_ofile(current_proc, fd);
+                current_proc->fd_flags[fd] = 0;
+            }
         }
     }
+
+    /* BF: POSIX requires caught signal dispositions (user handlers) to be
+     * reset to SIG_DFL on exec.  SIG_IGN dispositions are preserved.
+     * Also reset the alternate signal stack to SS_DISABLE since the old
+     * stack memory is gone after exec. */
+    {
+        struct kern_sigaction *sa = proc_sigactions(current_proc);
+        for (int i = 1; i < 32; i++) {
+            if (sa[i].handler > 1) { /* user handler, not SIG_DFL(0) or SIG_IGN(1) */
+                sa[i].handler = 0;  /* reset to SIG_DFL */
+                sa[i].flags = 0;
+                sa[i].mask = 0;
+            }
+        }
+    }
+    current_proc->ss_sp = 0;
+    current_proc->ss_size = 0;
+    current_proc->ss_flags = 2; /* SS_DISABLE */
 
     /* Mark that this process has exec'd (for POSIX setpgid restrictions) */
     current_proc->has_execed = 1;
@@ -2001,12 +2338,15 @@ static long sys_getppid_handler(struct trapframe *tf) {
 
 static long sys_getuid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual process UID instead of hardcoded 0 so that
+     * userspace identity checks (e.g. kill permission) are accurate. */
+    return (long)current_proc->uid;
 }
 
 static long sys_getgid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual process GID instead of hardcoded 0. */
+    return (long)current_proc->gid;
 }
 
 /* Helper: deliver signal to a single process */
@@ -2103,39 +2443,76 @@ static long sys_kill_handler(struct trapframe *tf) {
         /* Send to all processes in caller's process group */
         pid_t pgid = current_proc->pgid;
         int found = 0;
+        int eperm = 0;
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pgid == pgid) {
-                kill_deliver(&proc[i], sig);
+                /* BF: POSIX requires kill() to check UID permissions */
+                if (current_proc->uid != 0 &&
+                    current_proc->uid != proc[i].uid) {
+                    eperm = 1;
+                    continue;
+                }
                 found = 1;
+                /* BF: sig=0 is existence/permission check only -- no delivery.
+                 * Prevents undefined behavior from signal_bit(0) = 1 << -1. */
+                if (sig != 0)
+                    kill_deliver(&proc[i], sig);
             }
         }
-        return found ? 0 : (long)-3;
+        if (found)
+            return 0;
+        return eperm ? (long)-1 : (long)-3; /* EPERM or ESRCH */
     }
 
     if (target_pid < -1) {
         /* Send to all processes in process group abs(target_pid) */
         pid_t pgid = -target_pid;
         int found = 0;
+        int eperm = 0;
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pgid == pgid) {
-                kill_deliver(&proc[i], sig);
+                /* BF: POSIX requires kill() to check UID permissions */
+                if (current_proc->uid != 0 &&
+                    current_proc->uid != proc[i].uid) {
+                    eperm = 1;
+                    continue;
+                }
                 found = 1;
+                /* BF: sig=0 is existence/permission check only */
+                if (sig != 0)
+                    kill_deliver(&proc[i], sig);
             }
         }
-        return found ? 0 : (long)-3;
+        if (found)
+            return 0;
+        return eperm ? (long)-1 : (long)-3; /* EPERM or ESRCH */
     }
 
     if (target_pid == -1) {
         /* Send to all processes except init (pid 1) and self */
+        /* BF: Track found/eperm so we return correct POSIX error when
+         * all eligible processes were skipped due to UID mismatch. */
+        int found = 0;
+        int eperm = 0;
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pid != 1 && &proc[i] != current_proc) {
-                kill_deliver(&proc[i], sig);
+                /* BF: POSIX requires kill() to check UID permissions */
+                if (current_proc->uid != 0 &&
+                    current_proc->uid != proc[i].uid) {
+                    eperm = 1;
+                    continue;
+                }
+                /* BF: sig=0 is existence/permission check only */
+                if (sig != 0)
+                    kill_deliver(&proc[i], sig);
+                found = 1;
             }
         }
-        return 0;
+        if (found) return 0;
+        return eperm ? (long)-1 : (long)-3; /* EPERM or ESRCH */
     }
 
     /* Positive pid: send to specific process */
@@ -2148,6 +2525,67 @@ static long sys_kill_handler(struct trapframe *tf) {
     }
     if (!target)
         return (long)-3; /* -ESRCH */
+
+    /* BF: POSIX requires kill() to check UID permissions */
+    if (current_proc->uid != 0 && current_proc->uid != target->uid)
+        return (long)-1; /* -EPERM */
+
+    /* BF: sig=0 is existence/permission check only -- no signal sent.
+     * Prevents undefined behavior from signal_bit(0) = 1 << -1. */
+    if (sig == 0)
+        return 0;
+
+    kill_deliver(target, sig);
+    return 0;
+}
+
+/* ENH: rt_sigqueueinfo handler -- delivers a signal with siginfo_t data.
+ * POSIX sigqueue() requires this syscall to send queued signals with
+ * user-provided siginfo_t (including si_value). */
+static long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
+    pid_t target_pid = (pid_t)(int)tf->a0;
+    int sig = (int)tf->a1;
+    uint64_t info_uaddr = tf->a2;
+
+    if (sig < 0 || (!signal_is_valid(sig) && sig != 0))
+        return (long)-22; /* -EINVAL */
+
+    if (sig == 0)
+        return 0; /* permission check only */
+
+    struct proc *target = NULL;
+    for (int i = 0; i < NPROC; i++) {
+        if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
+            target = &proc[i];
+            break;
+        }
+    }
+    if (!target)
+        return (long)-3; /* -ESRCH */
+
+    /* BF: Store the user-provided siginfo_t in the target's queue so
+     * that sigtimedwait can later retrieve si_value / si_code.  Without
+     * this, sigqueue data was discarded and sigtimedwait returned empty
+     * siginfo. */
+    if (info_uaddr) {
+        int slot = -1;
+        for (int i = 0; i < NSIGQUEUE; i++) {
+            if (!target->sigqueue_buf[i].valid) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot >= 0) {
+            uint8_t kinfo[128];
+            if (copyin(current_proc->pagetable, kinfo, info_uaddr, 128) >= 0) {
+                memcpy(target->sigqueue_buf[slot].info, kinfo, 128);
+                target->sigqueue_buf[slot].signum = sig;
+                target->sigqueue_buf[slot].valid = 1;
+            }
+        }
+        /* If queue is full, signal is still delivered but info is lost
+         * (POSIX allows EAGAIN but we prefer delivery over rejection) */
+    }
 
     kill_deliver(target, sig);
     return 0;
@@ -2172,12 +2610,18 @@ static long sys_clock_gettime_handler(struct trapframe *tf) {
         uint64_t elapsed = r_time() - boot_time;
         kts.tv_sec  = (int64_t)(elapsed / TIMER_FREQ);
         kts.tv_nsec = (int64_t)((elapsed % TIMER_FREQ) * 100);
-    } else if (clk_id == 2 || clk_id == 3) {
-        /* CLOCK_PROCESS_CPUTIME_ID (2) / CLOCK_THREAD_CPUTIME_ID (3):
-         * approximate with monotonic time since boot (single-hart CPU) */
-        uint64_t elapsed = r_time() - boot_time;
-        kts.tv_sec  = (int64_t)(elapsed / TIMER_FREQ);
-        kts.tv_nsec = (int64_t)((elapsed % TIMER_FREQ) * 100);
+    } else if (clk_id == 2) {
+        /* BF: Return actual per-process CPU time instead of wall-clock.
+         * cputime_ticks is incremented by the timer interrupt (~10Hz),
+         * so each tick represents ~100ms of CPU time. */
+        uint64_t cpu_ns = current_proc->cputime_ticks * 100000000ULL; /* 100ms per tick */
+        kts.tv_sec  = (int64_t)(cpu_ns / 1000000000ULL);
+        kts.tv_nsec = (int64_t)(cpu_ns % 1000000000ULL);
+    } else if (clk_id == 3) {
+        /* CLOCK_THREAD_CPUTIME_ID: single-hart, so same as process time */
+        uint64_t cpu_ns = current_proc->cputime_ticks * 100000000ULL;
+        kts.tv_sec  = (int64_t)(cpu_ns / 1000000000ULL);
+        kts.tv_nsec = (int64_t)(cpu_ns % 1000000000ULL);
     } else {
         return (long)-22; /* EINVAL */
     }
@@ -2473,6 +2917,13 @@ static long sys_exit_handler(struct trapframe *tf) {
             struct proc *par = current_proc->parent;
             struct kern_sigaction *psa = proc_sigactions(par);
             current_proc->state = ZOMBIE;
+            /* BF: Set sigchld_code so SA_SIGINFO SIGCHLD handlers get the
+             * correct si_code (CLD_EXITED for normal exit, CLD_KILLED if
+             * terminated by a signal). */
+            /* BF: Don't overwrite sigchld_code if SIGCHLD is already
+             * pending -- a prior child's exit/stop code would be lost. */
+            if (!(par->sigpending & signal_bit(SIGCHLD)))
+                par->sigchld_code = current_proc->killed_by_signal ? 2 : 1;
             par->sigpending |= signal_bit(SIGCHLD);
             if (par->state == SLEEPING)
                 par->state = RUNNABLE;
@@ -2579,6 +3030,9 @@ static long sys_reboot_handler(struct trapframe *tf) {
     return SYSCALL_NORETURN;
 }
 
+/* Forward declaration: used by MAP_FIXED in sys_mmap_handler */
+static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end);
+
 static long sys_mmap_handler(struct trapframe *tf) {
     uint64_t addr  = tf->a0;
     uint64_t len   = tf->a1;
@@ -2587,37 +3041,104 @@ static long sys_mmap_handler(struct trapframe *tf) {
     int      fd    = (int)tf->a4;
     uint64_t offset = tf->a5;
 
+    /* BF: POSIX requires offset to be page-aligned for mmap. */
+    if (offset % PAGE_SIZE != 0)
+        return (long)-22; /* EINVAL */
+
+    /* BF: POSIX requires exactly one of MAP_SHARED or MAP_PRIVATE.
+     * Return EINVAL if neither or both are set. */
+    {
+        int shared = flags & 0x01; /* MAP_SHARED */
+        int priv   = flags & MAP_PRIVATE;
+        if ((!shared && !priv) || (shared && priv))
+            return (long)-22; /* EINVAL */
+    }
+
+    /* BF: MAP_FIXED requires a page-aligned address.  POSIX says
+     * the implementation must not silently round down. */
+    if ((flags & MAP_FIXED) && (addr & (PAGE_SIZE - 1)))
+        return (long)-22; /* EINVAL */
+
+    /* BF: Validate fd for non-anonymous (file-backed) mappings.
+     * POSIX requires a valid open file descriptor. */
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (!(flags & MAP_ANONYMOUS)) {
+        if (fd < 0 || fd >= NOFILE || !ftab[fd])
+            return (long)-9; /* EBADF */
+        /* BF: Pipes are not memory-mappable.  POSIX requires ENODEV when
+         * attempting to mmap a file descriptor that doesn't support it. */
+        if (ftab[fd]->is_pipe)
+            return (long)-19; /* ENODEV */
+        /* BF: Check file permission vs requested prot.
+         * MAP_SHARED + PROT_WRITE needs a writable fd.
+         * PROT_READ needs a readable fd. */
+        int accmode = ftab[fd]->flags & 3; /* O_ACCMODE mask */
+        if ((flags & 0x01 /* MAP_SHARED */) && (prot & PROT_WRITE)) {
+            /* accmode 0 = O_RDONLY — not writable */
+            if (accmode == 0)
+                return (long)-13; /* EACCES */
+        }
+        if (prot & PROT_READ) {
+            /* accmode 1 = O_WRONLY — not readable */
+            if (accmode == 1)
+                return (long)-13; /* EACCES */
+        }
+    }
+
+    /* BF: Check for overflow before rounding len up to page boundary.
+     * ULONG_MAX + PAGE_SIZE-1 wraps to 0, which would pass later checks. */
+    if (len > (uint64_t)-1 - (PAGE_SIZE - 1))
+        return (long)-75; /* EOVERFLOW */
+
+    /* BF: POSIX requires EOVERFLOW when off + len would overflow.
+     * File-backed mappings with large offset can wrap around. */
+    if (offset != 0 && offset + len < offset)
+        return (long)-75; /* EOVERFLOW */
+
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (len == 0) {
-        return (long)-1;
+        return (long)-22; /* EINVAL: zero-length mapping */
     }
 
     uint64_t va;
     if (flags & MAP_FIXED) {
-        va = addr & ~(uint64_t)(PAGE_SIZE - 1);
+        va = addr; /* BF: addr already validated as page-aligned above */
         /* Reject kernel addresses for MAP_FIXED */
         if (va >= 0x80000000UL || va + len > 0x80000000UL)
-            return (long)-1;
+            return (long)-22; /* EINVAL */
+        /* BF: POSIX requires MAP_FIXED to replace any existing mappings
+         * in the target range [va, va+len).  Without this, old PTEs and
+         * VMA entries persist, causing incorrect data reads. */
+        mmap_writeback_shared(current_proc, va, va + len);
+        uvmunmap(current_proc->pagetable, va, len);
+        sfence_vma();
+        vma_remove(current_proc, va, va + len);
     } else {
         if (current_proc->mmap_base == 0)
             current_proc->mmap_base = 0x20000000UL;
         va = current_proc->mmap_base;
-        current_proc->mmap_base += len;
+        /* BF: Ensure mmap never returns address 0 for anonymous mappings.
+         * A NULL return would be confused with MAP_FAILED by userspace. */
+        if (va == 0)
+            va = PAGE_SIZE;
+        current_proc->mmap_base = va + len;
     }
 
     int pte_flags = 0;
     if (prot & PROT_READ)  pte_flags |= PTE_R;
     if (prot & PROT_WRITE) pte_flags |= PTE_W;
     if (prot & PROT_EXEC)  pte_flags |= PTE_X;
-    if (pte_flags == 0) pte_flags = PTE_R; /* minimum readable */
+    /* BF: Removed forced PTE_R for PROT_NONE -- demand paging handles this
+     * correctly via the page fault handler which checks VMA prot flags
+     * and delivers SIGSEGV for PROT_NONE access attempts. */
 
     /* Register VMA — pages allocated lazily on first access. */
     if (vma_add(current_proc, va, va + len, prot, flags) < 0) {
         return (long)-1;
     }
 
-    /* File-backed mapping: store file reference in VMA for demand paging */
-    struct open_file **ftab = proc_ofile(current_proc);
+    /* File-backed mapping: store file reference in VMA for demand paging.
+     * ftab was already retrieved above during fd validation. */
     if (!(flags & MAP_ANONYMOUS) && fd >= 0 && fd < NOFILE && ftab[fd]) {
         struct vm_area *vma = vma_find(current_proc, va);
         if (vma) {
@@ -2658,8 +3179,19 @@ static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) 
 }
 
 static long sys_munmap_handler(struct trapframe *tf) {
-    uint64_t addr = tf->a0 & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t addr = tf->a0;
     uint64_t len  = tf->a1;
+
+    /* BF: POSIX requires EINVAL when len is 0.  Previously len=0 was
+     * rounded up to 0 and silently accepted as a no-op. */
+    if (len == 0)
+        return -22; /* -EINVAL */
+
+    /* BF: POSIX requires addr to be a multiple of page size.  Previously
+     * non-aligned addresses were silently rounded down. */
+    if (addr & (PAGE_SIZE - 1))
+        return -22; /* -EINVAL */
+
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 
     if (addr >= MAXVA || addr + len > MAXVA)
@@ -2676,6 +3208,24 @@ static long sys_munmap_handler(struct trapframe *tf) {
 
     /* Remove VMA tracking (handles splits automatically) */
     vma_remove(current_proc, addr, addr + len);
+
+    /* BF: Scan VMA list for highest allocated address.
+     * Resets mmap_base to allow address space reuse after munmap.
+     * Without this, 100k mmap/munmap cycles exhaust the address space
+     * since mmap_base only moves forward.  The simple frontier check
+     * (addr + len == mmap_base) only reclaims when unmapping at the
+     * exact frontier, missing non-contiguous free regions. */
+    {
+        uint64_t highest = 0x20000000;
+        struct vm_area *v = current_proc->vma_list;
+        while (v) {
+            uint64_t end = v->end;
+            if (end > highest)
+                highest = end;
+            v = v->next;
+        }
+        current_proc->mmap_base = highest;
+    }
 
     return 0;
 }
@@ -2860,9 +3410,29 @@ static long sys_rt_sigaction_handler(struct trapframe *tf) {
                 return (long)-14;
             }
             sig_sa[signum].handler = act.handler;
+            /* BF: POSIX forbids blocking SIGKILL or SIGSTOP via sa_mask.
+             * Strip these before storing so deliver_signal never masks them
+             * when applying the handler's sa_mask to the process sigmask. */
+            act.mask &= ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
             sig_sa[signum].mask = act.mask;
             sig_sa[signum].flags = act.flags;
             sig_sa[signum].restorer = act.restorer;
+
+            /* BF: POSIX: setting SIG_IGN for a signal clears any pending
+             * instance of that signal.  Without this, a pending signal could
+             * be delivered even after the process explicitly ignored it. */
+            if (act.handler == 1) { /* SIG_IGN */
+                current_proc->sigpending &= ~signal_bit(signum);
+            }
+            /* BF: POSIX requires that setting SIG_DFL for signals whose default
+             * action is "ignore" (SIGCHLD, SIGURG, SIGWINCH, SIGCONT) also
+             * discards any pending instance.  Without this, a pending SIGCHLD
+             * can survive a SIG_DFL->handler->SIG_DFL transition and fire
+             * unexpectedly when unblocked. */
+            if (act.handler == 0 && (signum == SIGCHLD || signum == SIGURG ||
+                                     signum == SIGWINCH || signum == SIGCONT)) {
+                current_proc->sigpending &= ~signal_bit(signum);
+            }
         }
         return (long)0;
     }
@@ -2884,12 +3454,17 @@ static long sys_rt_sigprocmask_handler(struct trapframe *tf) {
         if (copyin(current_proc->pagetable, &newset, set_uaddr, sizeof(newset)) < 0) {
             return (long)-14;
         }
-        if (how == 0)
-            current_proc->sigmask |= newset;
-        else if (how == 1)
+        /* BF: POSIX forbids blocking SIGKILL or SIGSTOP.  Strip these from
+         * any mask modification.  Also return -EINVAL for invalid how. */
+        uint64_t unblockable = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
+        if (how == 0)       /* SIG_BLOCK */
+            current_proc->sigmask |= (newset & ~unblockable);
+        else if (how == 1)  /* SIG_UNBLOCK */
             current_proc->sigmask &= ~newset;
-        else if (how == 2)
-            current_proc->sigmask = newset;
+        else if (how == 2)  /* SIG_SETMASK */
+            current_proc->sigmask = (newset & ~unblockable);
+        else
+            return (long)-22; /* EINVAL for invalid how */
     }
     return (long)0;
 }
@@ -2905,6 +3480,19 @@ static long sys_rt_sigreturn_handler(struct trapframe *tf) {
 
     current_proc->sigmask = frame.saved_sigmask;
     memcpy(tf, &frame.saved_tf, sizeof(frame.saved_tf));
+
+    /* BF: Clear SS_ONSTACK if the restored sp is outside the alternate
+     * signal stack.  POSIX requires SS_ONSTACK to reflect whether the
+     * thread is currently executing on the alt stack; without this,
+     * a second signal after sigreturn would incorrectly think we're
+     * still on the alt stack. */
+    if (current_proc->ss_sp != 0 && current_proc->ss_size != 0) {
+        uint64_t sp = tf->sp;
+        if (sp < current_proc->ss_sp ||
+            sp >= current_proc->ss_sp + current_proc->ss_size)
+            current_proc->ss_flags &= ~1; /* clear SS_ONSTACK */
+    }
+
     return SYSCALL_NORETURN;
 }
 
@@ -2998,11 +3586,29 @@ static long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
             
             /* Fill siginfo_t if requested */
             if (info_uaddr) {
-                /* siginfo_t is at least 128 bytes; zero it and set si_signo */
                 uint8_t kinfo[128];
-                memset(kinfo, 0, sizeof(kinfo));
-                int32_t si_signo = (int32_t)sig;
-                memcpy(kinfo, &si_signo, 4);
+                int found_queued = 0;
+                /* BF: Search sigqueue_buf for stored siginfo from sigqueue().
+                 * This preserves si_value and si_code that the sender set.
+                 * Without this, sigtimedwait always returned empty siginfo. */
+                for (int qi = 0; qi < NSIGQUEUE; qi++) {
+                    if (current_proc->sigqueue_buf[qi].valid &&
+                        current_proc->sigqueue_buf[qi].signum == sig) {
+                        memcpy(kinfo, current_proc->sigqueue_buf[qi].info, 128);
+                        current_proc->sigqueue_buf[qi].valid = 0;
+                        found_queued = 1;
+                        break;
+                    }
+                }
+                if (!found_queued) {
+                    /* No queued info: build minimal siginfo */
+                    memset(kinfo, 0, sizeof(kinfo));
+                    *(int32_t *)(kinfo + 0) = (int32_t)sig; /* si_signo */
+                    *(int32_t *)(kinfo + 4) = 0;            /* si_errno */
+                    *(int32_t *)(kinfo + 8) = 0;            /* si_code: SI_USER */
+                    *(int32_t *)(kinfo + 12) = 0;           /* si_pid */
+                    *(int32_t *)(kinfo + 16) = 0;           /* si_uid */
+                }
                 if (copyout(current_proc->pagetable, info_uaddr, kinfo, 128) < 0)
                     return (long)-14; /* EFAULT */
             }
@@ -3010,9 +3616,10 @@ static long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
             return (long)sig;
         }
         
-        /* Check timeout */
+        /* BF: POSIX specifies EAGAIN (not ETIMEDOUT) when sigtimedwait
+         * times out without a signal becoming pending. */
         if (has_timeout && r_time() >= deadline_ticks)
-            return (long)-110; /* ETIMEDOUT */
+            return (long)-11; /* EAGAIN */
         
         /* Sleep and retry */
         current_proc->state = SLEEPING;
@@ -3048,8 +3655,9 @@ static long sys_fcntl_handler(struct trapframe *tf) {
     if (fd < 0 || fd >= NOFILE || !ftab[fd])
         return (long)-9; /* EBADF */
 
-    if (cmd == 0 || cmd == 1030) {
-        /* F_DUPFD (0) or F_DUPFD_CLOEXEC (1030) — dup to lowest fd >= arg */
+    if (cmd == 0 || cmd == 1030 || cmd == 1031) {
+        /* F_DUPFD (0), F_DUPFD_CLOEXEC (1030), or F_DUPFD_CLOFORK (1031)
+         * — dup to lowest fd >= arg */
         int minfd = (int)tf->a2;
         if (minfd < 0 || minfd >= NOFILE)
             return (long)-22; /* EINVAL */
@@ -3064,13 +3672,27 @@ static long sys_fcntl_handler(struct trapframe *tf) {
                         if (ftab[fd]->pipe_write) pipes[pid].write_open++;
                     }
                 }
+                /* ENH: Set per-fd flags based on F_DUPFD variant.
+                 * F_DUPFD clears all flags; CLOEXEC/CLOFORK set their bit. */
+                current_proc->fd_flags[i] = 0;
+                if (cmd == 1030) /* F_DUPFD_CLOEXEC */
+                    current_proc->fd_flags[i] |= 1; /* FD_CLOEXEC */
+                if (cmd == 1031) /* F_DUPFD_CLOFORK */
+                    current_proc->fd_flags[i] |= 2; /* FD_CLOFORK */
                 return (long)i;
             }
         }
         return (long)-24; /* EMFILE */
     } else if (cmd == 1) { /* F_GETFD */
-        return (ftab[fd]->flags & 02000000) ? 1 : 0; /* FD_CLOEXEC */
+        /* ENH: Return per-fd flags (FD_CLOEXEC | FD_CLOFORK) from fd_flags
+         * instead of deriving from open file flags.  POSIX requires F_GETFD
+         * to return file descriptor flags, not file status flags. */
+        return (long)current_proc->fd_flags[fd];
     } else if (cmd == 2) { /* F_SETFD */
+        /* ENH: Store per-fd flags (FD_CLOEXEC=1, FD_CLOFORK=2) directly in
+         * fd_flags.  Also sync O_CLOEXEC in the open file flags for backward
+         * compat with the O_CLOEXEC-based close-on-exec path in execve. */
+        current_proc->fd_flags[fd] = (uint8_t)((int)tf->a2 & 3);
         if ((int)tf->a2 & 1) /* FD_CLOEXEC */
             ftab[fd]->flags |= 02000000; /* O_CLOEXEC */
         else
@@ -3081,6 +3703,65 @@ static long sys_fcntl_handler(struct trapframe *tf) {
     } else if (cmd == 4) { /* F_SETFL */
         ftab[fd]->flags = (int)tf->a2;
         return (long)0;
+    } else if (cmd == 5 || cmd == 36) {
+        /* F_GETLK (5) / F_OFD_GETLK (36) -- query whether a lock would
+         * conflict with existing locks.  Returns the conflicting lock info
+         * in the user-supplied struct flock, or sets l_type=F_UNLCK if no
+         * conflict exists. */
+        struct { short l_type; short l_whence; int64_t l_start;
+                 int64_t l_len; pid_t l_pid; } kfl;
+        if (copyin(current_proc->pagetable, &kfl, tf->a2, sizeof(kfl)) < 0)
+            return (long)-14; /* EFAULT */
+        int is_ofd = (cmd == 36);
+        /* Convert l_whence-relative offset to absolute (SEEK_CUR=1, SEEK_END=2) */
+        if (kfl.l_whence == 1) { /* SEEK_CUR */
+            kfl.l_start += ftab[fd]->offset;
+        } else if (kfl.l_whence == 2) { /* SEEK_END */
+            uint8_t stbuf[128];
+            if (ftab[fd]->ops && ftab[fd]->ops->fstat &&
+                ftab[fd]->ops->fstat(ftab[fd]->fs_data, ftab[fd]->private, stbuf) == 0) {
+                int64_t file_size = *(int64_t *)(stbuf + 48);
+                kfl.l_start += file_size;
+            }
+        }
+        kfl.l_whence = 0;
+        short ot; int64_t os, ol; pid_t op;
+        do_file_getlk(ftab[fd]->path, kfl.l_type, kfl.l_start, kfl.l_len,
+                       current_proc->pid, ftab[fd], is_ofd, &ot, &os, &ol, &op);
+        kfl.l_type = ot; kfl.l_start = os; kfl.l_len = ol;
+        kfl.l_pid = is_ofd ? -1 : op;
+        kfl.l_whence = 0;
+        if (copyout(current_proc->pagetable, tf->a2, &kfl, sizeof(kfl)) < 0)
+            return (long)-14;
+        return (long)0;
+    } else if (cmd == 6 || cmd == 7 || cmd == 37 || cmd == 38) {
+        /* F_SETLK (6) / F_SETLKW (7) / F_OFD_SETLK (37) / F_OFD_SETLKW (38)
+         * -- set, upgrade, or release a file lock.  Wait variants also return
+         * EAGAIN in this teaching OS (no blocking lock support). */
+        struct { short l_type; short l_whence; int64_t l_start;
+                 int64_t l_len; pid_t l_pid; } kfl;
+        if (copyin(current_proc->pagetable, &kfl, tf->a2, sizeof(kfl)) < 0)
+            return (long)-14;
+        int is_ofd = (cmd == 37 || cmd == 38);
+        int wait = (cmd == 7 || cmd == 38);
+        /* Convert l_whence-relative offset to absolute */
+        if (kfl.l_whence == 1) { /* SEEK_CUR */
+            kfl.l_start += ftab[fd]->offset;
+        } else if (kfl.l_whence == 2) { /* SEEK_END */
+            uint8_t stbuf[128];
+            if (ftab[fd]->ops && ftab[fd]->ops->fstat &&
+                ftab[fd]->ops->fstat(ftab[fd]->fs_data, ftab[fd]->private, stbuf) == 0) {
+                int64_t file_size = *(int64_t *)(stbuf + 48);
+                kfl.l_start += file_size;
+            }
+        }
+        return (long)do_file_setlk(ftab[fd]->path, kfl.l_type, kfl.l_start,
+                                    kfl.l_len, current_proc->pid, ftab[fd],
+                                    is_ofd, wait);
+    } else if (cmd == 8) { /* F_SETOWN -- store owning pid (stub) */
+        return (long)0;
+    } else if (cmd == 9) { /* F_GETOWN -- return owning pid (stub) */
+        return (long)current_proc->pid;
     } else {
         return (long)-22; /* EINVAL */
     }
@@ -3260,12 +3941,14 @@ static long sys_umask_handler(struct trapframe *tf) {
 
 static long sys_geteuid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual UID; in single-user OS, euid == uid. */
+    return (long)current_proc->uid;
 }
 
 static long sys_getegid_handler(struct trapframe *tf) {
     (void)tf;
-    return (long)0;
+    /* BF: Return actual GID; in single-user OS, egid == gid. */
+    return (long)current_proc->gid;
 }
 
 static long sys_set_tid_address_handler(struct trapframe *tf) {
@@ -3626,9 +4309,15 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     }
 
     tp->pgid = pgid;
-    if (tp->parent && tp->parent->state == SLEEPING &&
-        tp->parent->waiting_for_uart == 0)
-        tp->parent->state = RUNNABLE;
+    /* BF: Wake all wait4 sleepers — they need to re-evaluate match
+     * criteria after pgid change.  The previous parent-only wake was
+     * too narrow (non-parent waitpid(-pgid) callers missed the wake).
+     * A blanket wake was too broad (hit pipe/poll sleepers).  The
+     * waiting_for_child flag precisely targets wait4 sleepers. */
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        if (p->state == SLEEPING && p->waiting_for_child)
+            p->state = RUNNABLE;
+    }
     return 0;
 }
 
@@ -3802,8 +4491,44 @@ static long sys_timer_settime_handler(struct trapframe *tf) {
         uint64_t value_ticks = (uint64_t)kispec.val_sec * TIMER_FREQ +
                                (uint64_t)kispec.val_nsec / 100;
         if (flags & 1) { /* TIMER_ABSTIME */
-            /* Absolute time based on the timer's clockid */
-            current_proc->timers[tid].next_expiry_ticks = value_ticks;
+            /* BF: The old code used value_ticks (user epoch time in
+             * 10MHz ticks) directly as next_expiry_ticks (boot ticks).
+             * This caused the timer to never fire because epoch seconds
+             * (~1.7 billion) as boot ticks is far in the future.
+             * Fix: convert absolute wall-clock time to a delta from now,
+             * then add that delta to the current boot tick count.
+             * This mirrors the clock_nanosleep ABSTIME pattern. */
+            int clockid = current_proc->timers[tid].clockid;
+            if (clockid == 0) {
+                /* CLOCK_REALTIME: compare against wall-clock time */
+                int64_t now_sec, now_nsec;
+                get_wall_time(&now_sec, &now_nsec);
+                uint64_t now_total_ns = (uint64_t)now_sec * 1000000000UL +
+                                        (uint64_t)now_nsec;
+                uint64_t target_ns = (uint64_t)kispec.val_sec * 1000000000UL +
+                                     (uint64_t)kispec.val_nsec;
+                if (target_ns <= now_total_ns) {
+                    /* Already past: fire immediately */
+                    current_proc->timers[tid].next_expiry_ticks = r_time();
+                } else {
+                    uint64_t diff_ns = target_ns - now_total_ns;
+                    current_proc->timers[tid].next_expiry_ticks =
+                        r_time() + ns_to_time_ticks(diff_ns);
+                }
+            } else if (clockid == 1) {
+                /* CLOCK_MONOTONIC: compare against boot-relative time */
+                uint64_t elapsed = r_time() - boot_time;
+                if (value_ticks <= elapsed) {
+                    current_proc->timers[tid].next_expiry_ticks = r_time();
+                } else {
+                    current_proc->timers[tid].next_expiry_ticks =
+                        r_time() + (value_ticks - elapsed);
+                }
+            } else {
+                /* Other clocks: treat as relative for safety */
+                current_proc->timers[tid].next_expiry_ticks =
+                    r_time() + value_ticks;
+            }
         } else {
             /* Relative time from now */
             current_proc->timers[tid].next_expiry_ticks = r_time() + value_ticks;
@@ -4376,11 +5101,77 @@ static long sys_inotify_rm_watch_handler(struct trapframe *tf) {
     return (long)-22; /* EINVAL */
 }
 
-/* utimensat — update file timestamps (ext2 mtime) */
+/* BF: Mirror of ramfs inode and private structs from ramfs.c.
+ * Needed by utimensat/fchmod handlers to access ramfs inode fields
+ * (timestamps, mode) directly from trap.c.  Layout must exactly match
+ * the real struct in ramfs.c (field order, sizes, padding). */
+struct ramfs_inode_trap {
+  uint64_t ino;             /* offset 0 */
+  int      type;            /* offset 8 (enum ramfs_type = int) */
+  uint32_t mode;            /* offset 12 */
+  int      nlink;           /* offset 16 */
+  uint64_t size;            /* offset 24 (after 4-byte padding) */
+  uint64_t atime_sec;       /* offset 32 */
+  uint64_t mtime_sec;       /* offset 40 */
+  uint64_t ctime_sec;       /* offset 48 */
+  /* remaining fields (blocks[], nblocks, children[], etc.) omitted */
+};
+struct ramfs_private {
+  struct ramfs_inode_trap *inode;
+};
+
+/* utimensat — update file timestamps (ext2 mtime, ramfs atime/mtime) */
 static long sys_utimensat_handler(struct trapframe *tf) {
     /* a0 = dirfd (AT_FDCWD), a1 = path (NULL = use fd), a2 = times, a3 = flags */
+    int dirfd = (int)tf->a0;
     uint64_t path_uva = tf->a1;
-    if (!path_uva) return 0; /* NULL path with fd — not supported, succeed silently */
+    uint64_t times_uaddr = tf->a2;
+
+    /* BF: UTIME_NOW and UTIME_OMIT constants per POSIX */
+    #define UTIME_NOW  0x3fffffff
+    #define UTIME_OMIT 0x3ffffffe
+
+    /* Get current wall-clock time for UTIME_NOW */
+    int64_t now_sec, now_nsec;
+    get_wall_time(&now_sec, &now_nsec);
+
+    /* Parse times array if provided (2 x struct timespec = 32 bytes) */
+    struct { int64_t sec; int64_t nsec; } ktimes[2];
+    int has_times = 0;
+    if (times_uaddr) {
+        if (copyin(current_proc->pagetable, ktimes, times_uaddr, 32) < 0)
+            return (long)-14; /* EFAULT */
+        has_times = 1;
+    }
+
+    /* BF: Handle NULL path (futimens): look up file by fd */
+    if (!path_uva) {
+        struct open_file **ftab = proc_ofile(current_proc);
+        if (dirfd < 0 || dirfd >= NOFILE || !ftab[dirfd])
+            return (long)-9; /* EBADF */
+        struct open_file *f = ftab[dirfd];
+
+        /* For ramfs files: update timestamps on the inode directly */
+        if (f->ops == &ramfs_ops && f->private) {
+            struct ramfs_private *rp = (struct ramfs_private *)f->private;
+            if (has_times) {
+                if (ktimes[0].nsec != UTIME_OMIT) {
+                    rp->inode->atime_sec = (ktimes[0].nsec == UTIME_NOW) ?
+                        (uint64_t)now_sec : (uint64_t)ktimes[0].sec;
+                }
+                if (ktimes[1].nsec != UTIME_OMIT) {
+                    rp->inode->mtime_sec = (ktimes[1].nsec == UTIME_NOW) ?
+                        (uint64_t)now_sec : (uint64_t)ktimes[1].sec;
+                }
+            } else {
+                /* NULL times = set both to current time */
+                rp->inode->atime_sec = (uint64_t)now_sec;
+                rp->inode->mtime_sec = (uint64_t)now_sec;
+            }
+            rp->inode->ctime_sec = (uint64_t)now_sec;
+        }
+        return 0;
+    }
 
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, path_uva, sizeof(kpath)) < 0)
@@ -4394,15 +5185,35 @@ static long sys_utimensat_handler(struct trapframe *tf) {
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops || !ops->open) return (long)-2; /* ENOENT */
 
-    /* Open file to get inode, update mtime, close */
+    /* Open file to get inode, update timestamps, close */
     void *priv = NULL;
     if (ops->open(mnt->fs_data, relpath, 0, &priv) < 0) return (long)-2;
 
-    /* For ext2 files, touch the inode to update mtime */
-    (void)priv; /* ext2 mtime update handled by icache dirty flag on close */
+    /* BF: For ramfs files, update atime/mtime on the inode.  Without
+     * this, utimensat was a no-op for ramfs, causing stat tests to fail. */
+    if (ops == &ramfs_ops && priv) {
+        struct ramfs_private *rp = (struct ramfs_private *)priv;
+        if (has_times) {
+            if (ktimes[0].nsec != UTIME_OMIT) {
+                rp->inode->atime_sec = (ktimes[0].nsec == UTIME_NOW) ?
+                    (uint64_t)now_sec : (uint64_t)ktimes[0].sec;
+            }
+            if (ktimes[1].nsec != UTIME_OMIT) {
+                rp->inode->mtime_sec = (ktimes[1].nsec == UTIME_NOW) ?
+                    (uint64_t)now_sec : (uint64_t)ktimes[1].sec;
+            }
+        } else {
+            rp->inode->atime_sec = (uint64_t)now_sec;
+            rp->inode->mtime_sec = (uint64_t)now_sec;
+        }
+        rp->inode->ctime_sec = (uint64_t)now_sec;
+    }
 
     if (ops->close) ops->close(mnt->fs_data, priv);
-    return 0; /* Success — timestamps updated (or no-op for non-ext2) */
+    return 0;
+
+    #undef UTIME_NOW
+    #undef UTIME_OMIT
 }
 
 /* statfs/fstatfs — filesystem statistics */
@@ -4485,8 +5296,10 @@ static long sys_fchownat_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+/* BF: Store UID for kill() permission checking.
+ * Single-user OS -- just stores the UID without privilege checks. */
 static long sys_setuid_handler(struct trapframe *tf) {
-    (void)tf;
+    current_proc->uid = (int)tf->a0;
     return (long)0;
 }
 
@@ -4525,6 +5338,16 @@ static long sys_fchmodat_handler(struct trapframe *tf) {
             if (ops->close) ops->close(mnt->fs_data, priv);
         }
     }
+    /* BF: For ramfs files, update inode mode in memory.  Without this,
+     * fchmodat on /tmp paths was a no-op. */
+    if (ops == &ramfs_ops && ops->open) {
+        void *priv = NULL;
+        if (ops->open(mnt->fs_data, relpath, 0, &priv) >= 0) {
+            struct ramfs_private *rp = (struct ramfs_private *)priv;
+            rp->inode->mode = (uint32_t)tf->a2 & 07777;
+            if (ops->close) ops->close(mnt->fs_data, priv);
+        }
+    }
     return 0;
 }
 
@@ -4540,6 +5363,14 @@ static long sys_fchmod_handler(struct trapframe *tf) {
     if (ext2_is_ops(f->ops) && f->private) {
         struct ext2_open_private *priv = (struct ext2_open_private *)f->private;
         return (long)ext2_fchmod_ino(f->fs_data, priv->ino, mode);
+    }
+    /* BF: For ramfs files, update the in-memory inode mode.  Without
+     * this, fchmod on /tmp files was a silent no-op, causing tests
+     * that verify permission changes to fail. */
+    if (f->ops == &ramfs_ops && f->private) {
+        struct ramfs_private *rp = (struct ramfs_private *)f->private;
+        rp->inode->mode = mode & 07777; /* keep only permission bits */
+        return 0;
     }
     return 0; /* other filesystems: no-op */
 }
@@ -4671,6 +5502,8 @@ static long sys_ppoll_handler(struct trapframe *tf) {
     if (nfds < 0 || nfds > NOFILE)
         return (long)-22;
 
+    current_proc->has_saved_sigmask = 0;
+
     /* Copyin pollfd array: each entry is {int fd; short events; short revents} = 8 bytes */
     uint8_t kfds[NOFILE * 8];
     int fds_size = nfds * 8;
@@ -4679,11 +5512,37 @@ static long sys_ppoll_handler(struct trapframe *tf) {
 
     /* Handle sigmask swap */
     uint64_t old_mask = current_proc->sigmask;
+    /* BF: Snapshot signal_handled_epoch BEFORE mask swap so we can detect
+     * signals handled between raise() and the ppoll sleep.  If epoch
+     * changed after wakeup, a signal was already delivered and we must
+     * return -EINTR. */
+    uint64_t epoch_before = current_proc->signal_handled_epoch;
     if (sigmask_uaddr != 0) {
         uint64_t new_mask;
         if (copyin(current_proc->pagetable, &new_mask, sigmask_uaddr, 8) < 0)
             return (long)-14;
         current_proc->sigmask = new_mask;
+    }
+
+    /* BF: POSIX requires ppoll to atomically replace the mask and check
+     * for deliverable signals.  If a signal was pending but blocked, and
+     * the new mask unblocks it, ppoll must return -EINTR immediately
+     * without entering the poll loop. */
+    if (current_proc->sigpending & ~current_proc->sigmask) {
+        if (sigmask_uaddr != 0) {
+            /* BF: Defer mask restore so deliver_signal (at trap return) can
+             * deliver the handler under the ppoll-swapped mask.  sigreturn
+             * will restore old_mask from the signal frame. */
+            current_proc->saved_sigmask_restore = old_mask;
+            current_proc->has_saved_sigmask = 1;
+        }
+        if (nfds > 0 && fds_size > 0)
+            copyout(current_proc->pagetable, fds_uaddr, (void *)kfds, (uint64_t)fds_size);
+        /* BF: POSIX lists ppoll as a non-restartable syscall.  Clear
+         * in_syscall so deliver_signal does not rewind epc when
+         * SA_RESTART is set on the handler. */
+        current_proc->in_syscall = 0;
+        return (long)-4; /* EINTR */
     }
 
     /* Parse timeout */
@@ -4722,11 +5581,45 @@ static long sys_ppoll_handler(struct trapframe *tf) {
 
     /* If none ready and timeout allows blocking */
     if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
-        if (sleep_until_val > 0) {
+        /* BF: When !has_timeout (NULL timeout = infinite wait), use
+         * waiting_for_uart=1 to block indefinitely.  Previously
+         * sleep_until_val stayed 0 and the guard skipped swtch(),
+         * causing ppoll to return immediately instead of blocking. */
+        if (has_timeout && sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
             current_proc->waiting_for_uart = 2;
+        } else if (!has_timeout) {
+            current_proc->waiting_for_uart = 1; /* block indefinitely */
+        }
+        if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* BF: Clear on ALL post-sleep paths — stale waiting_for_uart
+             * value (1 or 2) causes scheduler to mistrack process state
+             * in subsequent syscalls. */
+            current_proc->waiting_for_uart = 0;
+        }
+
+        /* BF: ppoll must return -EINTR when a deliverable signal is pending
+         * during the wait.  POSIX: "If ... a signal is caught, ppoll() shall
+         * be interrupted... and shall return -1 with errno set to [EINTR]."
+         * Also check epoch: if a signal was handled between the mask swap
+         * and entering sleep, we must still return -EINTR even if
+         * sigpending is now clear. */
+        if ((current_proc->sigpending & ~current_proc->sigmask) ||
+            current_proc->signal_handled_epoch != epoch_before) {
+            if (sigmask_uaddr != 0) {
+                /* BF: Defer mask restore -- same as early EINTR path above. */
+                current_proc->saved_sigmask_restore = old_mask;
+                current_proc->has_saved_sigmask = 1;
+            }
+            if (fds_size > 0)
+                copyout(current_proc->pagetable, fds_uaddr, kfds, (uint64_t)fds_size);
+            /* BF: POSIX lists ppoll as a non-restartable syscall.  Clear
+             * in_syscall so deliver_signal does not rewind epc when
+             * SA_RESTART is set on the handler. */
+            current_proc->in_syscall = 0;
+            return (long)-4; /* EINTR */
         }
 
         /* Re-check after wakeup */
@@ -4763,27 +5656,59 @@ static long sys_pselect6_handler(struct trapframe *tf) {
     if (nfds < 0 || nfds > NOFILE)
         nfds = NOFILE;
 
+    current_proc->has_saved_sigmask = 0;
+
+    /* BF: Handle sigmask from a5 (pselect6 ABI: a5 points to {sigmask_ptr, size}).
+     * This enables signal-driven interruption and SA_RESTART for select(). */
+    uint64_t sigmask_uaddr_raw = tf->a5;
+    uint64_t old_mask = current_proc->sigmask;
+    /* BF: Snapshot epoch before mask swap to detect signals handled
+     * between the swap and sleep (same race as ppoll). */
+    uint64_t epoch_before = current_proc->signal_handled_epoch;
+    int has_sigmask = 0;
+    if (sigmask_uaddr_raw != 0) {
+        uint64_t sig_args[2]; /* {sigmask_ptr, sigsetsize} */
+        if (copyin(current_proc->pagetable, sig_args, sigmask_uaddr_raw, 16) == 0 &&
+            sig_args[0] != 0) {
+            uint64_t new_mask;
+            if (copyin(current_proc->pagetable, &new_mask, sig_args[0], 8) == 0) {
+                current_proc->sigmask = new_mask;
+                has_sigmask = 1;
+            }
+        }
+    }
+
     /* fd_set is 128 bytes but we only need first 8 bytes (64 fds) */
     uint64_t rfds = 0, wfds = 0, efds = 0;
-    if (readfds_uaddr && copyin(current_proc->pagetable, &rfds, readfds_uaddr, 8) < 0)
+    if (readfds_uaddr && copyin(current_proc->pagetable, &rfds, readfds_uaddr, 8) < 0) {
+        if (has_sigmask) current_proc->sigmask = old_mask;
         return (long)-14;
-    if (writefds_uaddr && copyin(current_proc->pagetable, &wfds, writefds_uaddr, 8) < 0)
+    }
+    if (writefds_uaddr && copyin(current_proc->pagetable, &wfds, writefds_uaddr, 8) < 0) {
+        if (has_sigmask) current_proc->sigmask = old_mask;
         return (long)-14;
-    if (exceptfds_uaddr && copyin(current_proc->pagetable, &efds, exceptfds_uaddr, 8) < 0)
+    }
+    if (exceptfds_uaddr && copyin(current_proc->pagetable, &efds, exceptfds_uaddr, 8) < 0) {
+        if (has_sigmask) current_proc->sigmask = old_mask;
         return (long)-14;
+    }
 
     /* Parse timeout */
     int has_timeout = (timeout_uaddr != 0);
     uint64_t sleep_until_val = 0;
     if (has_timeout) {
         uint64_t kts[2];
-        if (copyin(current_proc->pagetable, kts, timeout_uaddr, 16) < 0)
+        if (copyin(current_proc->pagetable, kts, timeout_uaddr, 16) < 0) {
+            if (has_sigmask) current_proc->sigmask = old_mask;
             return (long)-14;
+        }
         if (kts[0] == 0 && kts[1] == 0) {
             /* Non-blocking */
         } else {
-            if (kts[1] >= 1000000000UL)
+            if (kts[1] >= 1000000000UL) {
+                if (has_sigmask) current_proc->sigmask = old_mask;
                 return (long)-22;
+            }
             sleep_until_val = timespec_rel_deadline(kts[0], kts[1]);
         }
     }
@@ -4821,13 +5746,68 @@ static long sys_pselect6_handler(struct trapframe *tf) {
         }
     }
 
+    /* BF: Check for pending signals before blocking (POSIX atomicity). */
+    if (ready == 0 && (current_proc->sigpending & ~current_proc->sigmask)) {
+        if (has_sigmask) {
+            current_proc->saved_sigmask_restore = old_mask;
+            current_proc->has_saved_sigmask = 1;
+        }
+        out_rfds = out_wfds = out_efds = 0;
+        if (readfds_uaddr) copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8);
+        if (writefds_uaddr) copyout(current_proc->pagetable, writefds_uaddr, &out_wfds, 8);
+        if (exceptfds_uaddr) copyout(current_proc->pagetable, exceptfds_uaddr, &out_efds, 8);
+        /* BF: POSIX lists pselect as a non-restartable syscall.  Clear
+         * in_syscall so deliver_signal does not rewind epc when
+         * SA_RESTART is set on the handler. */
+        current_proc->in_syscall = 0;
+        return (long)-4; /* EINTR */
+    }
+
     /* Block if none ready and timeout allows */
     if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
-        if (sleep_until_val > 0) {
+        /* BF: Fix blocking for NULL timeout -- when !has_timeout,
+         * sleep_until_val is 0 so we need waiting_for_uart=1 (indefinite). */
+        if (has_timeout && sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
             current_proc->waiting_for_uart = 2;
+        } else if (!has_timeout) {
+            current_proc->waiting_for_uart = 1; /* block indefinitely */
+        }
+        if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
+            /* BF: Clear on ALL post-sleep paths — stale waiting_for_uart
+             * value (1 or 2) causes scheduler to mistrack process state
+             * in subsequent syscalls. */
+            current_proc->waiting_for_uart = 0;
+        }
+
+        /* BF: If a signal handler ran between mask swap and here,
+         * return -EINTR even though sigpending is now clear. */
+        if (current_proc->signal_handled_epoch != epoch_before) {
+            if (has_sigmask) {
+                current_proc->saved_sigmask_restore = old_mask;
+                current_proc->has_saved_sigmask = 1;
+            }
+            current_proc->in_syscall = 0;
+            return (long)-4;  /* EINTR */
+        }
+
+        /* BF: Check for signal after wakeup. */
+        if (current_proc->sigpending & ~current_proc->sigmask) {
+            if (has_sigmask) {
+                current_proc->saved_sigmask_restore = old_mask;
+                current_proc->has_saved_sigmask = 1;
+            }
+            out_rfds = out_wfds = out_efds = 0;
+            if (readfds_uaddr) copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8);
+            if (writefds_uaddr) copyout(current_proc->pagetable, writefds_uaddr, &out_wfds, 8);
+            if (exceptfds_uaddr) copyout(current_proc->pagetable, exceptfds_uaddr, &out_efds, 8);
+            /* BF: POSIX lists pselect as a non-restartable syscall.  Clear
+             * in_syscall so deliver_signal does not rewind epc when
+             * SA_RESTART is set on the handler. */
+            current_proc->in_syscall = 0;
+            return (long)-4; /* EINTR */
         }
 
         /* Re-check */
@@ -4851,6 +5831,10 @@ static long sys_pselect6_handler(struct trapframe *tf) {
         }
     }
 
+    /* Restore sigmask on normal return */
+    if (has_sigmask)
+        current_proc->sigmask = old_mask;
+
     /* Copyout modified fd_sets */
     if (readfds_uaddr && copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8) < 0)
         return (long)-14;
@@ -4871,24 +5855,65 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
         uint8_t kold[24];
         memset(kold, 0, sizeof(kold));
         *(uint64_t *)(kold + 0) = current_proc->ss_sp;
-        *(int32_t *)(kold + 8) = (int32_t)current_proc->ss_flags;
+        int32_t old_flags = (int32_t)current_proc->ss_flags;
+        /* BF: Dynamically compute SS_ONSTACK by checking if the current sp
+         * is within the alt stack range.  The stored ss_flags may be stale
+         * if deliver_signal set it but sigreturn didn't clear it properly. */
+        if (current_proc->ss_sp != 0 && current_proc->ss_size != 0) {
+            uint64_t sp = tf->sp;
+            if (sp >= current_proc->ss_sp &&
+                sp < current_proc->ss_sp + current_proc->ss_size)
+                old_flags |= 1; /* SS_ONSTACK */
+            else
+                old_flags &= ~1;
+        } else {
+            /* BF: When no alt stack is configured (ss_sp==0 && ss_size==0),
+             * POSIX requires SS_DISABLE (2) to be reported.  Without this,
+             * tests checking the initial sigaltstack state would fail. */
+            old_flags = 2; /* SS_DISABLE */
+        }
+        *(int32_t *)(kold + 8) = old_flags;
         *(uint64_t *)(kold + 16) = current_proc->ss_size;
         if (copyout(current_proc->pagetable, old_addr, kold, 24) < 0)
             return (long)-14;
     }
 
     if (new_addr != 0) {
-        /* Cannot change alt stack while executing on it */
-        if (current_proc->ss_flags & 1) /* SS_ONSTACK */
+        /* BF: Use dynamic SP check instead of stored ss_flags for the
+         * on-stack test. A handler that longjmp'd out (skipping sigreturn)
+         * would leave ss_flags with stale SS_ONSTACK, incorrectly blocking
+         * future sigaltstack calls. */
+        int on_stack = 0;
+        if (current_proc->ss_sp != 0 && current_proc->ss_size != 0) {
+            uint64_t sp = tf->sp;
+            if (sp >= current_proc->ss_sp && sp < current_proc->ss_sp + current_proc->ss_size)
+                on_stack = 1;
+        }
+        if (on_stack)
             return (long)-1; /* EPERM */
 
         uint8_t knew[24];
         if (copyin(current_proc->pagetable, knew, new_addr, 24) < 0)
             return (long)-14;
 
+        int new_flags = (int)(*(int32_t *)(knew + 8));
+        uint64_t new_size = *(uint64_t *)(knew + 16);
+
+        /* BF: POSIX requires EINVAL if ss_flags contains values other
+         * than SS_DISABLE (or zero).  SS_ONSTACK is not a valid input
+         * flag — it is output-only.  Without this check, tests that
+         * verify EINVAL for invalid flags would fail. */
+        if (new_flags & ~2) /* any bit other than SS_DISABLE set */
+            return (long)-22; /* EINVAL */
+
+        /* BF: POSIX requires ENOMEM if enabling the alt stack with
+         * ss_size < MINSIGSTKSZ.  Skip check when disabling. */
+        if (!(new_flags & 2) && new_size < 2048) /* MINSIGSTKSZ = 2048 */
+            return (long)-12; /* ENOMEM */
+
         current_proc->ss_sp = *(uint64_t *)(knew + 0);
-        current_proc->ss_flags = (int)(*(int32_t *)(knew + 8));
-        current_proc->ss_size = *(uint64_t *)(knew + 16);
+        current_proc->ss_flags = new_flags;
+        current_proc->ss_size = new_size;
     }
 
     return 0;
@@ -5006,6 +6031,7 @@ void syscall_init(void) {
     syscall_table[SYS_rt_sigsuspend]   = sys_rt_sigsuspend_handler;
     syscall_table[SYS_rt_sigpending]   = sys_rt_sigpending_handler;
     syscall_table[SYS_rt_sigtimedwait] = sys_rt_sigtimedwait_handler;
+    syscall_table[SYS_rt_sigqueueinfo] = sys_rt_sigqueueinfo_handler;
     syscall_table[SYS_gettimeofday]    = sys_gettimeofday_handler;
     syscall_table[SYS_fcntl]           = sys_fcntl_handler;
     syscall_table[SYS_faccessat]       = sys_faccessat_handler;
@@ -5095,10 +6121,10 @@ void trap_handler(struct trapframe *tf) {
          * Unblockable signals (SIGKILL, synchronous faults) must be
          * deliverable even if sa_mask has them blocked, so we
          * temporarily unblock them for the deliverability check. */
+        /* BF: Narrowed force_unblock to only SIGKILL/SIGSTOP (same as
+         * syscall return path) -- synchronous signals unmasked at fault. */
         if (current_proc) {
-            uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP) |
-                          signal_bit(SIGILL) | signal_bit(SIGSEGV) |
-                          signal_bit(SIGBUS) | signal_bit(SIGFPE);
+            uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
             uint64_t saved = current_proc->sigmask;
             current_proc->sigmask &= ~fu;
             int has = (current_proc->sigpending & ~current_proc->sigmask) != 0;
@@ -5194,10 +6220,41 @@ void trap_handler(struct trapframe *tf) {
             if (current_proc && stval < 0x80000000UL) {
                 struct vm_area *fvma = vma_find(current_proc, stval);
                 if (fvma) {
+                    /* BF: Enforce VMA protection flags -- deliver SIGSEGV if the fault
+                     * type doesn't match the VMA's prot bits.  POSIX requires SIGSEGV
+                     * for writes to PROT_READ-only, and any access to PROT_NONE. */
+                    if (fvma->prot == 0 /* PROT_NONE */) {
+                        /* PROT_NONE: no access allowed at all */
+                        goto pagefault_kill;
+                    }
+                    if (cause == SCAUSE_STORE_PAGE_FAULT && !(fvma->prot & PROT_WRITE)) {
+                        /* Write to non-writable mapping */
+                        goto pagefault_kill;
+                    }
+
                     uint64_t va = PGROUNDDOWN(stval);
                     /* Check if page is already mapped */
                     pte_t *pte = walk(current_proc->pagetable, va, 0);
                     if (!pte || !(*pte & PTE_V)) {
+                        /* BF: POSIX requires SIGBUS for file-backed mmap access
+                         * beyond the end of the file (rounded up to page boundary).
+                         * Check file size via fstat before demand-paging. */
+                        if (fvma->file && fvma->file->ops && fvma->file->ops->fstat) {
+                            uint8_t stbuf[128];
+                            memset(stbuf, 0, sizeof(stbuf));
+                            if (fvma->file->ops->fstat(fvma->file->fs_data,
+                                                       fvma->file->private, stbuf) == 0) {
+                                int64_t file_sz = *(int64_t *)(stbuf + 48); /* st_size */
+                                uint64_t file_end_page = ((uint64_t)file_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+                                uint64_t page_file_off = fvma->file_offset + (va - fvma->start);
+                                if (page_file_off >= file_end_page) {
+                                    current_proc->sigpending |= signal_bit(SIGBUS);
+                                    deliver_signal(tf, current_proc);
+                                    return;
+                                }
+                            }
+                        }
+
                         /* Page not yet allocated — demand-page it */
                         char *pg = kalloc();
                         if (pg) {
@@ -5277,17 +6334,67 @@ void trap_handler(struct trapframe *tf) {
                 }
             }
 
-            /* Workaround: if instruction page fault at kernel address,
-             * the kernel code PTE may have lost PTE_X.  Restore it and
-             * retry the instruction.  This handles corruption that
-             * occurs during boot tests (after the initial restore). */
+            /* Use self-referencing gigapage window to repair PTE without
+             * walk() and without depending on the identity-mapped superpages
+             * (which are the PTEs being corrupted by DMA). */
             if (cause == SCAUSE_INST_PAGE_FAULT && stval >= 0x80000000UL) {
-                pte_t *kpte = walk(kernel_pagetable, PGROUNDDOWN(stval), 0);
-                if (kpte && (*kpte & PTE_V)) {
-                    /* Always ensure PTE_X is set and flush TLB */
-                    *kpte |= PTE_X;
-                    asm volatile("sfence.vma %0, zero" : : "r"(stval));
-                    return; /* retry faulting instruction */
+                if (kernel_pagetable[RECURSIVE_INDEX] & PTE_V) {
+                    volatile pte_t *ppte = recursive_l1_pte(PGROUNDDOWN(stval));
+                    if (ppte) {
+                        pte_t pte = *ppte;
+                        if ((pte & PTE_V) && !(pte & PTE_X)) {
+                            *ppte = pte | PTE_X;
+                            asm volatile("sfence.vma zero, zero" ::: "memory");
+                            asm volatile("fence.i" ::: "memory");
+                            return;
+                        }
+                        if (!(pte & PTE_V)) {
+                            uint64_t pa = SPGROUNDDOWN(stval);
+                            *ppte = PA2PTE(pa) | PTE_V | PTE_R | PTE_W | PTE_X;
+                            asm volatile("sfence.vma zero, zero" ::: "memory");
+                            asm volatile("fence.i" ::: "memory");
+                            return;
+                        }
+                    }
+                }
+                /* Fallback: direct identity-map access (works if identity
+                 * map is not corrupted) */
+                {
+                    pte_t l2pte = kernel_pagetable[2];
+                    if (l2pte & PTE_V) {
+                        pagetable_t l1 = (pagetable_t)PTE2PA(l2pte);
+                        int idx = PX(1, stval);
+                        if ((l1[idx] & PTE_V) && !(l1[idx] & PTE_X)) {
+                            l1[idx] |= PTE_X;
+                            asm volatile("sfence.vma zero, zero" ::: "memory");
+                            asm volatile("fence.i" ::: "memory");
+                            return;
+                        }
+                    }
+                }
+                /* BF: If we reach here, the PTE already has PTE_X -- the timer
+                 * interrupt may have repaired it between the CPU fault and our
+                 * handler entry.  Retry the faulting instruction, but limit
+                 * retries to avoid infinite loops from persistent corruption. */
+                {
+                    static int kpte_retry_count;
+                    static uint64_t kpte_retry_epc;
+                    if (tf->epc == kpte_retry_epc) {
+                        kpte_retry_count++;
+                    } else {
+                        kpte_retry_epc = tf->epc;
+                        kpte_retry_count = 1;
+                    }
+                    if (kpte_retry_count <= 3) {
+                        /* Full TLB flush + instruction cache sync -- the
+                         * targeted sfence.vma may not suffice if the stale
+                         * translation is cached in the I-TLB. */
+                        asm volatile("sfence.vma zero, zero" ::: "memory");
+                        asm volatile("fence.i" ::: "memory");
+                        return;
+                    }
+                    /* Too many retries at same EPC -- fall through to kill */
+                    kpte_retry_count = 0;
                 }
             }
 
@@ -5376,21 +6483,24 @@ pagefault_kill:
         tf->a0 = (uint64_t)-38; /* -ENOSYS */
     }
 
-    if (current_proc) current_proc->in_syscall = 0;
+    /* BF: in_syscall must remain set through deliver_signal so the
+     * SA_RESTART check (which tests in_syscall && a0==-EINTR) fires
+     * correctly.  Cleared AFTER delivery. */
 
     /* Deliver pending signals before returning to user mode.
-     * Unblockable signals (SIGKILL, synchronous faults) must be
-     * deliverable even if sa_mask has them blocked, so we
-     * temporarily unblock them for the deliverability check. */
+     * BF: Narrowed force_unblock to only truly unblockable signals
+     * (SIGKILL, SIGSTOP).  Synchronous fault signals (SIGILL, SIGSEGV,
+     * SIGBUS, SIGFPE) are unmasked at their exception handler sites,
+     * not here -- force-unblocking them here breaks SA_SIGINFO tests
+     * that install handlers for these signals. */
     if (current_proc) {
-        uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP) |
-                      signal_bit(SIGILL) | signal_bit(SIGSEGV) |
-                      signal_bit(SIGBUS) | signal_bit(SIGFPE);
+        uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
         uint64_t saved = current_proc->sigmask;
         current_proc->sigmask &= ~fu;
         int has = (current_proc->sigpending & ~current_proc->sigmask) != 0;
         current_proc->sigmask = saved;
         if (has) deliver_signal(tf, current_proc);
+        current_proc->in_syscall = 0;
     }
     return;
 }

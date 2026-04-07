@@ -4,6 +4,12 @@
 #include <riscv.h>
 #include <vfs.h>
 
+/* BF: Kernel stack is 2 contiguous pages (8KB).  A single 4KB page
+ * overflows during deep syscall call chains (ext2 I/O path), corrupting
+ * return addresses and causing instruction page faults. */
+#define KSTACK_PAGES 2
+#define KSTACK_SIZE  (KSTACK_PAGES * PAGE_SIZE)
+
 // Saved registers for kernel context switches.
 struct context {
   uint64_t ra;
@@ -166,6 +172,7 @@ struct proc {
   char exe_path[256];          // path of executable (set by exec)
   unsigned int umask_val;       // file creation mask
   struct open_file *ofile[NOFILE]; // open file descriptors (VFS)
+  uint8_t fd_flags[NOFILE]; /* Per-fd flags: FD_CLOEXEC=1, FD_CLOFORK=2 */
   /* VMA list for tracking all user memory regions */
   struct vm_area *vma_list;    // sorted linked list of virtual memory areas
   uint64_t mmap_base;          // next VA to use for non-MAP_FIXED mmap
@@ -198,6 +205,51 @@ struct proc {
   uint64_t saved_a5;
   /* POSIX timers */
   struct posix_timer timers[NPTIMER];
+
+  /* BF: Track kernel stack size for proper free on process exit.
+   * Added at the END of struct to avoid shifting field offsets. */
+  int kstack_npages;
+
+  /* BF: Per-process CPU time in timer ticks for CLOCK_PROCESS_CPUTIME_ID.
+   * Incremented by the timer interrupt handler each tick while this
+   * process is current_proc.  Added at END to avoid shifting offsets. */
+  uint64_t cputime_ticks;
+
+  /* BF: Deferred sigmask restore for ppoll/pselect6.  When these syscalls
+   * return -EINTR, the temporary mask must stay active so deliver_signal
+   * can deliver the handler.  sigreturn restores saved_sigmask_restore. */
+  uint64_t saved_sigmask_restore;
+  int      has_saved_sigmask;
+
+  /* BF: SIGCHLD si_code for SA_SIGINFO handlers.  Set by stop/continue/exit
+   * paths so deliver_signal can populate siginfo_t correctly. */
+  int sigchld_code;
+
+  /* BF: Epoch counter incremented each time deliver_signal dispatches a
+   * user handler.  ppoll/pselect6 snapshot this before the mask swap
+   * to detect signals handled between raise() and ppoll(). */
+  uint64_t signal_handled_epoch;
+
+  /* BF: Per-process UID/GID for kill() permission checks.
+   * Default 0 (root) in single-user OS. */
+  int uid;
+  int gid;
+
+  /* BF: Set to 1 while sleeping in sys_wait4 (waitpid/wait4).  Allows
+   * setpgid to wake only wait4 sleepers without disturbing pipe/poll/
+   * futex sleepers that also have waiting_for_uart unset. */
+  int waiting_for_child;
+
+  /* BF: Per-process signal info queue for rt_sigqueueinfo / sigtimedwait.
+   * Stores the siginfo_t provided by sigqueue so that sigtimedwait can
+   * retrieve si_value and si_code.  Without this, queued signal data
+   * was discarded and sigtimedwait returned empty siginfo. */
+  #define NSIGQUEUE 16
+  struct {
+    int valid;
+    int signum;
+    uint8_t info[128]; /* raw siginfo_t bytes */
+  } sigqueue_buf[NSIGQUEUE];
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,

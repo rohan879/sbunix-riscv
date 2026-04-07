@@ -127,8 +127,18 @@ found:
     return 0;
   }
 
-  // Allocate a kernel stack page.
-  if((p->kstack = kalloc()) == 0){
+  /* BF: Allocate 2 contiguous pages (8KB) for kernel stack.  A single
+   * 4KB page overflows during deep syscall chains (openat -> resolve_path
+   * -> resolve_symlinks -> ext2_open -> bcache -> virtio_blk), corrupting
+   * return addresses.  Falls back to 1 page if contiguous unavailable. */
+  p->kstack = kalloc_contiguous(KSTACK_PAGES);
+  if (p->kstack) {
+    p->kstack_npages = KSTACK_PAGES;
+  } else {
+    p->kstack = kalloc();
+    p->kstack_npages = 1;
+  }
+  if (!p->kstack) {
     kfree(p->trapframe);
     p->state = UNUSED;
     return 0;
@@ -142,7 +152,8 @@ found:
   // Set up new context to start executing at forkret
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64_t)forkret;
-  p->context.sp = (uint64_t)p->kstack + PAGE_SIZE;
+  /* BF: sp points to TOP of the (potentially multi-page) kernel stack */
+  p->context.sp = (uint64_t)p->kstack + (uint64_t)p->kstack_npages * PAGE_SIZE;
 
   // Initialize open file table
   for (int i = 0; i < NOFILE; i++)
@@ -160,6 +171,19 @@ found:
   p->killed_by_signal = 0;
   p->stopped_signal = 0;
 
+  /* BF: Initialize alternate signal stack to SS_DISABLE.  Without this,
+   * recycled process slots retain stale ss_flags from the previous
+   * occupant, and sigaltstack(NULL, &old) reports wrong flags. */
+  p->ss_sp = 0;
+  p->ss_size = 0;
+  p->ss_flags = 2; /* SS_DISABLE */
+
+  /* BF: Zero epoch and sigchld_code to prevent stale values from
+   * recycled process slots affecting ppoll epoch detection or
+   * SIGCHLD si_code delivery. */
+  p->signal_handled_epoch = 0;
+  p->sigchld_code = 0;
+
   // Initialize POSIX timers
   for (int i = 0; i < NPTIMER; i++)
     p->timers[i].used = 0;
@@ -172,6 +196,10 @@ found:
   p->shared_pt = NULL;
   p->shared_ft = NULL;
   p->shared_sa = NULL;
+
+  /* BF: Initialize waiting_for_child so recycled slots don't carry
+   * stale values from previous process occupants. */
+  p->waiting_for_child = 0;
 
   return p;
 }
@@ -198,7 +226,9 @@ void userinit(void) {
 void uart_wakeup(void) {
   struct proc *p;
   for (p = proc; p < &proc[NPROC]; p++) {
-    if (p->state == SLEEPING && p->waiting_for_uart == 1) {
+    /* BF: Skip wait4 sleepers — UART input is irrelevant for processes
+     * blocked in waitpid; waking them causes spurious wakeups. */
+    if (p->state == SLEEPING && p->waiting_for_uart == 1 && !p->waiting_for_child) {
       p->waiting_for_uart = 0;
       p->state = RUNNABLE;
     }
@@ -234,7 +264,8 @@ void scheduler(void) {
         w_sstatus(r_sstatus() & ~SSTATUS_SIE);
 
         /* Set sscratch and switch to process page table */
-                asm volatile("csrw sscratch, %0" : : "r"((uint64_t)p->kstack + PAGE_SIZE));
+                /* BF: sscratch = top of kernel stack (8KB if contiguous) */
+                asm volatile("csrw sscratch, %0" : : "r"((uint64_t)p->kstack + (uint64_t)p->kstack_npages * PAGE_SIZE));
                 if (p->pagetable != kernel_pagetable) {
                     w_satp(MAKE_SATP(p->pagetable));
                     sfence_vma();

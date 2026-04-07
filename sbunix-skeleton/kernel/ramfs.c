@@ -13,6 +13,7 @@
 #include <printk.h>
 #include <kmalloc.h>
 #include <kalloc.h>
+#include <riscv.h>  /* BF: for r_time() used in inode timestamp init */
 
 /* ================================================================== */
 /* Inode / directory-entry structures                                   */
@@ -33,6 +34,12 @@ struct ramfs_inode {
   uint32_t         mode;       /* permission bits (no S_IF prefix stored here) */
   int              nlink;
   uint64_t         size;       /* bytes for files, 0 for dirs */
+  /* BF: Added timestamps so stat/utimensat can report and modify
+   * atime/mtime/ctime.  Without these, stat always returned zero
+   * timestamps, causing POSIX compliance test failures. */
+  uint64_t         atime_sec;  /* last access time */
+  uint64_t         mtime_sec;  /* last modification time */
+  uint64_t         ctime_sec;  /* last status change time */
   /* File data blocks (each is a kalloc page = 4096 bytes) */
   char            *blocks[RAMFS_MAX_BLOCKS];
   int              nblocks;
@@ -60,6 +67,14 @@ static struct ramfs_inode *ramfs_alloc_inode(enum ramfs_type type, uint32_t mode
       inodes[i].type = type;
       inodes[i].mode = mode;
       inodes[i].nlink = 1;
+      /* BF: Initialize timestamps to current time (in seconds since
+       * boot).  Proper epoch time would require get_wall_time, which
+       * is only available in trap.c; the real timestamps will be set
+       * by utimensat from userspace. */
+      uint64_t now = r_time() / 10000000UL; /* ticks -> approx seconds */
+      inodes[i].atime_sec = now;
+      inodes[i].mtime_sec = now;
+      inodes[i].ctime_sec = now;
       return &inodes[i];
     }
   }
@@ -415,6 +430,20 @@ static void ramfs_fill_stat(uint8_t *st, struct ramfs_inode *ino) {
   memcpy(st + 48, &size, 8);     /* st_size */
   memcpy(st + 56, &blksz, 4);    /* st_blksize */
   memcpy(st + 64, &blks, 8);     /* st_blocks */
+
+  /* BF: Write atime/mtime/ctime into stat buffer at correct offsets.
+   * Each timespec is 16 bytes (8 for tv_sec + 8 for tv_nsec).
+   * Without these, stat always returned zero timestamps. */
+  uint64_t atime_sec = ino->atime_sec;
+  uint64_t mtime_sec = ino->mtime_sec;
+  uint64_t ctime_sec = ino->ctime_sec;
+  uint64_t nsec_zero = 0;
+  memcpy(st + 72, &atime_sec, 8);  /* st_atim.tv_sec */
+  memcpy(st + 80, &nsec_zero, 8);  /* st_atim.tv_nsec */
+  memcpy(st + 88, &mtime_sec, 8);  /* st_mtim.tv_sec */
+  memcpy(st + 96, &nsec_zero, 8);  /* st_mtim.tv_nsec */
+  memcpy(st + 104, &ctime_sec, 8); /* st_ctim.tv_sec */
+  memcpy(st + 112, &nsec_zero, 8); /* st_ctim.tv_nsec */
 }
 
 static int ramfs_fstat(void *fs_data, void *private, uint8_t *st) {

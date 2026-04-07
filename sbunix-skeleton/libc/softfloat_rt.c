@@ -458,6 +458,32 @@ double __divdf3(double a, double b)
   }
 
   exp = ae - be;
+
+  /*
+   * Binary long division producing 56-bit quotient.
+   *
+   * FIX: The original code started with rem = asig (~2^53) and
+   * shifted left 56 times, causing 64-bit overflow after ~10 shifts.
+   * Fixed by normalizing both significands to the top of the word
+   * first, then extracting quotient bits from high to low.
+   *
+   * Normalize so bsig has its MSB at bit 62 (leaving bit 63 for
+   * the doubled remainder). This keeps rem < 2*bsig < 2^63
+   * throughout the loop, preventing overflow.
+   */
+  /* Count leading zeros to normalize bsig to bit 62 */
+  int nlz = 0;
+  {
+    uint64_t tmp = bsig;
+    while (!(tmp & (1ULL << 62))) {
+      tmp <<= 1;
+      nlz++;
+    }
+  }
+  bsig <<= nlz;
+  asig <<= nlz;
+
+  /* Adjust if asig < bsig (after normalization) */
   if (asig < bsig) {
     asig <<= 1;
     exp--;
@@ -466,14 +492,17 @@ double __divdf3(double a, double b)
   q = 0;
   rem = asig;
   for (i = 0; i < 56; i++) {
-    rem <<= 1;
     q <<= 1;
     if (rem >= bsig) {
       rem -= bsig;
       q |= 1ULL;
     }
+    rem <<= 1;
   }
-  if (rem != 0) {
+  /* Final comparison for sticky bit (rounding) */
+  if (rem >= bsig) {
+    q |= 1ULL;
+  } else if (rem != 0) {
     q |= 1ULL;
   }
 
@@ -524,23 +553,55 @@ int __nedf2(double a, double b)
   return dcmp(a, b) == 0 ? 0 : 1;
 }
 
+/*
+ * GCC soft-float comparison return conventions:
+ *   __ltdf2: returns < 0 if a < b, else >= 0. NaN -> >= 0 (not less).
+ *   __gtdf2: returns > 0 if a > b, else <= 0. NaN -> <= 0 (not greater).
+ *   __ledf2: returns <= 0 if a <= b, else > 0. NaN -> > 0 (not le).
+ *   __gedf2: returns >= 0 if a >= b, else < 0. NaN -> < 0 (not ge).
+ *
+ * FIX: The old dcmp returned 1 for NaN which made __gtdf2 return 1
+ * (meaning "greater"), violating IEEE 754 NaN ordering rules.
+ * Now each function checks for NaN explicitly and returns the correct
+ * "unordered" value per GCC conventions.
+ */
 int __ltdf2(double a, double b)
 {
-  return dcmp(a, b) < 0 ? -1 : 1;
+  f64_u ua, ub;
+  ua.d = a; ub.d = b;
+  /* NaN: return >= 0 so (a < b) is false */
+  if (is_nan_df(ua.u) || is_nan_df(ub.u))
+    return 1;
+  return dcmp(a, b) < 0 ? -1 : 0;
 }
 
 int __gtdf2(double a, double b)
 {
-  return dcmp(a, b) > 0 ? 1 : -1;
+  f64_u ua, ub;
+  ua.d = a; ub.d = b;
+  /* NaN: return <= 0 so (a > b) is false */
+  if (is_nan_df(ua.u) || is_nan_df(ub.u))
+    return -1;
+  return dcmp(a, b) > 0 ? 1 : 0;
 }
 
 int __ledf2(double a, double b)
 {
+  f64_u ua, ub;
+  ua.d = a; ub.d = b;
+  /* NaN: return > 0 so (a <= b) is false */
+  if (is_nan_df(ua.u) || is_nan_df(ub.u))
+    return 1;
   return dcmp(a, b);
 }
 
 int __gedf2(double a, double b)
 {
+  f64_u ua, ub;
+  ua.d = a; ub.d = b;
+  /* NaN: return < 0 so (a >= b) is false */
+  if (is_nan_df(ua.u) || is_nan_df(ub.u))
+    return -1;
   return dcmp(a, b);
 }
 
@@ -714,6 +775,44 @@ double __floatdidf(long long i)
   return out.d;
 }
 
+/* BF: Added __floatundidf (unsigned long long -> double) for printf
+ * float formatting.  Same algorithm as __floatdidf but without sign
+ * handling since the input is unsigned. */
+double __floatundidf(unsigned long long u)
+{
+  f64_u out;
+  uint64_t frac;
+  uint64_t bits;
+  int msb;
+
+  if (u == 0) {
+    out.u = 0;
+    return out.d;
+  }
+
+  msb = 63 - clz64(u);
+
+  if (msb <= 52) {
+    frac = (u << (52 - msb)) & 0x000FFFFFFFFFFFFFULL;
+  } else {
+    uint64_t r = shr_jam64(u, (unsigned)(msb - 52 - 3));
+    uint64_t rb = r & 0x7ULL;
+    uint64_t m = r >> 3;
+    if (rb > 4 || (rb == 4 && (m & 1ULL))) {
+      m++;
+      if (m & (1ULL << 53)) {
+        msb++;
+        m >>= 1;
+      }
+    }
+    frac = m & 0x000FFFFFFFFFFFFFULL;
+  }
+
+  bits = ((uint64_t)(msb + 1023) << 52) | frac;
+  out.u = bits;
+  return out.d;
+}
+
 long long __fixdfdi(double a)
 {
   f64_u ua;
@@ -822,6 +921,16 @@ long long __fixsfdi(float a)
 unsigned long long __fixunssfdi(float a)
 {
   return __fixunsdfdi(__extendsfdf2(a));
+}
+
+/* BF: Added __fixdfsi (double -> signed int) for printf float
+ * formatting.  Delegates to __fixdfdi then narrows to int. */
+int __fixdfsi(double a)
+{
+  long long v = __fixdfdi(a);
+  if (v > 2147483647LL) return 2147483647;
+  if (v < -2147483648LL) return -2147483647 - 1;
+  return (int)v;
 }
 
 unsigned int __fixunsdfsi(double a)

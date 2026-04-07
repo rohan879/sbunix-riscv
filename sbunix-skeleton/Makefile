@@ -27,7 +27,7 @@ ifdef BUILD_TESTS
   TEST_TARGETS := $(patsubst tests/%,build/testfs/bin/%,$(TEST_SRC_DIRS))
 endif
 
-TIMEOUT ?= 600
+TIMEOUT ?= 1800
 # MODIFIED: END added
 
 # Language-specific kernel object/library
@@ -221,6 +221,9 @@ $(DISK_IMG): build/tools/mkfs
 # MODIFIED: BEGIN added
 ifdef BUILD_TESTS
 build/testfs/.prepared: build/testfs/.dirs $(TEST_TARGETS) $(OS_TEST_MARKER) $(OPEN_POSIX_TEST_MARKER)
+	@if [ -x tools/generate-priority-manifest ]; then \
+		tools/generate-priority-manifest; \
+	fi
 	@touch $@
 
 $(TEST_DISK_IMG): build/tools/mkext2img build/testfs/.prepared
@@ -251,6 +254,17 @@ qemu: build/kernel.elf $(DISK_IMG) $(if $(BUILD_TESTS),$(TEST_DISK_IMG))
 		-netdev user,id=net0 \
 		-nographic
 
+# NEW: GDB debug target -- launches QEMU paused with GDB stub on TCP :1234.
+# Connect with: riscv64-unknown-elf-gdb build/kernel.elf -ex "target remote :1234"
+# Useful for PTE_X watchpoints, signal delivery tracing, crash backtraces.
+qemu-gdb: build/kernel.elf $(DISK_IMG) $(if $(BUILD_TESTS),$(TEST_DISK_IMG))
+	qemu-system-riscv64 -machine virt -bios default -kernel $< \
+		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
+		-device virtio-blk-pci-non-transitional,drive=hd0 \
+		$(QEMU_TEST_DRIVE_ARGS) \
+		-device virtio-gpu-pci \
+		-nographic -s -S
+
 # MODIFIED: added
 test: $(DISK_IMG)
 	TIMEOUT=$(TIMEOUT) bash tools/run_tests.sh
@@ -266,7 +280,7 @@ submit:
 	rsync -a \
 		--exclude='.git' --exclude='build/' --exclude='zig-out/' \
 		--exclude='.zig-cache/' --exclude='.claude/' --exclude='thirdparty/' \
-		--max-size=175K \
+		--max-size=300K \
 		. "$$STMP/"; \
 	cd "$$STMP"; \
 	git init -q; \

@@ -2,6 +2,14 @@
 
 echo SBUnix booting...
 
+# ENH: Ensure essential environment variables are set and exported.
+# HOME and PATH must be available for cd builtin and command resolution.
+# These may already come from init's envp, but export them explicitly
+# so child processes always inherit them.
+export HOME=/
+export PATH=/bin
+export SHELL=/bin/sbush
+
 if test -f /test/bin/badfd; then
     /test/bin/badfd
 fi

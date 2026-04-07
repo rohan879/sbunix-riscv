@@ -49,22 +49,20 @@ void boot(uint64_t hartid, void *dtb) {
   syscall_init();
   userinit();
 
-  /* Workaround: something during boot corrupts the kernel code PTE
-   * (at 0x87ffa008), clearing PTE_X.  This causes instruction page
-   * faults when the kernel executes code.  Restore PTE_X before
-   * starting the scheduler so user processes run on a correct page
-   * table.  Root cause TBD — GDB shows corruption during
-   * virtio_blk_init but virtqueue pages don't overlap with the
-   * page table page and it is pinned. */
+  /* Verify kernel code PTE integrity via self-referencing page table window.
+   * The gigapage at L2[510] provides a redundant access path to the L1 PTE
+   * that does not depend on the identity-mapped superpages. */
+  if (recursive_check_kcode_pte())
+    printk("boot: repaired kernel code PTE_X via recursive mapping\n");
+  /* Verify the self-referencing window is functional by reading a
+   * known L2 entry through the window and comparing to direct access */
   {
-    pte_t l2pte = kernel_pagetable[2]; /* VPN[2]=2 for 0x80000000+ */
-    if (l2pte & PTE_V) {
-      pagetable_t l1 = (pagetable_t)PTE2PA(l2pte);
-      if ((l1[0] & PTE_V) && !(l1[0] & PTE_X)) {
-        l1[0] |= PTE_X;
-        asm volatile("sfence.vma zero, zero");
-      }
-    }
+    volatile pte_t *l2r =
+      (volatile pte_t *)RECURSIVE_L2_PTE_VA(2);
+    if (*l2r == kernel_pagetable[2])
+      printk("boot: recursive paging verified\n");
+    else
+      printk("boot: WARNING recursive paging mismatch\n");
   }
 
   printk("Starting scheduler...\n");

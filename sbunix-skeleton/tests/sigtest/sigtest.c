@@ -4,7 +4,7 @@
  * Exercises kill(pid, sig), signal(), SIG_IGN, SIGKILL, SIGSTOP/SIGCONT,
  * process-group kill, default termination, sigprocmask, and sigpending.
  *
- * Matches autograder test "11_signals".
+ * Tests signal delivery and kill().
  */
 
 #include <stdio.h>

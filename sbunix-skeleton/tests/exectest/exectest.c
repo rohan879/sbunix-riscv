@@ -1,5 +1,5 @@
 /*
- * exectest.c -- comprehensive execve compliance tests (autograder "06_exec")
+ * exectest.c -- comprehensive execve compliance tests
  *
  * Uses self-exec with argv[1]="--subtest" to verify child-side behavior
  * after execve (argv, envp, cwd, fd inheritance, signal reset, etc.).

@@ -541,6 +541,11 @@ rm /mnt/dddst
 
 echo === POSIX Utility Tests Done ===
 
+echo "=== Priority Third-Party Tests ==="
+if test -f /bin/run-priority-tests; then
+    run-priority-tests
+fi
+
 echo ""
 echo "=== Summary ==="
 echo "Passed: $PASS"
@@ -550,8 +555,10 @@ echo "To run Sortix os-test POSIX compliance suite: run-os-test"
 echo "To run Open POSIX test suite: run-open-posix-test"
 
 # --- Persistence test: MUST be last (calls poweroff after write phase) ---
+# BF: persisttest is compiled with BUILD_TESTS=1 and placed on the test
+# disk at /test/bin/persisttest, not in the main rootfs at /bin.
 echo "=== Running persisttest ==="
-/bin/persisttest
+/test/bin/persisttest
 
 if test $FAIL -gt 0; then
     exit 1

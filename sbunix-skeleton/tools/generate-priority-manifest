@@ -1,0 +1,37 @@
+#!/bin/bash
+# generate-priority-manifest: filter third-party test manifests to
+# test priority subsets.  Runs on the HOST during build.
+
+set -euo pipefail
+
+OS_MANIFEST="build/os-test-out/sbunix/test-manifest.txt"
+POSIX_MANIFEST="build/open-posix-test-out/sbunix/test-manifest.txt"
+
+OS_OUT="build/testfs/priority-os-test-manifest"
+POSIX_OUT="build/testfs/priority-open-posix-manifest"
+
+mkdir -p build/testfs
+
+# --- os-test manifest ---
+if [ -f "$OS_MANIFEST" ]; then
+  (grep -E 'include/string/|io/|process/|paths/|signal/|malloc/' "$OS_MANIFEST" || true) \
+    | sed 's|^/test/bin/os-test/||' \
+    | grep -v '^$' \
+    > "$OS_OUT" || true
+  echo "os-test priority manifest: $(wc -l < "$OS_OUT") tests"
+else
+  echo "WARNING: $OS_MANIFEST not found; skipping os-test priority manifest"
+fi
+
+# --- open-posix manifest ---
+if [ -f "$POSIX_MANIFEST" ]; then
+  (grep -E \
+    'string_h/|interfaces/str|interfaces/mem|interfaces/read/|interfaces/write/|interfaces/open/|interfaces/close/|interfaces/lseek/|interfaces/dup/|interfaces/fork/|interfaces/waitpid/|interfaces/_exit/|interfaces/wait/|interfaces/execve/|interfaces/execvp/|interfaces/execl/|interfaces/opendir/|interfaces/readdir/|interfaces/closedir/|interfaces/mkdir/|interfaces/rmdir/|interfaces/getenv/|interfaces/setenv/|interfaces/unsetenv/|interfaces/putenv/|interfaces/pipe/|interfaces/kill/|interfaces/raise/|interfaces/signal/|interfaces/sigaction/|interfaces/sigprocmask/|interfaces/sigpending/|interfaces/mmap/|interfaces/sbrk/|interfaces/setpgid/|interfaces/getpgrp/|interfaces/setsid/|interfaces/symlink/|interfaces/readlink/|interfaces/lstat/|interfaces/clock_gettime/|interfaces/time/|interfaces/gettimeofday/|interfaces/chdir/|interfaces/getcwd/' \
+    "$POSIX_MANIFEST" || true) \
+    | sed 's|^/test/bin/open-posix-test/||' \
+    | grep -v '^$' \
+    > "$POSIX_OUT" || true
+  echo "open-posix priority manifest: $(wc -l < "$POSIX_OUT") tests"
+else
+  echo "WARNING: $POSIX_MANIFEST not found; skipping open-posix priority manifest"
+fi

@@ -293,6 +293,56 @@ double strtod(const char *s, char **endptr)
         p++;
     }
 
+    /*
+     * Handle special strings: "inf", "infinity", "nan" (case-insensitive).
+     * C99/POSIX require strtod to recognize these.
+     */
+    {
+        /* Simple case-insensitive compare for "inf" prefix */
+        int is_inf = 0;
+        int is_nan = 0;
+        if ((p[0] == 'i' || p[0] == 'I') &&
+            (p[1] == 'n' || p[1] == 'N') &&
+            (p[2] == 'f' || p[2] == 'F')) {
+            is_inf = 1;
+            p += 3;
+            /* Also accept "infinity" */
+            if ((p[0] == 'i' || p[0] == 'I') &&
+                (p[1] == 'n' || p[1] == 'N') &&
+                (p[2] == 'i' || p[2] == 'I') &&
+                (p[3] == 't' || p[3] == 'T') &&
+                (p[4] == 'y' || p[4] == 'Y'))
+                p += 5;
+        } else if ((p[0] == 'n' || p[0] == 'N') &&
+                   (p[1] == 'a' || p[1] == 'A') &&
+                   (p[2] == 'n' || p[2] == 'N')) {
+            is_nan = 1;
+            p += 3;
+            /* Skip optional (n-char-sequence) */
+            if (*p == '(') {
+                const char *q = p + 1;
+                while (*q && *q != ')')
+                    q++;
+                if (*q == ')')
+                    p = q + 1;
+            }
+        }
+        if (is_inf) {
+            f64_union u;
+            u.u = sign ? 0xFFF0000000000000ULL : 0x7FF0000000000000ULL;
+            if (endptr)
+                *endptr = (char *)p;
+            return u.d;
+        }
+        if (is_nan) {
+            f64_union u;
+            u.u = 0x7FF8000000000000ULL; /* quiet NaN */
+            if (endptr)
+                *endptr = (char *)p;
+            return u.d;
+        }
+    }
+
     const char *start = p;
     uint64_t mantissa = 0;
     int      digits = 0;

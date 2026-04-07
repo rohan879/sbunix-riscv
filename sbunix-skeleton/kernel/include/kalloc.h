@@ -18,6 +18,10 @@ void page_ref_set(uint64_t pa, int val);
 /* Free page count */
 int  get_free_page_count(void);
 
+/* Small contiguous allocation (2-16 pages) for kernel stacks */
+void *kalloc_contiguous(int npages);  /* allocate npages contiguous 4KB pages */
+void  kfree_contiguous(void *pa, int npages); /* free npages contiguous pages */
+
 /* 2MB super page allocation */
 #define SUPERPAGE_NPAGES 512   /* number of 4KB pages in one 2MB super page */
 void *kalloc_super(void);      /* allocate 2MB-aligned contiguous block */

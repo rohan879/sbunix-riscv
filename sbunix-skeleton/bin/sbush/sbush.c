@@ -373,8 +373,12 @@ int main(int argc, char *argv[], char *envp[]) {
     var_export("PATH");
 
     char cwd[256];
-    if (getcwd(cwd, sizeof(cwd)))
+    if (getcwd(cwd, sizeof(cwd))) {
         var_set("PWD", cwd);
+        /* BF: Export PWD so child processes inherit the current directory.
+         * POSIX requires PWD to be in the environment. */
+        var_export("PWD");
+    }
 
     /* -c mode: execute command string */
     if (argc >= 3 && strcmp(argv[1], "-c") == 0) {

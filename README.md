@@ -63,27 +63,131 @@ qemu-riscv64 build/rootfs/bin/sbush
 
 This is useful for quick shell-only experiments, but it does not test the SBUnix kernel.
 
-## Automated Test Run
+## Third-Party Test Suites (Git Submodules)
 
-Run the host-side regression suite:
+The repository includes two POSIX compliance test suites as git submodules:
+
+- **Sortix os-test** (`sbunix-skeleton/tests/thirdparty/sortix/os-test/`) — POSIX compliance tests
+- **Open POSIX Test Suite** (`sbunix-skeleton/tests/thirdparty/open-posix-test-suite/posixtest/`) — IEEE conformance, functional, and stress tests
+
+### Pulling the Submodules
+
+After cloning the repository, initialize and fetch the submodules:
 
 ```bash
-bash tools/run_tests.sh
+git submodule update --init --recursive
 ```
 
-What it does:
+To later pull upstream changes for the submodules:
 
-- runs `make clean && make`
-- builds `build/disk.img`
-- boots the kernel in QEMU
+```bash
+git submodule update --remote --recursive
+```
+
+### Building with Submodule Tests
+
+The submodule tests are only compiled when `BUILD_TESTS=1` is set:
+
+```bash
+cd sbunix-skeleton
+source tools/sourceme.sh
+BUILD_TESTS=1 make -j$(nproc)
+```
+
+This compiles the os-test and open-posix suites via `tools/os-test.mk` and `tools/open-posix-test.mk`, and produces a `build/test-disk.img` containing the compiled test binaries.
+
+### Running the Submodule Tests
+
+Boot the OS with the test disk:
+
+```bash
+BUILD_TESTS=1 make qemu
+```
+
+Then from the `sbush` shell prompt inside QEMU:
+
+```
+run-os-test                              # Run all Sortix POSIX compliance tests
+run-os-test include/assert/assert        # Run a single os-test
+
+run-open-posix-test                      # Run all Open POSIX tests
+run-open-posix-test definitions/errno_h/4-1  # Run a single open-posix test
+```
+
+### Analyzing Build Failures
+
+Most submodule tests fail to compile due to missing headers (e.g., `pthread.h`, `sys/socket.h`). Analysis tools are provided:
+
+```bash
+./tools/analyze-os-test-failures headers    # Show missing headers for os-test
+./tools/analyze-os-test-failures symbols    # Show missing symbols
+./tools/analyze-os-test-failures suite      # Per-suite statistics
+
+./tools/analyze-open-posix-failures headers   # Show missing headers for open-posix
+./tools/analyze-open-posix-failures symbols   # Show missing symbols
+./tools/analyze-open-posix-failures category  # Per-category statistics
+```
+
+## Running Tests
+
+There are two ways to run the test suites: fully automated (`make test`) or manual via QEMU.
+
+### Option 1: Automated (`make test`)
+
+```bash
+cd sbunix-skeleton
+source tools/sourceme.sh
+make test
+```
+
+This runs `tools/run_tests.sh`, which:
+
+- runs `make clean && make -j1 BUILD_TESTS=1`
+- compiles ~2000 Sortix os-test binaries and ~1000 Open POSIX test binaries
+- builds `build/disk.img` and `build/test-disk.img`
+- boots QEMU twice (Boot 1: all tests + persistence write + poweroff; Boot 2: persistence verify)
 - parses `[PASS]` and `[FAIL]` lines from serial output
 - prints a pass/fail summary
 
-You can also invoke the same flow with:
+Fully automated, no interaction needed. First run is slow (~40 min for test compilation).
+
+### Option 2: Manual via QEMU
 
 ```bash
-make test
+cd sbunix-skeleton
+source tools/sourceme.sh
+make clean && make BUILD_TESTS=1 qemu
 ```
+
+**`BUILD_TESTS=1` is required.** Without it, no test disk is built and the test
+commands inside QEMU will fail with "Test manifest not found."
+
+First run is slow (~40 min) because it compiles all test binaries and builds a
+~1.9 GB test disk image. Subsequent runs reuse the cached disk if you skip
+`make clean`.
+
+Once QEMU boots and you see `sbush$`:
+
+```
+run-tests                  # SBUnix regression tests (~1 min)
+run-os-test                # Sortix os-test suite, 4071 tests (~40 min)
+run-open-posix-test        # Open POSIX test suite, 989 tests (~30 min)
+run-priority-tests         # Priority subset of both suites, ~1030 tests (~15 min)
+```
+
+To run a single test:
+
+```
+run-os-test signal/ppoll-block-raise
+run-open-posix-test conformance/interfaces/sigaction/4-12
+```
+
+Exit QEMU with `Ctrl-A`, then `X`.
+
+### Test output protocol
+
+Test binaries print `[PASS] <name>` or `[FAIL] <name> (details)` to stdout.
+Both the automated runner and the in-QEMU commands use this format.
 
 ## Manual Verification
 

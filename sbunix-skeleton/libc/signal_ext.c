@@ -88,8 +88,25 @@ int str2sig(const char *str, int *sig) {
 }
 
 int sigqueue(pid_t pid, int sig, const union sigval value) {
-  (void)value;
-  return kill(pid, sig);
+  /* BF: Use SYS_rt_sigqueueinfo instead of kill() so that the kernel
+   * receives the full siginfo_t (including si_value) and can properly
+   * deliver queued signals per POSIX. */
+  siginfo_t info;
+  memset(&info, 0, sizeof(info));
+  info.si_signo = sig;
+  /* BF: si_code must be SI_QUEUE (-1) per POSIX.  The old code used 0
+   * (SI_USER) and discarded si_value with (void)value, so sigtimedwait
+   * tests that check si_value always got zero. */
+  info.si_code = -1; /* SI_QUEUE */
+  info.si_pid = getpid();
+  info.si_uid = 0;
+  memcpy(&info.si_value, &value, sizeof(value));
+  long ret = syscall(SYS_rt_sigqueueinfo, (long)pid, (long)sig, &info);
+  if (ret < 0) {
+    errno = (int)(-ret);
+    return -1;
+  }
+  return 0;
 }
 
 int sigtimedwait(const sigset_t *set, siginfo_t *info,
@@ -179,5 +196,16 @@ void (*sigset(int sig, void (*disp)(int)))(int) {
   return old.sa_handler;
 }
 
-/* pthread_sigmask intentionally removed. callers should use sigprocmask()
-   directly. */
+/* ENH: Added pthread_kill and pthread_sigmask stubs.  POSIX requires
+ * these to be available from <signal.h>.  Since SBUnix is single-threaded,
+ * pthread_kill delegates to kill() and pthread_sigmask delegates to
+ * sigprocmask(). */
+int pthread_kill(pthread_t thread, int sig) {
+  (void)thread;
+  return kill(getpid(), sig);
+}
+
+int pthread_sigmask(int how, const sigset_t *restrict set,
+                    sigset_t *restrict oldset) {
+  return sigprocmask(how, set, oldset);
+}

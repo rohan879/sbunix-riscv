@@ -5,7 +5,7 @@
  * nested signal delivery, handler argument correctness,
  * register restoration after sigreturn, and SIGKILL/SIGSTOP rejection.
  *
- * Matches autograder test "12_sighand".
+ * Tests signal handlers and sigaction().
  */
 
 #include <stdio.h>

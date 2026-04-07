@@ -1,5 +1,5 @@
 /*
- * symlinktest.c -- Symlink resolution tests (matches autograder "20_symlink")
+ * symlinktest.c -- Symlink resolution tests
  *
  * Exercises symlink creation, readlink, open-through-symlink, symlink chains,
  * ELOOP detection, lstat, stat, relative targets, unlink, and dangling links.

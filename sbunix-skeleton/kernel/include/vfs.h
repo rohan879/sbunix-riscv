@@ -82,4 +82,35 @@ void ramfs_init(void);
 /* devfs helpers */
 int devfs_is_tty(void *private);
 
+/* File lock entry -- used for both POSIX (per-PID) and OFD (per-open_file)
+ * record locks.  Lock matching uses path string comparison because
+ * struct open_file has no inode number field. */
+#define MAX_FILE_LOCKS 256
+
+struct file_lock {
+  int used;                /* 1 if slot is in use */
+  short l_type;            /* F_RDLCK(0), F_WRLCK(1) */
+  int64_t l_start;         /* absolute start offset */
+  int64_t l_len;           /* length (0 = to EOF) */
+  pid_t l_pid;             /* owning PID (POSIX locks) or -1 (OFD) */
+  struct open_file *ofd;   /* owning open_file ptr (OFD) or NULL (POSIX) */
+  char path[256];          /* file path for lock matching */
+};
+
+extern struct file_lock lock_table[MAX_FILE_LOCKS];
+
+/* Set or release a file lock.  Returns 0 on success, -EAGAIN on conflict. */
+int do_file_setlk(const char *path, short type, int64_t start, int64_t len,
+                   pid_t pid, struct open_file *ofd, int is_ofd, int wait);
+/* Query whether a hypothetical lock would conflict.  Fills out_* with the
+ * conflicting lock info, or sets *out_type = F_UNLCK(2) if no conflict. */
+int do_file_getlk(const char *path, short type, int64_t start, int64_t len,
+                   pid_t pid, struct open_file *ofd, int is_ofd,
+                   short *out_type, int64_t *out_start, int64_t *out_len,
+                   pid_t *out_pid);
+/* Release all POSIX locks owned by pid (called on process exit). */
+void file_locks_release_pid(pid_t pid);
+/* Release all OFD locks owned by the given open_file (called on close). */
+void file_locks_release_ofd(struct open_file *ofd);
+
 #endif

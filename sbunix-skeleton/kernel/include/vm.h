@@ -67,4 +67,29 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len);
 int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len);
 int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max);
 
+/* Recursive paging: check/repair kernel code PTEs via the gigapage
+ * window at L2[510], bypassing the identity-mapped superpages that
+ * are susceptible to DMA-induced PTE_X corruption. */
+
+/* Two-step L1 PTE access through the self-referencing gigapage window.
+ * Step 1: Read the L2 entry via the window to find the L1 table PA.
+ * Step 2: Access the L1 PTE through the window.
+ * This does NOT call walk() and does NOT depend on the identity-mapped
+ * L1 superpages (which are the ones losing PTE_X).
+ * Defined inline in the header so both vm.c and trap.c can use it. */
+static inline volatile pte_t *recursive_l1_pte(uint64_t va) {
+  /* Step 1: read L2 entry for VPN[2] of va */
+  volatile pte_t *l2_ptr =
+      (volatile pte_t *)RECURSIVE_L2_PTE_VA(PX(2, va));
+  pte_t l2_entry = *l2_ptr;
+  if (!(l2_entry & PTE_V)) return 0;
+  /* Step 2: compute L1 PTE address through the window */
+  uint64_t l1_table_pa = PTE2PA(l2_entry);
+  return (volatile pte_t *)RECURSIVE_PA2VA(
+      l1_table_pa + PX(1, va) * sizeof(pte_t));
+}
+
+int recursive_check_kcode_pte(void);
+int recursive_check_all_kernel_ptes(void);
+
 #endif
