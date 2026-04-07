@@ -546,6 +546,8 @@ double pow(double base, double exponent)
     if (base == 0.0) {
         if (exponent > 0.0)
             return 0.0;
+        /* POSIX: 0^negative is a pole error */
+        errno = ERANGE;
         return pos_inf();
     }
     /* POSIX: pow(inf, y): inf^positive = inf, inf^negative = 0 */
@@ -1453,9 +1455,15 @@ double scalbln(double x, long n) {
 }
 
 double remquo(double x, double y, int *quo) {
-    if (__math_isnan(x) || __math_isnan(y) || __math_isinf(x) || y == 0.0) {
+    /* NaN input: return NaN without setting errno */
+    if (__math_isnan(x) || __math_isnan(y)) {
         if (quo) *quo = 0;
-        if (__math_isinf(x) || y == 0.0) errno = EDOM;
+        return qnan();
+    }
+    if (__math_isinf(x) || y == 0.0) {
+        /* POSIX: remquo(inf,y) or remquo(x,0) is domain error */
+        if (quo) *quo = 0;
+        errno = EDOM;
         return qnan();
     }
     if (__math_isinf(y)) {
