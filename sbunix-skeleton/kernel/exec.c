@@ -17,8 +17,10 @@ extern char _kernel_end[];
 
 static uint64_t exec_mmap_base(uint64_t sz) {
     uint64_t base = PGROUNDUP(sz) + PAGE_SIZE;
-    if (base < 0x20000000UL)
-        base = 0x20000000UL;
+    /* BF: Use USER_MMAP_FLOOR instead of hardcoded 0x20000000 to ensure
+     * mmap base never overlaps shared kernel MMIO L1 entries. */
+    if (base < USER_MMAP_FLOOR)
+        base = USER_MMAP_FLOOR;
     return base;
 }
 
