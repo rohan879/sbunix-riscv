@@ -6194,6 +6194,9 @@ void trap_handler(struct trapframe *tf) {
             if (cause == SCAUSE_STORE_PAGE_FAULT && current_proc) {
                 uint64_t va = PGROUNDDOWN(stval);
                 pte_t *pte = walk(current_proc->pagetable, va, 0);
+                /* BF: Guard — reject kernel-only PTEs in COW handler */
+                if (pte && (*pte & PTE_V) && !(*pte & PTE_U))
+                    goto pagefault_kill;
 
                 if (pte && (*pte & PTE_V) && (*pte & PTE_COW)) {
                     uint64_t pa = PTE2PA(*pte);
@@ -6283,7 +6286,16 @@ void trap_handler(struct trapframe *tf) {
                     }
 
                     uint64_t va = PGROUNDDOWN(stval);
-                    /* Check if page is already mapped */
+                    /* BF: Guard — reject kernel-only superpages before demand-paging.
+                     * These are shared MMIO entries from uvmmap_kernel() that should
+                     * not be demand-paged by user processes. */
+                    {
+                        int pte_level = -1;
+                        pte_t *spte = walk_super(current_proc->pagetable, va, &pte_level);
+                        if (spte && (*spte & PTE_V) && !(*spte & PTE_U) && pte_level > 0)
+                            goto pagefault_kill;
+                    }
+                    /* Original walk() for demand-paging logic — unchanged */
                     pte_t *pte = walk(current_proc->pagetable, va, 0);
                     if (!pte || !(*pte & PTE_V)) {
                         /* BF: POSIX requires SIGBUS for file-backed mmap access
@@ -6332,6 +6344,9 @@ void trap_handler(struct trapframe *tf) {
                             return; /* resume */
                         }
                     } else if (!(*pte & PTE_COW)) {
+                        /* BF: Guard — skip kernel-only PTEs in stale-permissions path */
+                        if (!(*pte & PTE_U))
+                            goto pagefault_kill;
                         /* Page is mapped (non-COW) but may have stale
                          * permissions.  This happens when mprotect updates
                          * the VMA prot but the PTE was not updated (e.g.,
