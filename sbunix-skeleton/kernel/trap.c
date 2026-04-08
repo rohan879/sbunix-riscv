@@ -3307,6 +3307,9 @@ static long sys_mprotect_handler(struct trapframe *tf) {
 
         if (!pte || !(*pte & PTE_V))
             continue;
+        /* BF: Skip shared kernel MMIO PTEs — must not modify kernel entries */
+        if (!(*pte & PTE_U))
+            continue;
 
         /* Clear old R/W/X, set new ones, keep U and other flags */
         *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | new_flags;

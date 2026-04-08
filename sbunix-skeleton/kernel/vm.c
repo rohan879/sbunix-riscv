@@ -337,6 +337,12 @@ void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len) {
             continue;
         }
         if (*pte & PTE_V) {
+            /* BF: Skip kernel-only PTEs (shared MMIO via uvmmap_kernel) —
+             * must not free kernel pages from user unmap paths. */
+            if (!(*pte & PTE_U)) {
+                a += (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
+                continue;
+            }
             uint64_t pa = PTE2PA(*pte);
             if (level == 1) {
                 /* Super page: free the 2MB block */
