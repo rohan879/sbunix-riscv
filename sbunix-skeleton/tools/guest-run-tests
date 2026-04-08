@@ -63,6 +63,10 @@ echo "=== Running mmaptest ==="
 /test/bin/mmaptest
 echo "=== Running cowstresstest ==="
 /test/bin/cowstresstest
+echo "=== Running mmaphitest ===" && /test/bin/mmaphitest
+echo "=== Running envtest ===" && /test/bin/envtest
+echo "=== Running malloctest ===" && /test/bin/malloctest
+echo "=== Running shelltests ===" && /test/bin/shelltests
 echo === C Binary Tests Done ===
 
 echo "=== Shell Regression Tests ==="
