@@ -88,6 +88,13 @@ typedef int            pid_t;
 
 #define USER_STACK_TOP  MAXVA   /* user stack grows down from top of VA space */
 
+/* BF: Floor for user mmap allocations — above all shared kernel MMIO L1
+ * entries.  L1[128] = UART at 0x10000000 is the highest safe device.
+ * L1[129] starts at 0x10200000, so mmap allocations begin here.
+ * PCIe ECAM at L1[384-510] (0x30000000+) is excluded from user page
+ * tables entirely by the uvmmap_kernel() share limit. */
+#define USER_MMAP_FLOOR 0x10200000UL
+
 typedef uint64_t pte_t;
 typedef uint64_t *pagetable_t; // 512 PTEs
 

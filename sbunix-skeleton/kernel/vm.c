@@ -269,7 +269,13 @@ int uvmmap_kernel(pagetable_t pt) {
 
   pagetable_t kernel_L1 = (pagetable_t)PTE2PA(kpte0);
   pagetable_t user_L1   = (pagetable_t)PTE2PA(upte0);
-  for (int j = 0; j < 512; j++) {
+  /* BF: Only share kernel MMIO L1 entries below USER_MMAP_FLOOR.
+   * L1 index j maps VA range [j*2MB, (j+1)*2MB) within VPN[2]=0.
+   * L1[128] = UART at 0x10000000, safely below mmap floor.
+   * L1[384-510] = PCIe ECAM at 0x30000000+ — within user mmap range, SKIP.
+   * Limit = USER_MMAP_FLOOR / SUPERPAGE_SIZE = 0x10200000 / 0x200000 = 129. */
+  int share_limit = USER_MMAP_FLOOR / SUPERPAGE_SIZE;
+  for (int j = 0; j < share_limit; j++) {
     if ((kernel_L1[j] & PTE_V) && !(user_L1[j] & PTE_V))
       user_L1[j] = kernel_L1[j];
   }
@@ -737,8 +743,11 @@ void proc_freepagetable(pagetable_t pagetable) {
   if ((upte0 & PTE_V) && !(upte0 & (PTE_R | PTE_W | PTE_X))) {
     pagetable_t user_L1 = (pagetable_t)PTE2PA(upte0);
     pagetable_t kernel_L1 = (kpte0 & PTE_V) ? (pagetable_t)PTE2PA(kpte0) : 0;
+    /* BF: Limit shared MMIO detach to same range as uvmmap_kernel() share limit.
+     * Entries above share_limit were never shared, so no need to compare. */
+    int share_limit = USER_MMAP_FLOOR / SUPERPAGE_SIZE;
     for (int j = 0; j < 512; j++) {
-      if (kernel_L1 && user_L1[j] == kernel_L1[j]) {
+      if (j < share_limit && kernel_L1 && user_L1[j] == kernel_L1[j]) {
         user_L1[j] = 0; /* shared MMIO — detach */
       } else if (user_L1[j] & PTE_V) {
         /* User-owned entry — free recursively. A user leaf may have no R/W/X
