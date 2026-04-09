@@ -351,13 +351,13 @@ void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len) {
                 *pte = 0;
                 a += SUPERPAGE_SIZE;
             } else {
-                /* Regular 4KB page */
-                /* BF: Remove reverse mapping before freeing so mapcount/anon_vma
-                 * metadata stays consistent — prevents stale rmap entries. */
-                struct page *pg = virt_to_page((void *)pa);
-                if (pg && PageAnon(pg)) {
-                  page_remove_rmap(pg, NULL);
-                }
+                /* Regular 4KB page.
+                 * BF: B7 (page_remove_rmap) intentionally omitted.
+                 * Without a matching page_add_mapping in copy_pagetable_cow
+                 * (reverted due to exit-path mapcount leak), calling
+                 * page_remove_rmap here would drive mapcount below -1.
+                 * Stale page descriptor state is cleaned up in kalloc()
+                 * when the page is next allocated. */
                 kfree((void *)pa);
                 *pte = 0;
                 a += PAGE_SIZE;

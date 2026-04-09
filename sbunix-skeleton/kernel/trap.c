@@ -599,13 +599,13 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
             return -1;
         }
 
-        /* BF: Increment page mapcount so reclaim/swap sees the correct
-         * sharing count.  VMA-level rmap linkage is already handled by
-         * anon_vma_fork() — this is the page-level counterpart. */
-        struct page *cow_pg = virt_to_page((void *)pa);
-        if (cow_pg) {
-          page_add_mapping(cow_pg);
-        }
+        /* BF: B4 (page_add_mapping) intentionally omitted here.
+         * copy_pagetable_cow runs for ALL pages (anon + non-anon), but
+         * freewalk_level in the exit path does kfree without a matching
+         * page_remove_mapping.  This causes mapcount to stay elevated
+         * after the child exits, making pages permanently unevictable
+         * by swap_evict_pages (which skips mapcount > 0).  The VMA-level
+         * rmap from anon_vma_fork is sufficient for swap/reclaim. */
         va += PAGE_SIZE;
     }
     /* Flush TLB since we modified parent PTEs */
