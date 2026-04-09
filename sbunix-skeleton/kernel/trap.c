@@ -3315,11 +3315,78 @@ static long sys_mprotect_handler(struct trapframe *tf) {
         *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | new_flags;
     }
 
-    /* Update VMA tracking: remove old region, re-add with new prot */
-    struct vm_area *v = vma_find(current_proc, addr);
-    int old_flags = v ? v->flags : 0;
-    vma_remove(current_proc, addr, addr + len);
-    vma_add(current_proc, addr, addr + len, prot, old_flags);
+    /* BF: Update VMAs in-place with split-and-update instead of the old
+     * vma_remove()+vma_add() approach.  The old method destroyed anon_vma
+     * chains and file metadata, breaking rmap and swap-in for the region. */
+    {
+      uint64_t range_start = addr;
+      uint64_t range_end = addr + len;
+      struct vm_area *v = current_proc->vma_list;
+      while (v && v->start < range_end) {
+        if (v->end <= range_start) { v = v->next; continue; }
+
+        /* Case 1: VMA starts before range — split off prefix */
+        if (v->start < range_start) {
+          struct vm_area *suffix = (struct vm_area *)kmalloc(sizeof(struct vm_area));
+          if (!suffix) break;
+          memset(suffix, 0, sizeof(*suffix));
+          suffix->start = range_start;
+          suffix->end   = v->end;
+          suffix->prot  = v->prot;
+          suffix->flags = v->flags;
+          suffix->file  = v->file;
+          suffix->file_offset = v->file_offset + (range_start - v->start);
+          if (suffix->file) suffix->file->refcount++;
+          /* BF: Initialize anon_vma for split VMA to keep rmap consistent */
+          INIT_LIST_HEAD(&suffix->anon_vma_chain);
+          suffix->anon_vma = NULL;
+          suffix->vm_pgoff = v->vm_pgoff + ((range_start - v->start) >> 12);
+          suffix->resident_pages = 0;
+          if (v->anon_vma) {
+            suffix->anon_vma = v->anon_vma;
+            anon_vma_get(v->anon_vma);
+            anon_vma_link(suffix);
+          }
+          suffix->next = v->next;
+          v->end = range_start;
+          v->next = suffix;
+          v = suffix;  /* continue processing the suffix */
+          continue;
+        }
+
+        /* Case 2: VMA ends after range — split off suffix */
+        if (v->end > range_end) {
+          struct vm_area *tail = (struct vm_area *)kmalloc(sizeof(struct vm_area));
+          if (!tail) break;
+          memset(tail, 0, sizeof(*tail));
+          tail->start = range_end;
+          tail->end   = v->end;
+          tail->prot  = v->prot;
+          tail->flags = v->flags;
+          tail->file  = v->file;
+          tail->file_offset = v->file_offset + (range_end - v->start);
+          if (tail->file) tail->file->refcount++;
+          /* BF: Initialize anon_vma for split tail VMA */
+          INIT_LIST_HEAD(&tail->anon_vma_chain);
+          tail->anon_vma = NULL;
+          tail->vm_pgoff = v->vm_pgoff + ((range_end - v->start) >> 12);
+          tail->resident_pages = 0;
+          if (v->anon_vma) {
+            tail->anon_vma = v->anon_vma;
+            anon_vma_get(v->anon_vma);
+            anon_vma_link(tail);
+          }
+          tail->next = v->next;
+          v->end = range_end;
+          v->next = tail;
+          /* Fall through to update v->prot below */
+        }
+
+        /* Case 3: VMA is fully within range — update prot */
+        v->prot = prot;
+        v = v->next;
+      }
+    }
 
     sfence_vma();
     return 0;
