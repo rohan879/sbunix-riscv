@@ -244,7 +244,13 @@ int swap_evict_pages(int n) {
           *pte = PTE_SWAP_ENCODE(slot, PTE_FLAGS(*pte));
           asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
         }
-        /* Page should now be unmapped from all processes */
+        /* BF: After try_to_unmap, the clock-scanning PTE (current process)
+         * may still be valid if it was not in the anon_vma chain.  Encode
+         * it too so the page can be freed safely. */
+        if (unmapped_count > 0 && (*pte & PTE_V)) {
+          *pte = PTE_SWAP_ENCODE(slot, PTE_FLAGS(*pte));
+          asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+        }
       } else {
         /* Non-anonymous page or no page descriptor - use old method */
         int orig_flags = PTE_FLAGS(*pte);
@@ -264,6 +270,10 @@ int swap_evict_pages(int n) {
                page_to_pfn(page), unmapped_count);
       }
       
+      /* BF: Clear page descriptor metadata before freeing the physical
+       * page to prevent stale anon_vma pointers from being followed
+       * after the page is reallocated for a different purpose. */
+      if (page) { ClearPageAnon(page); page->anon_vma = NULL; }
       kfree((void *)pa);
       evicted++;
     }
