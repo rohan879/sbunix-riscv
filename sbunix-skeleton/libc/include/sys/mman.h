@@ -19,6 +19,9 @@
 #define MAP_ANONYMOUS 0x20   /* not backed by a file */
 #define MAP_ANON      MAP_ANONYMOUS  /* alias */
 
+/* ENH: mremap() flags for memory remapping support */
+#define MREMAP_MAYMOVE 1
+
 /* mmap() failure sentinel */
 #define MAP_FAILED    ((void *)-1)
 
@@ -66,6 +69,8 @@ void *mmap(void *addr, size_t length, int prot, int flags,
            int fd, off_t offset);
 int   munmap(void *addr, size_t length);
 int   mprotect(void *addr, size_t length, int prot);
+/* ENH: mremap declaration for memory remapping support */
+void *mremap(void *old_address, size_t old_size, size_t new_size, int flags, ...);
 int   madvise(void *addr, size_t length, int advice);
 void *sbrk(long increment);
 int   brk(void *addr);

@@ -35,6 +35,17 @@ int mprotect(void *addr, size_t length, int prot) {
     return (int)syscall(SYS_mprotect, addr, length, prot);
 }
 
+/* ENH: mremap syscall wrapper for memory remapping support */
+void *mremap(void *old_address, size_t old_size, size_t new_size, int flags, ...) {
+  void *ret = (void *)syscall(SYS_mremap, old_address, old_size,
+                              new_size, flags, (void *)0);
+  if ((long)ret < 0 && (long)ret > -4096) {
+    errno = (int)(-(long)ret);
+    return MAP_FAILED;
+  }
+  return ret;
+}
+
 int madvise(void *addr, size_t length, int advice) {
     return (int)syscall(SYS_madvise, addr, length, advice);
 }
