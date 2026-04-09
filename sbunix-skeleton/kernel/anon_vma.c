@@ -232,6 +232,11 @@ void page_remove_rmap(struct page *page, struct vm_area *vma) {
 
   // If this was the last mapping, clear anon_vma association
   if (atomic_read(&page->mapcount) == -1) {
+    /* BF: Defensive re-check — page->anon_vma may have been cleared
+     * between the function entry check and here if another caller
+     * ran page_remove_rmap on the same page concurrently (e.g. via
+     * CoW fault decrementing mapcount on the shared page). */
+    if (!page->anon_vma) return;
     spin_lock(&page->anon_vma->lock);
     if (page->anon_vma->num_pages > 0) {
       page->anon_vma->num_pages--;
