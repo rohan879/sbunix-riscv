@@ -3259,16 +3259,18 @@ static long sys_munmap_handler(struct trapframe *tf) {
     /* Write back MAP_SHARED pages before unmapping */
     mmap_writeback_shared(current_proc, addr, addr + len);
 
-    /* BF: Remove VMA tracking BEFORE unmapping pages.  If vma_remove
-     * fails (split allocation), return error with pages still intact
-     * rather than leaving freed pages with stale VMA metadata. */
-    int vr = vma_remove(current_proc, addr, addr + len);
-    if (vr < 0)
-        return -12;  /* -ENOMEM */
-
-    /* Unmap pages -- uvmunmap handles unmapped gaps gracefully */
+    /* BF: Unmap pages BEFORE removing VMA tracking.  uvmunmap calls
+     * page_remove_rmap (B7) which accesses page->anon_vma — the
+     * anon_vma must still be alive.  If we did vma_remove first,
+     * anon_vma_unlink could free the anon_vma, leaving page_remove_rmap
+     * with a dangling pointer (use-after-free crash in swaptest). */
     uvmunmap(current_proc->pagetable, addr, len);
     sfence_vma();
+
+    /* Remove VMA tracking (handles splits automatically).
+     * BF: Check return — if split allocation fails the VMA list is
+     * inconsistent, but pages are safely freed above. */
+    vma_remove(current_proc, addr, addr + len);
 
     /* BF: Scan VMA list for highest non-stack allocated address.
      * Resets mmap_base to allow address space reuse after munmap.
