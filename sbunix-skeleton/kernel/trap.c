@@ -4879,26 +4879,135 @@ static long sys_mremap_handler(struct trapframe *tf) {
     }
     /* Cannot expand in place; if MREMAP_MAYMOVE, allocate new region + copy */
     if (flags & 1) { /* MREMAP_MAYMOVE */
-        /* BF: Use mmap_find_hole() instead of bare mmap_base bump to avoid
-         * kernel MMIO collision and VMA overlaps. */
+        /* BF: Full rewrite of MAYMOVE path with per-source-segment VMA
+         * recreation, growth-tail policy, two-phase page copy, rollback
+         * on failure, and proper anon_vma rmap registration.  The old
+         * code used a single vma_add with hardcoded RW/PRIVATE|ANON
+         * which lost file metadata, prot flags, and rmap chains. */
         uint64_t new_va = mmap_find_hole(current_proc, new_size);
         if (new_va == 0)
             return (long)-12; /* ENOMEM */
         current_proc->mmap_base = new_va + new_size;
-        vma_add(current_proc, new_va, new_va + new_size, 3 /* RW */, 0x22 /* PRIVATE|ANON */);
-        /* Copy old pages to new location */
-        for (uint64_t off = 0; off < old_size; off += PAGE_SIZE) {
-            pte_t *pte = walk(current_proc->pagetable, old_addr + off, 0);
-            if (pte && (*pte & PTE_V)) {
-                uint64_t pa = PTE2PA(*pte);
-                char *newpg = kalloc();
-                if (!newpg) return (long)-12; /* ENOMEM */
-                memcpy(newpg, (void *)pa, PAGE_SIZE);
-                mappages(current_proc->pagetable, new_va + off, PAGE_SIZE,
-                         (uint64_t)newpg, PTE_R | PTE_W | PTE_U);
+
+        /* --- Step 1: Initialize rollback state --- */
+        int copy_failed = 0;
+        uint64_t copied_up_to = 0;
+
+        /* --- Step 2: Recreate destination VMAs per source segment --- */
+        {
+          struct vm_area *sv = current_proc->vma_list;
+          while (sv) {
+            if (sv->start >= old_addr + old_size) break;
+            if (sv->end <= old_addr) { sv = sv->next; continue; }
+            uint64_t seg_start = (sv->start < old_addr) ? old_addr : sv->start;
+            uint64_t seg_end = (sv->end > old_addr + old_size) ? old_addr + old_size : sv->end;
+            uint64_t dst_start = new_va + (seg_start - old_addr);
+            uint64_t dst_end = new_va + (seg_end - old_addr);
+
+            if (vma_add(current_proc, dst_start, dst_end, sv->prot, sv->flags) < 0)
+              goto mremap_rollback;
+
+            /* BF: preserve file metadata from source VMA in destination */
+            struct vm_area *dv = vma_find(current_proc, dst_start);
+            if (dv && sv->file) {
+              dv->file = sv->file;
+              dv->file->refcount++;
+              dv->file_offset = sv->file_offset + (seg_start - sv->start);
             }
+            sv = sv->next;
+          }
         }
-        uvmunmap(current_proc->pagetable, old_addr, old_size);
+
+        /* --- Step 3: Growth tail (anonymous-only) --- */
+        if (new_size > old_size) {
+          struct vm_area *last_sv = NULL;
+          struct vm_area *sv2 = current_proc->vma_list;
+          while (sv2) {
+            if (sv2->start >= old_addr + old_size) break;
+            if (sv2->end > old_addr) last_sv = sv2;
+            sv2 = sv2->next;
+          }
+          int tail_prot = last_sv ? last_sv->prot : (PROT_READ | PROT_WRITE);
+          /* BF: growth tail is always anonymous, never file-backed */
+          if (vma_add(current_proc, new_va + old_size, new_va + new_size,
+                      tail_prot, MAP_PRIVATE | MAP_ANON) < 0)
+            goto mremap_rollback;
+        }
+
+        /* --- Step 4: Phase 1 -- copy pages without freeing old ones --- */
+        for (uint64_t off = 0; off < old_size; off += PAGE_SIZE) {
+          pte_t *old_pte = walk(current_proc->pagetable, old_addr + off, 0);
+          if (!old_pte || *old_pte == 0) continue;
+
+          struct vm_area *page_vma = vma_find(current_proc, new_va + off);
+          int pte_flags = PTE_U;
+          if (page_vma) {
+            if (page_vma->prot & PROT_READ)  pte_flags |= PTE_R;
+            if (page_vma->prot & PROT_WRITE) pte_flags |= PTE_W;
+            if (page_vma->prot & PROT_EXEC)  pte_flags |= PTE_X;
+          } else {
+            pte_flags |= PTE_R | PTE_W;
+          }
+
+          if (*old_pte & PTE_V) {
+            char *newpg = kalloc();
+            if (!newpg) { copy_failed = 1; copied_up_to = off; break; }
+            memcpy(newpg, (void *)PTE2PA(*old_pte), PAGE_SIZE);
+            if (mappages(current_proc->pagetable, new_va + off, PAGE_SIZE,
+                         (uint64_t)newpg, pte_flags) != 0) {
+              kfree(newpg);
+              copy_failed = 1; copied_up_to = off; break;
+            }
+            /* BF: register new page in rmap for reclaim */
+            if (page_vma && page_vma->anon_vma) {
+              struct page *pdesc = virt_to_page(newpg);
+              if (pdesc) page_add_anon_rmap(pdesc, page_vma, new_va + off);
+            }
+          } else if (PTE_IS_SWAPPED(*old_pte)) {
+            pte_t *new_pte = walk(current_proc->pagetable, new_va + off, 1);
+            if (!new_pte) { copy_failed = 1; copied_up_to = off; break; }
+            *new_pte = *old_pte;
+          }
+        }
+        if (!copy_failed) goto mremap_phase2;
+
+        /* --- Rollback: free only new pages; old mapping is INTACT --- */
+        mremap_rollback:
+        {
+          for (uint64_t off = 0; off < copied_up_to; off += PAGE_SIZE) {
+            pte_t *rpte = walk(current_proc->pagetable, new_va + off, 0);
+            if (rpte && (*rpte & PTE_V)) {
+              struct vm_area *rv = vma_find(current_proc, new_va + off);
+              if (rv) {
+                struct page *pd = virt_to_page((void *)PTE2PA(*rpte));
+                if (pd) page_remove_rmap(pd, rv);
+              }
+              kfree((void *)PTE2PA(*rpte));
+              *rpte = 0;
+            } else if (rpte && PTE_IS_SWAPPED(*rpte)) {
+              *rpte = 0;
+            }
+          }
+          vma_remove(current_proc, new_va, new_va + new_size);
+          return (long)-12; /* -ENOMEM */
+        }
+
+        /* --- Phase 2: Success -- clean up old mapping --- */
+        mremap_phase2:
+        for (uint64_t off = 0; off < old_size; off += PAGE_SIZE) {
+          pte_t *old_pte = walk(current_proc->pagetable, old_addr + off, 0);
+          if (!old_pte || *old_pte == 0) continue;
+          if (*old_pte & PTE_V) {
+            uint64_t pa = PTE2PA(*old_pte);
+            struct vm_area *ov = vma_find(current_proc, old_addr + off);
+            if (ov) {
+              struct page *opd = virt_to_page((void *)pa);
+              if (opd) page_remove_rmap(opd, ov);
+            }
+            kfree((void *)pa);
+          }
+          *old_pte = 0;
+        }
         sfence_vma();
         vma_remove(current_proc, old_addr, old_addr + old_size);
         return (long)new_va;
