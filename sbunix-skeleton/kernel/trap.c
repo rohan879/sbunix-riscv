@@ -6424,6 +6424,15 @@ void trap_handler(struct trapframe *tf) {
                     asm volatile("sfence.vma %0, zero" : : "r"(sva));
                     if ((sflags & PTE_X) || cause == SCAUSE_INST_PAGE_FAULT)
                         asm volatile("fence.i");
+                    /* BF: Register swapped-in page in anon rmap so the
+                     * reclaim subsystem can find and evict it again. */
+                    {
+                      struct vm_area *swap_vma = vma_find(current_proc, sva);
+                      if (swap_vma && swap_vma->anon_vma) {
+                        struct page *sp = virt_to_page(newpage);
+                        if (sp) page_add_anon_rmap(sp, swap_vma, sva);
+                      }
+                    }
                     return; /* resume faulting instruction */
                 }
             }
@@ -6441,6 +6450,15 @@ void trap_handler(struct trapframe *tf) {
                     memset(pg, 0, PAGE_SIZE);
                     mappages(current_proc->pagetable, current_proc->stack_bottom,
                              PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U);
+                    /* BF: Register stack page in anon rmap so reclaim can
+                     * track and evict stack pages under memory pressure. */
+                    {
+                      struct vm_area *stk_vma = vma_find(current_proc, current_proc->stack_bottom);
+                      if (stk_vma && stk_vma->anon_vma) {
+                        struct page *stk_pg = virt_to_page(pg);
+                        if (stk_pg) page_add_anon_rmap(stk_pg, stk_vma, current_proc->stack_bottom);
+                      }
+                    }
                     grew = 1;
                 }
                 if (grew && current_proc->stack_bottom <= va) {
@@ -6521,6 +6539,12 @@ void trap_handler(struct trapframe *tf) {
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
                             if ((perm & PTE_X) || cause == SCAUSE_INST_PAGE_FAULT)
                                 asm volatile("fence.i");
+                            /* BF: Register demand-faulted anonymous page in rmap
+                             * so reclaim can track and evict it later. */
+                            if ((fvma->flags & MAP_ANON) && fvma->anon_vma) {
+                              struct page *dp = virt_to_page(pg);
+                              if (dp) page_add_anon_rmap(dp, fvma, va);
+                            }
                             return; /* resume */
                         }
                     } else if (!(*pte & PTE_COW)) {
