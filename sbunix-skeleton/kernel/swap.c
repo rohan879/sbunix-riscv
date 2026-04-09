@@ -236,7 +236,9 @@ int swap_evict_pages(int n) {
       /* Try to unmap from all VMAs using anon_vma reverse mapping */
       int unmapped_count = 0;
       if (page && PageAnon(page)) {
-        unmapped_count = try_to_unmap(page);
+        /* BF: pass swap slot so try_to_unmap can encode swap entries
+         * in remote PTEs instead of silently zeroing them */
+        unmapped_count = try_to_unmap(page, slot);
         if (unmapped_count == 0) {
           /* Could not unmap - manually unmap from current process */
           *pte = PTE_SWAP_ENCODE(slot, PTE_FLAGS(*pte));

@@ -285,7 +285,7 @@ void anon_vma_unlink(struct vm_area *vma);
 /* Reverse mapping operations */
 int page_add_anon_rmap(struct page *page, struct vm_area *vma, uint64_t address);
 void page_remove_rmap(struct page *page, struct vm_area *vma);
-int try_to_unmap(struct page *page);
+int try_to_unmap(struct page *page, int swap_slot);
 int page_mapped_in_vma_count(struct page *page);
 
 /* Enhanced page access tracking */
