@@ -181,20 +181,45 @@ static inline int atomic_dec_return(atomic_t *a) {
   return --a->counter;
 }
 
-/* Simple spinlock operations (no-ops for uniprocessor) */
+/* Nesting-safe interrupt disable/restore for uniprocessor spinlocks.
+ * Globals defined in anon_vma.c; declared extern here so all TUs
+ * share one counter (not static — that would create per-TU copies).
+ *
+ * SCOPE LIMITATION: These spinlocks provide uniprocessor safety via
+ * interrupt masking only.  They are NOT real mutual-exclusion locks:
+ * no ownership tracking, no deadlock detection, no SMP-safe atomic
+ * exchange.  Sufficient for timer-preempted list corruption (B6 bug)
+ * but should not be assumed SMP-safe for future multi-hart work. */
+extern int spin_noff;       /* push_off/pop_off nesting depth */
+extern int spin_intena;     /* were interrupts enabled before first push_off? */
+
+static inline void push_off(void) {
+  int old = (r_sstatus() & SSTATUS_SIE) != 0;
+  w_sstatus(r_sstatus() & ~SSTATUS_SIE);
+  if (spin_noff == 0)
+    spin_intena = old;
+  spin_noff++;
+}
+
+static inline void pop_off(void) {
+  spin_noff--;
+  if (spin_noff == 0 && spin_intena)
+    w_sstatus(r_sstatus() | SSTATUS_SIE);
+}
+
 static inline void spin_lock_init(spinlock_t *lock, const char *name) {
   lock->locked = 0;
   lock->name = name;
 }
 
 static inline void spin_lock(spinlock_t *lock) {
-  // In uniprocessor kernel, just disable interrupts would be proper,
-  // but for simplicity we'll leave this as no-op for now
-  (void)lock;
+  push_off();
+  lock->locked = 1;
 }
 
 static inline void spin_unlock(spinlock_t *lock) {
-  (void)lock;
+  lock->locked = 0;
+  pop_off();
 }
 
 /* Enhanced memory statistics */
@@ -280,6 +305,7 @@ void anon_vma_get(struct anon_vma *anon_vma);
 void anon_vma_put(struct anon_vma *anon_vma);
 int anon_vma_fork(struct vm_area *vma, struct vm_area *parent_vma);
 int anon_vma_link(struct vm_area *vma);
+int anon_vma_link_prealloc(struct vm_area *vma, struct anon_vma_chain *avc);
 void anon_vma_unlink(struct vm_area *vma);
 
 /* Reverse mapping operations */
