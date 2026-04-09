@@ -3420,6 +3420,11 @@ static long sys_mprotect_handler(struct trapframe *tf) {
           suffix->resident_pages = 0;
           if (v->anon_vma) {
             suffix->anon_vma = v->anon_vma;
+            /* BF: Take a reference for the VMA's own anon_vma pointer.
+             * anon_vma_link/_prealloc adds a separate reference for the
+             * chain entry.  anon_vma_unlink does one put per chain plus
+             * one put for vma->anon_vma, so we need both. */
+            anon_vma_get(v->anon_vma);
             if (avc) {
               anon_vma_link_prealloc(suffix, avc);
             } else {
@@ -3453,6 +3458,9 @@ static long sys_mprotect_handler(struct trapframe *tf) {
           tail->resident_pages = 0;
           if (v->anon_vma) {
             tail->anon_vma = v->anon_vma;
+            /* BF: Take a reference for the VMA's own anon_vma pointer.
+             * Same rationale as prefix split above. */
+            anon_vma_get(v->anon_vma);
             if (avc) {
               anon_vma_link_prealloc(tail, avc);
             } else {

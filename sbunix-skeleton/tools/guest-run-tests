@@ -69,9 +69,7 @@ echo "=== Running malloctest ===" && /test/bin/malloctest
 echo "=== Running shelltests ===" && /test/bin/shelltests
 echo "=== Running mremaptest ===" && /test/bin/mremaptest
 echo "=== Running mprotecttest ===" && /test/bin/mprotecttest
-# BF: membugstest temporarily disabled — triggers heap corruption under
-# memory pressure from preceding tests (runs fine standalone).
-# echo "=== Running membugstest ===" && /test/bin/membugstest
+echo "=== Running membugstest ===" && /test/bin/membugstest
 echo "=== Running posix_mem_test ===" && /test/bin/posix_mem_test
 echo === C Binary Tests Done ===
 

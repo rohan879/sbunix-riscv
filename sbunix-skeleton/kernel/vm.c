@@ -542,11 +542,13 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
       tail->anon_vma = NULL;
       tail->vm_pgoff = v->vm_pgoff + ((end - v->start) >> 12);
       tail->resident_pages = 0;
-      /* BF: anon_vma_link() internally calls anon_vma_get(), so we must
-       * NOT call anon_vma_get() separately — that would double-increment
-       * the refcount and leak the anon_vma on VMA removal. */
+      /* BF: anon_vma_link() calls anon_vma_get() for the chain entry.
+       * We need a SEPARATE anon_vma_get() for the VMA's own anon_vma
+       * pointer, because anon_vma_unlink does one put per chain plus
+       * one put for vma->anon_vma (2 puts total for 1 chain). */
       if (v->anon_vma) {
         tail->anon_vma = v->anon_vma;
+        anon_vma_get(v->anon_vma);
         anon_vma_link(tail);
       }
       v->end = start;
