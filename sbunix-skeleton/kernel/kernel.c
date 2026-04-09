@@ -29,6 +29,9 @@ void boot(uint64_t hartid, void *dtb) {
   dtb_print_devices();
 
   kinit();
+  mm_init_page_descriptors(); /* BF: page descriptors must be initialized before
+                                 any virt_to_page() or page accounting is used */
+  mm_init_watermarks();       /* BF: set reclaim watermarks based on total pages */
   anon_vma_init();  /* Initialize anonymous VMA subsystem */
   kvminit();
 
