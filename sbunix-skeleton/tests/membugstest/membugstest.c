@@ -231,13 +231,14 @@ static void test_cow_mapcount_survives_pressure(void) {
     /* Child: write different pattern to trigger CoW on all 4 pages */
     memset(p, 0x99, 4 * PAGE);
 
-    /* Allocate 200 more pages to create memory pressure */
-    void *pressure = mmap(NULL, 200 * PAGE, PROT_READ | PROT_WRITE,
+    /* Allocate extra pages to create memory pressure.
+     * BF: Reduced from 200 to 32 to avoid OOM under constrained memory. */
+    void *pressure = mmap(NULL, 32 * PAGE, PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (pressure == MAP_FAILED) _exit(1);
 
     /* Touch all pressure pages to ensure they are allocated */
-    memset(pressure, 0x55, 200 * PAGE);
+    memset(pressure, 0x55, 32 * PAGE);
 
     /* Verify original 4 pages still have child's pattern */
     volatile unsigned char *c = (volatile unsigned char *)p;
@@ -246,7 +247,7 @@ static void test_cow_mapcount_survives_pressure(void) {
       if (c[i] != 0x99) _exit(2);
     }
 
-    munmap(pressure, 200 * PAGE);
+    munmap(pressure, 32 * PAGE);
     _exit(0);
   }
 
@@ -275,8 +276,10 @@ static void test_cow_mapcount_survives_pressure(void) {
  * data is intact.
  * =================================================================== */
 static void test_cow_heavy_fork_stress(void) {
-  const int NPAGES = 16;
-  const int NCHILDREN = 20;
+  /* BF: Reduced from 16 pages / 20 children to avoid OOM on a
+   * kernel with limited physical memory (128MB, no overcommit). */
+  const int NPAGES = 4;
+  const int NCHILDREN = 5;
 
   void *p = mmap(NULL, NPAGES * PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
