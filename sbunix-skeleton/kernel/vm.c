@@ -6,6 +6,7 @@
 #include <vm.h>
 #include <proc.h>
 #include <swap.h>
+#include <mm.h>  /* BF: needed for anon_vma_get/link/unlink in vma_remove splits */
 
 #ifndef VM_FREEWALK_TRACE
 #define VM_FREEWALK_TRACE 1
@@ -528,6 +529,18 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
       tail->file_offset = v->file_offset + (end - old_start);
       if (tail->file)
         tail->file->refcount++;
+      /* BF: Initialize anon_vma fields on split tail so that rmap
+       * chains remain consistent and page reclaim doesn't follow
+       * uninitialized pointers. */
+      INIT_LIST_HEAD(&tail->anon_vma_chain);
+      tail->anon_vma = NULL;
+      tail->vm_pgoff = v->vm_pgoff + ((end - v->start) >> 12);
+      tail->resident_pages = 0;
+      if (v->anon_vma) {
+        tail->anon_vma = v->anon_vma;
+        anon_vma_get(v->anon_vma);
+        anon_vma_link(tail);
+      }
       v->end = start;
       v->next = tail;
       pp = &tail->next;
@@ -544,6 +557,11 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
     } else {
       /* VMA fully within range: remove entirely */
       *pp = v->next;
+      /* BF: Unlink from anon_vma chains before freeing to prevent
+       * dangling rmap entries that would corrupt page reclaim. */
+      if (v->anon_vma) {
+        anon_vma_unlink(v);
+      }
       if (v->file) {
         vfs_free_file(v->file);
         v->file = NULL;
