@@ -90,6 +90,10 @@ OS_TEST_TOTAL := $(shell find tests/thirdparty/sortix/os-test -name '*.c' 2>/dev
 # Count total open-posix-test source files at build time
 OPEN_POSIX_TOTAL := $(shell find tests/thirdparty/open-posix-test-suite/posixtest -name '*.c' ! -name 'testfrmw*' 2>/dev/null | wc -l)
 
+# BF: Use nproc instead of hardcoded -j16 to avoid oversubscription on
+# machines with fewer cores.  Defaults to 4 if nproc is unavailable.
+SUBMAKE_JOBS ?= $(shell nproc 2>/dev/null || echo 4)
+
 # Special rule for run-os-test: pass TOTAL_TESTS_IN_SUITE as build-time define
 build/rootfs/bin/run-os-test: $$(wildcard bin/run-os-test/*.c) build/libc/crt.S.o build/libc.a
 	@mkdir -p $(@D)
@@ -146,7 +150,7 @@ endif
 ifdef BUILD_TESTS
 $(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/testfs/.dirs $(TEST_TARGETS)
 	@echo "=== Building os-test suite ==="
-	$(MAKE) -f tools/os-test.mk SBUNIX_ROOT=$(CURDIR) -j16 install
+	$(MAKE) -f tools/os-test.mk SBUNIX_ROOT=$(CURDIR) -j$(SUBMAKE_JOBS) install
 	# Copy test manifest and expected outputs into testfs
 	@if [ -f build/os-test-out/sbunix/test-manifest.txt ]; then \
 		cp build/os-test-out/sbunix/test-manifest.txt build/testfs/os-test-manifest; \
@@ -170,7 +174,7 @@ endif
 ifdef BUILD_TESTS
 $(OPEN_POSIX_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/testfs/.dirs $(TEST_TARGETS)
 	@echo "=== Building open-posix-test suite ==="
-	$(MAKE) -f tools/open-posix-test.mk SBUNIX_ROOT=$(CURDIR) -j16 install
+	$(MAKE) -f tools/open-posix-test.mk SBUNIX_ROOT=$(CURDIR) -j$(SUBMAKE_JOBS) install
 	# Copy test manifest into testfs
 	@if [ -f build/open-posix-test-out/sbunix/test-manifest.txt ]; then \
 		cp build/open-posix-test-out/sbunix/test-manifest.txt build/testfs/open-posix-test-manifest; \
