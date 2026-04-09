@@ -580,6 +580,8 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
         uint64_t pa = PTE2PA(*pte);
         int flags = PTE_FLAGS(*pte);
 
+        int orig_flags = PTE_FLAGS(*pte);  /* BF: save before CoW conversion for rollback */
+
         if (flags & PTE_W) {
             /* Writable page: mark read-only + COW in both parent and child */
             *pte = PA2PTE(pa) | ((flags & ~PTE_W) | PTE_COW | PTE_V);
@@ -588,8 +590,22 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
 
         /* Share the same physical page */
         page_ref_inc(pa);
-        if (mappages(dst, va, PAGE_SIZE, pa, flags) < 0)
+        if (mappages(dst, va, PAGE_SIZE, pa, flags) < 0) {
+            /* BF: Rollback — restore parent PTE and decrement refcount
+             * leaked by the failed child mapping attempt. */
+            *pte = PA2PTE(pa) | orig_flags;
+            page_ref_dec(pa);
+            sfence_vma();
             return -1;
+        }
+
+        /* BF: Increment page mapcount so reclaim/swap sees the correct
+         * sharing count.  VMA-level rmap linkage is already handled by
+         * anon_vma_fork() — this is the page-level counterpart. */
+        struct page *cow_pg = virt_to_page((void *)pa);
+        if (cow_pg) {
+          page_add_mapping(cow_pg);
+        }
         va += PAGE_SIZE;
     }
     /* Flush TLB since we modified parent PTEs */
@@ -3243,12 +3259,16 @@ static long sys_munmap_handler(struct trapframe *tf) {
     /* Write back MAP_SHARED pages before unmapping */
     mmap_writeback_shared(current_proc, addr, addr + len);
 
+    /* BF: Remove VMA tracking BEFORE unmapping pages.  If vma_remove
+     * fails (split allocation), return error with pages still intact
+     * rather than leaving freed pages with stale VMA metadata. */
+    int vr = vma_remove(current_proc, addr, addr + len);
+    if (vr < 0)
+        return -12;  /* -ENOMEM */
+
     /* Unmap pages -- uvmunmap handles unmapped gaps gracefully */
     uvmunmap(current_proc->pagetable, addr, len);
     sfence_vma();
-
-    /* Remove VMA tracking (handles splits automatically) */
-    vma_remove(current_proc, addr, addr + len);
 
     /* BF: Scan VMA list for highest non-stack allocated address.
      * Resets mmap_base to allow address space reuse after munmap.
@@ -3304,6 +3324,44 @@ static long sys_mprotect_handler(struct trapframe *tf) {
     if (prot & PROT_WRITE) new_flags |= PTE_W;
     if (prot & PROT_EXEC)  new_flags |= PTE_X;
 
+    /* BF: Preflight allocation — count needed VMA splits and pre-allocate
+     * all objects.  If any allocation fails, return -ENOMEM with no PTEs
+     * or VMA list modified (failure atomicity). */
+    struct vm_area *prealloc_vma[2] = {NULL, NULL};
+    struct anon_vma_chain *prealloc_avc[2] = {NULL, NULL};
+    int n_splits = 0;
+    {
+      struct vm_area *v = current_proc->vma_list;
+      while (v && v->start < addr + len) {
+        if (v->end <= addr) { v = v->next; continue; }
+        /* Prefix split needed if VMA starts before range */
+        if (v->start < addr) n_splits++;
+        /* Suffix split needed if VMA ends after range */
+        if (v->end > addr + len) n_splits++;
+        v = v->next;
+      }
+    }
+    /* Allocate VMA nodes and (if needed) anon_vma_chain nodes */
+    for (int i = 0; i < n_splits && i < 2; i++) {
+      prealloc_vma[i] = (struct vm_area *)kmalloc(sizeof(struct vm_area));
+      if (!prealloc_vma[i]) {
+        /* BF: Allocation failed — free anything already allocated and
+         * return ENOMEM.  No PTEs or VMAs have been touched. */
+        for (int j = 0; j < i; j++) {
+          kmfree(prealloc_vma[j], sizeof(struct vm_area));
+          if (prealloc_avc[j])
+            kmfree(prealloc_avc[j], sizeof(struct anon_vma_chain));
+        }
+        return -12;  /* -ENOMEM */
+      }
+      /* Pre-allocate anon_vma_chain if source VMA has anon_vma —
+       * we'll check this during mutation, but allocate speculatively
+       * to avoid a second pass. */
+      prealloc_avc[i] = (struct anon_vma_chain *)kmalloc(sizeof(struct anon_vma_chain));
+      /* avc allocation failure is non-fatal — only needed if VMA has anon_vma */
+    }
+    int prealloc_idx = 0;
+
     /* Walk each page and update PTE flags */
     for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
         int level;
@@ -3321,13 +3379,17 @@ static long sys_mprotect_handler(struct trapframe *tf) {
         if (!(*pte & PTE_U))
             continue;
 
-        /* Clear old R/W/X, set new ones, keep U and other flags */
-        *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | new_flags;
+        /* BF: Preserve CoW state — do not re-enable PTE_W on a CoW page.
+         * The write fault must still fire to perform the copy. */
+        int pte_new_flags = new_flags;
+        if (*pte & PTE_COW) {
+          pte_new_flags &= ~PTE_W;
+        }
+        *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | pte_new_flags;
     }
 
-    /* BF: Update VMAs in-place with split-and-update instead of the old
-     * vma_remove()+vma_add() approach.  The old method destroyed anon_vma
-     * chains and file metadata, breaking rmap and swap-in for the region. */
+    /* BF: Mutation phase — VMA splits using pre-allocated objects.
+     * All allocations guaranteed available; no failure possible. */
     {
       uint64_t range_start = addr;
       uint64_t range_end = addr + len;
@@ -3336,9 +3398,10 @@ static long sys_mprotect_handler(struct trapframe *tf) {
         if (v->end <= range_start) { v = v->next; continue; }
 
         /* Case 1: VMA starts before range — split off prefix */
-        if (v->start < range_start) {
-          struct vm_area *suffix = (struct vm_area *)kmalloc(sizeof(struct vm_area));
-          if (!suffix) break;
+        if (v->start < range_start && prealloc_idx < 2 && prealloc_vma[prealloc_idx]) {
+          struct vm_area *suffix = prealloc_vma[prealloc_idx];
+          struct anon_vma_chain *avc = prealloc_avc[prealloc_idx];
+          prealloc_idx++;
           memset(suffix, 0, sizeof(*suffix));
           suffix->start = range_start;
           suffix->end   = v->end;
@@ -3347,29 +3410,32 @@ static long sys_mprotect_handler(struct trapframe *tf) {
           suffix->file  = v->file;
           suffix->file_offset = v->file_offset + (range_start - v->start);
           if (suffix->file) suffix->file->refcount++;
-          /* BF: Initialize anon_vma for split VMA to keep rmap consistent.
-           * anon_vma_link() calls anon_vma_get() internally, so we must
-           * NOT also call anon_vma_get() here — that would double-increment
-           * the refcount and leak the anon_vma. */
+          /* BF: Initialize anon_vma for split VMA using pre-allocated chain
+           * to avoid allocation failure during mutation. */
           INIT_LIST_HEAD(&suffix->anon_vma_chain);
           suffix->anon_vma = NULL;
           suffix->vm_pgoff = v->vm_pgoff + ((range_start - v->start) >> 12);
           suffix->resident_pages = 0;
           if (v->anon_vma) {
             suffix->anon_vma = v->anon_vma;
-            anon_vma_link(suffix);
+            if (avc) {
+              anon_vma_link_prealloc(suffix, avc);
+            } else {
+              anon_vma_link(suffix);  /* fallback if avc alloc failed */
+            }
           }
           suffix->next = v->next;
           v->end = range_start;
           v->next = suffix;
-          v = suffix;  /* continue processing the suffix */
+          v = suffix;
           continue;
         }
 
         /* Case 2: VMA ends after range — split off suffix */
-        if (v->end > range_end) {
-          struct vm_area *tail = (struct vm_area *)kmalloc(sizeof(struct vm_area));
-          if (!tail) break;
+        if (v->end > range_end && prealloc_idx < 2 && prealloc_vma[prealloc_idx]) {
+          struct vm_area *tail = prealloc_vma[prealloc_idx];
+          struct anon_vma_chain *avc = prealloc_avc[prealloc_idx];
+          prealloc_idx++;
           memset(tail, 0, sizeof(*tail));
           tail->start = range_end;
           tail->end   = v->end;
@@ -3378,27 +3444,34 @@ static long sys_mprotect_handler(struct trapframe *tf) {
           tail->file  = v->file;
           tail->file_offset = v->file_offset + (range_end - v->start);
           if (tail->file) tail->file->refcount++;
-          /* BF: Initialize anon_vma for split tail VMA.
-           * anon_vma_link() calls anon_vma_get() internally — no separate
-           * anon_vma_get() needed (same pattern as suffix split above). */
+          /* BF: Initialize anon_vma for split tail using pre-allocated chain. */
           INIT_LIST_HEAD(&tail->anon_vma_chain);
           tail->anon_vma = NULL;
           tail->vm_pgoff = v->vm_pgoff + ((range_end - v->start) >> 12);
           tail->resident_pages = 0;
           if (v->anon_vma) {
             tail->anon_vma = v->anon_vma;
-            anon_vma_link(tail);
+            if (avc) {
+              anon_vma_link_prealloc(tail, avc);
+            } else {
+              anon_vma_link(tail);  /* fallback if avc alloc failed */
+            }
           }
           tail->next = v->next;
           v->end = range_end;
           v->next = tail;
-          /* Fall through to update v->prot below */
         }
 
         /* Case 3: VMA is fully within range — update prot */
         v->prot = prot;
         v = v->next;
       }
+    }
+
+    /* Free unused pre-allocated objects */
+    for (int i = prealloc_idx; i < 2; i++) {
+      if (prealloc_vma[i]) kmfree(prealloc_vma[i], sizeof(struct vm_area));
+      if (prealloc_avc[i]) kmfree(prealloc_avc[i], sizeof(struct anon_vma_chain));
     }
 
     sfence_vma();
