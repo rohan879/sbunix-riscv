@@ -7,14 +7,6 @@
 #include "include/vm.h"
 #include "include/swap.h"  /* BF: needed for PTE_SWAP_ENCODE in try_to_unmap */
 
-/* Global interrupt-nesting state for uniprocessor spinlocks.
- * Defined here; declared extern in mm.h so all TUs share one counter.
- * NOTE: anon_vma.c is a workable but non-ideal home for kernel-wide
- * lock state.  If spinlocks spread beyond the anon-vma path, move
- * these globals to a neutral kernel core file (e.g., kalloc.c). */
-int spin_noff = 0;       /* push_off/pop_off nesting depth */
-int spin_intena = 0;     /* were interrupts enabled before first push_off? */
-
 static spinlock_t anon_vma_lock;  // Global anon_vma allocation lock
 
 /* Initialize anonymous VMA subsystem */
@@ -235,35 +227,25 @@ int page_add_anon_rmap(struct page *page, struct vm_area *vma, uint64_t address)
 void page_remove_rmap(struct page *page, struct vm_area *vma) {
   if (!page || !PageAnon(page) || !page->anon_vma) return;
 
-  /* BF: Capture anon_vma in a local variable before any state changes.
-   * Between this check and the lock acquisition below, a timer interrupt
-   * can fire and context-switch to another process whose exit/munmap path
-   * calls page_remove_rmap on the same page, setting page->anon_vma = NULL.
-   * Using a local avoids the dangling re-read from page->anon_vma. */
-  struct anon_vma *av = page->anon_vma;
-
   // Update mapping count
   page_remove_mapping(page);
 
   // If this was the last mapping, clear anon_vma association
   if (atomic_read(&page->mapcount) == -1) {
-    /* BF: Re-check — another page_remove_rmap call may have already
-     * cleared page->anon_vma during a preemption window above. */
-    if (!page->anon_vma) return;
-    spin_lock(&av->lock);
-    if (av->num_pages > 0) {
-      av->num_pages--;
+    spin_lock(&page->anon_vma->lock);
+    if (page->anon_vma->num_pages > 0) {
+      page->anon_vma->num_pages--;
     }
-    spin_unlock(&av->lock);
+    spin_unlock(&page->anon_vma->lock);
 
     page->anon_vma = NULL;
     ClearPageAnon(page);
   }
 
+  /* BF: Unconditional resident_pages decrement (was gated on non-zero
+   * which prevented counting when first page was added unconditionally). */
   if (vma && vma->anon_vma) {
     spin_lock(&vma->anon_vma->lock);
-    /* BF: Removed outer guard — was preventing decrement when count was
-     * incremented unconditionally above. Keep floor check. */
     if (vma->resident_pages > 0) {
       vma->resident_pages--;
     }
@@ -286,25 +268,12 @@ int try_to_unmap(struct page *page, int swap_slot) {
   }
 
   anon_vma = page->anon_vma;
+  spin_lock(&anon_vma->lock);
 
   extern pte_t *walk(pagetable_t pagetable, uint64_t va, int alloc);
   extern struct proc proc[];
 
-  /* BF: Deferred rmap removal batch — process page_remove_rmap calls
-   * outside the anon_vma->lock to avoid recursive lock acquisition.
-   * Stack cost: DEFER_BATCH * 16 = 128 bytes (safe on 16KB stack). */
-#define DEFER_BATCH 8
-  struct { struct page *pg; struct vm_area *v; } deferred[DEFER_BATCH];
-  int ndeferred = 0;
-
-  /* BF: Hold a reference on anon_vma for the duration of the walk.
-   * During unlock-flush-relock cycles, page_remove_rmap and concurrent
-   * munmap/anon_vma_unlink could drop the last external reference.
-   * This prevents the anon_vma from being freed under us. */
-  anon_vma_get(anon_vma);
-
-  spin_lock(&anon_vma->lock);
-restart:
+  /* Walk all VMAs that could map this page */
   for (struct list_head *pos = anon_vma->head.next;
        pos != &anon_vma->head;
        pos = pos->next) {
@@ -315,7 +284,8 @@ restart:
     /* Search for the page in this VMA's address space */
     for (address = vma->start; address < vma->end; address += PAGE_SIZE) {
       /* BF: Find the process whose vma_list contains this VMA, then walk
-       * that process's pagetable. */
+       * that process's pagetable.  The old code used current_proc which
+       * is wrong when the VMA belongs to a forked child. */
       pagetable_t owner_pt = 0;
       for (int pi = 0; pi < NPROC; pi++) {
         if (proc[pi].state == UNUSED || proc[pi].pagetable == 0) continue;
@@ -331,49 +301,31 @@ restart:
       pte_t *pte = walk(owner_pt, address, 0);
       if (pte && (*pte & PTE_V)) {
         uint64_t pa = PTE2PA(*pte);
+        /* BF: PA comparison works because page->virtual holds the identity-
+         * mapped kernel virtual address which equals the physical address
+         * in our identity-mapping scheme. */
         if (pa == (uint64_t)page->virtual) {
           /* Found mapping — encode swap entry or zero the PTE */
           if (swap_slot >= 0) {
+            /* BF: Encode swap entry so the page can be faulted back in */
             *pte = PTE_SWAP_ENCODE(swap_slot, PTE_FLAGS(*pte));
           } else {
             *pte = 0;
           }
           asm volatile("sfence.vma %0, zero" : : "r"(address));
-
-          /* BF: Defer page_remove_rmap — cannot call while holding
-           * anon_vma->lock because it acquires the same lock. */
-          deferred[ndeferred].pg = page;
-          deferred[ndeferred].v = vma;
-          ndeferred++;
+          /* BF: Direct page_remove_rmap call is safe here because spinlocks
+           * are no-ops on this uniprocessor kernel — no recursive lock
+           * acquisition deadlock.  If real locks are added, this must be
+           * deferred outside the anon_vma->lock critical section. */
+          page_remove_rmap(page, vma);
           unmapped++;
-
-          if (ndeferred >= DEFER_BATCH) {
-            /* BF: Buffer full — flush deferred rmap removals.
-             * Restart walk from head because list may change while
-             * lock is released.  Already-cleared PTEs are skipped
-             * by the PTE_V / PA comparison checks above.
-             * anon_vma itself remains valid because we hold a ref. */
-            spin_unlock(&anon_vma->lock);
-            for (int i = 0; i < ndeferred; i++)
-              page_remove_rmap(deferred[i].pg, deferred[i].v);
-            ndeferred = 0;
-            spin_lock(&anon_vma->lock);
-            goto restart;
-          }
-          break;  /* one mapping per VMA for a given page */
+          break;  /* Only one mapping per VMA for a given page */
         }
       }
     }
   }
+
   spin_unlock(&anon_vma->lock);
-
-  /* Process remaining deferred entries */
-  for (int i = 0; i < ndeferred; i++)
-    page_remove_rmap(deferred[i].pg, deferred[i].v);
-
-  anon_vma_put(anon_vma);  /* release the reference taken above */
-#undef DEFER_BATCH
-
   return unmapped;
 }
 

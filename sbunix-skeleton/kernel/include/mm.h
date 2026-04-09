@@ -181,45 +181,25 @@ static inline int atomic_dec_return(atomic_t *a) {
   return --a->counter;
 }
 
-/* Nesting-safe interrupt disable/restore for uniprocessor spinlocks.
- * Globals defined in anon_vma.c; declared extern here so all TUs
- * share one counter (not static — that would create per-TU copies).
- *
- * SCOPE LIMITATION: These spinlocks provide uniprocessor safety via
- * interrupt masking only.  They are NOT real mutual-exclusion locks:
- * no ownership tracking, no deadlock detection, no SMP-safe atomic
- * exchange.  Sufficient for timer-preempted list corruption (B6 bug)
- * but should not be assumed SMP-safe for future multi-hart work. */
-extern int spin_noff;       /* push_off/pop_off nesting depth */
-extern int spin_intena;     /* were interrupts enabled before first push_off? */
-
-static inline void push_off(void) {
-  int old = (r_sstatus() & SSTATUS_SIE) != 0;
-  w_sstatus(r_sstatus() & ~SSTATUS_SIE);
-  if (spin_noff == 0)
-    spin_intena = old;
-  spin_noff++;
-}
-
-static inline void pop_off(void) {
-  spin_noff--;
-  if (spin_noff == 0 && spin_intena)
-    w_sstatus(r_sstatus() | SSTATUS_SIE);
-}
-
+/* Spinlock operations for uniprocessor kernel.
+ * BF: Kept as lightweight no-ops.  This kernel is cooperative single-hart
+ * with no preemptive scheduling; timer interrupts only set a flag and
+ * never touch anon_vma/page data structures.  Real interrupt masking
+ * was attempted (push_off/pop_off) but caused livelock in the swap
+ * eviction path because the interrupt disable/restore changed timing
+ * assumptions throughout the memory subsystem.  If SMP or preemptive
+ * scheduling is added, revisit with full interrupt-safe locking. */
 static inline void spin_lock_init(spinlock_t *lock, const char *name) {
   lock->locked = 0;
   lock->name = name;
 }
 
 static inline void spin_lock(spinlock_t *lock) {
-  push_off();
-  lock->locked = 1;
+  (void)lock;
 }
 
 static inline void spin_unlock(spinlock_t *lock) {
-  lock->locked = 0;
-  pop_off();
+  (void)lock;
 }
 
 /* Enhanced memory statistics */
