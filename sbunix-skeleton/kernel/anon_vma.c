@@ -234,22 +234,32 @@ int page_add_anon_rmap(struct page *page, struct vm_area *vma, uint64_t address)
 /* Remove reverse mapping for page */
 void page_remove_rmap(struct page *page, struct vm_area *vma) {
   if (!page || !PageAnon(page) || !page->anon_vma) return;
-  
-  // Update mapping count  
+
+  /* BF: Capture anon_vma in a local variable before any state changes.
+   * Between this check and the lock acquisition below, a timer interrupt
+   * can fire and context-switch to another process whose exit/munmap path
+   * calls page_remove_rmap on the same page, setting page->anon_vma = NULL.
+   * Using a local avoids the dangling re-read from page->anon_vma. */
+  struct anon_vma *av = page->anon_vma;
+
+  // Update mapping count
   page_remove_mapping(page);
-  
+
   // If this was the last mapping, clear anon_vma association
   if (atomic_read(&page->mapcount) == -1) {
-    spin_lock(&page->anon_vma->lock);
-    if (page->anon_vma->num_pages > 0) {
-      page->anon_vma->num_pages--;
+    /* BF: Re-check — another page_remove_rmap call may have already
+     * cleared page->anon_vma during a preemption window above. */
+    if (!page->anon_vma) return;
+    spin_lock(&av->lock);
+    if (av->num_pages > 0) {
+      av->num_pages--;
     }
-    spin_unlock(&page->anon_vma->lock);
-    
+    spin_unlock(&av->lock);
+
     page->anon_vma = NULL;
     ClearPageAnon(page);
   }
-  
+
   if (vma && vma->anon_vma) {
     spin_lock(&vma->anon_vma->lock);
     /* BF: Removed outer guard — was preventing decrement when count was
