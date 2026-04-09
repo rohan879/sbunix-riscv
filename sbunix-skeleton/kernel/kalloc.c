@@ -1,5 +1,6 @@
 #include <kalloc.h>
 #include <kmalloc.h>
+#include <mm.h>
 #include <printk.h>
 #include <riscv.h>
 #include <string.h>
@@ -218,8 +219,25 @@ void *kalloc(void) {
      * POSIX requires user-space pages contain zeroes. While all known
      * call sites already zero, this prevents future regressions and
      * catches the exec_vfs stale-page cascade bug. */
-    if (r)
+    if (r) {
         memset((void *)r, 0, PAGE_SIZE);
+        /* BF: Reset page descriptor to clean state on allocation.
+         * Without this, recycled pages retain stale rmap metadata
+         * (PageAnon, mapcount, anon_vma) from prior use because
+         * kfree/uvmunmap do not call page_remove_rmap.  The stale
+         * mapcount accumulates across reuse cycles, causing the
+         * swap eviction clock to skip these pages (mapcount > 0)
+         * and eventually exhausting evictable candidates. */
+        struct page *pg = virt_to_page((void *)r);
+        if (pg) {
+            pg->flags = 0;
+            atomic_set(&pg->mapcount, -1);
+            pg->anon_vma = NULL;
+            pg->age_score = 0;
+            pg->access_count = 0;
+            pg->last_access = 0;
+        }
+    }
     return r;
 }
 

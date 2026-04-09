@@ -3173,7 +3173,9 @@ static long sys_mmap_handler(struct trapframe *tf) {
 
     /* Register VMA — pages allocated lazily on first access. */
     if (vma_add(current_proc, va, va + len, prot, flags) < 0) {
-        return (long)-1;
+        /* BF: return -ENOMEM (not -1) so libc mmap wrapper sets
+         * the correct errno for the caller. */
+        return (long)-12; /* ENOMEM */
     }
 
     /* File-backed mapping: store file reference in VMA for demand paging.
@@ -3248,18 +3250,26 @@ static long sys_munmap_handler(struct trapframe *tf) {
     /* Remove VMA tracking (handles splits automatically) */
     vma_remove(current_proc, addr, addr + len);
 
-    /* BF: Scan VMA list for highest allocated address.
+    /* BF: Scan VMA list for highest non-stack allocated address.
      * Resets mmap_base to allow address space reuse after munmap.
      * Without this, 100k mmap/munmap cycles exhaust the address space
-     * since mmap_base only moves forward.  The simple frontier check
-     * (addr + len == mmap_base) only reclaims when unmapping at the
-     * exact frontier, missing non-contiguous free regions. */
-    /* BF: Use mmap_search_base() instead of hardcoded 0x20000000 to ensure
-     * mmap_base reset stays above USER_MMAP_FLOOR after unmapping. */
+     * since mmap_base only moves forward.  Excludes the stack region
+     * (which extends up to USER_STACK_TOP) from the scan so that
+     * mmap_base does not get pushed to the ceiling of the address
+     * space where mmap_find_hole would have no room to allocate. */
     {
         uint64_t highest = mmap_search_base(current_proc);
         struct vm_area *v = current_proc->vma_list;
         while (v) {
+            /* BF: Skip the stack VMA — it reaches USER_STACK_TOP and
+             * would push mmap_base to the address space ceiling. */
+            if (v->end <= current_proc->stack_bottom ||
+                v->start >= current_proc->stack_top) {
+              /* Not a stack VMA — include in scan */
+            } else {
+              v = v->next;
+              continue;
+            }
             uint64_t end = v->end;
             if (end > highest)
                 highest = end;
@@ -3337,14 +3347,16 @@ static long sys_mprotect_handler(struct trapframe *tf) {
           suffix->file  = v->file;
           suffix->file_offset = v->file_offset + (range_start - v->start);
           if (suffix->file) suffix->file->refcount++;
-          /* BF: Initialize anon_vma for split VMA to keep rmap consistent */
+          /* BF: Initialize anon_vma for split VMA to keep rmap consistent.
+           * anon_vma_link() calls anon_vma_get() internally, so we must
+           * NOT also call anon_vma_get() here — that would double-increment
+           * the refcount and leak the anon_vma. */
           INIT_LIST_HEAD(&suffix->anon_vma_chain);
           suffix->anon_vma = NULL;
           suffix->vm_pgoff = v->vm_pgoff + ((range_start - v->start) >> 12);
           suffix->resident_pages = 0;
           if (v->anon_vma) {
             suffix->anon_vma = v->anon_vma;
-            anon_vma_get(v->anon_vma);
             anon_vma_link(suffix);
           }
           suffix->next = v->next;
@@ -3366,14 +3378,15 @@ static long sys_mprotect_handler(struct trapframe *tf) {
           tail->file  = v->file;
           tail->file_offset = v->file_offset + (range_end - v->start);
           if (tail->file) tail->file->refcount++;
-          /* BF: Initialize anon_vma for split tail VMA */
+          /* BF: Initialize anon_vma for split tail VMA.
+           * anon_vma_link() calls anon_vma_get() internally — no separate
+           * anon_vma_get() needed (same pattern as suffix split above). */
           INIT_LIST_HEAD(&tail->anon_vma_chain);
           tail->anon_vma = NULL;
           tail->vm_pgoff = v->vm_pgoff + ((range_end - v->start) >> 12);
           tail->resident_pages = 0;
           if (v->anon_vma) {
             tail->anon_vma = v->anon_vma;
-            anon_vma_get(v->anon_vma);
             anon_vma_link(tail);
           }
           tail->next = v->next;

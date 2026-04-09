@@ -41,9 +41,14 @@ void anon_vma_free(struct anon_vma *anon_vma) {
     printk("WARNING: anon_vma_free: anon_vma still has chains\n");
   }
   
-  if (anon_vma->num_vmas > 0 || anon_vma->num_pages > 0) {
-    printk("WARNING: anon_vma_free: anon_vma still has %lu VMAs and %lu pages\n",
-           anon_vma->num_vmas, anon_vma->num_pages);
+  /* BF: num_pages > 0 at free time is expected because uvmunmap()
+   * frees physical pages via kfree() without calling page_remove_rmap()
+   * to decrement num_pages.  The stale page descriptor state is cleaned
+   * up in kalloc() when the page is next allocated.  Only warn about
+   * num_vmas > 0 which indicates a genuine leak. */
+  if (anon_vma->num_vmas > 0) {
+    printk("WARNING: anon_vma_free: anon_vma still has %lu VMAs\n",
+           anon_vma->num_vmas);
   }
   
   // Release parent reference if we have one
