@@ -4852,12 +4852,13 @@ static long sys_mremap_handler(struct trapframe *tf) {
     new_size = PGROUNDUP(new_size);
     if (new_size == old_size) return (long)old_addr;
     if (new_size < old_size) {
-        /* Shrink: unmap tail */
+        /* BF: Shrink — writeback dirty MAP_SHARED pages before unmapping,
+         * then use vma_remove() to properly trim/split VMAs instead of
+         * the old v->end assignment which breaks after K5-style splits. */
+        mmap_writeback_shared(current_proc, old_addr + new_size, old_addr + old_size);
         uvmunmap(current_proc->pagetable, old_addr + new_size, old_size - new_size);
         sfence_vma();
-        /* Update VMA */
-        struct vm_area *v = vma_find(current_proc, old_addr);
-        if (v) v->end = old_addr + new_size;
+        vma_remove(current_proc, old_addr + new_size, old_addr + old_size);
         return (long)old_addr;
     }
     /* Grow: try to expand in place (check if space after is unmapped) */
