@@ -28,8 +28,8 @@ struct file_lock lock_table[MAX_FILE_LOCKS];
 
 /* Two ranges [s1, s1+l1) and [s2, s2+l2) overlap.
  * l_len=0 means "to EOF" -- treat as infinite extent.
- * RF: Made non-static for access by extracted I/O module */
-int ranges_overlap(int64_t s1, int64_t l1, int64_t s2, int64_t l2) {
+ * RF: Made static -- only used within this module */
+static int ranges_overlap(int64_t s1, int64_t l1, int64_t s2, int64_t l2) {
   int64_t e1 = (l1 == 0) ? (int64_t)0x7FFFFFFFFFFFFFFFLL : s1 + l1;
   int64_t e2 = (l2 == 0) ? (int64_t)0x7FFFFFFFFFFFFFFFLL : s2 + l2;
   return s1 < e2 && s2 < e1;
@@ -38,8 +38,8 @@ int ranges_overlap(int64_t s1, int64_t l1, int64_t s2, int64_t l2) {
 /* Check whether an existing lock conflicts with a proposed lock.
  * Locks conflict if: same file path, overlapping byte ranges,
  * at least one is a write lock, and different owner. */
-/* RF: Made non-static for access by extracted I/O module */
-int lock_conflicts(struct file_lock *lk, const char *path,
+/* RF: Made static -- only used within this module */
+static int lock_conflicts(struct file_lock *lk, const char *path,
     short type, int64_t start, int64_t len, pid_t pid,
     struct open_file *ofd, int is_ofd) {
   if (!lk->used) return 0;

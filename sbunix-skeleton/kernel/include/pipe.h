@@ -4,8 +4,6 @@
 #ifndef _PIPE_H
 #define _PIPE_H
 
-#include <riscv.h>
-
 #define NPIPES    64
 /* Kernel pipe buffer size; distinct from POSIX PIPE_BUF (4096 in libc) */
 #define KPIPE_BUF 65536

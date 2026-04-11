@@ -50,13 +50,11 @@ long sys_brk_handler(struct trapframe *tf) {
 }
 
 /* Forward declaration: used by MAP_FIXED in sys_mmap_handler */
-/* RF: Made non-static for access by extracted memory syscall module */
-void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end);
+static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end);
 
 /* BF: Compute the floor for mmap allocations, ensuring it never
  * falls below USER_MMAP_FLOOR (avoiding shared kernel MMIO range). */
-/* RF: Made non-static for access by extracted memory syscall module */
-uint64_t mmap_search_base(struct proc *p) {
+static uint64_t mmap_search_base(struct proc *p) {
   uint64_t base = PGROUNDUP(p->sz) + PAGE_SIZE;
   if (base < USER_MMAP_FLOOR)
     base = USER_MMAP_FLOOR;
@@ -65,8 +63,7 @@ uint64_t mmap_search_base(struct proc *p) {
 
 /* BF: Find a hole in the user address space for a new mapping of len bytes.
  * Walks the VMA list to skip overlaps.  Returns 0 on failure (ENOMEM). */
-/* RF: Made non-static for access by extracted memory syscall module */
-uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
+static uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
   uint64_t floor = mmap_search_base(p);
   uint64_t candidate = p->mmap_base ? p->mmap_base : floor;
   if (candidate < floor) candidate = floor;
@@ -215,7 +212,7 @@ long sys_mmap_handler(struct trapframe *tf) {
 }
 
 /* Write back dirty MAP_SHARED pages to the backing file before unmapping */
-void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) {
+static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) {
     struct vm_area *v = p->vma_list;
     while (v) {
         if (v->file && (v->flags & 0x01) /* MAP_SHARED */ &&

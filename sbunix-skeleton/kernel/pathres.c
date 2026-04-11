@@ -9,10 +9,6 @@
 #include <riscv.h>
 #include <proc.h>
 #include <printk.h>
-#include <tar.h>
-
-extern char _tarfs_start[];
-extern char _tarfs_end[];
 
 /* Convert an absolute/relative path to the tarfs "./..." format.
  * tarfs uses paths like "./bin/echo", "./etc/rc", etc.

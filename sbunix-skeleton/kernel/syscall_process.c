@@ -200,8 +200,8 @@ void cleanup_proc_resources(struct proc *p) {
 /* a0 = flags (CLONE_VM | CLONE_FILES | CLONE_SIGHAND | SIGCHLD etc.)  */
 /* a1 = child stack pointer (0 means inherit parent sp)                 */
 /* ------------------------------------------------------------------ */
-/* RF: Made non-static for access by extracted process syscall module */
-pid_t sys_clone(struct trapframe *caller_tf) {
+/* RF: Made static -- only called from sys_clone_handler in this module */
+static pid_t sys_clone(struct trapframe *caller_tf) {
     uint64_t flags    = caller_tf->a0;
     uint64_t child_sp = caller_tf->a1;
     int clone_flags   = (int)(flags & ~0xFFUL); /* mask out low-byte signal */
@@ -355,8 +355,8 @@ bad:
 /* ------------------------------------------------------------------ */
 /* sys_wait4: wait for a child to exit                                  */
 /* ------------------------------------------------------------------ */
-/* RF: Made non-static for access by extracted process syscall module */
-pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
+/* RF: Made static -- only called from sys_wait4_handler in this module */
+static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
     for (;;) {
         int found_child = 0;
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
