@@ -24,7 +24,7 @@ int alloc_fd(void);
 void close_ofile(struct proc *p, int fd);
 void copy_ofile(struct proc *dst, struct proc *src);
 
-/* Process lifecycle (defined in trap.c) */
+/* Process lifecycle (defined in syscall_process.c) */
 void cleanup_proc_resources(struct proc *p);
 
 /* VM support for fork (defined in syscall_process.c) */
