@@ -186,8 +186,29 @@ long sys_reboot_handler(struct trapframe *tf) {
 }
 
 long sys_fsync_handler(struct trapframe *tf) {
-    (void)tf;
-    ext2_sync(NULL);
+    /* BF: Validate fd before syncing.  The old code ignored the fd argument
+     * and unconditionally called ext2_sync.  POSIX requires EBADF for an
+     * invalid fd and EINVAL for fds that don't support syncing (e.g. pipes). */
+    int fd = (int)tf->a0;
+    if (fd < 0 || fd >= NOFILE)
+        return (long)-9; /* -EBADF */
+
+    struct open_file **oft = proc_ofile(current_proc);
+    struct open_file *of = oft[fd];
+    if (!of)
+        return (long)-9; /* -EBADF */
+
+    /* Pipes and special fds cannot be synced */
+    if (of->is_pipe)
+        return (long)-22; /* -EINVAL */
+
+    /* Only ext2 is a persistent writable filesystem; for in-memory or
+     * read-only filesystems (tarfs, ramfs, procfs, devfs, sysfs) syncing
+     * is a no-op and returns success.  If a new writable FS is added,
+     * update this dispatch. */
+    if (of->ops == &ext2_ops)
+        ext2_sync(NULL);
+
     return 0;
 }
 

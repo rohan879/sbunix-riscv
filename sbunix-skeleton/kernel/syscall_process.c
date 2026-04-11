@@ -525,7 +525,10 @@ long sys_execve_handler(struct trapframe *tf) {
     char resolved[128];
     char tarpath[128];
     resolve_path(current_proc->cwd, kpath, resolved);
-    resolve_symlinks_in_path(resolved, 8, 1);
+    /* BF: Reduced maxdepth from 8 to 6 to prevent kernel stack overflow.
+     * Each recursion level costs ~1152 bytes; 6*1152+600 = 7512, leaving
+     * ~680 bytes margin on the 8KB kernel stack. */
+    resolve_symlinks_in_path(resolved, 6, 1);
     to_tarfs_path(resolved, tarpath);
 
     int ret = exec(tarpath);
@@ -642,7 +645,7 @@ long sys_execve_handler(struct trapframe *tf) {
                     /* Now exec the interpreter (follow symlinks) */
                     char interp_resolved[128];
                     resolve_path("/", interp, interp_resolved);
-                    resolve_symlinks_in_path(interp_resolved, 8, 1);
+                    resolve_symlinks_in_path(interp_resolved, 6, 1);
                     char interp_tarpath[128];
                     to_tarfs_path(interp_resolved, interp_tarpath);
                     ret = exec(interp_tarpath);
@@ -710,6 +713,13 @@ long sys_execve_handler(struct trapframe *tf) {
         uint64_t argv_str_base = sp + header + argv_ptrs_sz + envp_ptrs_sz;
         uint64_t envp_str_base = argv_str_base + kstroff;
 
+        /* BF: Use multi-chunk copyout to avoid kbuf overflow.
+         * The old code copied header + pointer arrays + all strings into a
+         * single 4096-byte kalloc page, but total could reach ~8KB when
+         * argv and envp strings fill their respective pages.  Now we copy
+         * only the header + pointer arrays into kbuf (max ~536 bytes),
+         * then copyout argv and envp strings directly from their own
+         * already-allocated pages. */
         char *kbuf = (char *)kalloc();
         if (kbuf) {
             int off = 0;
@@ -738,30 +748,33 @@ long sys_execve_handler(struct trapframe *tf) {
             memcpy(kbuf + off, ptrs, envp_ptrs_sz);
             off += envp_ptrs_sz;
 
-            if (kstroff > 0) {
-                memcpy(kbuf + off, kstrbuf, kstroff);
-                off += kstroff;
-            }
-
-            if (kenvoff > 0) {
-                memcpy(kbuf + off, kenvbuf, kenvoff);
-                off += kenvoff;
-            }
-
+            /* Multi-chunk copyout: header+ptrs first, then string pages */
             copyout(current_proc->pagetable, sp, kbuf, off);
+            if (kstroff > 0)
+                copyout(current_proc->pagetable, argv_str_base, kstrbuf, kstroff);
+            if (kenvoff > 0)
+                copyout(current_proc->pagetable, envp_str_base, kenvbuf, kenvoff);
             kfree(kbuf);
-        }
 
-        newtf->sp = sp;
-        newtf->a0 = (uint64_t)kargc;
-        newtf->a1 = argv_ptr_base;
-        newtf->a2 = envp_ptr_base;
+            newtf->sp = sp;
+            newtf->a0 = (uint64_t)kargc;
+            newtf->a1 = argv_ptr_base;
+            newtf->a2 = envp_ptr_base;
+        } else {
+            /* BF: Fallback on kbuf alloc failure -- set argc=0 so the
+             * process can at least start rather than reading garbage.
+             * sp/a1/a2 are left at exec defaults (entry point sets them). */
+            newtf->a0 = 0;
+        }
     }
 
     kfree(kstrbuf);
     if (kenvbuf) kfree(kenvbuf);
 
-    memcpy(tf, current_proc->trapframe, sizeof(struct trapframe));
+    /* BF: Guard against overlapping src/dst (undefined behavior for memcpy).
+     * When tf already points to current_proc->trapframe, no copy is needed. */
+    if (tf != current_proc->trapframe)
+        memcpy(tf, current_proc->trapframe, sizeof(struct trapframe));
     return SYSCALL_NORETURN;
 }
 
