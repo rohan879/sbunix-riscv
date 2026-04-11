@@ -259,12 +259,18 @@ struct ramfs_private {
 
 /* Flags from libc/include/fcntl.h */
 #define RAMFS_O_CREAT   0x40
+#define RAMFS_O_EXCL    0x80  /* ENH: Added to support O_CREAT|O_EXCL for mknodat */
 #define RAMFS_O_TRUNC   0x200
 #define RAMFS_O_APPEND  0x400
 
 static int ramfs_open(void *fs_data, const char *path, int flags, void **private) {
   (void)fs_data;
   struct ramfs_inode *ino = ramfs_walk(path);
+
+  /* ENH: O_EXCL with O_CREAT must fail if the file already exists (EEXIST).
+   * Required by POSIX and used by mknodat to avoid creating duplicates. */
+  if (ino && (flags & RAMFS_O_CREAT) && (flags & RAMFS_O_EXCL))
+    return -17; /* -EEXIST */
 
   if (!ino && (flags & RAMFS_O_CREAT)) {
     /* Create the file */
@@ -680,6 +686,38 @@ static int ramfs_readlink(void *fs_data, const char *path, char *buf, int bufsiz
   return copylen;
 }
 
+/* ENH: ramfs_link — create a hard link (new directory entry pointing to the
+ * same inode).  Increments nlink on the source inode.  Required by linkat(2)
+ * to support hard links on in-memory filesystems. */
+static int ramfs_link(void *fs_data, const char *oldpath, const char *newpath) {
+  (void)fs_data;
+  /* Find the source inode */
+  struct ramfs_inode *src = ramfs_walk(oldpath);
+  if (!src) return -2; /* -ENOENT */
+  if (src->type == RAMFS_DIR) return -31; /* -EMLINK (POSIX: no hard links to dirs) */
+
+  /* Find parent directory of newpath and the basename */
+  const char *new_base;
+  struct ramfs_inode *new_parent = ramfs_walk_parent(newpath, &new_base);
+  if (!new_parent || new_parent->type != RAMFS_DIR)
+    return -2; /* -ENOENT (parent doesn't exist) */
+  if (*new_base == '\0')
+    return -22; /* -EINVAL */
+
+  /* Check that newpath doesn't already exist */
+  if (ramfs_dir_lookup(new_parent, new_base))
+    return -17; /* -EEXIST */
+
+  /* Add a new directory entry in the parent pointing to the same inode */
+  int rc = ramfs_dir_add(new_parent, new_base, src);
+  if (rc < 0)
+    return rc;
+
+  /* Increment the link count on the source inode */
+  src->nlink++;
+  return 0;
+}
+
 /* ================================================================== */
 /* VFS ops table                                                        */
 /* ================================================================== */
@@ -699,6 +737,7 @@ struct vfs_ops ramfs_ops = {
   .symlink = ramfs_symlink,
   .readlink = ramfs_readlink,
   .rename  = ramfs_rename,
+  .link    = ramfs_link,
 };
 
 /* ================================================================== */

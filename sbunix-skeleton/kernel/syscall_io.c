@@ -1192,22 +1192,22 @@ long sys_linkat_handler(struct trapframe *tf) {
     if (old_ops != new_ops ||
         (old_mnt && new_mnt && old_mnt->fs_data != new_mnt->fs_data))
         return (long)-18; /* EXDEV: cross-device link */
-    if (!ext2_is_ops(old_ops))
-        return (long)-30; /* EROFS: read-only filesystem */
-
-    /* Get the source inode number by opening the old path */
-    void *priv = NULL;
-    if (old_ops->open(old_mnt->fs_data, old_rel, 0, &priv) < 0)
-        return (long)-2; /* ENOENT */
-    struct ext2_open_private *ep = (struct ext2_open_private *)priv;
-    uint32_t src_ino = ep->ino;
-    if (old_ops->close) old_ops->close(old_mnt->fs_data, priv);
-
-    /* Create a new directory entry pointing to the same inode.
-     * Use ext2_mknod-style approach: create entry in parent dir + increment link_count.
-     * For simplicity, use the kernel's ext2 internal functions via a helper. */
-    int ret = ext2_hardlink(new_mnt->fs_data, new_rel, src_ino);
-    return (long)ret;
+    if (ext2_is_ops(old_ops)) {
+        /* ext2: use inode-based hard link */
+        void *priv = NULL;
+        if (old_ops->open(old_mnt->fs_data, old_rel, 0, &priv) < 0)
+            return (long)-2; /* ENOENT */
+        struct ext2_open_private *ep = (struct ext2_open_private *)priv;
+        uint32_t src_ino = ep->ino;
+        if (old_ops->close) old_ops->close(old_mnt->fs_data, priv);
+        int ret = ext2_hardlink(new_mnt->fs_data, new_rel, src_ino);
+        return (long)ret;
+    } else if (old_ops && old_ops->link) {
+        /* ENH: Generic VFS dispatch for non-ext2 backends (e.g. ramfs) */
+        return (long)(int64_t)old_ops->link(old_mnt->fs_data, old_rel, new_rel);
+    } else {
+        return (long)-30; /* EROFS */
+    }
 }
 
 long sys_renameat2_handler(struct trapframe *tf) {
@@ -1276,6 +1276,14 @@ long sys_mknodat_handler(struct trapframe *tf) {
         if (ext2_is_ops(ops)) {
             int ret = ext2_mknod(mnt->fs_data, relpath, mode, rdev);
             return (long)(int64_t)ret;
+        } else if (ops && ops->open) {
+            /* ENH: For in-memory filesystems (ramfs), create the file using
+             * O_CREAT|O_EXCL.  S_ISFIFO mode bits are preserved as a stub
+             * (stat reports FIFO type, but no pipe semantics). */
+            void *priv = NULL;
+            int ret = ops->open(mnt->fs_data, relpath, 0x40 | 0x80, &priv);
+            if (ret >= 0 && ops->close) ops->close(mnt->fs_data, priv);
+            return (long)(ret >= 0 ? 0 : ret);
         } else {
             return (long)-30;
         }

@@ -25,6 +25,9 @@ struct vfs_ops {
   int (*symlink)(void *fs_data, const char *target, const char *linkpath);
   int (*readlink)(void *fs_data, const char *path, char *buf, int bufsiz);
   int (*rename)(void *fs_data, const char *oldpath, const char *newpath);
+  /* ENH: Hard link support for linkat(2).  Creates a new directory entry
+   * (newpath) that refers to the same inode as oldpath. */
+  int (*link)(void *fs_data, const char *oldpath, const char *newpath);
 };
 
 /* Open file description -- stored in proc->ofile[] */
