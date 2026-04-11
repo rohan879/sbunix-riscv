@@ -15,29 +15,36 @@
 #include <tty.h>
 #include <swap.h>
 #include <mm.h>
-
-#define TIMER_FREQ 10000000UL  // 10 MHz timebase
+/* RF: New headers for trap.c modular decomposition */
+#include <syscall_handlers.h>
+#include <trap_internal.h>
+#include <pipe.h>
+#include <pathres.h>
 
 /* Goldfish RTC at 0x101000 (QEMU virt machine) */
 #define GOLDFISH_RTC_BASE 0x101000UL
 #define GOLDFISH_RTC_TIME_LOW  0x00
 #define GOLDFISH_RTC_TIME_HIGH 0x04
 
-static unsigned long boot_time;
-static unsigned long ticks;
+/* RF: Made non-static for access by extracted syscall modules via trap_internal.h */
+unsigned long boot_time;
+unsigned long ticks;
 
 /* Get current tick count - accessible from other modules */
 unsigned long get_ticks(void) {
   return ticks;
 }
-static uint64_t boot_epoch_ns;  /* RTC nanoseconds at boot */
-static unsigned char last_key = 0;
+/* RF: Made non-static for access by extracted syscall modules via trap_internal.h */
+uint64_t boot_epoch_ns;  /* RTC nanoseconds at boot */
+unsigned char last_key = 0;
 
-static uint64_t ns_to_time_ticks(uint64_t ns) {
+/* RF: Made non-static for access by extracted time syscall module */
+uint64_t ns_to_time_ticks(uint64_t ns) {
     return (ns + 99) / 100;
 }
 
-static uint64_t timespec_rel_deadline(uint64_t sec, uint64_t nsec) {
+/* RF: Made non-static for access by extracted time syscall module */
+uint64_t timespec_rel_deadline(uint64_t sec, uint64_t nsec) {
     uint64_t delta = sec * TIMER_FREQ + ns_to_time_ticks(nsec);
     return r_time() + delta;
 }
@@ -49,8 +56,9 @@ static void rtc_init(void) {
     boot_epoch_ns = ((uint64_t)hi << 32) | (uint64_t)lo;
 }
 
-/* Get current wall-clock time as {sec, nsec} */
-static void get_wall_time(int64_t *sec, int64_t *nsec) {
+/* Get current wall-clock time as {sec, nsec}
+ * RF: Made non-static for access by extracted time syscall module */
+void get_wall_time(int64_t *sec, int64_t *nsec) {
     uint64_t elapsed_ticks = r_time() - boot_time;
     uint64_t elapsed_ns = elapsed_ticks * 100; /* 10MHz -> ns */
     uint64_t now_ns = boot_epoch_ns + elapsed_ns;
@@ -60,22 +68,13 @@ static void get_wall_time(int64_t *sec, int64_t *nsec) {
 
 /* ------------------------------------------------------------------ */
 /* Kernel pipe table                                                    */
+/* RF: struct kpipe, NPIPES, KKPIPE_BUF now defined in pipe.h.           */
+/* Made non-static for access by extracted IPC and I/O modules.         */
 /* ------------------------------------------------------------------ */
-#define NPIPES 64
-#define PIPE_BUF 65536
 
-struct kpipe {
-  int used;
-  char buf[PIPE_BUF];
-  int rpos;        // next read position
-  int wpos;        // next write position
-  int write_open;  // number of writers still open
-  int read_open;   // number of readers still open
-};
+struct kpipe pipes[NPIPES];
 
-static struct kpipe pipes[NPIPES];
-
-static int alloc_pipe(void) {
+int alloc_pipe(void) {
   for (int i = 0; i < NPIPES; i++) {
     if (!pipes[i].used) {
       pipes[i].used = 1;
@@ -89,7 +88,8 @@ static int alloc_pipe(void) {
   return -1;
 }
 
-static int pipe_avail(int pid) {
+/* RF: Made non-static for access by extracted IPC module */
+int pipe_avail(int pid) {
   return pipes[pid].wpos - pipes[pid].rpos;
 }
 
@@ -97,8 +97,9 @@ static int pipe_avail(int pid) {
 /* File descriptor helpers                                              */
 /* ------------------------------------------------------------------ */
 
-/* Allocate a free fd slot in current_proc; returns fd or -1 */
-static int alloc_fd(void) {
+/* Allocate a free fd slot in current_proc; returns fd or -1
+ * RF: Made non-static for access by extracted syscall modules */
+int alloc_fd(void) {
   struct open_file **ftable = proc_ofile(current_proc);
   for (int i = 0; i < NOFILE; i++) {
     if (ftable[i] == NULL)
@@ -107,8 +108,9 @@ static int alloc_fd(void) {
   return -1;
 }
 
-/* Shallow copy fd table from src to dst (for clone), incrementing refcounts */
-static void copy_ofile(struct proc *dst, struct proc *src) {
+/* Shallow copy fd table from src to dst (for clone), incrementing refcounts
+ * RF: Made non-static for access by extracted process syscall module */
+void copy_ofile(struct proc *dst, struct proc *src) {
   struct open_file **srctab = proc_ofile(src);
   /* ENH: FD_CLOFORK (bit 2) causes the fd to be skipped during fork,
    * per POSIX O_CLOFORK semantics.  Non-skipped fds inherit fd_flags. */
@@ -146,8 +148,9 @@ static void copy_ofile(struct proc *dst, struct proc *src) {
 struct file_lock lock_table[MAX_FILE_LOCKS];
 
 /* Two ranges [s1, s1+l1) and [s2, s2+l2) overlap.
- * l_len=0 means "to EOF" -- treat as infinite extent. */
-static int ranges_overlap(int64_t s1, int64_t l1, int64_t s2, int64_t l2) {
+ * l_len=0 means "to EOF" -- treat as infinite extent.
+ * RF: Made non-static for access by extracted I/O module */
+int ranges_overlap(int64_t s1, int64_t l1, int64_t s2, int64_t l2) {
   int64_t e1 = (l1 == 0) ? (int64_t)0x7FFFFFFFFFFFFFFFLL : s1 + l1;
   int64_t e2 = (l2 == 0) ? (int64_t)0x7FFFFFFFFFFFFFFFLL : s2 + l2;
   return s1 < e2 && s2 < e1;
@@ -156,7 +159,8 @@ static int ranges_overlap(int64_t s1, int64_t l1, int64_t s2, int64_t l2) {
 /* Check whether an existing lock conflicts with a proposed lock.
  * Locks conflict if: same file path, overlapping byte ranges,
  * at least one is a write lock, and different owner. */
-static int lock_conflicts(struct file_lock *lk, const char *path,
+/* RF: Made non-static for access by extracted I/O module */
+int lock_conflicts(struct file_lock *lk, const char *path,
     short type, int64_t start, int64_t len, pid_t pid,
     struct open_file *ofd, int is_ofd) {
   if (!lk->used) return 0;
@@ -283,8 +287,9 @@ void file_locks_release_ofd(struct open_file *ofd) {
 }
 
 /* Close an open_file: decrement refcount, handle pipe cleanup, free when zero.
- * Also clears the slot in the given proc's ofile[fd] (or shared_ft). */
-static void close_ofile(struct proc *p, int fd) {
+ * Also clears the slot in the given proc's ofile[fd] (or shared_ft).
+ * RF: Made non-static for access by extracted syscall modules */
+void close_ofile(struct proc *p, int fd) {
   struct open_file **ftable = proc_ofile(p);
   struct open_file *f = ftable[fd];
   if (!f) return;
@@ -518,8 +523,9 @@ static void handle_timer_interrupt(void) {
 /* ------------------------------------------------------------------ */
 /* copy_pagetable_cow: COW-share user pages from src to dst           */
 /* ------------------------------------------------------------------ */
-static int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
-                              uint64_t start, uint64_t end) {
+/* RF: Made non-static for access by extracted process syscall module */
+int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
+                       uint64_t start, uint64_t end) {
     /* Walk a specific VA range and COW-share PTE_U pages.
      * Super page PTEs (level-1 leaf, detected by PTE_IS_LEAF) are skipped
      * by advancing VA to the next 2MB boundary instead of 4KB. */
@@ -617,7 +623,8 @@ static int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
 /* cleanup_proc_resources: free or release shared resources on exit      */
 /* Called from SYS_exit, signal default-kill, and SYS_kill SIGKILL.     */
 /* ------------------------------------------------------------------ */
-static void cleanup_proc_resources(struct proc *p) {
+/* RF: Made non-static for access by extracted process syscall module */
+void cleanup_proc_resources(struct proc *p) {
     /* ---- POSIX file locks ---- */
     /* POSIX: all locks held by a process are released on exit.
      * OFD locks are released separately when the open_file refcount hits 0. */
@@ -690,7 +697,8 @@ static void cleanup_proc_resources(struct proc *p) {
 /* a0 = flags (CLONE_VM | CLONE_FILES | CLONE_SIGHAND | SIGCHLD etc.)  */
 /* a1 = child stack pointer (0 means inherit parent sp)                 */
 /* ------------------------------------------------------------------ */
-static pid_t sys_clone(struct trapframe *caller_tf) {
+/* RF: Made non-static for access by extracted process syscall module */
+pid_t sys_clone(struct trapframe *caller_tf) {
     uint64_t flags    = caller_tf->a0;
     uint64_t child_sp = caller_tf->a1;
     int clone_flags   = (int)(flags & ~0xFFUL); /* mask out low-byte signal */
@@ -844,7 +852,8 @@ bad:
 /* ------------------------------------------------------------------ */
 /* sys_wait4: wait for a child to exit                                  */
 /* ------------------------------------------------------------------ */
-static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
+/* RF: Made non-static for access by extracted process syscall module */
+pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
     for (;;) {
         int found_child = 0;
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
@@ -948,7 +957,8 @@ extern char _tarfs_end[];
 /* Convert an absolute/relative path to the tarfs "./..." format.
  * tarfs uses paths like "./bin/echo", "./etc/rc", etc.
  * Used by execve to look up ELF binaries. */
-static void to_tarfs_path(const char *path, char *out) {
+/* RF: Made non-static for extraction to pathres.c */
+void to_tarfs_path(const char *path, char *out) {
     /* Strip leading slash(es) */
     while (*path == '/') path++;
     if (*path == '\0') {
@@ -966,7 +976,8 @@ static void to_tarfs_path(const char *path, char *out) {
 
 /* Normalize an absolute path in-place: collapse "." and ".." components.
  * Input must already be absolute (start with '/').  Result is written to out. */
-static void normalize_path(const char *in, char *out) {
+/* RF: Made non-static for extraction to pathres.c */
+void normalize_path(const char *in, char *out) {
     /* Use a small stack of component offsets into out[] */
     /* We build the result into out directly, tracking segment starts. */
     char tmp[128];
@@ -1017,7 +1028,8 @@ static void normalize_path(const char *in, char *out) {
 /* BF: Reduced raw[] from 256 to 128 to prevent kernel stack overflow.
  * Deep call chains (openat -> resolve_path -> resolve_symlinks ->
  * ext2_open -> bcache -> virtio_blk) on 4KB stacks caused corruption. */
-static void resolve_path(const char *cwd, const char *path, char *out) {
+/* RF: Made non-static for extraction to pathres.c */
+void resolve_path(const char *cwd, const char *path, char *out) {
     char raw[128]; /* intermediate buffer before normalization */
     int rlen;
 
@@ -1048,7 +1060,8 @@ static void resolve_path(const char *cwd, const char *path, char *out) {
 }
 
 /* Check if a resolved path exists as a directory by trying to open it */
-static int vfs_is_dir(const char *path) {
+/* RF: Made non-static for extraction to pathres.c */
+int vfs_is_dir(const char *path) {
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(path, &relpath);
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -1064,7 +1077,8 @@ static int vfs_is_dir(const char *path) {
 }
 
 /* Follow symlinks in a resolved path (up to 8 levels to prevent loops) */
-static int follow_symlinks(char *resolved, int maxdepth) {
+/* RF: Made non-static for extraction to pathres.c */
+int follow_symlinks(char *resolved, int maxdepth) {
     if (maxdepth <= 0) return -40; /* ELOOP */
 
     const char *relpath;
@@ -1122,7 +1136,8 @@ static int follow_symlinks(char *resolved, int maxdepth) {
  * unless resolve_final is 0.  After return, 'resolved' contains the
  * fully-resolved path.
  * Returns 0 on success, negative errno on failure (-40 = ELOOP). */
-static int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
+/* RF: Made non-static for extraction to pathres.c */
+int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
     if (maxdepth <= 0) return -40; /* ELOOP */
 
     int rlen = strlen(resolved);
@@ -1229,7 +1244,8 @@ static int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_fi
 /* Signal delivery                                                      */
 /* ------------------------------------------------------------------ */
 
-static void deliver_signal(struct trapframe *tf, struct proc *p) {
+/* RF: Made non-static for access by extracted signal syscall module */
+void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* BF: Only SIGKILL and SIGSTOP are truly unblockable per POSIX.
      * Synchronous fault signals (SIGILL, SIGSEGV, SIGBUS, SIGFPE) are
      * unmasked at their exception handler sites, not here. */
@@ -1494,14 +1510,13 @@ static void deliver_signal(struct trapframe *tf, struct proc *p) {
 /* Syscall dispatch table                                               */
 /* ------------------------------------------------------------------ */
 
-#define SYSCALL_NORETURN ((long)0x5BC411DEAD)
-#define NSYSCALLS 501
-
-static long (*syscall_table[NSYSCALLS])(struct trapframe *tf);
+/* RF: SYSCALL_NORETURN, NSYSCALLS now defined in syscall_handlers.h.
+ * syscall_table made non-static for access by extracted modules. */
+long (*syscall_table[NSYSCALLS])(struct trapframe *tf);
 
 /* ---- Individual syscall handler functions ---- */
 
-static long sys_brk_handler(struct trapframe *tf) {
+long sys_brk_handler(struct trapframe *tf) {
     uint64_t new_brk = tf->a0;
     uint64_t cur_sz  = current_proc->sz;
 
@@ -1532,7 +1547,7 @@ static long sys_brk_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_write_handler(struct trapframe *tf) {
+long sys_write_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     uint64_t ubuf = tf->a1;
     size_t len = (size_t)tf->a2;
@@ -1561,7 +1576,7 @@ static long sys_write_handler(struct trapframe *tf) {
                 current_proc->sigpending |= signal_bit(SIGPIPE);
                 return (written > 0) ? (long)written : (long)-32;
             }
-            int avail = PIPE_BUF - pipe_avail(pid);
+            int avail = KPIPE_BUF - pipe_avail(pid);
             if (avail <= 0) {
                 current_proc->state = SLEEPING;
                 swtch(&current_proc->context, &scheduler_context);
@@ -1576,7 +1591,7 @@ static long sys_write_handler(struct trapframe *tf) {
                     return (written > 0) ? (long)written : (long)-14;
                 }
                 for (int i = 0; i < chunk; i++) {
-                    pipes[pid].buf[pipes[pid].wpos % PIPE_BUF] = kchunk[i];
+                    pipes[pid].buf[pipes[pid].wpos % KPIPE_BUF] = kchunk[i];
                     pipes[pid].wpos++;
                 }
                 written += chunk;
@@ -1619,7 +1634,7 @@ static long sys_write_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_read_handler(struct trapframe *tf) {
+long sys_read_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     uint64_t ubuf = tf->a1;
     size_t len = (size_t)tf->a2;
@@ -1675,7 +1690,7 @@ static long sys_read_handler(struct trapframe *tf) {
         }
         /* Drain all available bytes (up to len) without re-blocking */
         while (read_bytes < len && pipe_avail(pid) > 0) {
-            char kc = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
+            char kc = pipes[pid].buf[pipes[pid].rpos % KPIPE_BUF];
             pipes[pid].rpos++;
             if (copyout(current_proc->pagetable, ubuf + read_bytes, &kc, 1) < 0) {
                 return (read_bytes > 0) ? (long)read_bytes : (long)-14;
@@ -1712,7 +1727,7 @@ pipe_eof:
     }
 }
 
-static long sys_openat_handler(struct trapframe *tf) {
+long sys_openat_handler(struct trapframe *tf) {
     int flags = (int)tf->a2;
 
     char kpath[128];
@@ -1801,7 +1816,7 @@ static long sys_openat_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_close_handler(struct trapframe *tf) {
+long sys_close_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     if (fd >= 0 && fd < NOFILE && proc_ofile(current_proc)[fd]) {
         close_ofile(current_proc, fd);
@@ -1813,7 +1828,7 @@ static long sys_close_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_dup3_handler(struct trapframe *tf) {
+long sys_dup3_handler(struct trapframe *tf) {
     int oldfd = (int)tf->a0;
     int newfd = (int)tf->a1;
     struct open_file **ftab = proc_ofile(current_proc);
@@ -1849,7 +1864,7 @@ static long sys_dup3_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_pipe2_handler(struct trapframe *tf) {
+long sys_pipe2_handler(struct trapframe *tf) {
     int pipe_flags = (int)tf->a1;
     int pipeid = alloc_pipe();
     if (pipeid < 0) {
@@ -1911,7 +1926,7 @@ static long sys_pipe2_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_getcwd_handler(struct trapframe *tf) {
+long sys_getcwd_handler(struct trapframe *tf) {
     if (tf->a0 == 0) return (long)-14; /* -EFAULT: NULL buffer */
     size_t sz = (size_t)tf->a1;
     const char *cwd = current_proc->cwd;
@@ -1926,7 +1941,7 @@ static long sys_getcwd_handler(struct trapframe *tf) {
     return (long)tf->a0; /* return buf pointer */
 }
 
-static long sys_chdir_handler(struct trapframe *tf) {
+long sys_chdir_handler(struct trapframe *tf) {
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
         return (long)-14;
@@ -1951,7 +1966,7 @@ static long sys_chdir_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_fchdir_handler(struct trapframe *tf) {
+long sys_fchdir_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
     if (!f) return (long)-9; /* EBADF */
@@ -1962,13 +1977,13 @@ static long sys_fchdir_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_clone_handler(struct trapframe *tf) {
+long sys_clone_handler(struct trapframe *tf) {
     pid_t child = sys_clone(tf);
     tf->a0 = (uint64_t)child;
     return SYSCALL_NORETURN;
 }
 
-static long sys_execve_handler(struct trapframe *tf) {
+long sys_execve_handler(struct trapframe *tf) {
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
         return (long)-14;
@@ -2273,7 +2288,7 @@ static long sys_execve_handler(struct trapframe *tf) {
     return SYSCALL_NORETURN;
 }
 
-static long sys_fexecve_handler(struct trapframe *tf) {
+long sys_fexecve_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     uint64_t uargv = tf->a1;
     uint64_t uenvp = tf->a2;
@@ -2326,7 +2341,7 @@ static long sys_fexecve_handler(struct trapframe *tf) {
     return sys_execve_handler(tf);
 }
 
-static long sys_wait4_handler(struct trapframe *tf) {
+long sys_wait4_handler(struct trapframe *tf) {
     pid_t wpid   = (pid_t)(int)tf->a0;
     int options  = (int)tf->a2;
     int kwstatus = 0;
@@ -2339,12 +2354,12 @@ static long sys_wait4_handler(struct trapframe *tf) {
     return (long)ret;
 }
 
-static long sys_getpid_handler(struct trapframe *tf) {
+long sys_getpid_handler(struct trapframe *tf) {
     (void)tf;
     return current_proc ? (long)current_proc->pid : 0;
 }
 
-static long sys_getppid_handler(struct trapframe *tf) {
+long sys_getppid_handler(struct trapframe *tf) {
     (void)tf;
     if (current_proc && current_proc->parent)
         return (long)current_proc->parent->pid;
@@ -2352,21 +2367,22 @@ static long sys_getppid_handler(struct trapframe *tf) {
         return (long)1;
 }
 
-static long sys_getuid_handler(struct trapframe *tf) {
+long sys_getuid_handler(struct trapframe *tf) {
     (void)tf;
     /* BF: Return actual process UID instead of hardcoded 0 so that
      * userspace identity checks (e.g. kill permission) are accurate. */
     return (long)current_proc->uid;
 }
 
-static long sys_getgid_handler(struct trapframe *tf) {
+long sys_getgid_handler(struct trapframe *tf) {
     (void)tf;
     /* BF: Return actual process GID instead of hardcoded 0. */
     return (long)current_proc->gid;
 }
 
 /* Helper: deliver signal to a single process */
-static void kill_deliver(struct proc *target, int sig) {
+/* RF: Made non-static for access by extracted signal syscall module */
+void kill_deliver(struct proc *target, int sig) {
     /* Signals to zombie/unused processes are silently discarded.
      * Without this guard, SIGSTOP's immediate-stop code would override
      * the ZOMBIE state with SLEEPING, and a subsequent SIGCONT would
@@ -2446,7 +2462,7 @@ static void kill_deliver(struct proc *target, int sig) {
     }
 }
 
-static long sys_kill_handler(struct trapframe *tf) {
+long sys_kill_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
 
@@ -2558,7 +2574,7 @@ static long sys_kill_handler(struct trapframe *tf) {
 /* ENH: rt_sigqueueinfo handler -- delivers a signal with siginfo_t data.
  * POSIX sigqueue() requires this syscall to send queued signals with
  * user-provided siginfo_t (including si_value). */
-static long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
+long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
     uint64_t info_uaddr = tf->a2;
@@ -2607,7 +2623,7 @@ static long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
     return 0;
 }
 
-static long sys_clock_gettime_handler(struct trapframe *tf) {
+long sys_clock_gettime_handler(struct trapframe *tf) {
     uint64_t clk_id   = tf->a0;
     uint64_t ts_uaddr = tf->a1;
     if (!ts_uaddr)
@@ -2647,7 +2663,7 @@ static long sys_clock_gettime_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_clock_getres_handler(struct trapframe *tf) {
+long sys_clock_getres_handler(struct trapframe *tf) {
     uint64_t clk_id   = tf->a0;
     uint64_t res_uaddr = tf->a1;
     
@@ -2671,7 +2687,7 @@ static long sys_clock_getres_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_clock_settime_handler(struct trapframe *tf) {
+long sys_clock_settime_handler(struct trapframe *tf) {
     uint64_t clk_id   = tf->a0;
     uint64_t ts_uaddr = tf->a1;
     
@@ -2700,7 +2716,7 @@ static long sys_clock_settime_handler(struct trapframe *tf) {
     return (long)-1; /* EPERM */
 }
 
-static long sys_lseek_handler(struct trapframe *tf) {
+long sys_lseek_handler(struct trapframe *tf) {
     int fd      = (int)tf->a0;
     long offset = (long)tf->a1;
     int whence  = (int)tf->a2;
@@ -2730,7 +2746,7 @@ static long sys_lseek_handler(struct trapframe *tf) {
     return (long)new_off;
 }
 
-static long sys_fstat_handler(struct trapframe *tf) {
+long sys_fstat_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
     if (!f) {
@@ -2791,7 +2807,7 @@ static long sys_fstat_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_newfstatat_handler(struct trapframe *tf) {
+long sys_newfstatat_handler(struct trapframe *tf) {
     if (!tf->a1 || !tf->a2) {
         return (long)-1;
     }
@@ -2828,7 +2844,7 @@ static long sys_newfstatat_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_getdents64_handler(struct trapframe *tf) {
+long sys_getdents64_handler(struct trapframe *tf) {
     int fd             = (int)tf->a0;
     uint64_t ubuf_va   = tf->a1;
     unsigned int count = (unsigned int)tf->a2;
@@ -2893,7 +2909,7 @@ static long sys_getdents64_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_nanosleep_handler(struct trapframe *tf) {
+long sys_nanosleep_handler(struct trapframe *tf) {
     uint64_t req_uaddr = tf->a0;
     if (req_uaddr && current_proc) {
         uint64_t kreq[2];
@@ -2911,7 +2927,7 @@ static long sys_nanosleep_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_exit_handler(struct trapframe *tf) {
+long sys_exit_handler(struct trapframe *tf) {
     int status = (int)tf->a0;
     if (current_proc) {
         current_proc->exit_status = status;
@@ -2992,13 +3008,13 @@ static long sys_exit_handler(struct trapframe *tf) {
  * We accept the correct magic pair and then call SBI SRST extension.
  * If called without correct magic, return -EPERM. */
 
-static long sys_fsync_handler(struct trapframe *tf) {
+long sys_fsync_handler(struct trapframe *tf) {
     (void)tf;
     ext2_sync(NULL);
     return 0;
 }
 
-static long sys_sync_handler(struct trapframe *tf) {
+long sys_sync_handler(struct trapframe *tf) {
     (void)tf;
     ext2_sync(NULL);
     return 0;
@@ -3010,7 +3026,7 @@ static long sys_sync_handler(struct trapframe *tf) {
 #define REBOOT_CMD_POWEROFF 0x4321fedcU
 #define REBOOT_CMD_RESTART 0x01234567U
 
-static long sys_reboot_handler(struct trapframe *tf) {
+long sys_reboot_handler(struct trapframe *tf) {
     uint32_t magic1 = (uint32_t)tf->a0;
     uint32_t magic2 = (uint32_t)tf->a1;
     uint32_t cmd    = (uint32_t)tf->a2;
@@ -3047,11 +3063,13 @@ static long sys_reboot_handler(struct trapframe *tf) {
 }
 
 /* Forward declaration: used by MAP_FIXED in sys_mmap_handler */
-static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end);
+/* RF: Made non-static for access by extracted memory syscall module */
+void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end);
 
 /* BF: Compute the floor for mmap allocations, ensuring it never
  * falls below USER_MMAP_FLOOR (avoiding shared kernel MMIO range). */
-static uint64_t mmap_search_base(struct proc *p) {
+/* RF: Made non-static for access by extracted memory syscall module */
+uint64_t mmap_search_base(struct proc *p) {
   uint64_t base = PGROUNDUP(p->sz) + PAGE_SIZE;
   if (base < USER_MMAP_FLOOR)
     base = USER_MMAP_FLOOR;
@@ -3060,7 +3078,8 @@ static uint64_t mmap_search_base(struct proc *p) {
 
 /* BF: Find a hole in the user address space for a new mapping of len bytes.
  * Walks the VMA list to skip overlaps.  Returns 0 on failure (ENOMEM). */
-static uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
+/* RF: Made non-static for access by extracted memory syscall module */
+uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
   uint64_t floor = mmap_search_base(p);
   uint64_t candidate = p->mmap_base ? p->mmap_base : floor;
   if (candidate < floor) candidate = floor;
@@ -3081,7 +3100,7 @@ static uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
   }
 }
 
-static long sys_mmap_handler(struct trapframe *tf) {
+long sys_mmap_handler(struct trapframe *tf) {
     uint64_t addr  = tf->a0;
     uint64_t len   = tf->a1;
     int      prot  = (int)tf->a2;
@@ -3209,7 +3228,7 @@ static long sys_mmap_handler(struct trapframe *tf) {
 }
 
 /* Write back dirty MAP_SHARED pages to the backing file before unmapping */
-static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) {
+void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) {
     struct vm_area *v = p->vma_list;
     while (v) {
         if (v->file && (v->flags & 0x01) /* MAP_SHARED */ &&
@@ -3235,7 +3254,7 @@ static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) 
     }
 }
 
-static long sys_munmap_handler(struct trapframe *tf) {
+long sys_munmap_handler(struct trapframe *tf) {
     uint64_t addr = tf->a0;
     uint64_t len  = tf->a1;
 
@@ -3303,7 +3322,7 @@ static long sys_munmap_handler(struct trapframe *tf) {
     return 0;
 }
 
-static long sys_mprotect_handler(struct trapframe *tf) {
+long sys_mprotect_handler(struct trapframe *tf) {
     uint64_t addr = tf->a0;
     uint64_t len  = tf->a1;
     int prot      = (int)tf->a2;
@@ -3488,7 +3507,7 @@ static long sys_mprotect_handler(struct trapframe *tf) {
     return 0;
 }
 
-static long sys_ps_handler(struct trapframe *tf) {
+long sys_ps_handler(struct trapframe *tf) {
     int      maxn     = (int)tf->a1;
     int      written  = 0;
     if (tf->a0 && maxn > 0) {
@@ -3525,7 +3544,7 @@ static long sys_ps_handler(struct trapframe *tf) {
     return (long)written;
 }
 
-static long sys_ioctl_handler(struct trapframe *tf) {
+long sys_ioctl_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     unsigned long request = tf->a1;
     uint64_t argp = tf->a2;
@@ -3585,7 +3604,7 @@ static long sys_ioctl_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_rt_sigaction_handler(struct trapframe *tf) {
+long sys_rt_sigaction_handler(struct trapframe *tf) {
     int signum = (int)tf->a0;
     uint64_t act_uaddr = tf->a1;
     uint64_t oldact_uaddr = tf->a2;
@@ -3645,7 +3664,7 @@ static long sys_rt_sigaction_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_rt_sigprocmask_handler(struct trapframe *tf) {
+long sys_rt_sigprocmask_handler(struct trapframe *tf) {
     int how = (int)tf->a0;
     uint64_t set_uaddr = tf->a1;
     uint64_t oldset_uaddr = tf->a2;
@@ -3676,7 +3695,7 @@ static long sys_rt_sigprocmask_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_rt_sigreturn_handler(struct trapframe *tf) {
+long sys_rt_sigreturn_handler(struct trapframe *tf) {
     uint64_t usp = tf->sp;
 
     struct signal_frame frame;
@@ -3703,7 +3722,7 @@ static long sys_rt_sigreturn_handler(struct trapframe *tf) {
     return SYSCALL_NORETURN;
 }
 
-static long sys_rt_sigsuspend_handler(struct trapframe *tf) {
+long sys_rt_sigsuspend_handler(struct trapframe *tf) {
     uint64_t mask;
     if (copyin(current_proc->pagetable, &mask, tf->a0, sizeof(uint64_t)) < 0)
         return -14; // EFAULT
@@ -3731,7 +3750,7 @@ static long sys_rt_sigsuspend_handler(struct trapframe *tf) {
     return -4; // EINTR
 }
 
-static long sys_rt_sigpending_handler(struct trapframe *tf) {
+long sys_rt_sigpending_handler(struct trapframe *tf) {
     uint64_t pending = current_proc->sigpending & current_proc->sigmask;
     if (copyout(current_proc->pagetable, tf->a0, &pending, sizeof(uint64_t)) < 0)
         return -14;
@@ -3739,7 +3758,7 @@ static long sys_rt_sigpending_handler(struct trapframe *tf) {
 }
 
 /* rt_sigtimedwait — synchronously wait for queued signals */
-static long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
+long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
     /* a0 = sigset_t *set, a1 = siginfo_t *info, a2 = timespec *timeout, a3 = sigsetsize */
     uint64_t set_uaddr = tf->a0;
     uint64_t info_uaddr = tf->a1;
@@ -3839,7 +3858,7 @@ static long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_gettimeofday_handler(struct trapframe *tf) {
+long sys_gettimeofday_handler(struct trapframe *tf) {
     uint64_t tv_uaddr = tf->a0;
     if (tv_uaddr) {
         int64_t sec, nsec;
@@ -3854,7 +3873,7 @@ static long sys_gettimeofday_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_fcntl_handler(struct trapframe *tf) {
+long sys_fcntl_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     int cmd = (int)tf->a1;
     struct open_file **ftab = proc_ofile(current_proc);
@@ -3974,7 +3993,7 @@ static long sys_fcntl_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_faccessat_handler(struct trapframe *tf) {
+long sys_faccessat_handler(struct trapframe *tf) {
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-14;
@@ -3996,7 +4015,7 @@ static long sys_faccessat_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_unlinkat_handler(struct trapframe *tf) {
+long sys_unlinkat_handler(struct trapframe *tf) {
     int flags = (int)tf->a2;
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
@@ -4028,7 +4047,7 @@ static long sys_unlinkat_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_linkat_handler(struct trapframe *tf) {
+long sys_linkat_handler(struct trapframe *tf) {
     /* a0 = olddirfd (AT_FDCWD), a1 = oldpath, a2 = newdirfd, a3 = newpath, a4 = flags */
     char kold[128], knew[256];
     if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
@@ -4067,7 +4086,7 @@ static long sys_linkat_handler(struct trapframe *tf) {
     return (long)ret;
 }
 
-static long sys_renameat2_handler(struct trapframe *tf) {
+long sys_renameat2_handler(struct trapframe *tf) {
     char kold[128], knew[256];
     if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
         return (long)-14;
@@ -4094,7 +4113,7 @@ static long sys_renameat2_handler(struct trapframe *tf) {
                                           new_relpath);
 }
 
-static long sys_mkdirat_handler(struct trapframe *tf) {
+long sys_mkdirat_handler(struct trapframe *tf) {
     int mode = (int)tf->a2;
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
@@ -4117,7 +4136,7 @@ static long sys_mkdirat_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_mknodat_handler(struct trapframe *tf) {
+long sys_mknodat_handler(struct trapframe *tf) {
     uint32_t mode = (uint32_t)tf->a2;
     uint32_t rdev = (uint32_t)tf->a3;
     char kpath[128];
@@ -4139,31 +4158,31 @@ static long sys_mknodat_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_umask_handler(struct trapframe *tf) {
+long sys_umask_handler(struct trapframe *tf) {
     unsigned int new_mask = (unsigned int)tf->a0 & 0777;
     unsigned int old_mask = current_proc->umask_val;
     current_proc->umask_val = new_mask;
     return (long)old_mask;
 }
 
-static long sys_geteuid_handler(struct trapframe *tf) {
+long sys_geteuid_handler(struct trapframe *tf) {
     (void)tf;
     /* BF: Return actual UID; in single-user OS, euid == uid. */
     return (long)current_proc->uid;
 }
 
-static long sys_getegid_handler(struct trapframe *tf) {
+long sys_getegid_handler(struct trapframe *tf) {
     (void)tf;
     /* BF: Return actual GID; in single-user OS, egid == gid. */
     return (long)current_proc->gid;
 }
 
-static long sys_set_tid_address_handler(struct trapframe *tf) {
+long sys_set_tid_address_handler(struct trapframe *tf) {
     (void)tf;
     return (long)current_proc->pid;
 }
 
-static long sys_readlinkat_handler(struct trapframe *tf) {
+long sys_readlinkat_handler(struct trapframe *tf) {
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
         return (long)-14;
@@ -4192,7 +4211,7 @@ static long sys_readlinkat_handler(struct trapframe *tf) {
     return (long)ret;
 }
 
-static long sys_symlinkat_handler(struct trapframe *tf) {
+long sys_symlinkat_handler(struct trapframe *tf) {
     char ktarget[128], klinkpath[256];
     if (copyinstr(current_proc->pagetable, ktarget, tf->a0, sizeof(ktarget)) < 0)
         return (long)-14;
@@ -4210,7 +4229,7 @@ static long sys_symlinkat_handler(struct trapframe *tf) {
     return (long)-30; /* EROFS */
 }
 
-static long sys_writev_handler(struct trapframe *tf) {
+long sys_writev_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     uint64_t iov_uaddr = tf->a1;
     int iovcnt = (int)tf->a2;
@@ -4250,7 +4269,7 @@ static long sys_writev_handler(struct trapframe *tf) {
                         goto writev_out;
                     }
                     for (uint64_t j = 0; j < clen; j++) {
-                        while (pipe_avail(pid) >= PIPE_BUF) {
+                        while (pipe_avail(pid) >= KPIPE_BUF) {
                             if (!pipes[pid].read_open) break;
                             current_proc->state = SLEEPING;
                             swtch(&current_proc->context, &scheduler_context);
@@ -4284,7 +4303,7 @@ static long sys_writev_handler(struct trapframe *tf) {
                             if (total == 0) total = -32;
                             goto writev_out;
                         }
-                        pipes[pid].buf[pipes[pid].wpos % PIPE_BUF] = kchunk[j];
+                        pipes[pid].buf[pipes[pid].wpos % KPIPE_BUF] = kchunk[j];
                         pipes[pid].wpos++;
                     }
                     done += clen;
@@ -4326,7 +4345,7 @@ writev_out:
     }
 }
 
-static long sys_readv_handler(struct trapframe *tf) {
+long sys_readv_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     uint64_t iov_uaddr = tf->a1;
     int iovcnt = (int)tf->a2;
@@ -4385,7 +4404,7 @@ static long sys_readv_handler(struct trapframe *tf) {
                     if (clen > sizeof(kchunk)) clen = sizeof(kchunk);
                     uint64_t k;
                     for (k = 0; k < clen && pipe_avail(pid) > 0; k++) {
-                        kchunk[k] = pipes[pid].buf[pipes[pid].rpos % PIPE_BUF];
+                        kchunk[k] = pipes[pid].buf[pipes[pid].rpos % KPIPE_BUF];
                         pipes[pid].rpos++;
                     }
                     if (k > 0 && copyout(current_proc->pagetable, buf_uaddr + j, kchunk, k) < 0) {
@@ -4423,7 +4442,7 @@ readv_out:
     }
 }
 
-static long sys_prlimit64_handler(struct trapframe *tf) {
+long sys_prlimit64_handler(struct trapframe *tf) {
     int resource = (int)tf->a1;
     uint64_t old_uaddr = tf->a3;
     if (old_uaddr) {
@@ -4445,7 +4464,7 @@ static long sys_prlimit64_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_getrandom_handler(struct trapframe *tf) {
+long sys_getrandom_handler(struct trapframe *tf) {
     uint64_t uaddr = tf->a0;
     uint64_t buflen = tf->a1;
     if (uaddr && buflen > 0) {
@@ -4467,7 +4486,7 @@ static long sys_getrandom_handler(struct trapframe *tf) {
     return (long)buflen;
 }
 
-static long sys_setpgid_handler(struct trapframe *tf) {
+long sys_setpgid_handler(struct trapframe *tf) {
     pid_t target = (pid_t)tf->a0;
     pid_t pgid = (pid_t)tf->a1;
     if (target < 0)
@@ -4528,7 +4547,7 @@ static long sys_setpgid_handler(struct trapframe *tf) {
     return 0;
 }
 
-static long sys_setsid_handler(struct trapframe *tf) {
+long sys_setsid_handler(struct trapframe *tf) {
     (void)tf;
     /* POSIX: setsid fails with EPERM if caller is already a process group leader */
     if (current_proc->pid == current_proc->pgid)
@@ -4541,7 +4560,7 @@ static long sys_setsid_handler(struct trapframe *tf) {
     return (long)current_proc->pid;
 }
 
-static long sys_getpgid_handler(struct trapframe *tf) {
+long sys_getpgid_handler(struct trapframe *tf) {
     pid_t target = (pid_t)tf->a0;
     if (target == 0) {
         return (long)current_proc->pgid;
@@ -4557,7 +4576,7 @@ static long sys_getpgid_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_getsid_handler(struct trapframe *tf) {
+long sys_getsid_handler(struct trapframe *tf) {
     pid_t target = (pid_t)tf->a0;
     if (target == 0) {
         return (long)current_proc->sid;
@@ -4573,7 +4592,7 @@ static long sys_getsid_handler(struct trapframe *tf) {
     }
 }
 
-static long sys_alarm_handler(struct trapframe *tf) {
+long sys_alarm_handler(struct trapframe *tf) {
     unsigned long seconds = tf->a0;
     unsigned long remaining = 0;
     uint64_t now = r_time();
@@ -4589,7 +4608,7 @@ static long sys_alarm_handler(struct trapframe *tf) {
 }
 
 /* POSIX timers — timer_create, timer_delete, timer_settime, timer_gettime, timer_getoverrun */
-static long sys_timer_create_handler(struct trapframe *tf) {
+long sys_timer_create_handler(struct trapframe *tf) {
     /* a0 = clockid, a1 = sigevent *, a2 = timer_t * */
     int clockid = (int)tf->a0;
     uint64_t evp_uaddr = tf->a1;
@@ -4638,7 +4657,7 @@ static long sys_timer_create_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_timer_delete_handler(struct trapframe *tf) {
+long sys_timer_delete_handler(struct trapframe *tf) {
     int tid = (int)tf->a0;
     if (tid < 0 || tid >= NPTIMER || !current_proc->timers[tid].used)
         return (long)-22; /* EINVAL */
@@ -4646,7 +4665,7 @@ static long sys_timer_delete_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_timer_settime_handler(struct trapframe *tf) {
+long sys_timer_settime_handler(struct trapframe *tf) {
     /* a0 = timerid, a1 = flags, a2 = new_value, a3 = old_value */
     int tid = (int)tf->a0;
     int flags = (int)tf->a1;
@@ -4746,7 +4765,7 @@ static long sys_timer_settime_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_timer_gettime_handler(struct trapframe *tf) {
+long sys_timer_gettime_handler(struct trapframe *tf) {
     int tid = (int)tf->a0;
     uint64_t value_uaddr = tf->a1;
     
@@ -4777,7 +4796,7 @@ static long sys_timer_gettime_handler(struct trapframe *tf) {
     return (long)0;
 }
 
-static long sys_timer_getoverrun_handler(struct trapframe *tf) {
+long sys_timer_getoverrun_handler(struct trapframe *tf) {
     int tid = (int)tf->a0;
     
     if (tid < 0 || tid >= NPTIMER || !current_proc->timers[tid].used)
@@ -4789,7 +4808,7 @@ static long sys_timer_getoverrun_handler(struct trapframe *tf) {
     return (long)overrun;
 }
 
-static long sys_madvise_handler(struct trapframe *tf) {
+long sys_madvise_handler(struct trapframe *tf) {
     (void)tf;
     return (long)0;
 }
@@ -4799,7 +4818,7 @@ static long sys_madvise_handler(struct trapframe *tf) {
 #define FUTEX_WAKE 1
 #define FUTEX_PRIVATE_FLAG 128
 
-static long sys_futex_handler(struct trapframe *tf) {
+long sys_futex_handler(struct trapframe *tf) {
     uint64_t uaddr = tf->a0;
     int op = (int)tf->a1 & ~FUTEX_PRIVATE_FLAG; /* strip FUTEX_PRIVATE */
     uint32_t val = (uint32_t)tf->a2;
@@ -4858,7 +4877,7 @@ static long sys_futex_handler(struct trapframe *tf) {
 }
 
 /* msync — flush MAP_SHARED pages back to file */
-static long sys_msync_handler(struct trapframe *tf) {
+long sys_msync_handler(struct trapframe *tf) {
     uint64_t addr = tf->a0 & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t len  = tf->a1;
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
@@ -4869,13 +4888,13 @@ static long sys_msync_handler(struct trapframe *tf) {
 }
 
 /* gettid — return thread/process ID */
-static long sys_gettid_handler(struct trapframe *tf) {
+long sys_gettid_handler(struct trapframe *tf) {
     (void)tf;
     return current_proc ? (long)current_proc->pid : 0;
 }
 
 /* sched_yield — voluntarily yield the CPU */
-static long sys_sched_yield_handler(struct trapframe *tf) {
+long sys_sched_yield_handler(struct trapframe *tf) {
     (void)tf;
     if (current_proc && current_proc->state == RUNNING) {
         current_proc->state = RUNNABLE;
@@ -4885,7 +4904,7 @@ static long sys_sched_yield_handler(struct trapframe *tf) {
 }
 
 /* pread64 — read at offset without changing file position */
-static long sys_pread64_handler(struct trapframe *tf) {
+long sys_pread64_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     uint64_t ubuf = tf->a1;
     size_t count = (size_t)tf->a2;
@@ -4912,7 +4931,7 @@ static long sys_pread64_handler(struct trapframe *tf) {
 }
 
 /* pwrite64 — write at offset without changing file position */
-static long sys_pwrite64_handler(struct trapframe *tf) {
+long sys_pwrite64_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     uint64_t ubuf = tf->a1;
     size_t count = (size_t)tf->a2;
@@ -4939,7 +4958,7 @@ static long sys_pwrite64_handler(struct trapframe *tf) {
 }
 
 /* mremap — grow or shrink an existing mapping */
-static long sys_mremap_handler(struct trapframe *tf) {
+long sys_mremap_handler(struct trapframe *tf) {
     uint64_t old_addr = tf->a0 & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t old_size = tf->a1;
     uint64_t new_size = tf->a2;
@@ -5112,7 +5131,7 @@ static long sys_mremap_handler(struct trapframe *tf) {
 }
 
 /* getrusage — resource usage statistics */
-static long sys_getrusage_handler(struct trapframe *tf) {
+long sys_getrusage_handler(struct trapframe *tf) {
     /* a0 = who (RUSAGE_SELF=0, RUSAGE_CHILDREN=-1), a1 = rusage buf */
     uint64_t uaddr = tf->a1;
     /* struct rusage is 128 bytes on RISC-V LP64 (two timeval + 14 longs) */
@@ -5130,7 +5149,7 @@ static long sys_getrusage_handler(struct trapframe *tf) {
 }
 
 /* times — process times */
-static long sys_times_handler(struct trapframe *tf) {
+long sys_times_handler(struct trapframe *tf) {
     /* a0 = struct tms *buf */
     uint64_t uaddr = tf->a0;
     /* struct tms: 4 clock_t fields (32 bytes on LP64) */
@@ -5168,7 +5187,7 @@ struct epoll_private {
     int count;
 };
 
-static long sys_epoll_create1_handler(struct trapframe *tf) {
+long sys_epoll_create1_handler(struct trapframe *tf) {
     (void)tf;
     struct open_file **ftab = proc_ofile(current_proc);
     int efd = alloc_fd();
@@ -5187,7 +5206,7 @@ static long sys_epoll_create1_handler(struct trapframe *tf) {
     return (long)efd;
 }
 
-static long sys_epoll_ctl_handler(struct trapframe *tf) {
+long sys_epoll_ctl_handler(struct trapframe *tf) {
     int epfd = (int)tf->a0;
     int op = (int)tf->a1;
     int fd = (int)tf->a2;
@@ -5232,7 +5251,7 @@ static long sys_epoll_ctl_handler(struct trapframe *tf) {
     return 0;
 }
 
-static long sys_epoll_pwait_handler(struct trapframe *tf) {
+long sys_epoll_pwait_handler(struct trapframe *tf) {
     int epfd = (int)tf->a0;
     uint64_t events_uva = tf->a1;
     int maxevents = (int)tf->a2;
@@ -5253,7 +5272,7 @@ static long sys_epoll_pwait_handler(struct trapframe *tf) {
             if (pipe_avail(pid) > 0 || pipes[pid].write_open <= 0) ready = 1;
         } else if (f->is_pipe && f->pipe_write) {
             int pid = f->pipe_id;
-            if (pipe_avail(pid) < PIPE_BUF) ready = 1;
+            if (pipe_avail(pid) < KPIPE_BUF) ready = 1;
         } else {
             ready = 1; /* regular files are always ready */
         }
@@ -5285,7 +5304,7 @@ struct timerfd_private {
     uint64_t expirations;  /* count of expirations since last read */
 };
 
-static long sys_timerfd_create_handler(struct trapframe *tf) {
+long sys_timerfd_create_handler(struct trapframe *tf) {
     (void)tf;
     struct open_file **ftab = proc_ofile(current_proc);
     int tfd = alloc_fd();
@@ -5303,7 +5322,7 @@ static long sys_timerfd_create_handler(struct trapframe *tf) {
     return (long)tfd;
 }
 
-static long sys_timerfd_settime_handler(struct trapframe *tf) {
+long sys_timerfd_settime_handler(struct trapframe *tf) {
     int tfd = (int)tf->a0;
     uint64_t new_uva = tf->a2;
     struct open_file **ftab = proc_ofile(current_proc);
@@ -5330,7 +5349,7 @@ static long sys_timerfd_settime_handler(struct trapframe *tf) {
     return 0;
 }
 
-static long sys_timerfd_gettime_handler(struct trapframe *tf) {
+long sys_timerfd_gettime_handler(struct trapframe *tf) {
     int tfd = (int)tf->a0;
     uint64_t out_uva = tf->a1;
     struct open_file **ftab = proc_ofile(current_proc);
@@ -5369,7 +5388,7 @@ struct inotify_private {
     int next_wd;
 };
 
-static long sys_inotify_init1_handler(struct trapframe *tf) {
+long sys_inotify_init1_handler(struct trapframe *tf) {
     (void)tf;
     struct open_file **ftab = proc_ofile(current_proc);
     int ifd = alloc_fd();
@@ -5388,7 +5407,7 @@ static long sys_inotify_init1_handler(struct trapframe *tf) {
     return (long)ifd;
 }
 
-static long sys_inotify_add_watch_handler(struct trapframe *tf) {
+long sys_inotify_add_watch_handler(struct trapframe *tf) {
     int ifd = (int)tf->a0;
     uint64_t path_uva = tf->a1;
     uint32_t mask = (uint32_t)tf->a2;
@@ -5410,7 +5429,7 @@ static long sys_inotify_add_watch_handler(struct trapframe *tf) {
     return (long)wd;
 }
 
-static long sys_inotify_rm_watch_handler(struct trapframe *tf) {
+long sys_inotify_rm_watch_handler(struct trapframe *tf) {
     int ifd = (int)tf->a0;
     int wd = (int)tf->a1;
     struct open_file **ftab = proc_ofile(current_proc);
@@ -5447,7 +5466,7 @@ struct ramfs_private {
 };
 
 /* utimensat — update file timestamps (ext2 mtime, ramfs atime/mtime) */
-static long sys_utimensat_handler(struct trapframe *tf) {
+long sys_utimensat_handler(struct trapframe *tf) {
     /* a0 = dirfd (AT_FDCWD), a1 = path (NULL = use fd), a2 = times, a3 = flags */
     int dirfd = (int)tf->a0;
     uint64_t path_uva = tf->a1;
@@ -5543,7 +5562,7 @@ static long sys_utimensat_handler(struct trapframe *tf) {
 }
 
 /* statfs/fstatfs — filesystem statistics */
-static long sys_statfs_handler(struct trapframe *tf) {
+long sys_statfs_handler(struct trapframe *tf) {
     /* a0 = path, a1 = buf (struct statfs, 120 bytes on RISC-V) */
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0)
@@ -5590,7 +5609,7 @@ static long sys_statfs_handler(struct trapframe *tf) {
     return 0;
 }
 
-static long sys_fstatfs_handler(struct trapframe *tf) {
+long sys_fstatfs_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     struct open_file **ftab = proc_ofile(current_proc);
     if (fd < 0 || fd >= NOFILE || !ftab[fd])
@@ -5617,24 +5636,24 @@ static long sys_fstatfs_handler(struct trapframe *tf) {
 }
 
 /* Ownership/credential stubs — single-user OS, always uid/gid 0 */
-static long sys_fchownat_handler(struct trapframe *tf) {
+long sys_fchownat_handler(struct trapframe *tf) {
     (void)tf;
     return (long)0;
 }
 
 /* BF: Store UID for kill() permission checking.
  * Single-user OS -- just stores the UID without privilege checks. */
-static long sys_setuid_handler(struct trapframe *tf) {
+long sys_setuid_handler(struct trapframe *tf) {
     current_proc->uid = (int)tf->a0;
     return (long)0;
 }
 
-static long sys_setgid_handler(struct trapframe *tf) {
+long sys_setgid_handler(struct trapframe *tf) {
     (void)tf;
     return (long)0;
 }
 
-static long sys_fchmodat_handler(struct trapframe *tf) {
+long sys_fchmodat_handler(struct trapframe *tf) {
     /* a0 = dirfd (AT_FDCWD), a1 = user path, a2 = mode, a3 = flags */
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
@@ -5677,7 +5696,7 @@ static long sys_fchmodat_handler(struct trapframe *tf) {
     return 0;
 }
 
-static long sys_fchmod_handler(struct trapframe *tf) {
+long sys_fchmod_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     uint32_t mode = (uint32_t)tf->a1;
     struct open_file **ftab = proc_ofile(current_proc);
@@ -5701,7 +5720,7 @@ static long sys_fchmod_handler(struct trapframe *tf) {
     return 0; /* other filesystems: no-op */
 }
 
-static long sys_ftruncate_handler(struct trapframe *tf) {
+long sys_ftruncate_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     uint64_t length = (uint64_t)tf->a1;
     struct open_file **ftab = proc_ofile(current_proc);
@@ -5716,7 +5735,7 @@ static long sys_ftruncate_handler(struct trapframe *tf) {
     return (long)-30; /* EROFS: read-only filesystems */
 }
 
-static long sys_tgkill_handler(struct trapframe *tf) {
+long sys_tgkill_handler(struct trapframe *tf) {
     pid_t tid = (pid_t)tf->a1;
     int sig = (int)tf->a2;
     if (sig == 0) {
@@ -5739,13 +5758,10 @@ static long sys_tgkill_handler(struct trapframe *tf) {
 }
 
 /* Poll event constants (must match libc/include/poll.h) */
-#define KPOLLIN   0x0001
-#define KPOLLOUT  0x0004
-#define KPOLLERR  0x0008
-#define KPOLLHUP  0x0010
-#define KPOLLNVAL 0x0020
+/* RF: KPOLL* constants now defined in pipe.h */
 
-static short check_fd_ready(struct open_file *f, short events) {
+/* RF: Made non-static for access by extracted IPC module */
+short check_fd_ready(struct open_file *f, short events) {
     if (!f)
         return KPOLLNVAL;
 
@@ -5767,7 +5783,7 @@ static short check_fd_ready(struct open_file *f, short events) {
         }
         if (f->pipe_write) {
             if (events & KPOLLOUT) {
-                if (pipe_avail(pid) < PIPE_BUF)
+                if (pipe_avail(pid) < KPIPE_BUF)
                     revents |= KPOLLOUT;
             }
             /* POLLERR: read end closed */
@@ -5782,7 +5798,7 @@ static short check_fd_ready(struct open_file *f, short events) {
     return revents;
 }
 
-static long sys_clock_nanosleep_handler(struct trapframe *tf) {
+long sys_clock_nanosleep_handler(struct trapframe *tf) {
     /* a0=clockid (ignored), a1=flags, a2=request, a3=remain */
     int flags = (int)tf->a1;
     uint64_t kreq[2]; /* {tv_sec, tv_nsec} */
@@ -5819,7 +5835,7 @@ static long sys_clock_nanosleep_handler(struct trapframe *tf) {
     return 0;
 }
 
-static long sys_ppoll_handler(struct trapframe *tf) {
+long sys_ppoll_handler(struct trapframe *tf) {
     uint64_t fds_uaddr = tf->a0;
     int nfds = (int)tf->a1;
     uint64_t timeout_uaddr = tf->a2;
@@ -5972,7 +5988,7 @@ static long sys_ppoll_handler(struct trapframe *tf) {
     return (long)ready;
 }
 
-static long sys_pselect6_handler(struct trapframe *tf) {
+long sys_pselect6_handler(struct trapframe *tf) {
     int nfds = (int)tf->a0;
     uint64_t readfds_uaddr = tf->a1;
     uint64_t writefds_uaddr = tf->a2;
@@ -6172,7 +6188,7 @@ static long sys_pselect6_handler(struct trapframe *tf) {
     return (long)ready;
 }
 
-static long sys_sigaltstack_handler(struct trapframe *tf) {
+long sys_sigaltstack_handler(struct trapframe *tf) {
     uint64_t new_addr = tf->a0;
     uint64_t old_addr = tf->a1;
 
@@ -6249,7 +6265,7 @@ static long sys_sigaltstack_handler(struct trapframe *tf) {
 static char mount_path_storage[8][128];
 static int mount_path_next = 0;
 
-static long sys_mount_handler(struct trapframe *tf) {
+long sys_mount_handler(struct trapframe *tf) {
     char ksrc[128], ktgt[256], kfstype[64];
     if (copyinstr(current_proc->pagetable, ksrc, tf->a0, sizeof(ksrc)) < 0)
         return (long)-14;
@@ -6283,7 +6299,7 @@ static long sys_mount_handler(struct trapframe *tf) {
     return 0;
 }
 
-static long sys_umount2_handler(struct trapframe *tf) {
+long sys_umount2_handler(struct trapframe *tf) {
     char ktgt[128];
     if (copyinstr(current_proc->pagetable, ktgt, tf->a0, sizeof(ktgt)) < 0)
         return (long)-14;
@@ -6293,7 +6309,7 @@ static long sys_umount2_handler(struct trapframe *tf) {
     return (long)vfs_unregister_mount(resolved);
 }
 
-static long sys_uname_handler(struct trapframe *tf) {
+long sys_uname_handler(struct trapframe *tf) {
     /* struct utsname: 5 fields of 65 bytes each = 325 bytes */
     char kbuf[325];
     memset(kbuf, 0, sizeof(kbuf));
