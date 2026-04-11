@@ -211,6 +211,10 @@ void kvminit(void) {
     printk("kvminit: paging enabled (with 2MB super pages).\n");
 }
 
+/* PTE_X corruption tracking — log context when repair is needed.
+ * Helps narrow the root cause (QEMU TCG bug vs kernel code path). */
+static int ptex_repair_count = 0;
+
 /* Check and repair the kernel code L1 PTE via the self-referencing
  * gigapage window.  Returns 1 if repair was needed, 0 if PTE was
  * correct.  Does NOT call walk(). */
@@ -219,11 +223,23 @@ int recursive_check_kcode_pte(void) {
   if (!ppte) return 0;
   pte_t pte = *ppte;
   if ((pte & PTE_V) && !(pte & PTE_X)) {
+    /* ENH: Log corruption details for root cause analysis.
+     * PTE value shows which bits are affected (is it only PTE_X?).
+     * sepc shows what code was running when we detected it.
+     * Repair count tracks frequency. */
+    ptex_repair_count++;
+    printk("PTE_X repair #%d: pte=0x%lx sepc=0x%lx ppte=%p\n",
+           ptex_repair_count, (unsigned long)pte,
+           (unsigned long)r_sepc(), ppte);
     *ppte = pte | PTE_X;
     asm volatile("sfence.vma zero, zero" ::: "memory");
     return 1;
   }
   if (!(pte & PTE_V)) {
+    ptex_repair_count++;
+    printk("PTE_X repair #%d (INVALID): pte=0x%lx sepc=0x%lx ppte=%p\n",
+           ptex_repair_count, (unsigned long)pte,
+           (unsigned long)r_sepc(), ppte);
     *ppte = PA2PTE(0x80200000UL) | PTE_V | PTE_R | PTE_W | PTE_X;
     asm volatile("sfence.vma zero, zero" ::: "memory");
     return 1;
