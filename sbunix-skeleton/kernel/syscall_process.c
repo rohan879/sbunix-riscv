@@ -420,14 +420,23 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
             /* Check for pending signals after waking up:
              * - User handler (handler > 1): return -EINTR
              * - SIG_DFL terminating signal: return -EINTR to let deliver_signal kill us
-             * - SIG_IGN / SIG_DFL ignore-class: continue waiting */
+             * - SIG_IGN / SIG_DFL ignore-class: continue waiting
+             * BF: SIGCHLD with user handler must NOT return EINTR — it's the
+             * signal that woke us to re-check children. Returning EINTR would
+             * prevent wait4 from finding the zombie (or detecting ECHILD when
+             * SA_NOCLDWAIT auto-reaped the child). Let the loop re-check. */
             {
                 uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
                 struct kern_sigaction *ksa = proc_sigactions(current_proc);
                 for (int s = 1; s < 32 && deliverable; s++) {
                     if (deliverable & signal_bit(s)) {
-                        if (ksa[s].handler > 1) /* user handler */
+                        if (ksa[s].handler > 1) { /* user handler */
+                            /* BF: SIGCHLD doesn't interrupt wait4 — it's the
+                             * reason we woke up. Let the loop re-scan children.
+                             * The signal will be delivered after wait4 returns. */
+                            if (s == SIGCHLD) continue;
                             return -4; /* -EINTR */
+                        }
                         if (ksa[s].handler == 0) { /* SIG_DFL */
                             /* Ignore-class: SIGCHLD, SIGURG, SIGWINCH (continue waiting) */
                             if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
@@ -1048,9 +1057,15 @@ long sys_setsid_handler(struct trapframe *tf) {
         return (long)-1; /* -EPERM */
     current_proc->sid = current_proc->pid;
     current_proc->pgid = current_proc->pid;
-    if (current_proc->parent && current_proc->parent->state == SLEEPING &&
-        current_proc->parent->waiting_for_uart == 0)
-        current_proc->parent->state = RUNNABLE;
+    /* BF: Wake all wait4 sleepers — setsid changes the process group,
+     * so any waitpid(-pgid) callers need to re-evaluate whether the
+     * target group is now empty (should return ECHILD).  Previous code
+     * only woke the parent with a waiting_for_uart check, which missed
+     * non-parent waiters and used the wrong sleep classification. */
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        if (p->state == SLEEPING && p->waiting_for_child)
+            p->state = RUNNABLE;
+    }
     return (long)current_proc->pid;
 }
 
