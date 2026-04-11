@@ -363,7 +363,7 @@ long sys_openat_handler(struct trapframe *tf) {
     /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
     {
         int nofollow = (flags & 0400000); /* O_NOFOLLOW = 0400000 */
-        int symret = resolve_symlinks_in_path(resolved, 8, !nofollow);
+        int symret = resolve_symlinks_in_path(resolved, 6, !nofollow);
         if (symret == -40)
             return (long)-40; /* -ELOOP */
     }
@@ -510,7 +510,7 @@ long sys_chdir_handler(struct trapframe *tf) {
     if (kpath[0] == '\0') return (long)-2; /* -ENOENT */
     char resolved[128];
     resolve_path(current_proc->cwd, kpath, resolved);
-    resolve_symlinks_in_path(resolved, 8, 1);
+    resolve_symlinks_in_path(resolved, 6, 1);
     /* Check if path exists by trying stat */
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -643,7 +643,7 @@ long sys_newfstatat_handler(struct trapframe *tf) {
     int at_flags = (int)tf->a3;
     {
         int nofollow = (at_flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
-        int symret = resolve_symlinks_in_path(resolved, 8, !nofollow);
+        int symret = resolve_symlinks_in_path(resolved, 6, !nofollow);
         if (symret == -40)
             return (long)-40; /* -ELOOP */
     }
@@ -1125,7 +1125,7 @@ long sys_faccessat_handler(struct trapframe *tf) {
 
     char resolved[128];
     resolve_path(current_proc->cwd, kpath, resolved);
-    resolve_symlinks_in_path(resolved, 8, 1);
+    resolve_symlinks_in_path(resolved, 6, 1);
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1149,7 +1149,7 @@ long sys_unlinkat_handler(struct trapframe *tf) {
         char resolved[128];
         resolve_path(current_proc->cwd, kpath, resolved);
         /* Resolve intermediate symlinks; do NOT follow final (unlink targets the link itself) */
-        resolve_symlinks_in_path(resolved, 8, 0);
+        resolve_symlinks_in_path(resolved, 6, 0);
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
         struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -1247,7 +1247,7 @@ long sys_mkdirat_handler(struct trapframe *tf) {
         char resolved[128];
         resolve_path(current_proc->cwd, kpath, resolved);
         /* Resolve intermediate symlinks only (creating at final component) */
-        resolve_symlinks_in_path(resolved, 8, 0);
+        resolve_symlinks_in_path(resolved, 6, 0);
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
         struct vfs_ops *ops = mnt ? mnt->ops : NULL;

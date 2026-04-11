@@ -26,7 +26,8 @@
 
 #define RAMFS_INO_ROOT       1
 
-enum ramfs_type { RAMFS_FILE, RAMFS_DIR };
+/* ENH: Added RAMFS_SYMLINK type to support symbolic links in ramfs */
+enum ramfs_type { RAMFS_FILE, RAMFS_DIR, RAMFS_SYMLINK };
 
 struct ramfs_inode {
   uint64_t         ino;
@@ -50,6 +51,8 @@ struct ramfs_inode {
   } children[RAMFS_MAX_CHILDREN];
   int              nchildren;
   struct ramfs_inode *parent;   /* ".." link */
+  /* ENH: Symlink target storage — 128 bytes matches pathres buffer sizes */
+  char symlink_target[128];
 };
 
 static struct ramfs_inode inodes[RAMFS_MAX_INODES];
@@ -285,6 +288,12 @@ static int ramfs_open(void *fs_data, const char *path, int flags, void **private
   if (!ino)
     return -2; /* -ENOENT */
 
+  /* ENH: Safety guard — pathres should have resolved symlinks before we
+   * get here, but O_NOFOLLOW opens could reach a symlink inode directly.
+   * Return -ELOOP to prevent opening the raw symlink as a file. */
+  if (ino->type == RAMFS_SYMLINK)
+    return -40; /* -ELOOP */
+
   /* Truncate if requested */
   if ((flags & RAMFS_O_TRUNC) && ino->type == RAMFS_FILE) {
     for (int i = 0; i < ino->nblocks; i++) {
@@ -416,6 +425,8 @@ static void ramfs_fill_stat(uint8_t *st, struct ramfs_inode *ino) {
   uint32_t mode;
   if (ino->type == RAMFS_DIR)
     mode = (uint32_t)(0x4000 | ino->mode); /* S_IFDIR */
+  else if (ino->type == RAMFS_SYMLINK)
+    mode = (uint32_t)(0120000 | ino->mode); /* S_IFLNK */
   else
     mode = (uint32_t)(0x8000 | ino->mode); /* S_IFREG */
   uint32_t nlink = (uint32_t)ino->nlink;
@@ -503,7 +514,9 @@ static int ramfs_readdir(void *fs_data, void *private, char *ubuf,
   /* Directory entries */
   for (int i = 0; i < dir->nchildren; i++) {
     struct ramfs_inode *child = dir->children[i].inode;
-    uint8_t dt = (child->type == RAMFS_DIR) ? 4 : 8; /* DT_DIR : DT_REG */
+    /* ENH: Report correct dirent type for symlinks (DT_LNK=10) */
+    uint8_t dt = (child->type == RAMFS_DIR) ? 4
+               : (child->type == RAMFS_SYMLINK) ? 10 : 8; /* DT_DIR : DT_LNK : DT_REG */
     RAMFS_EMIT_DIRENT(dir->children[i].name, child->ino, dt);
   }
 
@@ -545,6 +558,8 @@ static int ramfs_unlink(void *fs_data, const char *path) {
 
   struct ramfs_inode *ino = ramfs_dir_lookup(parent, basename);
   if (!ino) return -2;
+  /* ENH: Only directories are rejected — symlinks (RAMFS_SYMLINK) and
+   * regular files can both be unlinked normally. */
   if (ino->type == RAMFS_DIR) return -21; /* -EISDIR */
 
   ramfs_dir_remove(parent, basename);
@@ -611,6 +626,61 @@ static int ramfs_rename(void *fs_data, const char *oldpath,
 }
 
 /* ================================================================== */
+/* Symlink operations                                                   */
+/* ================================================================== */
+
+/* ENH: Create a symbolic link at linkpath pointing to target.
+ * The target string is stored verbatim in the inode (not resolved). */
+static int ramfs_symlink(void *fs_data, const char *target, const char *linkpath) {
+  (void)fs_data;
+
+  /* Check if it already exists */
+  if (ramfs_walk(linkpath))
+    return -17; /* -EEXIST */
+
+  /* Validate target fits in inode storage */
+  int tlen = strlen(target);
+  if (tlen >= (int)sizeof(((struct ramfs_inode *)0)->symlink_target))
+    return -36; /* -ENAMETOOLONG */
+
+  const char *basename;
+  struct ramfs_inode *parent = ramfs_walk_parent(linkpath, &basename);
+  if (!parent || parent->type != RAMFS_DIR)
+    return -2; /* -ENOENT (parent dir doesn't exist) */
+  if (*basename == '\0')
+    return -22; /* -EINVAL */
+
+  struct ramfs_inode *ino = ramfs_alloc_inode(RAMFS_SYMLINK, 0777);
+  if (!ino) return -12; /* -ENOMEM */
+
+  memcpy(ino->symlink_target, target, tlen);
+  ino->symlink_target[tlen] = '\0';
+  ino->size = (uint64_t)tlen;
+
+  int rc = ramfs_dir_add(parent, basename, ino);
+  if (rc < 0) {
+    ramfs_free_inode(ino);
+    return rc;
+  }
+  return 0;
+}
+
+/* ENH: Read the target of a symbolic link into buf.
+ * Returns the number of bytes copied (not null-terminated). */
+static int ramfs_readlink(void *fs_data, const char *path, char *buf, int bufsiz) {
+  (void)fs_data;
+  struct ramfs_inode *ino = ramfs_walk(path);
+  if (!ino) return -2; /* -ENOENT */
+  if (ino->type != RAMFS_SYMLINK) return -22; /* -EINVAL: not a symlink */
+
+  int copylen = (int)ino->size;
+  if (copylen > bufsiz)
+    copylen = bufsiz;
+  memcpy(buf, ino->symlink_target, copylen);
+  return copylen;
+}
+
+/* ================================================================== */
 /* VFS ops table                                                        */
 /* ================================================================== */
 
@@ -626,8 +696,8 @@ struct vfs_ops ramfs_ops = {
   .mkdir   = ramfs_mkdir,
   .unlink  = ramfs_unlink,
   .rmdir   = ramfs_rmdir,
-  .symlink = NULL,
-  .readlink = NULL,
+  .symlink = ramfs_symlink,
+  .readlink = ramfs_readlink,
   .rename  = ramfs_rename,
 };
 

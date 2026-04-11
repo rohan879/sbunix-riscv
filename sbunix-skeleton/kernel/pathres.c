@@ -63,7 +63,9 @@ void normalize_path(const char *in, char *out) {
             /* Normal component — push */
             stack[depth++] = tlen; /* save position before adding '/' + component */
             if (tlen > 1) tmp[tlen++] = '/'; /* add separator (root already has '/') */
-            if (tlen + clen < 255) {
+            /* BF: Use sizeof(tmp) instead of hardcoded 255 to prevent
+             * buffer overflow — tmp is only 128 bytes, not 256. */
+            if (tlen + clen < (int)sizeof(tmp) - 1) {
                 memcpy(tmp + tlen, start, clen);
                 tlen += clen;
             }
@@ -89,14 +91,16 @@ void resolve_path(const char *cwd, const char *path, char *out) {
     if (path[0] == '/') {
         /* absolute */
         rlen = strlen(path);
-        if (rlen > 255) rlen = 255;
+        /* BF: Cap at sizeof(raw)-1 instead of 255 — raw is 128 bytes */
+        if (rlen > (int)sizeof(raw) - 1) rlen = (int)sizeof(raw) - 1;
         memcpy(raw, path, rlen);
         raw[rlen] = '\0';
     } else {
         /* relative — prepend cwd */
         int cwdlen = strlen(cwd);
         int pathlen = strlen(path);
-        if (cwdlen + 1 + pathlen > 254) {
+        /* BF: Use sizeof(raw)-2 instead of hardcoded 254 */
+        if (cwdlen + 1 + pathlen > (int)sizeof(raw) - 2) {
             out[0] = '/'; out[1] = '\0';
             return;
         }
@@ -128,8 +132,12 @@ int vfs_is_dir(const char *path) {
     return 0;
 }
 
-/* Follow symlinks in a resolved path (up to 8 levels to prevent loops) */
-int follow_symlinks(char *resolved, int maxdepth) {
+/* Follow symlinks in a resolved path (up to 6 levels to prevent loops).
+ * BF: Added bufsiz parameter so the copy-back step respects the caller's
+ * actual buffer size instead of assuming 256 bytes.
+ * BF: Reduced from 8 to 6 levels; each frame uses ~640 bytes of stack
+ * (target[128] + new_resolved[128] + dir[128] + combined[128] + locals). */
+int follow_symlinks(char *resolved, int maxdepth, int bufsiz) {
     if (maxdepth <= 0) return -40; /* ELOOP */
 
     const char *relpath;
@@ -137,22 +145,24 @@ int follow_symlinks(char *resolved, int maxdepth) {
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops || !ops->readlink) return 0; /* no readlink = not a symlink-capable fs */
 
-    char target[64];
+    /* BF: Increased from 64 to 128 to match ramfs symlink_target size
+     * and prevent truncation of longer symlink targets. */
+    char target[128];
     int ret = ops->readlink(mnt->fs_data, relpath, target, sizeof(target) - 1);
     if (ret < 0) return 0; /* not a symlink, path is final */
     target[ret] = '\0';
 
     /* Resolve the symlink target.  Use small local buffers to avoid
-     * kernel stack overflow — follow_symlinks recurses up to 8 levels
+     * kernel stack overflow — follow_symlinks recurses up to 6 levels
      * and each frame consumes the sum of all local arrays. */
-    char new_resolved[64];
+    char new_resolved[128];
     if (target[0] == '/') {
         resolve_path("/", target, new_resolved);
     } else {
         /* Relative: resolve from symlink's parent directory */
-        char dir[64];
+        char dir[128];
         int rlen = strlen(resolved);
-        if (rlen > 63) rlen = 63;
+        if (rlen > (int)sizeof(dir) - 1) rlen = (int)sizeof(dir) - 1;
         memcpy(dir, resolved, rlen);
         dir[rlen] = '\0';
         char *last_slash = dir;
@@ -166,7 +176,7 @@ int follow_symlinks(char *resolved, int maxdepth) {
         char combined[128];
         int dlen = strlen(dir);
         int tlen = strlen(target);
-        if (dlen + tlen >= 126) return -36; /* ENAMETOOLONG */
+        if (dlen + tlen >= (int)sizeof(combined) - 2) return -36; /* ENAMETOOLONG */
         memcpy(combined, dir, dlen);
         memcpy(combined + dlen, target, tlen + 1);
 
@@ -174,12 +184,13 @@ int follow_symlinks(char *resolved, int maxdepth) {
     }
 
     int nlen = strlen(new_resolved);
-    if (nlen > 255) nlen = 255;
+    /* BF: Respect caller's buffer size instead of hardcoded 255 */
+    if (nlen > bufsiz - 1) nlen = bufsiz - 1;
     memcpy(resolved, new_resolved, nlen);
     resolved[nlen] = '\0';
 
     /* Recursively follow in case target is also a symlink */
-    return follow_symlinks(resolved, maxdepth - 1);
+    return follow_symlinks(resolved, maxdepth - 1, bufsiz);
 }
 
 /* Walk a resolved path component-by-component, resolving symlinks at
@@ -196,12 +207,15 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
 
     /* Split into components */
     char work[128];
-    if (rlen > 255) rlen = 255;
+    /* BF: Use sizeof(work)-1 instead of hardcoded 255 to match actual
+     * buffer size and prevent out-of-bounds writes. */
+    if (rlen > (int)sizeof(work) - 1) rlen = (int)sizeof(work) - 1;
     memcpy(work, resolved, rlen);
     work[rlen] = '\0';
 
     char built[128]; /* path built so far */
     int bi = 0;
+    int bmax = (int)sizeof(built) - 1; /* max usable index */
 
     int wi = 0; /* index into work */
 
@@ -229,9 +243,9 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
 
         /* Append separator if needed */
         if (bi > 0 && built[bi - 1] != '/') {
-            if (bi < 255) built[bi++] = '/';
+            if (bi < bmax) built[bi++] = '/';
         }
-        if (bi + comp_len > 255)
+        if (bi + comp_len > bmax)
             return -36; /* ENAMETOOLONG */
         memcpy(built + bi, work + comp_start, comp_len);
         bi += comp_len;
@@ -247,7 +261,7 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
         char before[128];
         memcpy(before, built, bi + 1);
 
-        int sym_ret = follow_symlinks(built, maxdepth);
+        int sym_ret = follow_symlinks(built, maxdepth, sizeof(built));
         if (sym_ret == -40) return -40; /* ELOOP */
 
         bi = strlen(built);
@@ -262,9 +276,9 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
             int remaining = rlen - wi;
             if (remaining > 0) {
                 if (bi > 0 && built[bi - 1] != '/' && work[wi] != '/') {
-                    if (bi < 255) built[bi++] = '/';
+                    if (bi < bmax) built[bi++] = '/';
                 }
-                if (bi + remaining > 255) remaining = 255 - bi;
+                if (bi + remaining > bmax) remaining = bmax - bi;
                 memcpy(built + bi, work + wi, remaining);
                 bi += remaining;
                 built[bi] = '\0';
@@ -273,7 +287,7 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
                 char normalized[128];
                 resolve_path("/", built, normalized);
                 int nlen = strlen(normalized);
-                if (nlen > 255) nlen = 255;
+                if (nlen > bmax) nlen = bmax;
                 memcpy(resolved, normalized, nlen);
                 resolved[nlen] = '\0';
 
@@ -284,7 +298,7 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
     }
 
     /* Copy result back */
-    if (bi > 255) bi = 255;
+    if (bi > bmax) bi = bmax;
     memcpy(resolved, built, bi);
     resolved[bi] = '\0';
     return 0;
