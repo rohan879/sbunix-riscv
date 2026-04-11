@@ -59,6 +59,7 @@ typedef struct {
     char  buf[2048]; /* kernel dirent64 read buffer */
     int   buf_pos;  /* current position in buf */
     int   buf_len;  /* valid bytes in buf */
+    long  tell_off; /* BF: d_off cookie from last readdir for telldir/seekdir */
 } DIR;
 
 /* POSIX directory functions */
