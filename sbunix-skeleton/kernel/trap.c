@@ -3,7 +3,6 @@
 #include <riscv.h>
 #include <proc.h>
 #include <vfs.h>
-#include <ext2.h>
 #include <syscall.h>
 #include <uart.h>
 #include <plic.h>
@@ -11,7 +10,6 @@
 #include <kmalloc.h>
 #include <string.h>
 #include <vm.h>
-#include <exec.h>
 #include <tty.h>
 #include <swap.h>
 #include <mm.h>
@@ -19,7 +17,6 @@
 #include <syscall_handlers.h>
 #include <trap_internal.h>
 #include <pipe.h>
-#include <pathres.h>
 
 /* Goldfish RTC at 0x101000 (QEMU virt machine) */
 #define GOLDFISH_RTC_BASE 0x101000UL
@@ -65,9 +62,6 @@ void get_wall_time(int64_t *sec, int64_t *nsec) {
     *sec  = (int64_t)(now_ns / 1000000000ULL);
     *nsec = (int64_t)(now_ns % 1000000000ULL);
 }
-
-/* RF: Kernel pipe table (pipes[], alloc_pipe, pipe_avail) moved to syscall_ipc.c.
- * Still accessible here via pipe.h extern declarations. */
 
 /* ------------------------------------------------------------------ */
 /* File descriptor helpers                                              */
@@ -634,35 +628,9 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
  * syscall_table made non-static for access by extracted modules. */
 long (*syscall_table[NSYSCALLS])(struct trapframe *tf);
 
-/* ---- Individual syscall handler functions ---- */
-
-/* RF: sys_brk_handler moved to syscall_memory.c */
-
-/* RF: sys_write_handler moved to syscall_io.c */
-
-/* RF: sys_read_handler moved to syscall_io.c */
-
-/* RF: sys_openat_handler, sys_close_handler, sys_dup3_handler moved to syscall_io.c */
-
-/* RF: sys_pipe2_handler moved to syscall_ipc.c */
-
-/* RF: sys_getcwd_handler, sys_chdir_handler, sys_fchdir_handler moved to syscall_io.c */
-
-/* RF: sys_clone_handler moved to syscall_process.c */
-
-/* RF: sys_execve_handler moved to syscall_process.c */
-
-/* RF: sys_fexecve_handler moved to syscall_process.c */
-
-/* RF: sys_wait4_handler moved to syscall_process.c */
-
-/* RF: sys_getpid_handler moved to syscall_process.c */
-
-/* RF: sys_getppid_handler moved to syscall_process.c */
-
-/* RF: sys_getuid_handler moved to syscall_process.c */
-
-/* RF: sys_getgid_handler moved to syscall_process.c */
+/* RF: All sys_*_handler functions have been extracted to their
+ * respective kernel/syscall_*.c modules.  See syscall_handlers.h
+ * for the complete list of handler prototypes and their locations. */
 
 /* Helper: deliver signal to a single process */
 /* RF: Made non-static for access by extracted signal syscall module */
@@ -745,103 +713,6 @@ void kill_deliver(struct proc *target, int sig) {
         }
     }
 }
-
-/* RF: sys_kill_handler, sys_rt_sigqueueinfo_handler
- * moved to syscall_signal.c */
-
-/* RF: sys_clock_gettime_handler, sys_clock_getres_handler, sys_clock_settime_handler
- * moved to syscall_time.c */
-
-/* RF: sys_lseek_handler, sys_fstat_handler, sys_newfstatat_handler,
- * sys_getdents64_handler moved to syscall_io.c */
-
-/* RF: sys_nanosleep_handler moved to syscall_time.c */
-
-/* RF: sys_exit_handler moved to syscall_process.c */
-
-/* RF: sys_fsync_handler, sys_sync_handler, sys_reboot_handler moved to syscall_misc.c */
-
-/* RF: mmap_writeback_shared, mmap_search_base, mmap_find_hole moved to syscall_memory.c */
-
-/* RF: sys_mmap_handler, mmap_writeback_shared moved to syscall_memory.c */
-
-/* RF: sys_munmap_handler moved to syscall_memory.c */
-
-/* RF: sys_mprotect_handler moved to syscall_memory.c */
-
-/* RF: sys_ps_handler moved to syscall_process.c */
-
-/* RF: sys_ioctl_handler moved to syscall_misc.c */
-
-/* RF: sys_rt_sigaction_handler, sys_rt_sigprocmask_handler,
- * sys_rt_sigreturn_handler, sys_rt_sigsuspend_handler,
- * sys_rt_sigpending_handler, sys_rt_sigtimedwait_handler
- * moved to syscall_signal.c */
-
-/* RF: sys_gettimeofday_handler moved to syscall_time.c */
-
-/* RF: sys_fcntl_handler, sys_faccessat_handler, sys_unlinkat_handler,
- * sys_linkat_handler, sys_renameat2_handler, sys_mkdirat_handler,
- * sys_mknodat_handler, sys_readlinkat_handler, sys_symlinkat_handler
- * moved to syscall_io.c */
-
-/* RF: sys_umask_handler, sys_geteuid_handler, sys_getegid_handler,
- * sys_set_tid_address_handler moved to syscall_misc.c */
-
-/* RF: sys_writev_handler, sys_readv_handler moved to syscall_io.c */
-
-/* RF: sys_prlimit64_handler, sys_getrandom_handler moved to syscall_misc.c */
-
-/* RF: sys_setpgid_handler moved to syscall_process.c */
-
-/* RF: sys_setsid_handler moved to syscall_process.c */
-
-/* RF: sys_getpgid_handler moved to syscall_process.c */
-
-/* RF: sys_getsid_handler moved to syscall_process.c */
-
-/* RF: sys_alarm_handler, sys_timer_create_handler, sys_timer_delete_handler,
- * sys_timer_settime_handler, sys_timer_gettime_handler,
- * sys_timer_getoverrun_handler moved to syscall_time.c */
-
-/* RF: sys_madvise_handler moved to syscall_memory.c */
-
-/* RF: sys_futex_handler and FUTEX_* defines moved to syscall_ipc.c */
-
-/* RF: sys_msync_handler moved to syscall_memory.c */
-
-/* RF: sys_gettid_handler, sys_sched_yield_handler moved to syscall_misc.c */
-
-/* RF: sys_pread64_handler, sys_pwrite64_handler moved to syscall_io.c */
-
-/* RF: sys_mremap_handler moved to syscall_memory.c */
-
-/* RF: sys_getrusage_handler, sys_times_handler moved to syscall_time.c */
-
-/* RF: epoll, timerfd, inotify structs and handlers moved to syscall_ipc.c */
-
-/* RF: ramfs_inode_trap, ramfs_private structs moved to syscall_io.c and syscall_misc.c */
-
-/* RF: sys_utimensat_handler, sys_statfs_handler, sys_fstatfs_handler,
- * sys_fchownat_handler, sys_setuid_handler, sys_setgid_handler
- * moved to syscall_misc.c */
-
-/* RF: sys_fchmodat_handler, sys_fchmod_handler, sys_ftruncate_handler
- * moved to syscall_io.c */
-
-/* RF: sys_tgkill_handler moved to syscall_signal.c */
-
-/* Poll event constants (must match libc/include/poll.h) */
-/* RF: KPOLL* constants now defined in pipe.h */
-
-/* RF: check_fd_ready, sys_ppoll_handler, sys_pselect6_handler moved to syscall_ipc.c */
-
-/* RF: sys_clock_nanosleep_handler moved to syscall_time.c */
-
-/* RF: sys_sigaltstack_handler moved to syscall_signal.c */
-
-/* RF: sys_mount_handler, sys_umount2_handler, sys_uname_handler
- * moved to syscall_misc.c */
 
 /* ---- syscall_init: populate the dispatch table ---- */
 
