@@ -395,13 +395,18 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
                     }
                 }
                 if (!found_queued) {
-                    /* No queued info: build minimal siginfo */
+                    /* BF: Consume sig_sender metadata captured at generation
+                     * time so sigtimedwait returns correct si_code/si_pid. */
                     memset(kinfo, 0, sizeof(kinfo));
                     *(int32_t *)(kinfo + 0) = (int32_t)sig; /* si_signo */
                     *(int32_t *)(kinfo + 4) = 0;            /* si_errno */
-                    *(int32_t *)(kinfo + 8) = 0;            /* si_code: SI_USER */
-                    *(int32_t *)(kinfo + 12) = 0;           /* si_pid */
-                    *(int32_t *)(kinfo + 16) = 0;           /* si_uid */
+                    if (current_proc->sig_sender[sig].valid) {
+                        *(int32_t *)(kinfo + 8) = current_proc->sig_sender[sig].si_code;
+                        *(int32_t *)(kinfo + 12) = current_proc->sig_sender[sig].si_pid;
+                        *(int32_t *)(kinfo + 16) = current_proc->sig_sender[sig].si_uid;
+                        *(int32_t *)(kinfo + 20) = current_proc->sig_sender[sig].si_status;
+                        current_proc->sig_sender[sig].valid = 0;
+                    }
                 }
                 if (copyout(current_proc->pagetable, info_uaddr, kinfo, 128) < 0)
                     return (long)-14; /* EFAULT */
@@ -435,7 +440,9 @@ long sys_tgkill_handler(struct trapframe *tf) {
         long result = (long)-3;
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->pid == tid && p->state != UNUSED) {
-                p->sigpending |= signal_bit(sig);
+                /* BF: Capture sender metadata for SA_SIGINFO delivery */
+                sig_set_pending(p, sig, (int32_t)current_proc->pid, 0,
+                                K_SI_USER);
                 if (p->state == SLEEPING)
                     p->state = RUNNABLE;
                 result = 0;
