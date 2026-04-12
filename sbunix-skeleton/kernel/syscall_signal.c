@@ -158,7 +158,11 @@ long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
         }
         if (slot >= 0) {
             uint8_t kinfo[128];
-            if (copyin(current_proc->pagetable, kinfo, info_uaddr, 128) >= 0) {
+            /* BF: Zero kinfo before copyin so bytes past K_SIGINFO_SIZE
+             * are zeros, not uninitialized kernel stack data. */
+            memset(kinfo, 0, sizeof(kinfo));
+            if (copyin(current_proc->pagetable, kinfo, info_uaddr, K_SIGINFO_SIZE) >= 0) {
+                /* BF: Full 128 bytes intentional — kinfo zero-padded past K_SIGINFO_SIZE */
                 memcpy(target->sigqueue_buf[slot].info, kinfo, 128);
                 target->sigqueue_buf[slot].signum = sig;
                 target->sigqueue_buf[slot].valid = 1;
@@ -408,7 +412,10 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
                         current_proc->sig_sender[sig].valid = 0;
                     }
                 }
-                if (copyout(current_proc->pagetable, info_uaddr, kinfo, 128) < 0)
+                /* BF: Only copy K_SIGINFO_SIZE (40) bytes to user — the user's
+                 * siginfo_t is 40 bytes.  Writing 128 corrupts the caller's
+                 * stack frame (ra, locals), causing epc=0x0 page faults. */
+                if (copyout(current_proc->pagetable, info_uaddr, kinfo, K_SIGINFO_SIZE) < 0)
                     return (long)-14; /* EFAULT */
             }
 

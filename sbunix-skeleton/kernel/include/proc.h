@@ -288,6 +288,15 @@ static inline int signal_is_valid(int signum) {
 #define K_CLD_STOPPED   5
 #define K_CLD_CONTINUED 6
 
+/* BF: Size of user-space siginfo_t for copyin/copyout to user buffers.
+ * Must match libc/include/signal.h siginfo_t layout (RV64 LP64):
+ *   si_signo(4) + si_errno(4) + si_code(4) + si_pid(4)
+ *   + si_uid(4) + si_status(4) + si_value(8) + si_addr(8) = 40 bytes.
+ * Internal kernel kinfo[128] buffers stay 128 for signal frame delivery
+ * (deliver_signal allocates 128 bytes on user stack via sp -= 128);
+ * only user-facing copyin/copyout must respect this size. */
+#define K_SIGINFO_SIZE 40
+
 /* BF: Set signal pending with sender metadata. Does NOT wake target.
  * All sig_sender and sigqueue_buf accesses are safe without locking
  * because SBUnix is a single-hart kernel with no preemption in S-mode. */
