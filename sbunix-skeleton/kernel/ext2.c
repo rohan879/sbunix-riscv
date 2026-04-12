@@ -323,6 +323,12 @@ static void icache_writeback(struct ext2_fs *fs, struct ext2_inode_mem *ip) {
   di.indirect = ip->indirect;
   di.mode = ip->mode;
   di.rdev = ip->rdev;
+  /* BF: Preserve timestamps on writeback -- the eviction path (lines 273-274)
+   * correctly copies these, but icache_writeback was omitting them, causing
+   * on-disk timestamps to be zeroed on every explicit writeback (write, close,
+   * fsync).  This broke POSIX mmap atime consistency tests. */
+  di.ctime = ip->ctime;
+  di.mtime = ip->mtime;
   ext2_write_dinode(fs, ip->ino, &di);
   ip->dirty = 0;
 }
