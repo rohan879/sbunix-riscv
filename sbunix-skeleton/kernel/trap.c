@@ -302,7 +302,8 @@ static void handle_timer_interrupt(void) {
         if (p->state != UNUSED && p->state != ZOMBIE &&
             p->alarm_ticks > 0 && now >= p->alarm_ticks) {
             p->alarm_ticks = 0;  /* one-shot */
-            p->sigpending |= signal_bit(14);  /* SIGALRM = 14 */
+            /* BF: Capture timer metadata for SA_SIGINFO delivery */
+            sig_set_pending(p, 14, 0, 0, K_SI_TIMER);
             if (p->state == SLEEPING)
                 p->state = RUNNABLE;
         }
@@ -317,7 +318,8 @@ static void handle_timer_interrupt(void) {
                 continue;
             if (now >= p->timers[i].next_expiry_ticks) {
                 /* Timer expired — deliver signal */
-                p->sigpending |= signal_bit(p->timers[i].signo);
+                /* BF: Capture timer metadata for SA_SIGINFO delivery */
+                sig_set_pending(p, p->timers[i].signo, 0, 0, K_SI_TIMER);
                 if (p->state == SLEEPING)
                     p->state = RUNNABLE;
                 
@@ -410,11 +412,10 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
             if (p->parent) {
                 struct kern_sigaction *psa = proc_sigactions(p->parent);
                 if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
-                    /* BF: Don't overwrite sigchld_code if SIGCHLD is already
-                     * pending -- a prior child's exit/stop code would be lost. */
-                    if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
-                        p->parent->sigchld_code = 6; /* CLD_CONTINUED */
-                    p->parent->sigpending |= signal_bit(SIGCHLD);
+                    /* BF: Capture child metadata for parent's SIGCHLD handler.
+                     * sig_set_pending_ex checks pending internally. */
+                    sig_set_pending_ex(p->parent, SIGCHLD,
+                                       (int32_t)p->pid, 0, K_CLD_CONTINUED, 0);
                     if (p->parent->state == SLEEPING)
                         p->parent->state = RUNNABLE;
                 }
@@ -433,11 +434,10 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
                 /* SA_NOCLDSTOP: don't send SIGCHLD on child stop */
                 struct kern_sigaction *psa = proc_sigactions(p->parent);
                 if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
-                    /* BF: Don't overwrite sigchld_code if SIGCHLD is already
-                     * pending -- a prior child's exit/stop code would be lost. */
-                    if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
-                        p->parent->sigchld_code = 5; /* CLD_STOPPED */
-                    p->parent->sigpending |= signal_bit(SIGCHLD);
+                    /* BF: Capture child metadata for parent's SIGCHLD handler.
+                     * deliver_signal path, distinct from kill_deliver Fix 2+3c. */
+                    sig_set_pending_ex(p->parent, SIGCHLD,
+                                       (int32_t)p->pid, 0, K_CLD_STOPPED, signum);
                     if (p->parent->state == SLEEPING)
                         p->parent->state = RUNNABLE;
                 }
@@ -453,10 +453,10 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         cleanup_proc_resources(p);
         p->state = ZOMBIE;
         if (p->parent) {
-            /* BF: Don't overwrite sigchld_code if SIGCHLD is already pending */
-            if (!(p->parent->sigpending & signal_bit(SIGCHLD)))
-                p->parent->sigchld_code = 2; /* CLD_KILLED */
-            p->parent->sigpending |= signal_bit(SIGCHLD);
+            /* BF: Capture child metadata for parent's SIGCHLD handler */
+            sig_set_pending_ex(p->parent, SIGCHLD,
+                               (int32_t)p->pid, 0, K_CLD_KILLED,
+                               p->killed_by_signal);
             if (p->parent->state == SLEEPING)
                 p->parent->state = RUNNABLE;
             /* BF: SA_NOCLDWAIT on parent means auto-reap -- reparent to
@@ -507,22 +507,43 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
          * the wrong offset (16 instead of 12). */
         uint8_t ksi[128];
         memset(ksi, 0, sizeof(ksi));
-        int32_t si_signo = (int32_t)signum;
-        memcpy(ksi + 0, &si_signo, 4);   /* offset 0: si_signo */
-        int32_t si_errno = 0;
-        memcpy(ksi + 4, &si_errno, 4);   /* offset 4: si_errno = 0 */
-        /* BF: Use process-specific sigchld_code for SIGCHLD so SA_SIGINFO
-         * handlers can distinguish CLD_STOPPED/CLD_CONTINUED/CLD_EXITED. */
-        int32_t si_code = 0; /* SI_USER for kill-delivered signals */
-        if (signum == SIGCHLD && p->sigchld_code != 0) {
-            si_code = p->sigchld_code;
-            p->sigchld_code = 0; /* consumed */
+        /* BF: Search sigqueue_buf for queued siginfo from sigqueue().
+         * FIFO ordering is approximate (first-valid-match scan, not
+         * sequence-ordered).  Acceptable for a teaching OS since repeated
+         * same-signal queueing is rare. */
+        int found_queued = 0;
+        for (int qi = 0; qi < NSIGQUEUE; qi++) {
+            if (p->sigqueue_buf[qi].valid &&
+                p->sigqueue_buf[qi].signum == signum) {
+                memcpy(ksi, p->sigqueue_buf[qi].info, 128);
+                p->sigqueue_buf[qi].valid = 0;
+                found_queued = 1;
+                /* BF: Force si_signo to match delivered signal (POSIX requires this) */
+                int32_t si_signo = (int32_t)signum;
+                memcpy(ksi + 0, &si_signo, 4);
+                break;
+            }
         }
-        memcpy(ksi + 8, &si_code, 4);    /* offset 8: si_code */
-        int32_t si_pid = current_proc ? (int32_t)current_proc->pid : 0;
-        memcpy(ksi + 12, &si_pid, 4);    /* offset 12: si_pid (sender) */
-        int32_t si_uid = 0;
-        memcpy(ksi + 16, &si_uid, 4);    /* offset 16: si_uid = 0 (single-user OS) */
+        if (!found_queued) {
+            /* BF: Use sig_sender metadata captured at generation time so
+             * si_pid/si_code reflect the sender, not the target at delivery. */
+            int32_t si_signo = (int32_t)signum;
+            memcpy(ksi + 0, &si_signo, 4);   /* offset 0: si_signo */
+            int32_t si_errno = 0;
+            memcpy(ksi + 4, &si_errno, 4);   /* offset 4: si_errno = 0 */
+            int32_t si_code = 0, si_pid = 0, si_uid = 0, si_status = 0;
+            if (p->sig_sender[signum].valid) {
+                si_code = p->sig_sender[signum].si_code;
+                si_pid = p->sig_sender[signum].si_pid;
+                si_uid = p->sig_sender[signum].si_uid;
+                si_status = p->sig_sender[signum].si_status;
+                p->sig_sender[signum].valid = 0;
+            }
+            memcpy(ksi + 8, &si_code, 4);    /* offset 8: si_code */
+            memcpy(ksi + 12, &si_pid, 4);    /* offset 12: si_pid (sender) */
+            memcpy(ksi + 16, &si_uid, 4);    /* offset 16: si_uid */
+            memcpy(ksi + 20, &si_status, 4); /* offset 20: si_status (SIGCHLD) */
+        }
 
         sp -= 128;
         sp &= ~15UL;
@@ -576,7 +597,10 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         cleanup_proc_resources(p);
         p->state = ZOMBIE;
         if (p->parent) {
-            p->parent->sigpending |= signal_bit(SIGCHLD);
+            /* BF: Capture child metadata for parent's SIGCHLD handler */
+            sig_set_pending_ex(p->parent, SIGCHLD,
+                               (int32_t)p->pid, 0, K_CLD_KILLED,
+                               p->killed_by_signal);
             if (p->parent->state == SLEEPING)
                 p->parent->state = RUNNABLE;
         }
@@ -657,7 +681,9 @@ void kill_deliver(struct proc *target, int sig) {
         }
         target->state = ZOMBIE;
         if (target->parent) {
-            target->parent->sigpending |= signal_bit(SIGCHLD);
+            /* BF: Capture child metadata for parent's SIGCHLD handler */
+            sig_set_pending_ex(target->parent, SIGCHLD,
+                               (int32_t)target->pid, 0, K_CLD_KILLED, 9);
             if (target->parent->state == SLEEPING)
                 target->parent->state = RUNNABLE;
         }
@@ -666,7 +692,10 @@ void kill_deliver(struct proc *target, int sig) {
         if (target == current_proc)
             swtch(&target->context, &scheduler_context);
     } else if (signal_is_valid(sig)) {
-        target->sigpending |= signal_bit(sig);
+        /* BF: Capture sender metadata at generation time for SA_SIGINFO */
+        sig_set_pending(target, sig,
+                        current_proc ? (int32_t)current_proc->pid : 0,
+                        0, K_SI_USER);
         if (sig == SIGCONT) {
             /* SIGCONT: clear stopped state and wake process */
             target->stopped_signal = 0;
@@ -697,13 +726,17 @@ void kill_deliver(struct proc *target, int sig) {
              proc_sigactions(target)[sig].handler == 0)) {
             target->sigpending &= ~signal_bit(sig);
             target->stopped_signal = sig;
+            target->exit_status = (sig << 8) | 0x7f; /* BF: Fix 2 — for WIFSTOPPED/WSTOPSIG */
             target->state = SLEEPING;
             target->sigpending &= ~signal_bit(SIGCONT);
             /* Notify parent (unless SA_NOCLDSTOP) */
             if (target->parent) {
                 struct kern_sigaction *psa = proc_sigactions(target->parent);
                 if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
-                    target->parent->sigpending |= signal_bit(SIGCHLD);
+                    /* BF: Fix 3c — capture child metadata for parent's SIGCHLD handler */
+                    sig_set_pending_ex(target->parent, SIGCHLD,
+                                       (int32_t)target->pid, 0, K_CLD_STOPPED,
+                                       sig /* si_status = stop signal */);
                     if (target->parent->state == SLEEPING)
                         target->parent->state = RUNNABLE;
                 }
@@ -1004,7 +1037,9 @@ void trap_handler(struct trapframe *tf) {
                                 uint64_t file_end_page = ((uint64_t)file_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
                                 uint64_t page_file_off = fvma->file_offset + (va - fvma->start);
                                 if (page_file_off >= file_end_page) {
-                                    current_proc->sigpending |= signal_bit(SIGBUS);
+                                    /* BF: Capture sender metadata for SA_SIGINFO */
+                                    sig_set_pending(current_proc, SIGBUS,
+                                                    (int32_t)current_proc->pid, 0, 0);
                                     deliver_signal(tf, current_proc);
                                     return;
                                 }
@@ -1196,7 +1231,9 @@ pagefault_kill:
                     printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
                            current_proc->pid, tf->epc, stval, cause);
                 }
-                current_proc->sigpending |= signal_bit(SIGSEGV);
+                /* BF: Capture sender metadata for SA_SIGINFO */
+                sig_set_pending(current_proc, SIGSEGV,
+                                (int32_t)current_proc->pid, 0, 0);
                 deliver_signal(tf, current_proc);
                 return;
             }
@@ -1213,7 +1250,9 @@ pagefault_kill:
             else if (cause == 5 || cause == 7) sig = SIGBUS;  /* Access fault */
             printk("trap pid=%d scause=0x%lx epc=0x%lx stval=0x%lx -> sig %d\n",
                    current_proc->pid, cause, tf->epc, stval, sig);
-            current_proc->sigpending |= signal_bit(sig);
+            /* BF: Capture sender metadata for SA_SIGINFO */
+            sig_set_pending(current_proc, sig,
+                            (int32_t)current_proc->pid, 0, 0);
             deliver_signal(tf, current_proc);
             return;
         }

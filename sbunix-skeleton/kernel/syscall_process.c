@@ -901,14 +901,15 @@ long sys_exit_handler(struct trapframe *tf) {
             struct proc *par = current_proc->parent;
             struct kern_sigaction *psa = proc_sigactions(par);
             current_proc->state = ZOMBIE;
-            /* BF: Set sigchld_code so SA_SIGINFO SIGCHLD handlers get the
-             * correct si_code (CLD_EXITED for normal exit, CLD_KILLED if
-             * terminated by a signal). */
-            /* BF: Don't overwrite sigchld_code if SIGCHLD is already
-             * pending -- a prior child's exit/stop code would be lost. */
-            if (!(par->sigpending & signal_bit(SIGCHLD)))
-                par->sigchld_code = current_proc->killed_by_signal ? 2 : 1;
-            par->sigpending |= signal_bit(SIGCHLD);
+            /* BF: Capture child metadata for parent's SIGCHLD SA_SIGINFO handler.
+             * CLD_EXITED for normal exit, CLD_KILLED if terminated by signal. */
+            {
+                int32_t code = current_proc->killed_by_signal ? K_CLD_KILLED
+                                                              : K_CLD_EXITED;
+                sig_set_pending_ex(par, SIGCHLD,
+                                   (int32_t)current_proc->pid, 0, code,
+                                   current_proc->exit_status & 0xff);
+            }
             if (par->state == SLEEPING)
                 par->state = RUNNABLE;
 

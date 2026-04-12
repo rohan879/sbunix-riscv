@@ -188,14 +188,18 @@ long sys_write_handler(struct trapframe *tf) {
         int pid = f->pipe_id;
         /* Check for broken pipe before writing */
         if (pipes[pid].read_open <= 0) {
-            current_proc->sigpending |= signal_bit(SIGPIPE);
+            /* BF: Capture sender metadata for SA_SIGINFO */
+            sig_set_pending(current_proc, SIGPIPE,
+                            (int32_t)current_proc->pid, 0, 0);
             return (long)-32; /* -EPIPE */
         }
         size_t written = 0;
         while (written < len) {
             /* Re-check after sleeping: reader may have closed */
             if (pipes[pid].read_open <= 0) {
-                current_proc->sigpending |= signal_bit(SIGPIPE);
+                /* BF: Capture sender metadata for SA_SIGINFO */
+                sig_set_pending(current_proc, SIGPIPE,
+                                (int32_t)current_proc->pid, 0, 0);
                 return (written > 0) ? (long)written : (long)-32;
             }
             int avail = KPIPE_BUF - pipe_avail(pid);
@@ -756,7 +760,9 @@ long sys_writev_handler(struct trapframe *tf) {
                 int pid = f->pipe_id;
                 if (pid < 0 || !f->pipe_write) { total = -9; break; }
                 if (pipes[pid].read_open <= 0) {
-                    current_proc->sigpending |= signal_bit(SIGPIPE);
+                    /* BF: Capture sender metadata for SA_SIGINFO */
+                    sig_set_pending(current_proc, SIGPIPE,
+                                    (int32_t)current_proc->pid, 0, 0);
                     if (total == 0) total = -32; /* -EPIPE */
                     goto writev_out;
                 }
@@ -800,7 +806,9 @@ long sys_writev_handler(struct trapframe *tf) {
                             }
                         }
                         if (!pipes[pid].read_open) {
-                            current_proc->sigpending |= signal_bit(SIGPIPE);
+                            /* BF: Capture sender metadata for SA_SIGINFO */
+                            sig_set_pending(current_proc, SIGPIPE,
+                                            (int32_t)current_proc->pid, 0, 0);
                             if (total == 0) total = -32;
                             goto writev_out;
                         }

@@ -221,9 +221,17 @@ struct proc {
   uint64_t saved_sigmask_restore;
   int      has_saved_sigmask;
 
-  /* BF: SIGCHLD si_code for SA_SIGINFO handlers.  Set by stop/continue/exit
-   * paths so deliver_signal can populate siginfo_t correctly. */
-  int sigchld_code;
+  /* BF: Per-signal sender metadata for SA_SIGINFO delivery.
+   * Captured at generation time, consumed at delivery time.
+   * Standard signals coalesce per POSIX — first sender's metadata is kept.
+   * Replaces the old sigchld_code field with per-signal granularity. */
+  struct {
+    int32_t si_pid;      /* sender PID or child PID (for SIGCHLD) */
+    int32_t si_uid;      /* sender UID */
+    int32_t si_code;     /* K_SI_USER, K_SI_TIMER, K_CLD_STOPPED, etc. */
+    int32_t si_status;   /* SIGCHLD: exit code (CLD_EXITED) or stop signal (CLD_STOPPED) */
+    uint8_t valid;
+  } sig_sender[32];  /* index 0 unused (signal numbers 1-31) */
 
   /* BF: Epoch counter incremented each time deliver_signal dispatches a
    * user handler.  ppoll/pselect6 snapshot this before the mask swap
@@ -268,6 +276,50 @@ static inline uint64_t signal_bit(int signum) {
 
 static inline int signal_is_valid(int signum) {
   return signum > 0 && signum < 32;
+}
+
+/* BF: Signal info codes for kernel use (matching Linux ABI values).
+ * Libc defines are unavailable in kernel, so use K_ prefixed literals. */
+#define K_SI_USER       0
+#define K_SI_QUEUE      (-1)
+#define K_SI_TIMER      (-2)
+#define K_CLD_EXITED    1
+#define K_CLD_KILLED    2
+#define K_CLD_STOPPED   5
+#define K_CLD_CONTINUED 6
+
+/* BF: Set signal pending with sender metadata. Does NOT wake target.
+ * All sig_sender and sigqueue_buf accesses are safe without locking
+ * because SBUnix is a single-hart kernel with no preemption in S-mode. */
+static inline void sig_set_pending(struct proc *target, int sig,
+                                   int32_t si_pid, int32_t si_uid,
+                                   int32_t si_code) {
+    if (!signal_is_valid(sig)) return;
+    /* BF: Only store metadata if signal is not already pending —
+     * standard signals coalesce per POSIX, first sender's metadata kept. */
+    if (!(target->sigpending & signal_bit(sig))) {
+        target->sig_sender[sig].si_pid = si_pid;
+        target->sig_sender[sig].si_uid = si_uid;
+        target->sig_sender[sig].si_code = si_code;
+        target->sig_sender[sig].si_status = 0;
+        target->sig_sender[sig].valid = 1;
+    }
+    target->sigpending |= signal_bit(sig);
+}
+
+/* BF: Extended version with si_status for SIGCHLD */
+static inline void sig_set_pending_ex(struct proc *target, int sig,
+                                      int32_t si_pid, int32_t si_uid,
+                                      int32_t si_code, int32_t si_status) {
+    if (!signal_is_valid(sig)) return;
+    if (!(target->sigpending & signal_bit(sig))) {
+        target->sig_sender[sig].si_pid = si_pid;
+        target->sig_sender[sig].si_uid = si_uid;
+        target->sig_sender[sig].si_code = si_code;
+        target->sig_sender[sig].si_status = si_status;
+        target->sig_sender[sig].valid = 1;
+    }
+    target->sigpending |= signal_bit(sig);
 }
 
 void            procinit(void);
