@@ -812,13 +812,15 @@ int clock_nanosleep(int clockid, int flags,
 }
 
 clock_t clock(void) {
-    struct timespec ts;
-    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) < 0) {
-        /* Fallback to monotonic */
-        if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
-            return (clock_t)-1;
-    }
-    return (clock_t)(ts.tv_sec * CLOCKS_PER_SEC + ts.tv_nsec / 1000);
+    /* BF: Use RISC-V rdtime directly instead of clock_gettime syscall.
+     * The previous implementation made a full ecall per call, causing
+     * POSIX tests that call clock() in tight loops (e.g., clock_gettime/4-1
+     * with 900,000 iterations) to time out under the 5-second alarm.
+     * TIMER_FREQ = 10000000 (10MHz), CLOCKS_PER_SEC = 1000000, so
+     * ticks / 10 converts hardware ticks to POSIX clock_t units. */
+    unsigned long ticks;
+    asm volatile("rdtime %0" : "=r"(ticks));
+    return (clock_t)(ticks / 10);
 }
 
 double difftime(time_t time1, time_t time0) {
