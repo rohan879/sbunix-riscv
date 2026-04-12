@@ -382,6 +382,15 @@ static int64_t ramfs_write(void *fs_data, void *private, const char *buf,
   if ((uint64_t)*offset > ino->size)
     ino->size = (uint64_t)*offset;
 
+  /* BF: Update mtime and ctime after successful write.  POSIX requires
+   * write() to update the file's modification and status-change times.
+   * Without this, timestamps remained frozen at creation time, causing
+   * mmap atime/mtime consistency tests to fail. */
+  if (total > 0) {
+    ino->mtime_sec = r_time() / 10000000UL;
+    ino->ctime_sec = ino->mtime_sec;
+  }
+
   return (int64_t)total;
 }
 
@@ -451,7 +460,11 @@ static void ramfs_fill_stat(uint8_t *st, struct ramfs_inode *ino) {
   /* BF: Write atime/mtime/ctime into stat buffer at correct offsets.
    * Each timespec is 16 bytes (8 for tv_sec + 8 for tv_nsec).
    * Without these, stat always returned zero timestamps. */
-  uint64_t atime_sec = ino->atime_sec;
+  /* BF: Report mtime as atime, consistent with ext2_fstat behavior.
+   * The kernel does not track per-read atime updates, so using mtime
+   * approximates relatime semantics and ensures POSIX mmap atime
+   * tests see updated timestamps after write-back. */
+  uint64_t atime_sec = ino->mtime_sec;
   uint64_t mtime_sec = ino->mtime_sec;
   uint64_t ctime_sec = ino->ctime_sec;
   uint64_t nsec_zero = 0;

@@ -217,6 +217,17 @@ static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) 
     while (v) {
         if (v->file && (v->flags & 0x01) /* MAP_SHARED */ &&
             v->start < end && v->end > start) {
+            /* BF: Get file size ONCE per VMA to clip writeback per page.
+             * Bytes beyond EOF in a partial page must NOT be persisted
+             * (POSIX mmap partial-page zero-fill semantics). */
+            int64_t file_size = 0;
+            if (v->file->ops && v->file->ops->fstat) {
+                uint8_t stbuf[128];
+                memset(stbuf, 0, sizeof(stbuf));
+                v->file->ops->fstat(v->file->fs_data, v->file->private,
+                                    stbuf);
+                memcpy(&file_size, stbuf + 48, 8); /* st_size at offset 48 */
+            }
             /* Writeback overlapping pages */
             uint64_t wb_start = (start > v->start) ? start : v->start;
             uint64_t wb_end = (end < v->end) ? end : v->end;
@@ -226,10 +237,19 @@ static void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) 
                     uint64_t pa = PTE2PA(*pte);
                     uint64_t file_off = v->file_offset + (va - v->start);
                     int64_t foff = (int64_t)file_off;
-                    if (v->file->ops && v->file->ops->write) {
+                    /* BF: Limit write to actual file content -- do not
+                     * persist the zero-fill tail beyond EOF. */
+                    uint64_t write_len = PAGE_SIZE;
+                    if (file_size > 0 &&
+                        file_off + PAGE_SIZE > (uint64_t)file_size) {
+                        write_len = ((uint64_t)file_size > file_off)
+                                        ? (uint64_t)file_size - file_off
+                                        : 0;
+                    }
+                    if (write_len > 0 && v->file->ops && v->file->ops->write) {
                         v->file->ops->write(v->file->fs_data,
                                             v->file->private,
-                                            (char *)pa, PAGE_SIZE, &foff);
+                                            (char *)pa, write_len, &foff);
                     }
                 }
             }
