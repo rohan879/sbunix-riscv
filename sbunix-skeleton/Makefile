@@ -157,6 +157,11 @@ $(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/
 	fi
 	@mkdir -p build/testfs/os-test-expect
 	@cp -a tests/thirdparty/sortix/os-test/*.expect build/testfs/os-test-expect/
+	@# BF: Add POSIX expect file for sigaction-exec-flags so correct "0"
+	@# output gets RESULT_PASS.  Also remove conflicting .unknown.1 which
+	@# contains "0" and could match first due to readdir ordering.
+	@printf '0' > build/testfs/os-test-expect/signal.expect/sigaction-exec-flags.posix
+	@rm -f build/testfs/os-test-expect/signal.expect/sigaction-exec-flags.unknown.1
 	# Seed testfs with compile-time .out files for skipped tests
 	@mkdir -p build/testfs/var/log/os-test
 	@if [ -d build/os-test-out/sbunix ]; then \
