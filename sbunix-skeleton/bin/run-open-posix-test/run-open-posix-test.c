@@ -320,7 +320,10 @@ int main(int argc, char *argv[]) {
                            (result == RESULT_UNTESTED) ? "UNTESTED" :
                            (result == RESULT_SKIP) ? "SKIP" : "FAIL";
         printf("%s: %s\n", rstr, argv[1]);
-        return (result == RESULT_PASS) ? 0 : 1;
+        /* BF: Only return failure exit code for actual failures.  Previously,
+         * UNTESTED / UNSUPPORTED / UNRESOLVED results returned exit 1,
+         * causing run-priority-tests to miscount them as [FAIL]. */
+        return (result == RESULT_FAIL || result == RESULT_ERROR) ? 1 : 0;
     }
 
     printf("Loading tests from manifest...\n");
