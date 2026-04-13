@@ -1154,7 +1154,7 @@ void vma_add_to_list(struct vm_area **list_head, struct vm_area *vma) {
 void vma_free_chain(struct vm_area *head) {
   while (head) {
     struct vm_area *next = head->next;
-    kmfree(head);
+    kmfree(head, sizeof(struct vm_area));
     head = next;
   }
 }
