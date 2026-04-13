@@ -319,6 +319,17 @@ long sys_rt_sigsuspend_handler(struct trapframe *tf) {
      * after the handler. */
     if (!(current_proc->sigpending & ~current_proc->sigmask))
         current_proc->sigmask = old_mask;
+
+    /* BF: Defer mask restore via saved_sigmask_restore (same pattern
+     * as ppoll/pselect6). deliver_signal will embed old_mask in the
+     * signal frame, and sigreturn restores it after the handler. */
+    current_proc->saved_sigmask_restore = old_mask;
+    current_proc->has_saved_sigmask = 1;
+
+    /* POSIX: sigsuspend must never be restarted by SA_RESTART.
+     * Clear in_syscall to prevent deliver_signal from rewinding epc. */
+    current_proc->in_syscall = 0;
+
     return -4; // EINTR
 }
 

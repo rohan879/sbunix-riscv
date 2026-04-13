@@ -258,6 +258,11 @@ struct proc {
     int signum;
     uint8_t info[128]; /* raw siginfo_t bytes */
   } sigqueue_buf[NSIGQUEUE];
+
+  /* BF: Flag set by copyin/copyout fault path to distinguish
+   * user-address faults from true kernel bugs during copy operations.
+   * Must be initialized to 0 in allocproc for recycled process slots. */
+  uint8_t in_copy_fault;
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,

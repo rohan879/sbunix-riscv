@@ -34,12 +34,18 @@ void forkret(void) {
     x |= SSTATUS_SPIE;
     w_sstatus(x);
 
-    /* Copy trapframe onto the kernel stack so trap_restore's _ret_user
-     * can compute sscratch = sp + 256 = kernel stack top correctly.
-     * (The persistent trapframe page is separate from the kernel stack.) */
-    struct trapframe kstack_tf;
-    memcpy(&kstack_tf, current_proc->trapframe, sizeof(struct trapframe));
-    trap_restore(&kstack_tf);
+    /* BF: Place trapframe at exact kstack_top - 256 so trap_restore's
+     * "sscratch = sp + 256" computes the correct kernel stack top.
+     * Use hardcoded 256 (matching trap_restore's assumption) rather
+     * than sizeof(struct trapframe) to be resilient to padding.
+     * Previously a stack-local copy was used, but its address was
+     * below kstack_top, causing sscratch to point to the wrong place. */
+    uint64_t kstack_top = (uint64_t)current_proc->kstack
+                         + (uint64_t)current_proc->kstack_npages * PAGE_SIZE;
+    struct trapframe *kstack_tf = (struct trapframe *)(kstack_top - 256);
+    _Static_assert(sizeof(struct trapframe) == 256, "trapframe size mismatch with trap.S");
+    memcpy(kstack_tf, current_proc->trapframe, sizeof(struct trapframe));
+    trap_restore(kstack_tf);
 }
 
 /* Open /dev/console via VFS and assign to the next free ofile slot.
@@ -200,6 +206,17 @@ found:
    * stale values from previous process occupants. */
   p->waiting_for_child = 0;
 
+  /* BF: Initialize deferred sigmask restore fields so recycled slots
+   * don't carry stale saved_sigmask from previous occupants.  Without
+   * this, sigsuspend/ppoll could embed a stale mask in signal frames. */
+  p->has_saved_sigmask = 0;
+  p->saved_sigmask_restore = 0;
+
+  /* BF: Initialize in_copy_fault flag for recycled process slots.
+   * Used by copyin/copyout fault path to distinguish user-address
+   * faults from true kernel bugs. */
+  p->in_copy_fault = 0;
+
   return p;
 }
 
@@ -252,15 +269,14 @@ void scheduler(void) {
     for(p = proc; p < &proc[NPROC]; p++) {
       if(p->state == RUNNABLE) {
         found = 1;
+
+        /* BF: Disable interrupts BEFORE publishing RUNNING/current_proc
+         * to close the race window where a timer interrupt could see
+         * RUNNING but sscratch/satp/context aren't configured yet. */
+        w_sstatus(r_sstatus() & ~SSTATUS_SIE);
+
         p->state = RUNNING;
         current_proc = p;
-
-        /* Disable interrupts before switching to user process context.
-         * The user process may resume inside trap_handler (e.g., from a
-         * sleep in SYS_read).  Interrupts must be off there to avoid
-         * re-entrant trap corruption.  The user's sret will restore SIE
-         * from sstatus.SPIE when it actually returns to user mode. */
-        w_sstatus(r_sstatus() & ~SSTATUS_SIE);
 
         /* Set sscratch and switch to process page table */
                 /* BF: sscratch = top of kernel stack (8KB if contiguous) */
