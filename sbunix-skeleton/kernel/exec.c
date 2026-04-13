@@ -17,11 +17,23 @@ extern char _kernel_end[];
 
 static uint64_t exec_mmap_base(uint64_t sz) {
     uint64_t base = PGROUNDUP(sz) + PAGE_SIZE;
-    /* BF: Use USER_MMAP_FLOOR instead of hardcoded 0x20000000 to ensure
-     * mmap base never overlaps shared kernel MMIO L1 entries. */
     if (base < USER_MMAP_FLOOR)
         base = USER_MMAP_FLOOR;
     return base;
+}
+
+/* BF: Clean up staged exec state on failure — unmap pages from
+ * staged pagetable and free the VMA chain built during loading.
+ * This allows exec to roll back without corrupting the original
+ * process state. */
+static void staged_exec_cleanup(pagetable_t pt, struct vm_area *staged_vmas) {
+  struct vm_area *v = staged_vmas;
+  while (v) {
+    uvmunmap(pt, v->start, v->end - v->start);
+    v = v->next;
+  }
+  proc_freepagetable(pt);
+  vma_free_chain(staged_vmas);
 }
 
 int exec(char *path) {
@@ -33,7 +45,7 @@ int exec(char *path) {
     pagetable_t pagetable;
     uint64_t sz = 0;
     struct trapframe *tf = current_proc->trapframe;
-    
+
     // 1. Find ELF
     elf_tar_header = tar_find_file(_tarfs_start, _tarfs_end, path);
     if (!elf_tar_header) return -1;
@@ -41,54 +53,28 @@ int exec(char *path) {
     elf_data = (char *)elf_tar_header + sizeof(struct posix_header);
     ehdr = (Elf64_Ehdr *)elf_data;
 
-    int old_pt_still_shared = 0;
-
-    // 2. Validate
+    // 2. Validate ELF magic — fail early before any state changes
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
         ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3) return -1;
 
-    /* Detach from shared pagetable if this is a CLONE_VM thread */
-    if (current_proc->shared_pt) {
-        current_proc->shared_pt->refcount--;
-        if (current_proc->shared_pt->refcount == 0) {
-            /* Last user of this shared pagetable wrapper. */
-            kmfree(current_proc->shared_pt, sizeof(struct shared_pagetable));
-        } else {
-            old_pt_still_shared = 1;
-        }
-        current_proc->shared_pt = NULL;
-        current_proc->clone_flags &= ~CLONE_VM;
-        /* exec will create a brand new pagetable below */
-    }
-
-    /* Detach from shared signal handlers (exec resets all to SIG_DFL) */
-    if (current_proc->shared_sa) {
-        current_proc->shared_sa->refcount--;
-        if (current_proc->shared_sa->refcount == 0)
-            kmfree(current_proc->shared_sa, sizeof(struct shared_sigactions));
-        current_proc->shared_sa = NULL;
-        current_proc->clone_flags &= ~CLONE_SIGHAND;
-    }
-    /* BF: POSIX requires SIG_IGN to be preserved across exec.
-     * Reset user-installed handlers (handler >= 2) to SIG_DFL.
-     * Clear flags/mask/restorer for all signals — stale flags
-     * like SA_NOCLDWAIT must not persist across exec. */
-    for (int i = 0; i < 32; i++) {
-        if (current_proc->sigactions[i].handler >= 2) {
-            current_proc->sigactions[i].handler = 0;  /* SIG_DFL */
-        }
-        current_proc->sigactions[i].mask = 0;
-        current_proc->sigactions[i].flags = 0;
-        current_proc->sigactions[i].restorer = 0;
-    }
-
-    /* Clear old VMAs before loading new binary */
-    vma_free_all(current_proc);
-
+    /* BF: Create new pagetable BEFORE destroying old state — this is the
+     * core of the failure-atomic exec design.  If the new image fails to
+     * load, we can discard the new pagetable and keep the old process. */
     pagetable = uvmcreate();
-    if(pagetable == 0) return -1;
+    if (pagetable == 0) return -1;
 
-    // 3. Load PT_LOAD segments
+    /* BF: Save old state so we can restore on failure.  Temporarily swap
+     * vma_list to an empty staging list.  Disable SIE while vma_list
+     * points to staging, so timer interrupts cannot see inconsistent state. */
+    pagetable_t old_pagetable = current_proc->pagetable;
+    struct vm_area *old_vma_list = current_proc->vma_list;
+    uint64_t old_sz = current_proc->sz;
+
+    unsigned long old_sstatus = r_sstatus();
+    w_sstatus(old_sstatus & ~SSTATUS_SIE);
+    current_proc->vma_list = NULL;  /* staging starts empty */
+
+    // 3. Load PT_LOAD segments into new pagetable
     for (i = 0; i < ehdr->e_phnum; i++) {
         phdr = (Elf64_Phdr *)(elf_data + ehdr->e_phoff + i*sizeof(Elf64_Phdr));
         if (phdr->p_type == PT_LOAD) {
@@ -104,7 +90,7 @@ int exec(char *path) {
              * This prevents text pages from being COW-marked during fork,
              * which would allow COW resolution to make text writable and
              * potentially corrupt code. */
-            if (!(phdr->p_flags & 0x2)) { /* PF_W not set — read-only segment */
+            if (!(phdr->p_flags & 0x2)) { /* PF_W not set -- read-only segment */
                 uint64_t seg_start = PGROUNDDOWN(phdr->p_vaddr);
                 uint64_t seg_end_pg = PGROUNDUP(phdr->p_vaddr + phdr->p_memsz);
                 for (uint64_t a = seg_start; a < seg_end_pg; a += PAGE_SIZE) {
@@ -124,11 +110,14 @@ int exec(char *path) {
             if (phdr->p_flags & 0x1) vprot |= PROT_EXEC;   /* PF_X */
             uint64_t vma_start = PGROUNDDOWN(phdr->p_vaddr);
             uint64_t vma_end   = PGROUNDUP(phdr->p_vaddr + phdr->p_memsz);
+            /* BF: vma_add adds to current_proc->vma_list which is now
+             * the staging list (NULL at start).  On failure, we restore
+             * old_vma_list and free these staged VMAs. */
             vma_add(current_proc, vma_start, vma_end, vprot, MAP_PRIVATE);
         }
     }
 
-    // 4. User Stack — allocate 8 pages (32 KB) below the trapframe/trampoline
+    // 4. User Stack -- allocate 8 pages (32 KB) below the trapframe/trampoline
     #define USER_STACK_PAGES 8
     uint64_t stack_va = USER_STACK_TOP - (USER_STACK_PAGES * PAGE_SIZE);
     char *top_page_mem = NULL;
@@ -141,16 +130,61 @@ int exec(char *path) {
         if (pg == USER_STACK_PAGES - 1)
             top_page_mem = sp_mem;  /* remember physical addr of topmost page */
     }
-    
+
     /* Add a VMA for the user stack region (up to USER_STACK_TOP, not MAXVA) */
     vma_add(current_proc, stack_va, USER_STACK_TOP, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
 
-    // 5. Map trampoline + trapframe pages (NO kernel identity mapping needed —
+    // 5. Map trampoline + trapframe pages (NO kernel identity mapping needed --
     //    the trampoline switches satp to kernel_pagetable on trap entry)
     if(uvmmap_kernel(pagetable) < 0) goto bad;
 
+    /* === POINT OF NO RETURN ===
+     * Everything above succeeded.  Now commit the new state and tear down old. */
+
+    /* BF: Determine shared_pt status before detaching, so we know whether
+     * to free the old pagetable later. */
+    int old_pt_still_shared = 0;
+
+    /* Detach from shared pagetable if this is a CLONE_VM thread */
+    if (current_proc->shared_pt) {
+        current_proc->shared_pt->refcount--;
+        if (current_proc->shared_pt->refcount == 0) {
+            /* Last user of this shared pagetable wrapper. */
+            kmfree(current_proc->shared_pt, sizeof(struct shared_pagetable));
+        } else {
+            old_pt_still_shared = 1;
+        }
+        current_proc->shared_pt = NULL;
+        current_proc->clone_flags &= ~CLONE_VM;
+    }
+
+    /* Detach from shared signal handlers (exec resets all to SIG_DFL) */
+    if (current_proc->shared_sa) {
+        current_proc->shared_sa->refcount--;
+        if (current_proc->shared_sa->refcount == 0)
+            kmfree(current_proc->shared_sa, sizeof(struct shared_sigactions));
+        current_proc->shared_sa = NULL;
+        current_proc->clone_flags &= ~CLONE_SIGHAND;
+    }
+    /* BF: POSIX requires SIG_IGN to be preserved across exec.
+     * Reset user-installed handlers (handler >= 2) to SIG_DFL.
+     * Clear flags/mask/restorer for all signals -- stale flags
+     * like SA_NOCLDWAIT must not persist across exec.
+     * This MUST happen after successful load, not before. */
+    for (int si = 0; si < 32; si++) {
+        if (current_proc->sigactions[si].handler >= 2) {
+            current_proc->sigactions[si].handler = 0;  /* SIG_DFL */
+        }
+        current_proc->sigactions[si].mask = 0;
+        current_proc->sigactions[si].flags = 0;
+        current_proc->sigactions[si].restorer = 0;
+    }
+
+    /* BF: Free old VMAs now that we're past the point of no return.
+     * The staging list (current_proc->vma_list) becomes the new live list. */
+    vma_free_chain(old_vma_list);
+
     // 6. Update process state
-    pagetable_t old_pt = current_proc->pagetable;
     current_proc->pagetable = pagetable;
     current_proc->sz = sz;
 
@@ -191,10 +225,13 @@ int exec(char *path) {
     sfence_vma();
     asm volatile("fence.i");
 
+    /* Re-enable SIE now that all state is consistent */
+    w_sstatus(old_sstatus);
+
     // Reclaim old user pages + page table pages.
     // Kernel stays on kernel_pagetable (user PT has no kernel mappings).
-    if (old_pt != kernel_pagetable && !old_pt_still_shared)
-        proc_freepagetable(old_pt);
+    if (old_pagetable != kernel_pagetable && !old_pt_still_shared)
+        proc_freepagetable(old_pagetable);
 
     // 7. Initialize trapframe
     memset(tf, 0, sizeof(*tf));
@@ -212,9 +249,16 @@ int exec(char *path) {
     return 0;
 
 bad:
-    /* The new pagetable may contain kernel identity maps — we cannot
-     * call uvmunmap on the whole range without corrupting kernel memory.
-     * Accept the leak on the (rare) exec failure path. */
+    /* BF: Restore original process state on failure -- this is the
+     * rollback path.  Discard the staged VMAs and new pagetable,
+     * put back the old vma_list, and re-enable SIE. */
+    {
+        struct vm_area *staged = current_proc->vma_list;
+        current_proc->vma_list = old_vma_list;
+        current_proc->sz = old_sz;
+        w_sstatus(old_sstatus);
+        staged_exec_cleanup(pagetable, staged);
+    }
     return -1;
 }
 
@@ -232,14 +276,14 @@ int exec_vfs(const char *resolved_path) {
     if (ops->open(mnt->fs_data, relpath, 0, &priv) < 0)
         return -1;
 
-    /* 1. Read ELF header */
+    /* 1. Read ELF header -- fail early before any state changes */
     Elf64_Ehdr ehdr;
     int64_t off = 0;
     int64_t nr = ops->read(mnt->fs_data, priv, (char *)&ehdr, sizeof(ehdr), &off);
     if (nr < (int64_t)sizeof(ehdr))
         goto fail_close;
 
-    /* 2. Validate ELF */
+    /* 2. Validate ELF -- fail early before any state changes */
     if (ehdr.e_ident[0] != ELFMAG0 || ehdr.e_ident[1] != ELFMAG1 ||
         ehdr.e_ident[2] != ELFMAG2 || ehdr.e_ident[3] != ELFMAG3)
         goto fail_close;
@@ -260,44 +304,22 @@ int exec_vfs(const char *resolved_path) {
         goto fail_close;
     }
 
-    int old_pt_still_shared = 0;
-
-    /* Detach from shared state (same as exec()) */
-    if (current_proc->shared_pt) {
-        current_proc->shared_pt->refcount--;
-        if (current_proc->shared_pt->refcount == 0)
-            kmfree(current_proc->shared_pt, sizeof(struct shared_pagetable));
-        else
-            old_pt_still_shared = 1;
-        current_proc->shared_pt = NULL;
-        current_proc->clone_flags &= ~0x00000100; /* CLONE_VM */
-    }
-    if (current_proc->shared_sa) {
-        current_proc->shared_sa->refcount--;
-        if (current_proc->shared_sa->refcount == 0)
-            kmfree(current_proc->shared_sa, sizeof(struct shared_sigactions));
-        current_proc->shared_sa = NULL;
-        current_proc->clone_flags &= ~0x00000800; /* CLONE_SIGHAND */
-    }
-    /* BF: POSIX requires SIG_IGN to be preserved across exec.
-     * Reset user-installed handlers (handler >= 2) to SIG_DFL.
-     * Clear flags/mask/restorer for all signals — stale flags
-     * like SA_NOCLDWAIT must not persist across exec. */
-    for (int i = 0; i < 32; i++) {
-        if (current_proc->sigactions[i].handler >= 2) {
-            current_proc->sigactions[i].handler = 0;  /* SIG_DFL */
-        }
-        current_proc->sigactions[i].mask = 0;
-        current_proc->sigactions[i].flags = 0;
-        current_proc->sigactions[i].restorer = 0;
-    }
-    vma_free_all(current_proc);
-
+    /* BF: Create new pagetable BEFORE destroying old state. */
     pagetable_t pagetable = uvmcreate();
     if (pagetable == 0) {
         kfree(phdr_buf);
         goto fail_close;
     }
+
+    /* BF: Save old state for rollback.  Swap vma_list to empty staging
+     * list with SIE disabled so timer interrupts see consistent state. */
+    pagetable_t old_pagetable = current_proc->pagetable;
+    struct vm_area *old_vma_list = current_proc->vma_list;
+    uint64_t old_sz = current_proc->sz;
+
+    unsigned long old_sstatus = r_sstatus();
+    w_sstatus(old_sstatus & ~SSTATUS_SIE);
+    current_proc->vma_list = NULL;  /* staging starts empty */
 
     /* 4. Load PT_LOAD segments */
     uint64_t sz = 0;
@@ -305,7 +327,7 @@ int exec_vfs(const char *resolved_path) {
     char *tmp_page = kalloc();
     if (!tmp_page) {
         kfree(phdr_buf);
-        goto fail_close;
+        goto bad_vfs;
     }
 
     for (unsigned int i = 0; i < ehdr.e_phnum; i++) {
@@ -370,6 +392,8 @@ int exec_vfs(const char *resolved_path) {
         if (ph->p_flags & PF_R) vprot |= 1; /* PROT_READ */
         if (ph->p_flags & PF_W) vprot |= 2; /* PROT_WRITE */
         if (ph->p_flags & PF_X) vprot |= 4; /* PROT_EXEC */
+        /* BF: vma_add adds to staging vma_list (currently NULL -> growing).
+         * On failure we restore old_vma_list and discard staged VMAs. */
         vma_add(current_proc, PGROUNDDOWN(ph->p_vaddr),
                 PGROUNDUP(ph->p_vaddr + ph->p_memsz),
                 vprot, 0x02 /* MAP_PRIVATE */);
@@ -399,8 +423,44 @@ int exec_vfs(const char *resolved_path) {
     /* 6. Map kernel entries */
     if (uvmmap_kernel(pagetable) < 0) goto bad_vfs;
 
+    /* === POINT OF NO RETURN ===
+     * Everything above succeeded.  Now commit new state and tear down old. */
+
+    /* BF: Determine shared_pt status before detaching. */
+    int old_pt_still_shared = 0;
+
+    /* Detach from shared state -- AFTER successful load */
+    if (current_proc->shared_pt) {
+        current_proc->shared_pt->refcount--;
+        if (current_proc->shared_pt->refcount == 0)
+            kmfree(current_proc->shared_pt, sizeof(struct shared_pagetable));
+        else
+            old_pt_still_shared = 1;
+        current_proc->shared_pt = NULL;
+        current_proc->clone_flags &= ~0x00000100; /* CLONE_VM */
+    }
+    if (current_proc->shared_sa) {
+        current_proc->shared_sa->refcount--;
+        if (current_proc->shared_sa->refcount == 0)
+            kmfree(current_proc->shared_sa, sizeof(struct shared_sigactions));
+        current_proc->shared_sa = NULL;
+        current_proc->clone_flags &= ~0x00000800; /* CLONE_SIGHAND */
+    }
+    /* BF: Signal handler reset MUST happen after successful load.
+     * POSIX: SIG_IGN preserved, user handlers reset to SIG_DFL. */
+    for (int si = 0; si < 32; si++) {
+        if (current_proc->sigactions[si].handler >= 2) {
+            current_proc->sigactions[si].handler = 0;  /* SIG_DFL */
+        }
+        current_proc->sigactions[si].mask = 0;
+        current_proc->sigactions[si].flags = 0;
+        current_proc->sigactions[si].restorer = 0;
+    }
+
+    /* BF: Free old VMAs now that load succeeded. */
+    vma_free_chain(old_vma_list);
+
     /* 7. Update process */
-    pagetable_t old_pt = current_proc->pagetable;
     current_proc->pagetable = pagetable;
     current_proc->sz = sz;
     current_proc->stack_top = USER_STACK_TOP;
@@ -429,8 +489,12 @@ int exec_vfs(const char *resolved_path) {
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
     asm volatile("fence.i");
-    if (old_pt != kernel_pagetable && !old_pt_still_shared)
-        proc_freepagetable(old_pt);
+
+    /* Re-enable SIE now that all state is consistent */
+    w_sstatus(old_sstatus);
+
+    if (old_pagetable != kernel_pagetable && !old_pt_still_shared)
+        proc_freepagetable(old_pagetable);
 
     /* 8. Initialize trapframe */
     memset(tf, 0, sizeof(*tf));
@@ -443,6 +507,15 @@ int exec_vfs(const char *resolved_path) {
     return 0;
 
 bad_vfs:
+    /* BF: Restore original process state on failure -- rollback path.
+     * Discard staged VMAs and new pagetable, restore old vma_list. */
+    {
+        struct vm_area *staged = current_proc->vma_list;
+        current_proc->vma_list = old_vma_list;
+        current_proc->sz = old_sz;
+        w_sstatus(old_sstatus);
+        staged_exec_cleanup(pagetable, staged);
+    }
     if (priv && ops->close) ops->close(mnt->fs_data, priv);
     return -1;
 

@@ -1660,16 +1660,42 @@ static int ext2_rename(void *fs_data, const char *oldpath,
         return -2;
     }
 
-    /* If new name exists, remove it */
+    /* BF: If target already exists, handle replace or self-rename */
     uint32_t existing;
     if (ext2_dir_lookup(fs, new_parent, new_basename, &existing) == 0) {
+        /* BF: Same-inode rename (e.g. rename("a","a")) is a no-op per POSIX */
+        if (existing == ino) {
+            icache_release(new_parent);
+            icache_release(old_parent);
+            return 0;
+        }
+        /* BF: Properly replace target — decrement link_count and free if
+         * no links remain, matching the pattern used in ext2_unlink. */
+        struct ext2_inode_mem *eip = icache_get(fs, existing);
+        if (eip) {
+            eip->link_count--;
+            eip->dirty = 1;
+            if (eip->link_count == 0 && eip->refcount <= 1) {
+                icache_release(eip);
+                ext2_free_inode(fs, existing);
+            } else {
+                icache_writeback(fs, eip);
+                icache_release(eip);
+            }
+        }
         ext2_dir_remove(fs, new_parent, new_basename);
     }
 
-    /* Add new entry, remove old */
+    /* Add new entry, then remove old */
     int ret = ext2_dir_add(fs, new_parent, new_basename, ino, ft);
-    if (ret == 0)
-        ext2_dir_remove(fs, old_parent, old_basename);
+    if (ret == 0) {
+        /* BF: If removing old entry fails after add succeeded, roll back
+         * the add to preserve filesystem consistency. */
+        if (ext2_dir_remove(fs, old_parent, old_basename) < 0) {
+            ext2_dir_remove(fs, new_parent, new_basename);
+            ret = -1;
+        }
+    }
 
     icache_writeback(fs, new_parent);
     icache_writeback(fs, old_parent);

@@ -1140,3 +1140,21 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
   }
   return got_null ? 0 : -1;
 }
+
+/* ENH: Insert VMA into an arbitrary list head (for staged exec).
+ * This allows building a VMA list independently of process state. */
+void vma_add_to_list(struct vm_area **list_head, struct vm_area *vma) {
+  vma->next = *list_head;
+  *list_head = vma;
+}
+
+/* ENH: Free an entire VMA chain without touching process state.
+ * Used to discard staged VMAs on exec failure without corrupting
+ * the original process's VMA list. */
+void vma_free_chain(struct vm_area *head) {
+  while (head) {
+    struct vm_area *next = head->next;
+    kmfree(head);
+    head = next;
+  }
+}

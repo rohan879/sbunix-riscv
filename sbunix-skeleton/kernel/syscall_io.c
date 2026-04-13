@@ -530,6 +530,10 @@ long sys_chdir_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+/* DOC: fchdir uses the path snapshot from open() time.  If the directory
+ * is renamed after the fd was opened, cwd will reflect the old name.
+ * This is a known limitation — a correct fix would require tracking
+ * inode-based cwd rather than path-based cwd. */
 long sys_fchdir_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;

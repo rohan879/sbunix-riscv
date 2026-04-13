@@ -645,10 +645,15 @@ static int ramfs_rename(void *fs_data, const char *oldpath,
   /* Remove existing target if any */
   struct ramfs_inode *existing = ramfs_dir_lookup(new_parent, new_base);
   if (existing) {
+    /* BF: Same-inode rename (e.g. rename("a","a")) is a no-op per POSIX */
+    if (existing == ino)
+      return 0;
     if (existing->type == RAMFS_DIR && existing->nchildren > 0)
       return -39; /* -ENOTEMPTY */
     ramfs_dir_remove(new_parent, new_base);
     existing->nlink--;
+    /* BF: Only free inode immediately if no links remain, matching the
+     * deferred-free pattern used in ramfs_unlink. */
     if (existing->nlink <= 0)
       ramfs_free_inode(existing);
   }

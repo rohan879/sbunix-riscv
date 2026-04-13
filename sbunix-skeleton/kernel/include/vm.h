@@ -96,4 +96,9 @@ int recursive_check_all_kernel_ptes(void);
 int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
               struct vm_area *vma);
 
+/* ENH: Staged exec VMA helpers — build a VMA list independently of
+ * process state so exec can roll back on failure. */
+void vma_add_to_list(struct vm_area **list_head, struct vm_area *vma);
+void vma_free_chain(struct vm_area *head);
+
 #endif
