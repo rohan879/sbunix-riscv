@@ -5,6 +5,7 @@
  * rather than advancing sz past a region with no VMA coverage. */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <stdint.h>
 

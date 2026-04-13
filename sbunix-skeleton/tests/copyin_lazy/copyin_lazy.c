@@ -5,6 +5,7 @@
  * from userspace (so no page fault has occurred to map it yet). */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <sys/types.h>

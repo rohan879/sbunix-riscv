@@ -70,7 +70,7 @@ int main(void) {
   /* suspend_set is empty, so SIGUSR1 is NOT blocked during suspend */
 
   handler_ran = 0;
-  int ret = sigsuspend(&suspend_set);
+  (void)sigsuspend(&suspend_set);
   /* sigsuspend always returns -1 with errno == EINTR */
 
   if (!handler_ran) {
