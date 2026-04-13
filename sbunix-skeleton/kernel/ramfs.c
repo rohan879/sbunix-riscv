@@ -34,6 +34,7 @@ struct ramfs_inode {
   enum ramfs_type  type;
   uint32_t         mode;       /* permission bits (no S_IF prefix stored here) */
   int              nlink;
+  int              open_count; /* BF: Track open fds for deferred unlink freeing */
   uint64_t         size;       /* bytes for files, 0 for dirs */
   /* BF: Added timestamps so stat/utimensat can report and modify
    * atime/mtime/ctime.  Without these, stat always returned zero
@@ -316,6 +317,9 @@ static int ramfs_open(void *fs_data, const char *path, int flags, void **private
   if (!priv) return -12;
   priv->inode = ino;
   *private = priv;
+  /* BF: Track open fds for deferred unlink — inode must not be freed
+   * while any fd (or mmap VMA) still references it. */
+  ino->open_count++;
   return 0;
 }
 
@@ -427,8 +431,19 @@ static int ramfs_ftruncate(void *fs_data, void *private, uint64_t length) {
 
 static int ramfs_close(void *fs_data, void *private) {
   (void)fs_data;
-  if (private)
+  if (private) {
+    struct ramfs_private *priv = (struct ramfs_private *)private;
+    /* BF: Decrement open count and free inode if this was the last
+     * reference to an unlinked file (nlink==0).  Without deferred
+     * freeing, unlink zeroes the inode while fds/mmaps still reference
+     * it, causing fstat to return size=0 and SIGBUS on demand paging. */
+    if (priv->inode) {
+      priv->inode->open_count--;
+      if (priv->inode->nlink <= 0 && priv->inode->open_count <= 0)
+        ramfs_free_inode(priv->inode);
+    }
     kmfree(private, sizeof(struct ramfs_private));
+  }
   return 0;
 }
 
@@ -583,7 +598,12 @@ static int ramfs_unlink(void *fs_data, const char *path) {
 
   ramfs_dir_remove(parent, basename);
   ino->nlink--;
-  if (ino->nlink <= 0)
+  /* BF: Only free the inode when both nlink reaches 0 AND no open fds
+   * remain.  Previously unlink freed immediately even with open fds,
+   * zeroing ino->size and causing SIGBUS on demand-paged mmap access
+   * to the still-open file.  POSIX requires unlinked files to remain
+   * accessible via existing fds until the last close. */
+  if (ino->nlink <= 0 && ino->open_count <= 0)
     ramfs_free_inode(ino);
   return 0;
 }
