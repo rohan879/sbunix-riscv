@@ -40,9 +40,12 @@ long sys_brk_handler(struct trapframe *tf) {
         uint64_t heap_start = PGROUNDUP(cur_sz);
         uint64_t rounded    = PGROUNDUP(new_brk);
         if (heap_start < rounded) {
-            /* Add VMA for the new heap region; demand paging handles the rest */
-            vma_add(current_proc, heap_start, rounded,
-                    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+            /* BF: Check vma_add return value — don't update sz if VMA
+             * allocation failed, otherwise the process state (sz) would
+             * advance past a region with no VMA coverage. */
+            if (vma_add(current_proc, heap_start, rounded,
+                        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON) < 0)
+                return (long)-12; /* -ENOMEM */
         }
         current_proc->sz = new_brk;
         return (long)new_brk;
@@ -155,8 +158,10 @@ long sys_mmap_handler(struct trapframe *tf) {
     uint64_t va;
     if (flags & MAP_FIXED) {
         va = addr; /* BF: addr already validated as page-aligned above */
-        /* Reject kernel addresses for MAP_FIXED */
-        if (va >= 0x80000000UL || va + len > 0x80000000UL)
+        /* BF: Reject kernel addresses for MAP_FIXED.  Use subtraction form
+         * (len > limit - va) to avoid unsigned wraparound when va + len
+         * overflows uint64_t. */
+        if (va >= 0x80000000UL || len > 0x80000000UL - va)
             return (long)-22; /* EINVAL */
         /* BF: Reject MAP_FIXED in shared MMIO range below mmap floor.
          * L1 entries for PLIC/UART are kernel superpages — user demand-paging
@@ -279,11 +284,16 @@ long sys_munmap_handler(struct trapframe *tf) {
     if (addr & (PAGE_SIZE - 1))
         return -22; /* -EINVAL */
 
+    /* BF: Guard against overflow before rounding len up to page boundary.
+     * Without this, a huge len wraps around and passes subsequent checks. */
+    if (len > (uint64_t)-1 - (PAGE_SIZE - 1))
+        return -22; /* -EINVAL */
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 
-    if (addr >= MAXVA || addr + len > MAXVA)
+    /* BF: Use subtraction form to avoid unsigned wraparound in addr + len */
+    if (addr >= MAXVA || len > MAXVA - addr)
         return -22; /* -EINVAL */
-    if (addr >= 0x80000000UL || addr + len > 0x80000000UL)
+    if (addr >= 0x80000000UL || len > 0x80000000UL - addr)
         return -22; /* -EINVAL: reject kernel addresses */
 
     /* Write back MAP_SHARED pages before unmapping */
@@ -341,13 +351,18 @@ long sys_mprotect_handler(struct trapframe *tf) {
     /* Validate alignment */
     if (addr & (PAGE_SIZE - 1))
         return -22; /* -EINVAL */
+    /* BF: Guard against overflow before rounding len up to page boundary.
+     * Without this, a huge len wraps around and passes subsequent checks. */
+    if (len > (uint64_t)-1 - (PAGE_SIZE - 1))
+        return -22; /* -EINVAL */
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (len == 0)
         return 0;
-    if (addr + len > MAXVA)
+    /* BF: Use subtraction form to avoid unsigned wraparound in addr + len */
+    if (len > MAXVA - addr)
         return -22;
     /* Reject kernel addresses — must not modify kernel page table entries */
-    if (addr >= 0x80000000UL || addr + len > 0x80000000UL)
+    if (addr >= 0x80000000UL || len > 0x80000000UL - addr)
         return -22; /* -EINVAL */
 
     /* Build new PTE permission bits */
@@ -359,8 +374,15 @@ long sys_mprotect_handler(struct trapframe *tf) {
     /* BF: Preflight allocation — count needed VMA splits and pre-allocate
      * all objects.  If any allocation fails, return -ENOMEM with no PTEs
      * or VMA list modified (failure atomicity). */
-    struct vm_area *prealloc_vma[2] = {NULL, NULL};
-    struct anon_vma_chain *prealloc_avc[2] = {NULL, NULL};
+    /* BF: Expanded preallocation from 2 to 8 to handle mprotect across
+     * multiple VMAs.  Stack usage: 128 bytes (safe on 8KB stack). */
+    #define MAX_MPROTECT_SPLITS 8
+    struct vm_area *prealloc_vma[MAX_MPROTECT_SPLITS];
+    struct anon_vma_chain *prealloc_avc[MAX_MPROTECT_SPLITS];
+    for (int pi = 0; pi < MAX_MPROTECT_SPLITS; pi++) {
+      prealloc_vma[pi] = NULL;
+      prealloc_avc[pi] = NULL;
+    }
     int n_splits = 0;
     {
       struct vm_area *v = current_proc->vma_list;
@@ -374,7 +396,7 @@ long sys_mprotect_handler(struct trapframe *tf) {
       }
     }
     /* Allocate VMA nodes and (if needed) anon_vma_chain nodes */
-    for (int i = 0; i < n_splits && i < 2; i++) {
+    for (int i = 0; i < n_splits && i < MAX_MPROTECT_SPLITS; i++) {
       prealloc_vma[i] = (struct vm_area *)kmalloc(sizeof(struct vm_area));
       if (!prealloc_vma[i]) {
         /* BF: Allocation failed — free anything already allocated and
@@ -430,7 +452,7 @@ long sys_mprotect_handler(struct trapframe *tf) {
         if (v->end <= range_start) { v = v->next; continue; }
 
         /* Case 1: VMA starts before range — split off prefix */
-        if (v->start < range_start && prealloc_idx < 2 && prealloc_vma[prealloc_idx]) {
+        if (v->start < range_start && prealloc_idx < MAX_MPROTECT_SPLITS && prealloc_vma[prealloc_idx]) {
           struct vm_area *suffix = prealloc_vma[prealloc_idx];
           struct anon_vma_chain *avc = prealloc_avc[prealloc_idx];
           prealloc_idx++;
@@ -469,7 +491,7 @@ long sys_mprotect_handler(struct trapframe *tf) {
         }
 
         /* Case 2: VMA ends after range — split off suffix */
-        if (v->end > range_end && prealloc_idx < 2 && prealloc_vma[prealloc_idx]) {
+        if (v->end > range_end && prealloc_idx < MAX_MPROTECT_SPLITS && prealloc_vma[prealloc_idx]) {
           struct vm_area *tail = prealloc_vma[prealloc_idx];
           struct anon_vma_chain *avc = prealloc_avc[prealloc_idx];
           prealloc_idx++;
@@ -509,10 +531,12 @@ long sys_mprotect_handler(struct trapframe *tf) {
     }
 
     /* Free unused pre-allocated objects */
-    for (int i = prealloc_idx; i < 2; i++) {
+    for (int i = prealloc_idx; i < MAX_MPROTECT_SPLITS; i++) {
       if (prealloc_vma[i]) kmfree(prealloc_vma[i], sizeof(struct vm_area));
       if (prealloc_avc[i]) kmfree(prealloc_avc[i], sizeof(struct anon_vma_chain));
     }
+
+    #undef MAX_MPROTECT_SPLITS
 
     sfence_vma();
     return 0;

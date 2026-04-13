@@ -400,6 +400,9 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
                 p->state = UNUSED;
                 p->pid = 0;
                 p->parent = NULL;
+                /* BF: Clear in_copy_fault so the slot can be reused cleanly
+                 * by allocproc without inheriting stale recursion guard state. */
+                p->in_copy_fault = 0;
                 return pid;
             }
             /* WUNTRACED: report stopped children */

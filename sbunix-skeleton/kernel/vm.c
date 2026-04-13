@@ -92,10 +92,19 @@ pte_t *walk_super(pagetable_t pagetable, uint64_t va, int *level_out) {
     return pte;
 }
 
-// Create PTEs for virtual addresses starting at va that refer to
-// physical addresses starting at pa. va and size might not
-// be page-aligned.
-int mappages(pagetable_t pagetable, uint64_t va, uint64_t size, uint64_t pa, int perm) {
+/* BF: Internal flag for mappages_flags() — allow overwriting existing
+ * valid PTEs.  Only used by kvmmap() which remaps MMIO/kernel regions
+ * at boot.  All other callers map into known-invalid PTEs. */
+#define MAP_FLAG_REMAP (1 << 0)
+
+/* Create PTEs for virtual addresses starting at va that refer to
+ * physical addresses starting at pa.  va and size might not
+ * be page-aligned.
+ *
+ * flags: 0 for normal use, MAP_FLAG_REMAP to allow overwrite of
+ *        existing valid PTEs. */
+static int mappages_flags(pagetable_t pagetable, uint64_t va, uint64_t size,
+                          uint64_t pa, int perm, int flags) {
     uint64_t a, last;
     pte_t *pte;
 
@@ -106,9 +115,11 @@ int mappages(pagetable_t pagetable, uint64_t va, uint64_t size, uint64_t pa, int
     for(;;) {
         if((pte = walk(pagetable, a, 1)) == 0)
             return -1;
-        if(*pte & PTE_V) {
-            // Already mapped, but we continue
-        }
+        /* BF: Detect accidental PTE overwrite — a valid PTE being silently
+         * clobbered usually indicates a double-map bug.  Only kvmmap passes
+         * MAP_FLAG_REMAP because boot-time MMIO regions legitimately remap. */
+        if((*pte & PTE_V) && !(flags & MAP_FLAG_REMAP))
+            return -1;
         *pte = PA2PTE(pa) | perm | PTE_V;
         if(a == last)
             break;
@@ -118,11 +129,17 @@ int mappages(pagetable_t pagetable, uint64_t va, uint64_t size, uint64_t pa, int
     return 0;
 }
 
+// Default wrapper: rejects overwrite of existing valid PTEs.
+int mappages(pagetable_t pagetable, uint64_t va, uint64_t size, uint64_t pa, int perm) {
+    return mappages_flags(pagetable, va, size, pa, perm, 0);
+}
+
 // add a mapping to the kernel page table.
 // only used when booting.
-// does not flush TLB or enable paging.
+// BF: Uses MAP_FLAG_REMAP because boot remaps MMIO/kernel regions
+// that may already have valid PTEs from earlier init steps.
 void kvmmap(uint64_t va, uint64_t pa, uint64_t sz, int perm) {
-    if(mappages(kernel_pagetable, va, sz, pa, perm) != 0)
+    if(mappages_flags(kernel_pagetable, va, sz, pa, perm, MAP_FLAG_REMAP) != 0)
         printk("kvmmap failed\n");
 }
 
@@ -840,6 +857,142 @@ void proc_freepagetable(pagetable_t pagetable) {
   kfree((void *)pagetable);
 }
 
+/* BF: Centralized COW break helper — handles ref count, page copy,
+ * PTE update, and rmap registration for new private page.  Previously
+ * the COW path in trap.c and copyout() duplicated this logic without
+ * calling page_add_anon_rmap, leaving new private pages invisible
+ * to the reverse-map eviction scanner. */
+int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
+              struct vm_area *vma) {
+  uint64_t pa = PTE2PA(*pte);
+  int flags = PTE_FLAGS(*pte);
+  int ref = page_ref_get(pa);
+
+  if (ref <= 1) {
+    /* Sole reference: flip PTE flags in place.  Skip rmap registration.
+     * uvmunmap does NOT call page_remove_rmap, so the page's original
+     * rmap entry (if any) survives parent exit.  Adding rmap again
+     * here would double-count. */
+    *pte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
+  } else {
+    char *newpage = kalloc();
+    if (!newpage) return -1;
+    memcpy(newpage, (void *)pa, PAGE_SIZE);
+    page_ref_dec(pa);
+    *pte = PA2PTE((uint64_t)newpage) | ((flags & ~PTE_COW) | PTE_W);
+    /* Register new page in anon rmap unconditionally so the eviction
+     * scanner can find and unmap it from all sharing processes. */
+    if (vma && vma->anon_vma) {
+      struct page *pg = virt_to_page(newpage);
+      if (pg) page_add_anon_rmap(pg, vma, va);
+    }
+  }
+  asm volatile("sfence.vma %0, zero" : : "r"(va));
+  return 0;
+}
+
+/* BF: Resolve a user page that may be lazily unmapped, swapped out, or
+ * COW-shared.  Called from copyin/copyout/copyinstr when the initial
+ * walk finds no valid PTE.
+ *
+ * Returns the physical address of the resolved page, or 0 on failure.
+ * For write==1, also handles COW break.
+ *
+ * Only demand-allocates anonymous VMAs to avoid deadlock (file-backed
+ * demand paging would re-enter VFS read paths). */
+static uint64_t vm_resolve_user_page(pagetable_t pagetable, uint64_t va,
+                                     int write) {
+  if (!current_proc)
+    return 0;
+
+  /* Recursion guard: if we're already inside a demand-fault from a copy
+   * path, bail out to prevent infinite recursion on the 8KB kernel stack. */
+  if (current_proc->in_copy_fault)
+    return 0;
+  current_proc->in_copy_fault = 1;
+
+  uint64_t result = 0;
+  uint64_t page_va = PGROUNDDOWN(va);
+
+  /* Look up VMA to validate the access */
+  struct vm_area *vma = vma_find(current_proc, page_va);
+  if (!vma) {
+    /* No VMA covers this address — EFAULT */
+    goto out;
+  }
+
+  /* Validate permissions against VMA prot bits */
+  if (vma->prot == 0) /* PROT_NONE — no access allowed */
+    goto out;
+  if (write && !(vma->prot & PROT_WRITE))
+    goto out;
+  if (!write && !(vma->prot & PROT_READ))
+    goto out;
+
+  pte_t *pte = walk(pagetable, page_va, 0);
+
+  /* Handle swap-in: PTE exists but is swapped out */
+  if (pte && PTE_IS_SWAPPED(*pte)) {
+    int slot = PTE_SWAP_SLOT(*pte);
+    int sflags = PTE_SWAP_FLAGS(*pte);
+    char *newpage = kalloc();
+    if (!newpage) goto out;
+    swap_read(slot, newpage);
+    *pte = PA2PTE((uint64_t)newpage) | sflags | PTE_V;
+    swap_free(slot);
+    asm volatile("sfence.vma %0, zero" : : "r"(page_va));
+    /* Register in rmap if anonymous */
+    if (vma->anon_vma) {
+      struct page *pg = virt_to_page(newpage);
+      if (pg) page_add_anon_rmap(pg, vma, page_va);
+    }
+  }
+
+  /* Re-walk after potential swap-in */
+  pte = walk(pagetable, page_va, 0);
+
+  if (!pte || !(*pte & PTE_V)) {
+    /* Page not present — demand-allocate for anonymous VMAs only.
+     * File-backed VMAs are skipped to avoid VFS re-entry deadlock. */
+    if (vma->file)
+      goto out;
+    char *pg = kalloc();
+    if (!pg) goto out;
+    memset(pg, 0, PAGE_SIZE);
+    int perm = PTE_U;
+    if (vma->prot & PROT_READ)  perm |= PTE_R;
+    if (vma->prot & PROT_WRITE) perm |= PTE_W;
+    if (vma->prot & PROT_EXEC)  perm |= PTE_X;
+    if (mappages(pagetable, page_va, PAGE_SIZE, (uint64_t)pg, perm) != 0) {
+      kfree(pg);
+      goto out;
+    }
+    asm volatile("sfence.vma %0, zero" : : "r"(page_va));
+    /* Register in rmap */
+    if (vma->anon_vma) {
+      struct page *ppg = virt_to_page(pg);
+      if (ppg) page_add_anon_rmap(ppg, vma, page_va);
+    }
+    /* Re-walk to get the PTE we just installed */
+    pte = walk(pagetable, page_va, 0);
+    if (!pte || !(*pte & PTE_V))
+      goto out;
+  }
+
+  /* Handle COW for write access */
+  if (write && (*pte & PTE_COW)) {
+    if (cow_break(pagetable, pte, page_va, vma) < 0)
+      goto out;
+  }
+
+  /* Return the resolved physical address for the requested VA */
+  result = PTE2PA(*pte) + (va - page_va);
+
+out:
+  current_proc->in_copy_fault = 0;
+  return result;
+}
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
@@ -851,29 +1004,34 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
       return -1;
     int level;
     pte_t *pte = walk_super(pagetable, dstva, &level);
-    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
-      return -1;
 
-    /* Resolve COW page before writing.  Also handle the case where
-     * PTE_COW was lost (e.g., after a swap round-trip) but the page
+    /* BF: If the page is not mapped, try demand-fault resolution.
+     * This handles lazy brk pages and swapped-out pages that haven't
+     * been faulted in yet (e.g., write() to freshly brk'd memory). */
+    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
+      uint64_t pa = vm_resolve_user_page(pagetable, dstva, 1);
+      if (pa == 0)
+        return -1;
+      /* After resolution, re-walk to get the proper PTE and level */
+      pte = walk_super(pagetable, dstva, &level);
+      if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+        return -1;
+    }
+
+    /* BF: Resolve COW page before writing via cow_break() which also
+     * registers the new private page in anon rmap.  Also handle the case
+     * where PTE_COW was lost (e.g., after a swap round-trip) but the page
      * is still shared (ref > 1): must copy before writing. */
     if (level == 0) {
       uint64_t old_pa = PTE2PA(*pte);
       int ref = page_ref_get(old_pa);
       if ((*pte & PTE_COW) || (ref > 1 && !(*pte & PTE_W))) {
-        int flags = PTE_FLAGS(*pte);
-        if (ref > 1) {
-          /* Shared: allocate new page and copy */
-          char *newpg = kalloc();
-          if (!newpg) return -1;
-          memcpy(newpg, (void *)old_pa, PAGE_SIZE);
-          page_ref_dec(old_pa);
-          *pte = PA2PTE((uint64_t)newpg) | (flags & ~PTE_COW) | PTE_W;
-        } else {
-          /* Last reference: just remove COW and add write */
-          *pte = (*pte & ~PTE_COW) | PTE_W;
-        }
-        sfence_vma();
+        /* Use cow_break for proper rmap registration of new page */
+        uint64_t va_page = PGROUNDDOWN(dstva);
+        struct vm_area *vma = current_proc ?
+            vma_find(current_proc, va_page) : 0;
+        if (cow_break(pagetable, pte, va_page, vma) < 0)
+          return -1;
       }
       if ((*pte & PTE_W) == 0)
         return -1;
@@ -908,8 +1066,18 @@ int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len) {
       return -1;
     int level;
     pte_t *pte = walk_super(pagetable, srcva, &level);
-    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
-      return -1;
+
+    /* BF: If the page is not mapped, try demand-fault resolution.
+     * This handles lazy brk pages and swapped-out pages that haven't
+     * been faulted in yet (e.g., read() from freshly brk'd memory). */
+    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
+      uint64_t pa = vm_resolve_user_page(pagetable, srcva, 0);
+      if (pa == 0)
+        return -1;
+      pte = walk_super(pagetable, srcva, &level);
+      if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+        return -1;
+    }
 
     uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
     uint64_t va0 = (level == 1) ? SPGROUNDDOWN(srcva) : PGROUNDDOWN(srcva);
@@ -936,8 +1104,17 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
       return -1;
     int level;
     pte_t *pte = walk_super(pagetable, srcva, &level);
-    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
-      return -1;
+
+    /* BF: If the page is not mapped, try demand-fault resolution.
+     * This handles lazy pages during string copy (e.g., execve argv). */
+    if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
+      uint64_t pa = vm_resolve_user_page(pagetable, srcva, 0);
+      if (pa == 0)
+        return -1;
+      pte = walk_super(pagetable, srcva, &level);
+      if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+        return -1;
+    }
 
     uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
     uint64_t va0 = (level == 1) ? SPGROUNDDOWN(srcva) : PGROUNDDOWN(srcva);

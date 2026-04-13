@@ -172,6 +172,16 @@ int swap_evict_pages(int n) {
     if (!(*pte & PTE_U))
       goto advance;
 
+    /* BF: Do not evict file-backed MAP_SHARED pages — they must be
+     * written back to the file, not to anonymous swap.  Swap entries
+     * have no file-backed metadata, so swapped-out shared pages would
+     * lose their backing file association and corrupt data on swap-in. */
+    {
+      struct vm_area *ev_vma = vma_find(p, clock_va);
+      if (ev_vma && ev_vma->file && (ev_vma->flags & 0x01 /* MAP_SHARED */))
+        goto advance;
+    }
+
     {
       uint64_t pa = PTE2PA(*pte);
 

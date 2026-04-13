@@ -373,8 +373,14 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     p->sigmask &= ~force_unblock;
     uint64_t deliverable = p->sigpending & ~p->sigmask;
     p->sigmask = saved_mask;
-    if (deliverable == 0)
+    if (deliverable == 0) {
+        /* BF: Clear has_saved_sigmask when no signal is actually delivered.
+         * Without this, a deferred mask restore from ppoll/pselect6 would
+         * persist across unrelated syscalls, corrupting the process sigmask
+         * on a later sigreturn. */
+        p->has_saved_sigmask = 0;
         return;
+    }
 
     int signum = 0;
     for (int i = 1; i < 32; i++) {
@@ -936,6 +942,8 @@ void trap_handler(struct trapframe *tf) {
             cause == SCAUSE_INST_PAGE_FAULT) {
 
             /* --- COW page fault (store fault with COW-marked PTE) --- */
+            /* BF: Refactored to use cow_break() which also registers the
+             * new private page in anon rmap for the eviction scanner. */
             if (cause == SCAUSE_STORE_PAGE_FAULT && current_proc) {
                 uint64_t va = PGROUNDDOWN(stval);
                 pte_t *pte = walk(current_proc->pagetable, va, 0);
@@ -944,24 +952,9 @@ void trap_handler(struct trapframe *tf) {
                     goto pagefault_kill;
 
                 if (pte && (*pte & PTE_V) && (*pte & PTE_COW)) {
-                    uint64_t pa = PTE2PA(*pte);
-                    int flags = PTE_FLAGS(*pte);
-                    int ref = page_ref_get(pa);
-
-                    if (ref <= 1) {
-                        /* Sole reference: make writable in place */
-                        *pte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
-                    } else {
-                        /* Multiple references: allocate new page and copy */
-                        char *newpage = kalloc();
-                        if (!newpage)
-                            goto pagefault_kill;
-                        memcpy(newpage, (void *)pa, PAGE_SIZE);
-                        *pte = PA2PTE((uint64_t)newpage) | ((flags & ~PTE_COW) | PTE_W);
-                        page_ref_dec(pa);
-                    }
-                    /* Flush TLB for this VA */
-                    asm volatile("sfence.vma %0, zero" : : "r"(va));
+                    struct vm_area *vma = vma_find(current_proc, va);
+                    if (cow_break(current_proc->pagetable, pte, va, vma) < 0)
+                        goto pagefault_kill;
                     return; /* resume execution */
                 }
             }
@@ -1312,6 +1305,11 @@ pagefault_kill:
         current_proc->saved_a4 = tf->a4;
         current_proc->saved_a5 = tf->a5;
         current_proc->in_syscall = 1;
+        /* BF: Clear stale has_saved_sigmask at syscall entry.  Without this,
+         * a flag left over from a previous ppoll/pselect6 that returned
+         * normally (not via signal) would leak into the next syscall and
+         * cause deliver_signal to restore the wrong sigmask. */
+        current_proc->has_saved_sigmask = 0;
     }
 
     if (sysnum >= 0 && sysnum < NSYSCALLS && syscall_table[sysnum]) {

@@ -92,4 +92,8 @@ static inline volatile pte_t *recursive_l1_pte(uint64_t va) {
 int recursive_check_kcode_pte(void);
 int recursive_check_all_kernel_ptes(void);
 
+/* BF: Centralized COW break — ref count, page copy, PTE update, rmap */
+int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
+              struct vm_area *vma);
+
 #endif
