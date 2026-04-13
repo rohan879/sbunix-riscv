@@ -133,6 +133,15 @@ void cleanup_proc_resources(struct proc *p) {
      * OFD locks are released separately when the open_file refcount hits 0. */
     file_locks_release_pid(p->pid);
 
+    /* BF: Write back MAP_SHARED pages before freeing VMAs on exit.
+     * Must run while p->pagetable is still valid because
+     * mmap_writeback_shared calls walk() (software PT walk, identity-mapped).
+     * Skip for CLONE_VM threads when siblings still share the address
+     * space (refcount > 1) to avoid racing with sibling modifications.
+     * Only the last thread exiting performs the writeback. */
+    if (!p->shared_pt || p->shared_pt->refcount <= 1)
+        mmap_writeback_shared(p, 0, MAXVA);
+
     /* ---- Pagetable / VMAs ---- */
     /* Switch to kernel_pagetable before freeing the process's page table.
      * The kernel runs on the process's page table (shared kernel mapping),

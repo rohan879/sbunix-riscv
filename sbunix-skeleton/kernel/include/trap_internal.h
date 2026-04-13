@@ -19,6 +19,9 @@ void get_wall_time(int64_t *sec, int64_t *nsec);
 uint64_t timespec_rel_deadline(uint64_t sec, uint64_t nsec);
 uint64_t ns_to_time_ticks(uint64_t ns);
 
+/* MAP_SHARED writeback (defined in syscall_memory.c) */
+void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end);
+
 /* FD helpers (defined in trap.c) */
 int alloc_fd(void);
 void close_ofile(struct proc *p, int fd);
