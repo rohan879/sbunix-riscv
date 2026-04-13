@@ -545,11 +545,18 @@ long sys_execve_handler(struct trapframe *tf) {
 
     char resolved[128];
     char tarpath[128];
-    resolve_path(current_proc->cwd, kpath, resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, kpath, resolved) < 0) {
+        kfree(kstrbuf);
+        if (kenvbuf) kfree(kenvbuf);
+        return (long)-36; /* -ENAMETOOLONG */
+    }
     /* BF: Reduced maxdepth from 8 to 6 to prevent kernel stack overflow.
      * Each recursion level costs ~1152 bytes; 6*1152+600 = 7512, leaving
      * ~680 bytes margin on the 8KB kernel stack. */
-    resolve_symlinks_in_path(resolved, 6, 1);
+    /* BF: Propagate all negative errors from resolve_symlinks_in_path */
+    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
+      if (sr < 0) { kfree(kstrbuf); if (kenvbuf) kfree(kenvbuf); return (long)sr; } }
     to_tarfs_path(resolved, tarpath);
 
     int ret = exec(tarpath);
@@ -665,11 +672,20 @@ long sys_execve_handler(struct trapframe *tf) {
 
                     /* Now exec the interpreter (follow symlinks) */
                     char interp_resolved[128];
-                    resolve_path("/", interp, interp_resolved);
-                    resolve_symlinks_in_path(interp_resolved, 6, 1);
-                    char interp_tarpath[128];
-                    to_tarfs_path(interp_resolved, interp_tarpath);
-                    ret = exec(interp_tarpath);
+                    /* BF: Propagate ENAMETOOLONG from resolve_path */
+                    if (resolve_path("/", interp, interp_resolved) < 0) {
+                        ret = -36; /* -ENAMETOOLONG */
+                    } else {
+                        /* BF: Propagate all negative errors from symlink resolution */
+                        int sr = resolve_symlinks_in_path(interp_resolved, 6, 1);
+                        if (sr < 0) {
+                            ret = sr;
+                        } else {
+                            char interp_tarpath[128];
+                            to_tarfs_path(interp_resolved, interp_tarpath);
+                            ret = exec(interp_tarpath);
+                        }
+                    }
                 }
             }
         }

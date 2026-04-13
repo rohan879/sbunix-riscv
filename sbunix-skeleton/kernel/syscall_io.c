@@ -362,14 +362,17 @@ long sys_openat_handler(struct trapframe *tf) {
     }
 
     char resolved[128];
-    resolve_path(current_proc->cwd, kpath, resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
 
     /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
     {
         int nofollow = (flags & 0400000); /* O_NOFOLLOW = 0400000 */
         int symret = resolve_symlinks_in_path(resolved, 6, !nofollow);
-        if (symret == -40)
-            return (long)-40; /* -ELOOP */
+        /* BF: Propagate all negative errors, not just ELOOP */
+        if (symret < 0)
+            return (long)symret;
     }
 
     const char *relpath;
@@ -513,8 +516,12 @@ long sys_chdir_handler(struct trapframe *tf) {
     /* Empty path is invalid */
     if (kpath[0] == '\0') return (long)-2; /* -ENOENT */
     char resolved[128];
-    resolve_path(current_proc->cwd, kpath, resolved);
-    resolve_symlinks_in_path(resolved, 6, 1);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
+    /* BF: Propagate all negative errors from resolve_symlinks_in_path */
+    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
+      if (sr < 0) return (long)sr; }
     /* Check if path exists by trying stat */
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -645,15 +652,18 @@ long sys_newfstatat_handler(struct trapframe *tf) {
         return (long)-14;
     }
     char resolved[128];
-    resolve_path(current_proc->cwd, kpath, resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
 
     /* Resolve symlinks: intermediate always, final unless AT_SYMLINK_NOFOLLOW */
     int at_flags = (int)tf->a3;
     {
         int nofollow = (at_flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
         int symret = resolve_symlinks_in_path(resolved, 6, !nofollow);
-        if (symret == -40)
-            return (long)-40; /* -ELOOP */
+        /* BF: Propagate all negative errors, not just ELOOP */
+        if (symret < 0)
+            return (long)symret;
     }
 
     const char *relpath;
@@ -1136,8 +1146,12 @@ long sys_faccessat_handler(struct trapframe *tf) {
     }
 
     char resolved[128];
-    resolve_path(current_proc->cwd, kpath, resolved);
-    resolve_symlinks_in_path(resolved, 6, 1);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
+    /* BF: Propagate all negative errors from resolve_symlinks_in_path */
+    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
+      if (sr < 0) return (long)sr; }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1159,9 +1173,12 @@ long sys_unlinkat_handler(struct trapframe *tf) {
     }
     {
         char resolved[128];
-        resolve_path(current_proc->cwd, kpath, resolved);
-        /* Resolve intermediate symlinks; do NOT follow final (unlink targets the link itself) */
-        resolve_symlinks_in_path(resolved, 6, 0);
+        /* BF: Propagate ENAMETOOLONG from resolve_path */
+        if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
+            return (long)-36; /* -ENAMETOOLONG */
+        /* BF: Propagate all negative errors from resolve_symlinks_in_path */
+        { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+          if (sr < 0) return (long)sr; }
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
         struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -1192,8 +1209,11 @@ long sys_linkat_handler(struct trapframe *tf) {
         return (long)-14;
 
     char old_resolved[128], new_resolved[256];
-    resolve_path(current_proc->cwd, kold, old_resolved);
-    resolve_path(current_proc->cwd, knew, new_resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, kold, old_resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
+    if (resolve_path(current_proc->cwd, knew, new_resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
 
     /* Both paths must be on ext2 (same filesystem) */
     const char *old_rel, *new_rel;
@@ -1230,8 +1250,11 @@ long sys_renameat2_handler(struct trapframe *tf) {
         return (long)-14;
 
     char old_resolved[128], new_resolved[256];
-    resolve_path(current_proc->cwd, kold, old_resolved);
-    resolve_path(current_proc->cwd, knew, new_resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, kold, old_resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
+    if (resolve_path(current_proc->cwd, knew, new_resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
 
     const char *old_relpath, *new_relpath;
     struct mount *old_mnt = vfs_lookup_mount_entry(old_resolved, &old_relpath);
@@ -1257,9 +1280,12 @@ long sys_mkdirat_handler(struct trapframe *tf) {
     }
     {
         char resolved[128];
-        resolve_path(current_proc->cwd, kpath, resolved);
-        /* Resolve intermediate symlinks only (creating at final component) */
-        resolve_symlinks_in_path(resolved, 6, 0);
+        /* BF: Propagate ENAMETOOLONG from resolve_path */
+        if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
+            return (long)-36; /* -ENAMETOOLONG */
+        /* BF: Propagate all negative errors from resolve_symlinks_in_path */
+        { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+          if (sr < 0) return (long)sr; }
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
         struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -1281,7 +1307,9 @@ long sys_mknodat_handler(struct trapframe *tf) {
     }
     {
         char resolved[128];
-        resolve_path(current_proc->cwd, kpath, resolved);
+        /* BF: Propagate ENAMETOOLONG from resolve_path */
+        if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
+            return (long)-36; /* -ENAMETOOLONG */
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
         struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -1312,7 +1340,9 @@ long sys_readlinkat_handler(struct trapframe *tf) {
         return (long)-22;
 
     char resolved[128];
-    resolve_path(current_proc->cwd, kpath, resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1339,7 +1369,9 @@ long sys_symlinkat_handler(struct trapframe *tf) {
         return (long)-14;
 
     char resolved[128];
-    resolve_path(current_proc->cwd, klinkpath, resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, klinkpath, resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1377,7 +1409,9 @@ long sys_fchmodat_handler(struct trapframe *tf) {
 
     /* Resolve path and verify it exists via stat */
     char resolved[128];
-    resolve_path(current_proc->cwd, kpath, resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);

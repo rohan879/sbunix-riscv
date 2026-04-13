@@ -30,13 +30,17 @@ void to_tarfs_path(const char *path, char *out) {
 }
 
 /* Normalize an absolute path in-place: collapse "." and ".." components.
- * Input must already be absolute (start with '/').  Result is written to out. */
-void normalize_path(const char *in, char *out) {
+ * Input must already be absolute (start with '/').  Result is written to out.
+ * BF: Returns 0 on success, -36 (ENAMETOOLONG) if any component was
+ * silently truncated due to buffer overflow. */
+int normalize_path(const char *in, char *out) {
     /* Use a small stack of component offsets into out[] */
     /* We build the result into out directly, tracking segment starts. */
     char tmp[128];
     int tlen = 0;
     const char *p = in;
+    /* BF: Track whether any component was dropped due to truncation */
+    int truncated = 0;
 
     /* Skip leading slash — we'll add it back */
     while (*p == '/') p++;
@@ -68,6 +72,9 @@ void normalize_path(const char *in, char *out) {
             if (tlen + clen < (int)sizeof(tmp) - 1) {
                 memcpy(tmp + tlen, start, clen);
                 tlen += clen;
+            } else {
+                /* BF: Component dropped — flag truncation for ENAMETOOLONG */
+                truncated = 1;
             }
         }
 
@@ -78,13 +85,18 @@ void normalize_path(const char *in, char *out) {
     tmp[tlen] = '\0';
     /* Result: if only the root slash remains, that's "/" */
     memcpy(out, tmp, tlen + 1);
+
+    /* BF: Return -ENAMETOOLONG if truncation occurred */
+    return truncated ? -36 : 0;
 }
 
-/* Resolve a path against cwd.  Result in out[128]. */
+/* Resolve a path against cwd.  Result in out[128].
+ * BF: Returns 0 on success, -36 (ENAMETOOLONG) when the combined
+ * path exceeds the internal buffer or normalize_path truncates. */
 /* BF: Reduced raw[] from 256 to 128 to prevent kernel stack overflow.
  * Deep call chains (openat -> resolve_path -> resolve_symlinks ->
  * ext2_open -> bcache -> virtio_blk) on 4KB stacks caused corruption. */
-void resolve_path(const char *cwd, const char *path, char *out) {
+int resolve_path(const char *cwd, const char *path, char *out) {
     char raw[128]; /* intermediate buffer before normalization */
     int rlen;
 
@@ -101,8 +113,9 @@ void resolve_path(const char *cwd, const char *path, char *out) {
         int pathlen = strlen(path);
         /* BF: Use sizeof(raw)-2 instead of hardcoded 254 */
         if (cwdlen + 1 + pathlen > (int)sizeof(raw) - 2) {
+            /* BF: Return -ENAMETOOLONG instead of silently falling back to "/" */
             out[0] = '/'; out[1] = '\0';
-            return;
+            return -36; /* -ENAMETOOLONG */
         }
         memcpy(raw, cwd, cwdlen);
         if (cwdlen == 0 || cwd[cwdlen-1] != '/') {
@@ -112,8 +125,8 @@ void resolve_path(const char *cwd, const char *path, char *out) {
         raw[cwdlen + pathlen] = '\0';
     }
 
-    /* Normalize: collapse "." and ".." components */
-    normalize_path(raw, out);
+    /* BF: Propagate ENAMETOOLONG from normalize_path */
+    return normalize_path(raw, out);
 }
 
 /* Check if a resolved path exists as a directory by trying to open it */
@@ -156,8 +169,10 @@ int follow_symlinks(char *resolved, int maxdepth, int bufsiz) {
      * kernel stack overflow — follow_symlinks recurses up to 6 levels
      * and each frame consumes the sum of all local arrays. */
     char new_resolved[128];
+    int rp_ret; /* BF: Propagate ENAMETOOLONG from resolve_path */
     if (target[0] == '/') {
-        resolve_path("/", target, new_resolved);
+        rp_ret = resolve_path("/", target, new_resolved);
+        if (rp_ret < 0) return rp_ret;
     } else {
         /* Relative: resolve from symlink's parent directory */
         char dir[128];
@@ -180,7 +195,8 @@ int follow_symlinks(char *resolved, int maxdepth, int bufsiz) {
         memcpy(combined, dir, dlen);
         memcpy(combined + dlen, target, tlen + 1);
 
-        resolve_path("/", combined, new_resolved);
+        rp_ret = resolve_path("/", combined, new_resolved);
+        if (rp_ret < 0) return rp_ret; /* BF: Propagate ENAMETOOLONG */
     }
 
     int nlen = strlen(new_resolved);
@@ -262,7 +278,8 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
         memcpy(before, built, bi + 1);
 
         int sym_ret = follow_symlinks(built, maxdepth, sizeof(built));
-        if (sym_ret == -40) return -40; /* ELOOP */
+        /* BF: Propagate all negative errors, not just ELOOP */
+        if (sym_ret < 0) return sym_ret;
 
         bi = strlen(built);
 
@@ -283,9 +300,10 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
                 bi += remaining;
                 built[bi] = '\0';
 
-                /* Normalize the combined path */
+                /* BF: Propagate ENAMETOOLONG from resolve_path */
                 char normalized[128];
-                resolve_path("/", built, normalized);
+                int rp_ret = resolve_path("/", built, normalized);
+                if (rp_ret < 0) return rp_ret;
                 int nlen = strlen(normalized);
                 if (nlen > bmax) nlen = bmax;
                 memcpy(resolved, normalized, nlen);

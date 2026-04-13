@@ -6,8 +6,9 @@
 #define _PATHRES_H
 
 void to_tarfs_path(const char *path, char *out);
-void normalize_path(const char *in, char *out);
-void resolve_path(const char *cwd, const char *path, char *out);
+/* BF: Changed return type from void to int to propagate ENAMETOOLONG */
+int  normalize_path(const char *in, char *out);
+int  resolve_path(const char *cwd, const char *path, char *out);
 int  vfs_is_dir(const char *path);
 int  follow_symlinks(char *resolved, int maxdepth, int bufsiz);
 int  resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final);

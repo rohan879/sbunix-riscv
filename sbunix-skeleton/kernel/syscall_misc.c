@@ -253,8 +253,11 @@ long sys_mount_handler(struct trapframe *tf) {
         return (long)-14;
 
     char source_resolved[128], target_resolved[256];
-    resolve_path(current_proc->cwd, ksrc, source_resolved);
-    resolve_path(current_proc->cwd, ktgt, target_resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, ksrc, source_resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
+    if (resolve_path(current_proc->cwd, ktgt, target_resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
 
     /* Only ext2 supported */
     if (strcmp(kfstype, "ext2") != 0)
@@ -283,7 +286,9 @@ long sys_umount2_handler(struct trapframe *tf) {
         return (long)-14;
 
     char resolved[128];
-    resolve_path(current_proc->cwd, ktgt, resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, ktgt, resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
     return (long)vfs_unregister_mount(resolved);
 }
 
@@ -364,7 +369,9 @@ long sys_utimensat_handler(struct trapframe *tf) {
         return (long)-14;
 
     char resolved[128];
-    resolve_path(current_proc->cwd, kpath, resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -410,7 +417,9 @@ long sys_statfs_handler(struct trapframe *tf) {
         return (long)-14;
 
     char resolved[128];
-    resolve_path(current_proc->cwd, kpath, resolved);
+    /* BF: Propagate ENAMETOOLONG from resolve_path */
+    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
+        return (long)-36; /* -ENAMETOOLONG */
 
     /* Fill in basic statfs structure */
     uint8_t kbuf[120];
