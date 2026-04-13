@@ -1150,10 +1150,20 @@ void vma_add_to_list(struct vm_area **list_head, struct vm_area *vma) {
 
 /* ENH: Free an entire VMA chain without touching process state.
  * Used to discard staged VMAs on exec failure without corrupting
- * the original process's VMA list. */
+ * the original process's VMA list.
+ * BF: Must release file references and unlink anon_vma chains,
+ * matching vma_free_all's cleanup — otherwise file refcounts leak
+ * and stale anon_vma pointers cause use-after-free during reclaim. */
 void vma_free_chain(struct vm_area *head) {
   while (head) {
     struct vm_area *next = head->next;
+    if (head->file) {
+      vfs_free_file(head->file);
+      head->file = NULL;
+    }
+    if ((head->flags & MAP_ANON) && head->anon_vma) {
+      anon_vma_unlink(head);
+    }
     kmfree(head, sizeof(struct vm_area));
     head = next;
   }

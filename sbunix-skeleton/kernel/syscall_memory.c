@@ -395,6 +395,11 @@ long sys_mprotect_handler(struct trapframe *tf) {
         v = v->next;
       }
     }
+    /* BF: Reject mprotect if more splits needed than preallocated cap.
+     * Without this, excess splits are silently skipped, potentially
+     * granting or removing permissions outside the requested range. */
+    if (n_splits > MAX_MPROTECT_SPLITS)
+      return -12; /* -ENOMEM */
     /* Allocate VMA nodes and (if needed) anon_vma_chain nodes */
     for (int i = 0; i < n_splits && i < MAX_MPROTECT_SPLITS; i++) {
       prealloc_vma[i] = (struct vm_area *)kmalloc(sizeof(struct vm_area));

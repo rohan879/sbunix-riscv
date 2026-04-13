@@ -402,11 +402,24 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     
     uint64_t handler = sa[signum].handler;
 
+    /* BF: Helper macro — consume deferred sigsuspend mask on any path
+     * that does NOT build a user signal frame (where sigreturn would
+     * normally restore it).  Without this, sigsuspend returns with the
+     * temporary mask still installed, violating POSIX. */
+    #define CONSUME_DEFERRED_MASK(proc) do { \
+        if ((proc)->has_saved_sigmask) { \
+            (proc)->sigmask = (proc)->saved_sigmask_restore; \
+            (proc)->has_saved_sigmask = 0; \
+        } \
+    } while(0)
+
     /* SIG_DFL (0) -- default action */
     if (handler == 0) {
         /* Ignore-class signals */
-        if (signum == SIGCHLD || signum == SIGURG || signum == SIGWINCH)
+        if (signum == SIGCHLD || signum == SIGURG || signum == SIGWINCH) {
+            CONSUME_DEFERRED_MASK(p);
             return;
+        }
 
         /* Continue: resume stopped process (or ignore if running) */
         if (signum == SIGCONT) {
@@ -426,6 +439,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
                         p->parent->state = RUNNABLE;
                 }
             }
+            CONSUME_DEFERRED_MASK(p);
             return;
         }
 
@@ -448,6 +462,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
                         p->parent->state = RUNNABLE;
                 }
             }
+            CONSUME_DEFERRED_MASK(p);
             swtch(&p->context, &scheduler_context);
             return;
         }
@@ -484,8 +499,10 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     }
 
     /* SIG_IGN (1) -- ignore */
-    if (handler == 1)
+    if (handler == 1) {
+        CONSUME_DEFERRED_MASK(p);
         return;
+    }
 
     /* User handler: save trapframe on user stack, redirect execution */
     uint64_t sp = tf->sp;

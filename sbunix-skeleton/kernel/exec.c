@@ -126,7 +126,10 @@ int exec(char *path) {
         if (!sp_mem) goto bad;
         memset(sp_mem, 0, PAGE_SIZE);
         uint64_t vaddr = stack_va + pg * PAGE_SIZE;
-        if (uvmmap(pagetable, vaddr, (uint64_t)sp_mem, PAGE_SIZE, PTE_R | PTE_W | PTE_U) < 0) goto bad;
+        if (uvmmap(pagetable, vaddr, (uint64_t)sp_mem, PAGE_SIZE, PTE_R | PTE_W | PTE_U) < 0) {
+            kfree(sp_mem); /* BF: Free page not yet attached to pagetable */
+            goto bad;
+        }
         if (pg == USER_STACK_PAGES - 1)
             top_page_mem = sp_mem;  /* remember physical addr of topmost page */
     }
@@ -412,8 +415,10 @@ int exec_vfs(const char *resolved_path) {
         if (!sp_mem) goto bad_vfs;
         memset(sp_mem, 0, PAGE_SIZE);
         if (mappages(pagetable, stack_va + pg * PAGE_SIZE, PAGE_SIZE,
-                     (uint64_t)sp_mem, PTE_R | PTE_W | PTE_U) < 0)
+                     (uint64_t)sp_mem, PTE_R | PTE_W | PTE_U) < 0) {
+            kfree(sp_mem); /* BF: Free page not yet attached to pagetable */
             goto bad_vfs;
+        }
         if (pg == USER_STACK_PAGES_VFS - 1)
             top_page_mem_vfs = sp_mem;
     }

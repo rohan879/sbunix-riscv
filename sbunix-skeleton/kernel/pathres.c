@@ -103,8 +103,12 @@ int resolve_path(const char *cwd, const char *path, char *out) {
     if (path[0] == '/') {
         /* absolute */
         rlen = strlen(path);
-        /* BF: Cap at sizeof(raw)-1 instead of 255 — raw is 128 bytes */
-        if (rlen > (int)sizeof(raw) - 1) rlen = (int)sizeof(raw) - 1;
+        /* BF: Return -ENAMETOOLONG for absolute paths that exceed buffer,
+         * instead of silently truncating (which resolves a different path). */
+        if (rlen > (int)sizeof(raw) - 1) {
+            out[0] = '/'; out[1] = '\0';
+            return -36; /* -ENAMETOOLONG */
+        }
         memcpy(raw, path, rlen);
         raw[rlen] = '\0';
     } else {
