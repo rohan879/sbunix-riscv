@@ -211,17 +211,16 @@ static int procfs_render_stat_file(char *buf, int bufsz, struct proc *p) {
   pos = append_int(buf, bufsz, pos, p->sid);
   if (pos < bufsz) buf[pos++] = ' ';
 
-  /* Fields 7-52 (46 fields): tty_nr(7) tpgid(8) flags(9) minflt(10) cminflt(11)
-   * majflt(12) cmajflt(13) utime(14) stime(15) cutime(16) cstime(17) priority(18)
-   * nice(19) num_threads(20) itrealvalue(21) starttime(22) vsize(23) rss(24)
-   * rsslim(25) startcode(26) endcode(27) startstack(28) kstkesp(29) kstkeip(30)
-   * signal(31) blocked(32) sigignore(33) sigcatch(34) wchan(35) nswap(36)
-   * cnswap(37) exit_signal(38) processor(39) rt_priority(40) policy(41)
-   * delayacct_blkio_ticks(42) guest_time(43) cguest_time(44) start_data(45)
-   * end_data(46) start_brk(47) arg_start(48) arg_end(49) env_start(50)
-   * env_end(51) exit_code(52) */
+  /* BF: Fields 7-52 (46 fields) following pid(1) (comm)(2) state(3) ppid(4)
+   * pgid(5) sid(6).  The pre-vsize string must have exactly 16 values
+   * (fields 7-22); the previous version had 18, shifting vsize from
+   * field 23 to 25 and breaking Linux /proc/pid/stat parsers.
+   * tty_nr(7) tpgid(8) flags(9) minflt(10) cminflt(11)
+   * majflt(12) cmajflt(13) utime(14) stime(15) cutime(16) cstime(17)
+   * priority(18)=20 nice(19)=0 num_threads(20)=1 itrealvalue(21)=0
+   * starttime(22)=0  =>  vsize(23)  =>  rss(24) ... exit_code(52) */
   pos = append_str(buf, bufsz, pos,
-    "0 0 0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 0 ");
+    "0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 0 ");
   pos = append_int(buf, bufsz, pos, (long)(p->sz)); /* vsize */
   pos = append_str(buf, bufsz, pos,
     " 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
