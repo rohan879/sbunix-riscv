@@ -137,6 +137,28 @@ int exec(char *path) {
     /* Add a VMA for the user stack region (up to USER_STACK_TOP, not MAXVA) */
     vma_add(current_proc, stack_va, USER_STACK_TOP, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
 
+    /* BF: Map sigtrampoline page for signal return without sa_restorer.
+     * External binaries may not set restorer — the trampoline executes
+     * rt_sigreturn to return from the signal handler. */
+    {
+      extern char sigtrampoline[], sigtrampoline_end[];
+      if ((uint64_t)(sigtrampoline_end - sigtrampoline) > PAGE_SIZE)
+        goto bad;
+      char *tramp_page = kalloc();
+      if (!tramp_page) goto bad;
+      memset(tramp_page, 0, PAGE_SIZE);
+      memcpy(tramp_page, sigtrampoline, sigtrampoline_end - sigtrampoline);
+      if (mappages(pagetable, SIGTRAMP_VA, PAGE_SIZE, (uint64_t)tramp_page,
+                   PTE_R | PTE_X | PTE_U) < 0) {
+        kfree(tramp_page);
+        goto bad;
+      }
+      /* Page now owned by pagetable — freed by proc_freepagetable on goto bad */
+    }
+    /* BF: VMA for sigtrampoline — enables proper cleanup on exit/exec */
+    vma_add(current_proc, SIGTRAMP_VA, SIGTRAMP_VA + PAGE_SIZE,
+            PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANON);
+
     // 5. Map trampoline + trapframe pages (NO kernel identity mapping needed --
     //    the trampoline switches satp to kernel_pagetable on trap entry)
     if(uvmmap_kernel(pagetable) < 0) goto bad;
@@ -424,6 +446,28 @@ int exec_vfs(const char *resolved_path) {
     }
     vma_add(current_proc, stack_va, USER_STACK_TOP,
             1 | 2 /* PROT_READ | PROT_WRITE */, 0x02 | 0x20 /* MAP_PRIVATE | MAP_ANON */);
+
+    /* BF: Map sigtrampoline page for signal return without sa_restorer.
+     * External binaries may not set restorer — the trampoline executes
+     * rt_sigreturn to return from the signal handler. */
+    {
+      extern char sigtrampoline[], sigtrampoline_end[];
+      if ((uint64_t)(sigtrampoline_end - sigtrampoline) > PAGE_SIZE)
+        goto bad_vfs;
+      char *tramp_page = kalloc();
+      if (!tramp_page) goto bad_vfs;
+      memset(tramp_page, 0, PAGE_SIZE);
+      memcpy(tramp_page, sigtrampoline, sigtrampoline_end - sigtrampoline);
+      if (mappages(pagetable, SIGTRAMP_VA, PAGE_SIZE, (uint64_t)tramp_page,
+                   PTE_R | PTE_X | PTE_U) < 0) {
+        kfree(tramp_page);
+        goto bad_vfs;
+      }
+      /* Page now owned by pagetable — freed by proc_freepagetable on goto bad_vfs */
+    }
+    /* BF: VMA for sigtrampoline — enables proper cleanup on exit/exec */
+    vma_add(current_proc, SIGTRAMP_VA, SIGTRAMP_VA + PAGE_SIZE,
+            PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANON);
 
     /* 6. Map kernel entries */
     if (uvmmap_kernel(pagetable) < 0) goto bad_vfs;
