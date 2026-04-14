@@ -15,6 +15,30 @@ extern char _tarfs_start[];
 extern char _tarfs_end[];
 extern char _kernel_end[];
 
+/* ENH: Sigtrampoline VA sits one page below the user stack region.
+ * Contains the sigreturn ecall stub copied from sigtramp.S, mapped
+ * PTE_R|PTE_X|PTE_U so user signal handlers can return through it. */
+#define SIGTRAMP_VA (USER_STACK_TOP - (8 * PAGE_SIZE) - PAGE_SIZE)
+
+/* ENH: Allocate and map the signal trampoline page into a user page table.
+ * This is shared by exec() and exec_vfs() to avoid duplicating the same
+ * allocation + mapping + error-handling logic. */
+static int map_sigtrampoline(pagetable_t pt) {
+  extern char sigtrampoline[], sigtrampoline_end[];
+  if ((uint64_t)(sigtrampoline_end - sigtrampoline) > PAGE_SIZE)
+    return -1;
+  char *tramp_page = kalloc();
+  if (!tramp_page) return -1;
+  memset(tramp_page, 0, PAGE_SIZE);
+  memcpy(tramp_page, sigtrampoline, sigtrampoline_end - sigtrampoline);
+  if (mappages(pt, SIGTRAMP_VA, PAGE_SIZE, (uint64_t)tramp_page,
+               PTE_R | PTE_X | PTE_U) < 0) {
+    kfree(tramp_page);
+    return -1;
+  }
+  return 0;
+}
+
 static uint64_t exec_mmap_base(uint64_t sz) {
     uint64_t base = PGROUNDUP(sz) + PAGE_SIZE;
     if (base < USER_MMAP_FLOOR)
@@ -137,31 +161,15 @@ int exec(char *path) {
     /* Add a VMA for the user stack region (up to USER_STACK_TOP, not MAXVA) */
     vma_add(current_proc, stack_va, USER_STACK_TOP, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
 
-    /* BF: Map sigtrampoline page for signal return without sa_restorer.
-     * External binaries may not set restorer — the trampoline executes
-     * rt_sigreturn to return from the signal handler. */
-    {
-      extern char sigtrampoline[], sigtrampoline_end[];
-      if ((uint64_t)(sigtrampoline_end - sigtrampoline) > PAGE_SIZE)
-        goto bad;
-      char *tramp_page = kalloc();
-      if (!tramp_page) goto bad;
-      memset(tramp_page, 0, PAGE_SIZE);
-      memcpy(tramp_page, sigtrampoline, sigtrampoline_end - sigtrampoline);
-      if (mappages(pagetable, SIGTRAMP_VA, PAGE_SIZE, (uint64_t)tramp_page,
-                   PTE_R | PTE_X | PTE_U) < 0) {
-        kfree(tramp_page);
-        goto bad;
-      }
-      /* Page now owned by pagetable — freed by proc_freepagetable on goto bad */
-    }
-    /* BF: VMA for sigtrampoline — enables proper cleanup on exit/exec */
-    vma_add(current_proc, SIGTRAMP_VA, SIGTRAMP_VA + PAGE_SIZE,
-            PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANON);
-
     // 5. Map trampoline + trapframe pages (NO kernel identity mapping needed --
     //    the trampoline switches satp to kernel_pagetable on trap entry)
     if(uvmmap_kernel(pagetable) < 0) goto bad;
+
+    /* ENH: Map signal trampoline page via extracted helper (replaces inline block) */
+    if (map_sigtrampoline(pagetable) < 0) goto bad;
+    /* VMA for sigtrampoline — enables proper cleanup on exit/exec */
+    vma_add(current_proc, SIGTRAMP_VA, SIGTRAMP_VA + PAGE_SIZE,
+            PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANON);
 
     /* === POINT OF NO RETURN ===
      * Everything above succeeded.  Now commit the new state and tear down old. */
@@ -413,15 +421,17 @@ int exec_vfs(const char *resolved_path) {
         uint64_t seg_end = ph->p_vaddr + ph->p_memsz;
         if (seg_end > sz) sz = seg_end;
 
+        /* RF: Use symbolic PROT_* / MAP_* constants instead of raw integers */
         int vprot = 0;
-        if (ph->p_flags & PF_R) vprot |= 1; /* PROT_READ */
-        if (ph->p_flags & PF_W) vprot |= 2; /* PROT_WRITE */
-        if (ph->p_flags & PF_X) vprot |= 4; /* PROT_EXEC */
+        /* ENH: Use symbolic PROT_* constants instead of raw hex flags */
+        if (ph->p_flags & PF_R) vprot |= PROT_READ;
+        if (ph->p_flags & PF_W) vprot |= PROT_WRITE;
+        if (ph->p_flags & PF_X) vprot |= PROT_EXEC;
         /* BF: vma_add adds to staging vma_list (currently NULL -> growing).
          * On failure we restore old_vma_list and discard staged VMAs. */
         vma_add(current_proc, PGROUNDDOWN(ph->p_vaddr),
                 PGROUNDUP(ph->p_vaddr + ph->p_memsz),
-                vprot, 0x02 /* MAP_PRIVATE */);
+                vprot, MAP_PRIVATE);
     }
     kfree(tmp_page);
     kfree(phdr_buf);
@@ -444,33 +454,19 @@ int exec_vfs(const char *resolved_path) {
         if (pg == USER_STACK_PAGES_VFS - 1)
             top_page_mem_vfs = sp_mem;
     }
+    /* RF: Use symbolic constants instead of raw hex flags for readability.
+     * Values verified against libc/include/sys/mman.h. */
     vma_add(current_proc, stack_va, USER_STACK_TOP,
-            1 | 2 /* PROT_READ | PROT_WRITE */, 0x02 | 0x20 /* MAP_PRIVATE | MAP_ANON */);
-
-    /* BF: Map sigtrampoline page for signal return without sa_restorer.
-     * External binaries may not set restorer — the trampoline executes
-     * rt_sigreturn to return from the signal handler. */
-    {
-      extern char sigtrampoline[], sigtrampoline_end[];
-      if ((uint64_t)(sigtrampoline_end - sigtrampoline) > PAGE_SIZE)
-        goto bad_vfs;
-      char *tramp_page = kalloc();
-      if (!tramp_page) goto bad_vfs;
-      memset(tramp_page, 0, PAGE_SIZE);
-      memcpy(tramp_page, sigtrampoline, sigtrampoline_end - sigtrampoline);
-      if (mappages(pagetable, SIGTRAMP_VA, PAGE_SIZE, (uint64_t)tramp_page,
-                   PTE_R | PTE_X | PTE_U) < 0) {
-        kfree(tramp_page);
-        goto bad_vfs;
-      }
-      /* Page now owned by pagetable — freed by proc_freepagetable on goto bad_vfs */
-    }
-    /* BF: VMA for sigtrampoline — enables proper cleanup on exit/exec */
-    vma_add(current_proc, SIGTRAMP_VA, SIGTRAMP_VA + PAGE_SIZE,
-            PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANON);
+            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
 
     /* 6. Map kernel entries */
     if (uvmmap_kernel(pagetable) < 0) goto bad_vfs;
+
+    /* ENH: Map signal trampoline page via extracted helper (replaces inline block) */
+    if (map_sigtrampoline(pagetable) < 0) goto bad_vfs;
+    /* VMA for sigtrampoline — enables proper cleanup on exit/exec */
+    vma_add(current_proc, SIGTRAMP_VA, SIGTRAMP_VA + PAGE_SIZE,
+            PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANON);
 
     /* === POINT OF NO RETURN ===
      * Everything above succeeded.  Now commit new state and tear down old. */
