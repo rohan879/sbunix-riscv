@@ -1616,6 +1616,35 @@ static int ext2_readlink(void *fs_data, const char *path, char *buf,
     return copylen;
 }
 
+/* RF: Extracted from ext2_rmdir inline check to reuse in ext2_rename.
+ * Returns 1 if directory contains only "." and "..", 0 if non-empty. */
+static int ext2_dir_is_empty(struct ext2_fs *fs, struct ext2_inode_mem *dir) {
+    uint32_t nblocks = (dir->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
+    for (uint32_t b = 0; b < nblocks; b++) {
+        uint32_t disk_blk = ext2_bmap(fs, dir, b);
+        if (disk_blk == 0) continue;
+        struct bcache_entry *e = bcache_get(fs, disk_blk);
+        if (!e) continue;
+        uint32_t off = 0;
+        while (off < EXT2_BLOCK_SIZE) {
+            struct ext2_dirent *de = (struct ext2_dirent *)(e->data + off);
+            if (de->rec_len == 0) break;
+            if (de->inode_number != 0) {
+                int is_dot = (de->name_len == 1 && de->name[0] == '.');
+                int is_dotdot = (de->name_len == 2 && de->name[0] == '.'
+                                 && de->name[1] == '.');
+                if (!is_dot && !is_dotdot) {
+                    bcache_release(e);
+                    return 0; /* non-empty */
+                }
+            }
+            off += de->rec_len;
+        }
+        bcache_release(e);
+    }
+    return 1; /* empty (only . and ..) */
+}
+
 static int ext2_rename(void *fs_data, const char *oldpath,
                        const char *newpath) {
     struct ext2_fs *fs = (struct ext2_fs *)fs_data;
@@ -1652,6 +1681,8 @@ static int ext2_rename(void *fs_data, const char *oldpath,
     }
     uint8_t ft = (ip->type == EXT2_TYPE_DIR) ? EXT2_FT_DIR :
                  (ip->type == EXT2_TYPE_SYMLINK) ? EXT2_FT_SYMLINK : EXT2_FT_FILE;
+    /* BF: Save source type for POSIX cross-type rename checks below */
+    uint16_t src_type = ip->type;
     icache_release(ip);
 
     struct ext2_inode_mem *new_parent = ext2_namei(fs, new_parent_path);
@@ -1673,6 +1704,28 @@ static int ext2_rename(void *fs_data, const char *oldpath,
          * no links remain, matching the pattern used in ext2_unlink. */
         struct ext2_inode_mem *eip = icache_get(fs, existing);
         if (eip) {
+            /* BF: POSIX type checks — source is dir, target is non-dir (ENOTDIR);
+             * source is non-dir, target is dir (EISDIR);
+             * target is non-empty dir (ENOTEMPTY).
+             * ip was already released above, so we use saved src_type. */
+            if (src_type == EXT2_TYPE_DIR && eip->type != EXT2_TYPE_DIR) {
+                icache_release(eip);
+                icache_release(new_parent);
+                icache_release(old_parent);
+                return -20; /* ENOTDIR */
+            }
+            if (src_type != EXT2_TYPE_DIR && eip->type == EXT2_TYPE_DIR) {
+                icache_release(eip);
+                icache_release(new_parent);
+                icache_release(old_parent);
+                return -21; /* EISDIR */
+            }
+            if (eip->type == EXT2_TYPE_DIR && !ext2_dir_is_empty(fs, eip)) {
+                icache_release(eip);
+                icache_release(new_parent);
+                icache_release(old_parent);
+                return -39; /* ENOTEMPTY */
+            }
             eip->link_count--;
             eip->dirty = 1;
             if (eip->link_count == 0 && eip->refcount <= 1) {
@@ -1748,30 +1801,11 @@ static int ext2_rmdir(void *fs_data, const char *path) {
     return -20; /* -ENOTDIR */
   }
 
-  /* Check directory is empty (only . and ..) */
-  uint32_t nblocks = (ip->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
-  for (uint32_t b = 0; b < nblocks; b++) {
-    uint32_t disk_blk = ext2_bmap(fs, ip, b);
-    if (disk_blk == 0) continue;
-    struct bcache_entry *e = bcache_get(fs, disk_blk);
-    if (!e) continue;
-    uint32_t off = 0;
-    while (off < EXT2_BLOCK_SIZE) {
-      struct ext2_dirent *de = (struct ext2_dirent *)(e->data + off);
-      if (de->rec_len == 0) break;
-      if (de->inode_number != 0) {
-        int is_dot = (de->name_len == 1 && de->name[0] == '.');
-        int is_dotdot = (de->name_len == 2 && de->name[0] == '.' && de->name[1] == '.');
-        if (!is_dot && !is_dotdot) {
-          bcache_release(e);
-          icache_release(ip);
-          icache_release(parent);
-          return -39; /* -ENOTEMPTY */
-        }
-      }
-      off += de->rec_len;
-    }
-    bcache_release(e);
+  /* RF: Use extracted helper instead of inline check */
+  if (!ext2_dir_is_empty(fs, ip)) {
+    icache_release(ip);
+    icache_release(parent);
+    return -39; /* -ENOTEMPTY */
   }
 
   /* Remove directory entry from parent */
