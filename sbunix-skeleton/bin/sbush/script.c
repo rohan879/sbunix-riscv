@@ -33,7 +33,10 @@ int run_script(const char *path) {
         line[i] = '\0';
         if (*p == '\n')
             p++;
-        if (i > 0)
+        /* BF: Always call execute_line when heredoc, control flow, or function
+         * definition is active — blank lines are meaningful content in those
+         * contexts (e.g. blank line inside a heredoc body). */
+        if (i > 0 || cf_active() || heredoc_active() || func_def_active())
             execute_line(line);
     }
 

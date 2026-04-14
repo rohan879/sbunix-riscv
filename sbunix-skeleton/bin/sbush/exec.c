@@ -345,5 +345,15 @@ void execute_cmdlist(struct cmdlist *cl) {
 
         status = execute_pipeline(pl);
         last_exit_status = status;
+
+        /* BF: Enforce set -e (errexit) — exit on non-zero status unless
+         * the failing command is part of an && or || chain, which POSIX
+         * exempts from errexit behavior. */
+        if (set_flag_e && status != 0) {
+            int conn = pl->connector;
+            if (conn != CONN_AND && conn != CONN_OR) {
+                _exit(status);
+            }
+        }
     }
 }
