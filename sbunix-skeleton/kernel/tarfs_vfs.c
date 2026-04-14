@@ -3,6 +3,7 @@
 #include <string.h>
 #include <printk.h>
 #include <kmalloc.h>
+#include <pathres.h>  /* RF: canonical to_tarfs_path prototype */
 
 extern char _tarfs_start[];
 extern char _tarfs_end[];
@@ -18,30 +19,9 @@ struct tarfs_private {
   int is_dir;                /* 1 if this is a directory */
 };
 
-/* ------------------------------------------------------------------ */
-/* Convert an absolute path to tarfs "./..." format                     */
-/* BF: Changed signature to accept outsize and return int (0 on success,
- * -36/ENAMETOOLONG on overflow) to prevent silent buffer overruns.     */
-/* ------------------------------------------------------------------ */
-static int to_tarfs_path(const char *path, char *out, int outsize) {
-  if (outsize < 2) return -36; /* ENAMETOOLONG */
-  /* Strip leading slashes */
-  while (*path == '/') path++;
-  if (*path == '\0') {
-    out[0] = '.'; out[1] = '\0';
-    return 0;
-  }
-  out[0] = '.';
-  out[1] = '/';
-  int i = 2;
-  int lim = outsize - 1; /* reserve null terminator */
-  while (*path && i < lim) {
-    out[i++] = *path++;
-  }
-  if (*path) return -36; /* ENAMETOOLONG — input too long */
-  out[i] = '\0';
-  return 0;
-}
+/* RF: Removed static to_tarfs_path duplicate — canonical extern
+ * implementation lives in kernel/pathres.c (declared in pathres.h).
+ * All internal callers use the extern 3-param signature. */
 
 /* Check if path is a directory in tarfs */
 static int tarfs_is_dir(const char *path) {
