@@ -36,11 +36,13 @@ struct vfs_ops;
 /* Max filename length */
 #define EXT2_NAME_MAX     255
 
-/* Block cache size */
-#define BCACHE_SIZE       16
+/* Block cache size — increased from 16 to 64 to reduce evictions on 128MB
+ * disk; memory impact is ~256KB (64 * 4KB blocks), well within budget. */
+#define BCACHE_SIZE       64
 
-/* Inode cache size */
-#define ICACHE_SIZE       32
+/* Inode cache size — increased from 32 to 128 to reduce repeated inode
+ * reads during directory traversals and path resolution. */
+#define ICACHE_SIZE       128
 
 /* Maximum open ext2 files */
 #define EXT2_MAX_OPEN     64
