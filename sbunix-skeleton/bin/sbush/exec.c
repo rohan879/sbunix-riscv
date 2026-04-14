@@ -14,6 +14,17 @@ int execute_pipeline(struct pipeline *pl) {
     if (pl->ncmds == 0)
         return 0;
 
+    /* set -x tracing: emit expanded command to stderr before execution.
+     * Placed before the builtin fast-path so builtins are traced too (POSIX). */
+    if (set_flag_x) {
+      for (int xi = 0; xi < pl->ncmds; xi++) {
+        dprintf(2, "+");
+        for (int xj = 0; xj < pl->cmds[xi].argc; xj++)
+          dprintf(2, " %s", pl->cmds[xi].argv[xj]);
+        dprintf(2, "\n");
+      }
+    }
+
     /* single builtin — run in-process (with save/restore for redirections) */
     if (pl->ncmds == 1 && !pl->background && is_builtin(pl->cmds[0].argv[0])) {
         struct command *c = &pl->cmds[0];
