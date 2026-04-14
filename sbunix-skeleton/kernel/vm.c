@@ -7,6 +7,7 @@
 #include <proc.h>
 #include <swap.h>
 #include <mm.h>  /* BF: needed for anon_vma_get/link/unlink in vma_remove splits */
+#include <errno.h>  /* BF: EFAULT for copyinstr page fault distinction */
 
 #ifndef VM_FREEWALK_TRACE
 #define VM_FREEWALK_TRACE 1
@@ -1096,25 +1097,32 @@ int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len) {
   return 0;
 }
 
-// Copy null-terminated string from user virtual address srcva to kernel buffer dst.
-// Copies at most max bytes (including the null). Returns 0 if null found, -1 otherwise.
+/* Copy null-terminated string from user virtual address srcva to kernel buffer dst.
+ * Copies at most max bytes (including the null).
+ * Returns:  0 on success (null terminator found),
+ *          -EFAULT if a page is unmapped/inaccessible (bad user pointer),
+ *          -1 if the buffer was exhausted before a null terminator (E2BIG). */
 int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
   int got_null = 0;
   while (max > 0) {
+    /* BF: Return -EFAULT for invalid user addresses so callers can
+     * distinguish page faults from buffer exhaustion (-1 / E2BIG). */
     if (srcva >= MAXVA)
-      return -1;
+      return -EFAULT;
     int level;
     pte_t *pte = walk_super(pagetable, srcva, &level);
 
     /* BF: If the page is not mapped, try demand-fault resolution.
-     * This handles lazy pages during string copy (e.g., execve argv). */
+     * This handles lazy pages during string copy (e.g., execve argv).
+     * Return -EFAULT (not -1) so callers can distinguish page faults
+     * from buffer exhaustion (E2BIG). */
     if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
       uint64_t pa = vm_resolve_user_page(pagetable, srcva, 0);
       if (pa == 0)
-        return -1;
+        return -EFAULT;
       pte = walk_super(pagetable, srcva, &level);
       if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
-        return -1;
+        return -EFAULT;
     }
 
     uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
@@ -1139,6 +1147,7 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
     max -= n;
     srcva = va0 + page_size;
   }
+  /* Buffer exhaustion: string did not fit in max bytes */
   return got_null ? 0 : -1;
 }
 
