@@ -192,6 +192,8 @@ long sys_timer_create_handler(struct trapframe *tf) {
     current_proc->timers[tid].next_expiry_ticks = 0;
     current_proc->timers[tid].signo = signo;
     current_proc->timers[tid].overrun = 0;
+    /* OPT: Track active count so timer interrupt can skip idle processes */
+    current_proc->active_timer_count++;
 
     /* Return timer_t (just the index) */
     if (copyout(current_proc->pagetable, timerid_uaddr, &tid, sizeof(int)) < 0)
@@ -205,6 +207,9 @@ long sys_timer_delete_handler(struct trapframe *tf) {
     if (tid < 0 || tid >= NPTIMER || !current_proc->timers[tid].used)
         return (long)-22; /* EINVAL */
     current_proc->timers[tid].used = 0;
+    /* OPT: Decrement active count to allow timer interrupt early-exit */
+    if (current_proc->active_timer_count > 0)
+        current_proc->active_timer_count--;
     return (long)0;
 }
 

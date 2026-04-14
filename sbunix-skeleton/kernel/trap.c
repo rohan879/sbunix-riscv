@@ -290,17 +290,21 @@ static void handle_timer_interrupt(void) {
         }
     }
     
+    /* OPT: Read hardware timer once and reuse for all deadline checks
+     * below (timed-sleep, SIGALRM, POSIX timers) to avoid repeated
+     * CSR reads within the same interrupt handler invocation. */
+    uint64_t now = r_time();
+
     /* Wake processes whose timed sleep has expired */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
-            r_time() >= p->sleep_until) {
+            now >= p->sleep_until) {
             p->waiting_for_uart = 0;
             p->state = RUNNABLE;
         }
     }
     /* Check for expired alarms and deliver SIGALRM */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-        uint64_t now = r_time();
         if (p->state != UNUSED && p->state != ZOMBIE &&
             p->alarm_ticks > 0 && now >= p->alarm_ticks) {
             p->alarm_ticks = 0;  /* one-shot */
@@ -314,7 +318,11 @@ static void handle_timer_interrupt(void) {
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state == UNUSED || p->state == ZOMBIE)
             continue;
-        uint64_t now = r_time();
+        /* OPT: Skip the NPTIMER inner loop entirely for processes with
+         * no active POSIX timers.  Safe on single-hart: SIE is cleared
+         * on trap entry so active_timer_count cannot change mid-loop. */
+        if (p->active_timer_count == 0)
+            continue;
         for (int i = 0; i < NPTIMER; i++) {
             if (!p->timers[i].used || p->timers[i].next_expiry_ticks == 0)
                 continue;
@@ -324,7 +332,7 @@ static void handle_timer_interrupt(void) {
                 sig_set_pending(p, p->timers[i].signo, 0, 0, K_SI_TIMER);
                 if (p->state == SLEEPING)
                     p->state = RUNNABLE;
-                
+
                 /* Handle periodic vs one-shot timers */
                 if (p->timers[i].interval_ticks > 0) {
                     /* Periodic: schedule next expiry */
@@ -340,6 +348,9 @@ static void handle_timer_interrupt(void) {
                     if (overrun_limit <= 0) {
                         p->timers[i].next_expiry_ticks = 0;
                         p->timers[i].used = 0;
+                        /* OPT: Decrement active count when overrun-disarm fires */
+                        if (p->active_timer_count > 0)
+                            p->active_timer_count--;
                     }
                 } else {
                     /* One-shot: disarm timer */

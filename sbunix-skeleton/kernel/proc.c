@@ -192,6 +192,8 @@ found:
   // Initialize POSIX timers
   for (int i = 0; i < NPTIMER; i++)
     p->timers[i].used = 0;
+  /* OPT: Reset active timer count for recycled process slots */
+  p->active_timer_count = 0;
 
   // Initialize exec tracking (for POSIX setpgid restrictions)
   p->has_execed = 0;

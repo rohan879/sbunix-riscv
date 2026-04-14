@@ -263,6 +263,12 @@ struct proc {
    * user-address faults from true kernel bugs during copy operations.
    * Must be initialized to 0 in allocproc for recycled process slots. */
   uint8_t in_copy_fault;
+
+  /* OPT: Count of active POSIX timers so the timer interrupt can skip
+   * the NPTIMER inner loop for processes with no timers.  Maintained by
+   * timer_create (++), timer_delete (--), and overrun-disarm (--).
+   * uint8_t is safe: NPTIMER=32 cannot overflow a uint8_t. */
+  uint8_t active_timer_count;
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,
