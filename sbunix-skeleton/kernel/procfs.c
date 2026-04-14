@@ -222,8 +222,14 @@ static int procfs_render_stat_file(char *buf, int bufsz, struct proc *p) {
   pos = append_str(buf, bufsz, pos,
     "0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 0 ");
   pos = append_int(buf, bufsz, pos, (long)(p->sz)); /* vsize */
+  /* BF: Fields 24-52 per Linux proc(5). exit_signal is field 38 (SIGCHLD).
+   * Previously had 17 at field 37 (cnswap) instead of field 38.
+   * Layout: 14 zeros (fields 24-37), SIGCHLD (field 38), 14 zeros (39-52). */
   pos = append_str(buf, bufsz, pos,
-    " 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+    " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ");
+  pos = append_int(buf, bufsz, pos, SIGCHLD); /* field 38: exit_signal */
+  pos = append_str(buf, bufsz, pos,
+    " 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
 
   return pos;
 }
