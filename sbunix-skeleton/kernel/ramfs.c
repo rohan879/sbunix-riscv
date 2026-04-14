@@ -621,7 +621,9 @@ static int ramfs_rmdir(void *fs_data, const char *path) {
 
   ramfs_dir_remove(parent, basename);
   ino->nlink--;
-  if (ino->nlink <= 0)
+  /* BF: Defer free if directory still has open fds (matches ramfs_unlink/
+   * ramfs_rename/ramfs_close deferred-free pattern) */
+  if (ino->nlink <= 0 && ino->open_count <= 0)
     ramfs_free_inode(ino);
   return 0;
 }

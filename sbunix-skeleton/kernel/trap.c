@@ -654,6 +654,13 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
      * the trampoline executes rt_sigreturn to return from the handler.
      * Previously, missing restorer killed the process unconditionally. */
     if (sa[signum].restorer == 0) {
+        /* BF: Guard against processes that never called exec (e.g. PID 1
+         * before init_starter runs) — SIGTRAMP_VA would be unmapped.
+         * walk() returns NULL if the page is not in the page table. */
+        pte_t *pte = walk(p->pagetable, SIGTRAMP_VA, 0);
+        if (!pte || !(*pte & PTE_V)) {
+            return; /* can't deliver — drop signal rather than fault */
+        }
         tf->ra = SIGTRAMP_VA;
     } else {
         tf->ra = (uint64_t)sa[signum].restorer;
