@@ -15,10 +15,7 @@ extern char _tarfs_start[];
 extern char _tarfs_end[];
 extern char _kernel_end[];
 
-/* ENH: Sigtrampoline VA sits one page below the user stack region.
- * Contains the sigreturn ecall stub copied from sigtramp.S, mapped
- * PTE_R|PTE_X|PTE_U so user signal handlers can return through it. */
-#define SIGTRAMP_VA (USER_STACK_TOP - (8 * PAGE_SIZE) - PAGE_SIZE)
+/* ENH: SIGTRAMP_VA is defined in riscv.h — used here by map_sigtrampoline */
 
 /* ENH: Allocate and map the signal trampoline page into a user page table.
  * This is shared by exec() and exec_vfs() to avoid duplicating the same
