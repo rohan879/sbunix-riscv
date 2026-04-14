@@ -508,13 +508,31 @@ long sys_execve_handler(struct trapframe *tf) {
             if (copyin(current_proc->pagetable, &uptr, uargv + (uint64_t)kargc * 8, 8) < 0)
                 break;
             if (uptr == 0) break;
-            char tmpstr[128];
-            if (copyinstr(current_proc->pagetable, tmpstr, uptr, sizeof(tmpstr)) < 0)
-                break;
-            int slen = strlen(tmpstr) + 1;
-            if (kstroff + slen > (int)PAGE_SIZE) break;
+            /* BF: Copy argv strings directly into kstrbuf instead of a 128-byte
+             * stack tmpstr.  The old code silently dropped all remaining args
+             * when any single string exceeded 127 chars (copyinstr returned -1
+             * and the loop broke).  Now strings up to PAGE_SIZE-kstroff bytes
+             * are supported, and we distinguish EFAULT (bad pointer) from E2BIG
+             * (string too long for the remaining page space). */
+            int remaining = (int)PAGE_SIZE - kstroff;
+            if (remaining <= 0) break; /* page full */
+            {
+                /* Probe 1 byte to distinguish bad pointer from string too long */
+                char probe;
+                if (copyin(current_proc->pagetable, &probe, uptr, 1) < 0) {
+                    /* BF: kenvbuf not yet allocated at this point, only free kstrbuf */
+                    kfree(kstrbuf);
+                    return (long)-14; /* -EFAULT */
+                }
+            }
+            if (copyinstr(current_proc->pagetable, kstrbuf + kstroff, uptr, remaining) < 0) {
+                /* String does not fit in remaining page space — arg list too big */
+                /* BF: kenvbuf not yet allocated at this point, only free kstrbuf */
+                kfree(kstrbuf);
+                return (long)-7; /* -E2BIG */
+            }
+            int slen = strlen(kstrbuf + kstroff) + 1;
             kstroff_arr[kargc] = kstroff;
-            memcpy(kstrbuf + kstroff, tmpstr, slen);
             kstroff += slen;
             kargc++;
         }
@@ -531,13 +549,30 @@ long sys_execve_handler(struct trapframe *tf) {
             if (copyin(current_proc->pagetable, &uptr, uenvp + (uint64_t)kenvc * 8, 8) < 0)
                 break;
             if (uptr == 0) break;
-            char tmpstr[128];
-            if (copyinstr(current_proc->pagetable, tmpstr, uptr, sizeof(tmpstr)) < 0)
-                break;
-            int slen = strlen(tmpstr) + 1;
-            if (kenvoff + slen > (int)PAGE_SIZE) break;
+            /* BF: Copy envp strings directly into kenvbuf instead of a 128-byte
+             * stack tmpstr.  Env vars like PATH commonly exceed 128 chars; the
+             * old code silently dropped them and all subsequent vars.  Now
+             * strings up to PAGE_SIZE-kenvoff bytes are supported, and we
+             * return proper error codes for bad pointers vs. oversized env. */
+            int remaining = (int)PAGE_SIZE - kenvoff;
+            if (remaining <= 0) break; /* page full */
+            {
+                /* Probe 1 byte to distinguish bad pointer from string too long */
+                char probe;
+                if (copyin(current_proc->pagetable, &probe, uptr, 1) < 0) {
+                    kfree(kstrbuf);
+                    kfree(kenvbuf);
+                    return (long)-14; /* -EFAULT */
+                }
+            }
+            if (copyinstr(current_proc->pagetable, kenvbuf + kenvoff, uptr, remaining) < 0) {
+                /* String does not fit in remaining page space — env list too big */
+                kfree(kstrbuf);
+                kfree(kenvbuf);
+                return (long)-7; /* -E2BIG */
+            }
+            int slen = strlen(kenvbuf + kenvoff) + 1;
             kenvoff_arr[kenvc] = kenvoff;
-            memcpy(kenvbuf + kenvoff, tmpstr, slen);
             kenvoff += slen;
             kenvc++;
         }
