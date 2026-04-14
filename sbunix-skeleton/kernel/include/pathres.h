@@ -5,7 +5,8 @@
 #ifndef _PATHRES_H
 #define _PATHRES_H
 
-void to_tarfs_path(const char *path, char *out);
+/* BF: Changed signature to accept outsize and return error on overflow */
+int  to_tarfs_path(const char *path, char *out, int outsize);
 /* BF: Changed return type from void to int to propagate ENAMETOOLONG */
 int  normalize_path(const char *in, char *out);
 int  resolve_path(const char *cwd, const char *path, char *out);

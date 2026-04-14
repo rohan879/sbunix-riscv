@@ -20,21 +20,27 @@ struct tarfs_private {
 
 /* ------------------------------------------------------------------ */
 /* Convert an absolute path to tarfs "./..." format                     */
+/* BF: Changed signature to accept outsize and return int (0 on success,
+ * -36/ENAMETOOLONG on overflow) to prevent silent buffer overruns.     */
 /* ------------------------------------------------------------------ */
-static void to_tarfs_path(const char *path, char *out) {
+static int to_tarfs_path(const char *path, char *out, int outsize) {
+  if (outsize < 2) return -36; /* ENAMETOOLONG */
   /* Strip leading slashes */
   while (*path == '/') path++;
   if (*path == '\0') {
     out[0] = '.'; out[1] = '\0';
-    return;
+    return 0;
   }
   out[0] = '.';
   out[1] = '/';
   int i = 2;
-  while (*path && i < 255) {
+  int lim = outsize - 1; /* reserve null terminator */
+  while (*path && i < lim) {
     out[i++] = *path++;
   }
+  if (*path) return -36; /* ENAMETOOLONG — input too long */
   out[i] = '\0';
+  return 0;
 }
 
 /* Check if path is a directory in tarfs */
@@ -43,7 +49,8 @@ static int tarfs_is_dir(const char *path) {
   if (path[0] == '.' && path[1] == '\0') return 1;
 
   char tarpath[256];
-  to_tarfs_path(path, tarpath);
+  /* BF: Pass sizeof to prevent buffer overflow; return 0 (not dir) on truncation */
+  if (to_tarfs_path(path, tarpath, sizeof(tarpath)) < 0) return 0;
   int tplen = strlen(tarpath);
 
   struct posix_header *hdr = (struct posix_header *)_tarfs_start;
@@ -68,7 +75,9 @@ static int tarfs_is_dir(const char *path) {
 static int tarfs_open(void *fs_data, const char *path, int flags, void **private) {
   (void)fs_data;
   char tarpath[256];
-  to_tarfs_path(path, tarpath);
+  /* BF: Pass sizeof to prevent buffer overflow; return ENOENT on truncation */
+  if (to_tarfs_path(path, tarpath, sizeof(tarpath)) < 0)
+    return -2; /* -ENOENT: path too long for tarfs */
 
   /* Try exact match first */
   struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
@@ -212,7 +221,9 @@ static int tarfs_fstat(void *fs_data, void *private, uint8_t *st) {
 static int tarfs_stat(void *fs_data, const char *path, uint8_t *st) {
   (void)fs_data;
   char tarpath[256];
-  to_tarfs_path(path, tarpath);
+  /* BF: Pass sizeof to prevent buffer overflow; return ENOENT on truncation */
+  if (to_tarfs_path(path, tarpath, sizeof(tarpath)) < 0)
+    return -2; /* -ENOENT: path too long for tarfs */
 
   struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
   if (!hdr) {
@@ -401,7 +412,9 @@ done:
 static int tarfs_readlink(void *fs_data, const char *path, char *buf, int bufsiz) {
   (void)fs_data;
   char tarpath[256];
-  to_tarfs_path(path, tarpath);
+  /* BF: Pass sizeof to prevent buffer overflow; return ENOENT on truncation */
+  if (to_tarfs_path(path, tarpath, sizeof(tarpath)) < 0)
+    return -2; /* -ENOENT: path too long for tarfs */
 
   struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
   if (!hdr)

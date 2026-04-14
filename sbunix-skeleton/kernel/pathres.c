@@ -12,21 +12,27 @@
 
 /* Convert an absolute/relative path to the tarfs "./..." format.
  * tarfs uses paths like "./bin/echo", "./etc/rc", etc.
- * Used by execve to look up ELF binaries. */
-void to_tarfs_path(const char *path, char *out) {
+ * Used by execve to look up ELF binaries.
+ * BF: Changed signature to accept outsize and return int (0 on success,
+ * -36/ENAMETOOLONG on overflow) to prevent silent buffer overruns. */
+int to_tarfs_path(const char *path, char *out, int outsize) {
+    if (outsize < 2) return -36; /* ENAMETOOLONG */
     /* Strip leading slash(es) */
     while (*path == '/') path++;
     if (*path == '\0') {
         out[0] = '.'; out[1] = '\0';
-        return;
+        return 0;
     }
     out[0] = '.';
     out[1] = '/';
     int i = 2;
-    while (*path && i < 255) {
+    int lim = outsize - 1; /* reserve null terminator */
+    while (*path && i < lim) {
         out[i++] = *path++;
     }
+    if (*path) return -36; /* ENAMETOOLONG — input too long */
     out[i] = '\0';
+    return 0;
 }
 
 /* Normalize an absolute path in-place: collapse "." and ".." components.
@@ -299,7 +305,9 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
                 if (bi > 0 && built[bi - 1] != '/' && work[wi] != '/') {
                     if (bi < bmax) built[bi++] = '/';
                 }
-                if (bi + remaining > bmax) remaining = bmax - bi;
+                /* BF: Return ENAMETOOLONG instead of silently truncating the
+                 * remaining suffix, which would resolve a different path. */
+                if (bi + remaining > bmax) return -36; /* ENAMETOOLONG */
                 memcpy(built + bi, work + wi, remaining);
                 bi += remaining;
                 built[bi] = '\0';
@@ -309,7 +317,9 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
                 int rp_ret = resolve_path("/", built, normalized);
                 if (rp_ret < 0) return rp_ret;
                 int nlen = strlen(normalized);
-                if (nlen > bmax) nlen = bmax;
+                /* BF: Return ENAMETOOLONG instead of silently truncating
+                 * the normalized path, which could resolve wrong target. */
+                if (nlen >= (int)sizeof(built)) return -36; /* ENAMETOOLONG */
                 memcpy(resolved, normalized, nlen);
                 resolved[nlen] = '\0';
 
@@ -320,7 +330,9 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
     }
 
     /* Copy result back */
-    if (bi > bmax) bi = bmax;
+    /* BF: Return ENAMETOOLONG instead of silently clamping the built
+     * path length, which would produce a truncated (wrong) path. */
+    if (bi > bmax) return -36; /* ENAMETOOLONG */
     memcpy(resolved, built, bi);
     resolved[bi] = '\0';
     return 0;

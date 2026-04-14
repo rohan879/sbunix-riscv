@@ -557,13 +557,16 @@ long sys_execve_handler(struct trapframe *tf) {
     /* BF: Propagate all negative errors from resolve_symlinks_in_path */
     { int sr = resolve_symlinks_in_path(resolved, 6, 1);
       if (sr < 0) { kfree(kstrbuf); if (kenvbuf) kfree(kenvbuf); return (long)sr; } }
-    to_tarfs_path(resolved, tarpath);
-
-    int ret = exec(tarpath);
+    /* BF: Pass sizeof(tarpath) to prevent buffer overflow; on ENAMETOOLONG
+     * skip the tarfs lookup — the binary may still exist on ext2/VFS. */
+    int ret = -2; /* default to ENOENT if tarfs path conversion fails */
+    if (to_tarfs_path(resolved, tarpath, sizeof(tarpath)) == 0)
+        ret = exec(tarpath);
     if (ret < 0) {
         char orig_tarpath[128];
-        to_tarfs_path(kpath, orig_tarpath);
-        ret = exec(orig_tarpath);
+        /* BF: Skip tarfs fallback on ENAMETOOLONG — binary may be on ext2 */
+        if (to_tarfs_path(kpath, orig_tarpath, sizeof(orig_tarpath)) == 0)
+            ret = exec(orig_tarpath);
     }
     if (ret < 0) {
         ret = exec(kpath);
@@ -581,8 +584,9 @@ long sys_execve_handler(struct trapframe *tf) {
         struct posix_header *th = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
         if (!th) {
             char orig_tp[128];
-            to_tarfs_path(kpath, orig_tp);
-            th = tar_find_file(_tarfs_start, _tarfs_end, orig_tp);
+            /* BF: Skip tarfs fallback on ENAMETOOLONG — file may be on ext2 */
+            if (to_tarfs_path(kpath, orig_tp, sizeof(orig_tp)) == 0)
+                th = tar_find_file(_tarfs_start, _tarfs_end, orig_tp);
         }
         if (th) {
             char *data = (char *)th + sizeof(struct posix_header);
@@ -682,8 +686,11 @@ long sys_execve_handler(struct trapframe *tf) {
                             ret = sr;
                         } else {
                             char interp_tarpath[128];
-                            to_tarfs_path(interp_resolved, interp_tarpath);
-                            ret = exec(interp_tarpath);
+                            /* BF: Skip tarfs lookup on ENAMETOOLONG — interpreter
+                             * may still be loadable from ext2/VFS path. */
+                            if (to_tarfs_path(interp_resolved, interp_tarpath,
+                                              sizeof(interp_tarpath)) == 0)
+                                ret = exec(interp_tarpath);
                         }
                     }
                 }
