@@ -652,9 +652,8 @@ static int ramfs_rename(void *fs_data, const char *oldpath,
       return -39; /* -ENOTEMPTY */
     ramfs_dir_remove(new_parent, new_base);
     existing->nlink--;
-    /* BF: Only free inode immediately if no links remain, matching the
-     * deferred-free pattern used in ramfs_unlink. */
-    if (existing->nlink <= 0)
+    /* BF: Defer free if file still has open fds (matches ramfs_unlink/ramfs_close pattern) */
+    if (existing->nlink <= 0 && existing->open_count <= 0)
       ramfs_free_inode(existing);
   }
 
