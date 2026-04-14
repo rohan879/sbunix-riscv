@@ -331,18 +331,28 @@ static int cf_process_segment(const char *seg) {
             if (strcmp(word, "done") == 0 && f->nested_loop == 0) {
                 f->evaluating = 1;
 
-                /* Expand globs in the for_words before iteration */
-                char *expanded_words = expand_glob_words(f->for_words);
-                char *words_to_use = expanded_words ? expanded_words : f->for_words;
+                /* BF: Expand variables ($@, $*, $VAR etc.) in for_words BEFORE
+                 * glob expansion. Copy to a local buffer so the struct state is
+                 * not corrupted if the body re-evaluates the loop. */
+                char expanded[MAX_LINE];
+                strncpy(expanded, f->for_words, MAX_LINE - 1);
+                expanded[MAX_LINE - 1] = '\0';
+                expand_vars(expanded);
+
+                /* Expand globs in the variable-expanded words */
+                char *expanded_words = expand_glob_words(expanded);
+                char *words_to_use = expanded_words ? expanded_words : expanded;
 
                 char words_buf[MAX_LINE];
                 strncpy(words_buf, words_to_use, MAX_LINE - 1);
                 words_buf[MAX_LINE - 1] = '\0';
 
-                /* Iterate over space-separated words */
+                /* Iterate over words, splitting on spaces/tabs AND \x01.
+                 * BF: \x01 is the delimiter produced by $@ expansion to
+                 * preserve word boundaries for arguments containing spaces. */
                 char *wp = words_buf;
                 while (*wp) {
-                    while (*wp == ' ' || *wp == '\t') wp++;
+                    while (*wp == ' ' || *wp == '\t' || *wp == '\x01') wp++;
                     if (!*wp) break;
 
                     char oneword[256];
@@ -358,7 +368,10 @@ static int cf_process_segment(const char *seg) {
                             oneword[wi++] = *wp++;
                         if (*wp == '\'') wp++;
                     } else {
-                        while (*wp && *wp != ' ' && *wp != '\t' && wi < 255)
+                        /* BF: Stop on \x01 as well as whitespace so $@ args
+                         * with internal spaces are split correctly. */
+                        while (*wp && *wp != ' ' && *wp != '\t' &&
+                               *wp != '\x01' && wi < 255)
                             oneword[wi++] = *wp++;
                     }
                     oneword[wi] = '\0';

@@ -381,11 +381,21 @@ int run_builtin(struct command *cmd) {
         /* Handle set -e/-x/-u/-- flags */
         if (cmd->argv[1][0] == '-' || cmd->argv[1][0] == '+') {
             int enable = (cmd->argv[1][0] == '-');
+            /* BF: Track whether '--' was seen so we can set positional params
+             * from argv[2..] instead of just returning. */
+            int saw_dashdash = 0;
             for (const char *p = cmd->argv[1] + 1; *p; p++) {
                 if (*p == 'e') set_flag_e = enable;
                 else if (*p == 'x') set_flag_x = enable;
                 else if (*p == 'u') set_flag_u = enable;
-                else if (*p == '-') break; /* -- */
+                else if (*p == '-') { saw_dashdash = 1; break; } /* -- */
+            }
+            /* BF: 'set --' (with or without trailing args) sets positional
+             * parameters from remaining argv. With no trailing args, this
+             * clears all positional parameters (POSIX). */
+            if (saw_dashdash) {
+                positional_set_args(cmd->argc - 2, cmd->argv + 2);
+                return 0;
             }
             return 0;
         }

@@ -501,12 +501,17 @@ void expand_vars(char *line) {
                 for (char *v = tmp; *v && dst < end; )
                     *dst++ = *v++;
             } else if (*src == '@' || *src == '*') {
-                /* $@ / $* -- all positional parameters */
+                /* $@ / $* -- all positional parameters.
+                 * BF: $@ uses \x01 delimiter to preserve word boundaries so
+                 * for-loop iteration can split on arg boundaries rather than
+                 * spaces within arguments. $* uses space (POSIX). */
+                int is_at = (*src == '@');
                 src++;
                 for (int pi = 1; pi <= positional_count; pi++) {
                     char *pv = positional_get(pi);
                     if (pv) {
-                        if (pi > 1 && dst < end) *dst++ = ' ';
+                        if (pi > 1 && dst < end)
+                            *dst++ = is_at ? '\x01' : ' ';
                         while (*pv && dst < end) *dst++ = *pv++;
                     }
                 }
