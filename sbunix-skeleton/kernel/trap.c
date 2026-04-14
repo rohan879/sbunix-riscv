@@ -649,22 +649,14 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     if (copyout(p->pagetable, sp, &frame, sizeof(frame)) < 0)
         return; /* can't deliver signal -- just drop it */
 
-    /* Safety check: if no restorer provided, fall back to default (kill) */
+    /* BF: Use per-process sigtrampoline page mapped at SIGTRAMP_VA when
+     * no sa_restorer is set.  External binaries may not set restorer —
+     * the trampoline executes rt_sigreturn to return from the handler.
+     * Previously, missing restorer killed the process unconditionally. */
     if (sa[signum].restorer == 0) {
-        p->exit_status = 128 + signum;
-        p->killed_by_signal = signum;
-        cleanup_proc_resources(p);
-        p->state = ZOMBIE;
-        if (p->parent) {
-            /* BF: Capture child metadata for parent's SIGCHLD handler */
-            sig_set_pending_ex(p->parent, SIGCHLD,
-                               (int32_t)p->pid, 0, K_CLD_KILLED,
-                               p->killed_by_signal);
-            if (p->parent->state == SLEEPING)
-                p->parent->state = RUNNABLE;
-        }
-        swtch(&p->context, &scheduler_context);
-        return;
+        tf->ra = SIGTRAMP_VA;
+    } else {
+        tf->ra = (uint64_t)sa[signum].restorer;
     }
 
     /* Set up trapframe to call handler(signum[, siginfo, ucontext]) */
@@ -684,7 +676,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
             tf->a2 = 0;                     /* third arg: ucontext_t * (NULL) */
         }
         tf->sp = sp;                         /* stack points to saved trapframe */
-        tf->ra = sa[signum].restorer;        /* return address -> libc restorer -> sigreturn */
+        /* tf->ra already set above: SIGTRAMP_VA or sa[signum].restorer */
 
         /* Block this signal during handler execution */
         p->sigmask |= sa[signum].mask;

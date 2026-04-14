@@ -109,6 +109,7 @@ static int mappages_flags(pagetable_t pagetable, uint64_t va, uint64_t size,
     pte_t *pte;
 
     if (size == 0) return 0;
+    if (va + size < va) return -1; /* BF: Overflow guard — va + size wraps around */
 
     a = PGROUNDDOWN(va);
     last = PGROUNDDOWN(va + size - 1);

@@ -88,6 +88,11 @@ typedef int            pid_t;
 
 #define USER_STACK_TOP  MAXVA   /* user stack grows down from top of VA space */
 
+/* BF: Per-process sigtrampoline page VA — executes rt_sigreturn when
+ * no sa_restorer is set.  In L1 index 252 (0x3F000000 >> 21 = 504 >> 2),
+ * above uvmmap_kernel share_limit (129), well below user stack. */
+#define SIGTRAMP_VA     0x3F000000UL
+
 /* BF: Floor for user mmap allocations — above all shared kernel MMIO L1
  * entries.  L1[128] = UART at 0x10000000 is the highest safe device.
  * L1[129] starts at 0x10200000, so mmap allocations begin here.
