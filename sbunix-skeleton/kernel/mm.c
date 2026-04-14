@@ -276,8 +276,9 @@ void mm_age_pages(void) {
   static unsigned long last_age_tick = 0;
   unsigned long current_ticks = get_ticks();
   
-  // Only age every 10 ticks to avoid overhead
-  if (current_ticks - last_age_tick < 10) {
+  /* OPT: Raised internal guard from 10 to 100 ticks to match the
+   * caller's new 100-tick modulo in handle_timer_interrupt. */
+  if (current_ticks - last_age_tick < 100) {
     return;
   }
   last_age_tick = current_ticks;
