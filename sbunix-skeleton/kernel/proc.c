@@ -133,16 +133,12 @@ found:
     return 0;
   }
 
-  /* BF: Allocate 2 contiguous pages (8KB) for kernel stack.  A single
-   * 4KB page overflows during deep syscall chains (openat -> resolve_path
-   * -> resolve_symlinks -> ext2_open -> bcache -> virtio_blk), corrupting
-   * return addresses.  Falls back to 1 page if contiguous unavailable. */
+  /* Allocate 2 contiguous pages (8KB) for the kernel stack.  A single
+   * 4KB stack is not a supported fallback: deep syscall and VFS paths can
+   * corrupt the trapframe before the fault is diagnosable. */
   p->kstack = kalloc_contiguous(KSTACK_PAGES);
   if (p->kstack) {
     p->kstack_npages = KSTACK_PAGES;
-  } else {
-    p->kstack = kalloc();
-    p->kstack_npages = 1;
   }
   if (!p->kstack) {
     kfree(p->trapframe);

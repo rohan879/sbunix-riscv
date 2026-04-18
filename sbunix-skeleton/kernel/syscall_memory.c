@@ -161,7 +161,7 @@ long sys_mmap_handler(struct trapframe *tf) {
         /* BF: Reject kernel addresses for MAP_FIXED.  Use subtraction form
          * (len > limit - va) to avoid unsigned wraparound when va + len
          * overflows uint64_t. */
-        if (va >= 0x80000000UL || len > 0x80000000UL - va)
+        if (!user_range_ok(va, len))
             return (long)-22; /* EINVAL */
         /* BF: Reject MAP_FIXED in shared MMIO range below mmap floor.
          * L1 entries for PLIC/UART are kernel superpages — user demand-paging
@@ -188,10 +188,6 @@ long sys_mmap_handler(struct trapframe *tf) {
         current_proc->mmap_base = va + len;
     }
 
-    int pte_flags = 0;
-    if (prot & PROT_READ)  pte_flags |= PTE_R;
-    if (prot & PROT_WRITE) pte_flags |= PTE_W;
-    if (prot & PROT_EXEC)  pte_flags |= PTE_X;
     /* BF: Removed forced PTE_R for PROT_NONE -- demand paging handles this
      * correctly via the page fault handler which checks VMA prot flags
      * and delivers SIGSEGV for PROT_NONE access attempts. */
@@ -290,11 +286,8 @@ long sys_munmap_handler(struct trapframe *tf) {
         return -22; /* -EINVAL */
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 
-    /* BF: Use subtraction form to avoid unsigned wraparound in addr + len */
-    if (addr >= MAXVA || len > MAXVA - addr)
+    if (!user_range_ok(addr, len))
         return -22; /* -EINVAL */
-    if (addr >= 0x80000000UL || len > 0x80000000UL - addr)
-        return -22; /* -EINVAL: reject kernel addresses */
 
     /* Write back MAP_SHARED pages before unmapping */
     mmap_writeback_shared(current_proc, addr, addr + len);
@@ -358,18 +351,11 @@ long sys_mprotect_handler(struct trapframe *tf) {
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     if (len == 0)
         return 0;
-    /* BF: Use subtraction form to avoid unsigned wraparound in addr + len */
-    if (len > MAXVA - addr)
-        return -22;
-    /* Reject kernel addresses — must not modify kernel page table entries */
-    if (addr >= 0x80000000UL || len > 0x80000000UL - addr)
+    if (!user_range_ok(addr, len))
         return -22; /* -EINVAL */
 
     /* Build new PTE permission bits */
-    int new_flags = 0;
-    if (prot & PROT_READ)  new_flags |= PTE_R;
-    if (prot & PROT_WRITE) new_flags |= PTE_W;
-    if (prot & PROT_EXEC)  new_flags |= PTE_X;
+    int new_flags = prot_to_pte_flags(prot);
 
     /* BF: Preflight allocation — count needed VMA splits and pre-allocate
      * all objects.  If any allocation fails, return -ENOMEM with no PTEs
@@ -557,7 +543,7 @@ long sys_msync_handler(struct trapframe *tf) {
     uint64_t addr = tf->a0 & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t len  = tf->a1;
     len = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-    if (addr >= MAXVA || addr + len > MAXVA)
+    if (!user_range_ok(addr, len))
         return (long)-22; /* EINVAL */
     mmap_writeback_shared(current_proc, addr, addr + len);
     return 0;
@@ -663,9 +649,7 @@ long sys_mremap_handler(struct trapframe *tf) {
           struct vm_area *page_vma = vma_find(current_proc, new_va + off);
           int pte_flags = PTE_U;
           if (page_vma) {
-            if (page_vma->prot & PROT_READ)  pte_flags |= PTE_R;
-            if (page_vma->prot & PROT_WRITE) pte_flags |= PTE_W;
-            if (page_vma->prot & PROT_EXEC)  pte_flags |= PTE_X;
+            pte_flags |= prot_to_pte_flags(page_vma->prot);
           } else {
             pte_flags |= PTE_R | PTE_W;
           }

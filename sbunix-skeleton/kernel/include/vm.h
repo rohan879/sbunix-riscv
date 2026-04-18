@@ -9,6 +9,17 @@
 #define PROT_WRITE  0x02
 #define PROT_EXEC   0x04
 
+static inline int prot_to_pte_flags(int prot) {
+  int flags = 0;
+  if (prot & (PROT_READ | PROT_WRITE))
+    flags |= PTE_R;
+  if (prot & PROT_WRITE)
+    flags |= PTE_W;
+  if (prot & PROT_EXEC)
+    flags |= PTE_X;
+  return flags;
+}
+
 /* Mapping flags for vm_area (must match libc MAP_* values) */
 #define MAP_PRIVATE   0x02
 #define MAP_ANON      0x20

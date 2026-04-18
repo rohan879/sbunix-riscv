@@ -961,10 +961,7 @@ static uint64_t vm_resolve_user_page(pagetable_t pagetable, uint64_t va,
     char *pg = kalloc();
     if (!pg) goto out;
     memset(pg, 0, PAGE_SIZE);
-    int perm = PTE_U;
-    if (vma->prot & PROT_READ)  perm |= PTE_R;
-    if (vma->prot & PROT_WRITE) perm |= PTE_W;
-    if (vma->prot & PROT_EXEC)  perm |= PTE_X;
+    int perm = PTE_U | prot_to_pte_flags(vma->prot);
     if (mappages(pagetable, page_va, PAGE_SIZE, (uint64_t)pg, perm) != 0) {
       kfree(pg);
       goto out;
@@ -1002,7 +999,7 @@ out:
 int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
   char *s = (char *)src;
   while (len > 0) {
-    if (dstva >= MAXVA)
+    if (!user_addr_ok(dstva))
       return -1;
     int level;
     pte_t *pte = walk_super(pagetable, dstva, &level);
@@ -1064,7 +1061,7 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
 int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len) {
   char *d = (char *)dst;
   while (len > 0) {
-    if (srcva >= MAXVA)
+    if (!user_addr_ok(srcva))
       return -1;
     int level;
     pte_t *pte = walk_super(pagetable, srcva, &level);
@@ -1107,7 +1104,7 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
   while (max > 0) {
     /* BF: Return -EFAULT for invalid user addresses so callers can
      * distinguish page faults from buffer exhaustion (-1 / E2BIG). */
-    if (srcva >= MAXVA)
+    if (!user_addr_ok(srcva))
       return -EFAULT;
     int level;
     pte_t *pte = walk_super(pagetable, srcva, &level);
