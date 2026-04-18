@@ -10,7 +10,7 @@
 #include <errno.h>  /* BF: EFAULT for copyinstr page fault distinction */
 
 #ifndef VM_FREEWALK_TRACE
-#define VM_FREEWALK_TRACE 1
+#define VM_FREEWALK_TRACE 0
 #endif
 
 #if VM_FREEWALK_TRACE
@@ -34,6 +34,39 @@ static int pa_is_valid_superpage(uint64_t pa);
 static int pa_is_live_page(uint64_t pa);
 static int pa_is_live_superpage(uint64_t pa);
 static int pa_is_live_ptpage(uint64_t pa);
+static int vm_check_pagetable_level(pagetable_t pt, int level,
+                                    const char *label, int *printed);
+
+enum pte_kind pte_classify(pte_t pte, int level) {
+  (void)level;
+  if (PTE_IS_SWAPPED(pte))
+    return PTE_KIND_SWAPPED;
+  if (!(pte & PTE_V))
+    return PTE_KIND_EMPTY;
+  if ((pte & PTE_W) && !(pte & PTE_R))
+    return PTE_KIND_RESERVED;
+  if (pte & (PTE_R | PTE_W | PTE_X)) {
+    if (pte & PTE_COW)
+      return PTE_KIND_COW_LEAF;
+    return PTE_KIND_LEAF;
+  }
+  if (pte & PTE_U)
+    return PTE_KIND_PROT_NONE;
+  return PTE_KIND_NONLEAF;
+}
+
+const char *pte_kind_name(enum pte_kind kind) {
+  switch (kind) {
+  case PTE_KIND_EMPTY: return "empty";
+  case PTE_KIND_NONLEAF: return "nonleaf";
+  case PTE_KIND_LEAF: return "leaf";
+  case PTE_KIND_COW_LEAF: return "cow-leaf";
+  case PTE_KIND_SWAPPED: return "swapped";
+  case PTE_KIND_PROT_NONE: return "prot-none";
+  case PTE_KIND_RESERVED: return "reserved";
+  default: return "unknown";
+  }
+}
 
 // Return the address of the PTE in page table pagetable
 // that corresponds to virtual address va.  If alloc!=0,
@@ -111,6 +144,8 @@ static int mappages_flags(pagetable_t pagetable, uint64_t va, uint64_t size,
 
     if (size == 0) return 0;
     if (va + size < va) return -1; /* BF: Overflow guard — va + size wraps around */
+    if (perm & PTE_W)
+        perm |= PTE_R;
 
     a = PGROUNDDOWN(va);
     last = PGROUNDDOWN(va + size - 1);
@@ -152,6 +187,8 @@ int mappages_super(pagetable_t pagetable, uint64_t va, uint64_t size,
     if (!IS_SUPERPAGE_ALIGNED(va) || !IS_SUPERPAGE_ALIGNED(pa) ||
         !IS_SUPERPAGE_ALIGNED(size))
         return -1;
+    if (perm & PTE_W)
+        perm |= PTE_R;
 
     uint64_t end = va + size;
     for (; va < end; va += SUPERPAGE_SIZE, pa += SUPERPAGE_SIZE) {
@@ -741,6 +778,65 @@ static int pa_is_live_ptpage(uint64_t pa) {
   return page_ref_get(pa) > 0 && page_is_ptpage(pa);
 }
 
+static int vm_check_pagetable_level(pagetable_t pt, int level,
+                                    const char *label, int *printed) {
+  int errors = 0;
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pt[i];
+    enum pte_kind kind = pte_classify(pte, level);
+    if (kind == PTE_KIND_EMPTY)
+      continue;
+
+    if (kind == PTE_KIND_RESERVED) {
+      errors++;
+      if (*printed < 32) {
+        printk("pte-check[%s]: reserved pte lvl=%d idx=%d pte=0x%lx\n",
+               label ? label : "?", level, i, pte);
+        (*printed)++;
+      }
+      continue;
+    }
+
+    if ((kind == PTE_KIND_LEAF || kind == PTE_KIND_COW_LEAF ||
+         kind == PTE_KIND_PROT_NONE) && level == 1 &&
+        !IS_SUPERPAGE_ALIGNED(PTE2PA(pte))) {
+      errors++;
+      if (*printed < 32) {
+        printk("pte-check[%s]: unaligned superpage lvl=%d idx=%d pte=0x%lx pa=0x%lx\n",
+               label ? label : "?", level, i, pte, PTE2PA(pte));
+        (*printed)++;
+      }
+    }
+
+    if (kind == PTE_KIND_NONLEAF) {
+      uint64_t child_pa = PTE2PA(pte);
+      if (level == 0 || !pa_is_valid_page(child_pa)) {
+        errors++;
+        if (*printed < 32) {
+          printk("pte-check[%s]: bad nonleaf lvl=%d idx=%d pte=0x%lx pa=0x%lx\n",
+                 label ? label : "?", level, i, pte, child_pa);
+          (*printed)++;
+        }
+        continue;
+      }
+      errors += vm_check_pagetable_level((pagetable_t)child_pa, level - 1,
+                                         label, printed);
+    }
+  }
+  return errors;
+}
+
+int vm_check_pagetable(pagetable_t pagetable, const char *label) {
+  if (!pagetable)
+    return 1;
+  int printed = 0;
+  int errors = vm_check_pagetable_level(pagetable, 2, label, &printed);
+  if (errors)
+    printk("pte-check[%s]: %d invariant violation(s)\n",
+           label ? label : "?", errors);
+  return errors;
+}
+
 /* Recursively free page-table pages and user leaf pages in a sub-tree.
  * Kernel-only leaf entries (no PTE_U) are skipped so MMIO and kernel
  * RAM are never kfree'd.  Page-table pages themselves are always freed.
@@ -818,7 +914,20 @@ void proc_freepagetable(pagetable_t pagetable) {
     for (int j = 0; j < 512; j++) {
       if (j < share_limit && kernel_L1 && user_L1[j] == kernel_L1[j]) {
         user_L1[j] = 0; /* shared MMIO — detach */
-      } else if (user_L1[j] & PTE_V) {
+      }
+    }
+
+    int printed = 0;
+    int errors = vm_check_pagetable_level(user_L1, 1,
+                                          "proc_freepagetable-user",
+                                          &printed);
+    if (errors) {
+      printk("pte-check[proc_freepagetable-user]: %d invariant violation(s)\n",
+             errors);
+    }
+
+    for (int j = 0; j < 512; j++) {
+      if (user_L1[j] & PTE_V) {
         /* User-owned entry — free recursively. A user leaf may have no R/W/X
          * bits after mprotect(PROT_NONE), so handle PTE_U before non-leaf. */
         if (user_L1[j] & PTE_U) {
@@ -830,12 +939,16 @@ void proc_freepagetable(pagetable_t pagetable) {
         } else if (!(user_L1[j] & (PTE_R | PTE_W | PTE_X))) {
           /* Non-leaf: recurse into level-0 table */
           pagetable_t child = (pagetable_t)PTE2PA(user_L1[j]);
+#if VM_FREEWALK_TRACE
           pte_t saved_pte = user_L1[j];  /* save for trace after clearing */
+#endif
           if (pa_is_live_ptpage((uint64_t)child)) {
             /* Clear PTE before recursion to prevent double-free */
             user_L1[j] = 0;
             freewalk_level(child, 0);
+#if VM_FREEWALK_TRACE
             vm_trace_freewalk("l1-child", user_L1, 1, j, saved_pte, (uint64_t)child);
+#endif
             kfree((void *)child);
           } else {
             /* Corrupted/reused L0 page — silently detach */
@@ -961,10 +1074,7 @@ static uint64_t vm_resolve_user_page(pagetable_t pagetable, uint64_t va,
     char *pg = kalloc();
     if (!pg) goto out;
     memset(pg, 0, PAGE_SIZE);
-    int perm = PTE_U;
-    if (vma->prot & PROT_READ)  perm |= PTE_R;
-    if (vma->prot & PROT_WRITE) perm |= PTE_W;
-    if (vma->prot & PROT_EXEC)  perm |= PTE_X;
+    int perm = PTE_U | prot_to_pte_flags(vma->prot);
     if (mappages(pagetable, page_va, PAGE_SIZE, (uint64_t)pg, perm) != 0) {
       kfree(pg);
       goto out;
@@ -1002,7 +1112,7 @@ out:
 int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
   char *s = (char *)src;
   while (len > 0) {
-    if (dstva >= MAXVA)
+    if (!user_addr_ok(dstva))
       return -1;
     int level;
     pte_t *pte = walk_super(pagetable, dstva, &level);
@@ -1064,7 +1174,7 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
 int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len) {
   char *d = (char *)dst;
   while (len > 0) {
-    if (srcva >= MAXVA)
+    if (!user_addr_ok(srcva))
       return -1;
     int level;
     pte_t *pte = walk_super(pagetable, srcva, &level);
@@ -1107,7 +1217,7 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
   while (max > 0) {
     /* BF: Return -EFAULT for invalid user addresses so callers can
      * distinguish page faults from buffer exhaustion (-1 / E2BIG). */
-    if (srcva >= MAXVA)
+    if (!user_addr_ok(srcva))
       return -EFAULT;
     int level;
     pte_t *pte = walk_super(pagetable, srcva, &level);

@@ -48,6 +48,8 @@ DISK_IMG  := build/disk.img
 TEST_DISK_SIZE ?= 128
 # MODIFIED: added
 TEST_DISK_IMG  := build/test-disk.img
+CORE_TEST_DISK_SIZE ?= 32
+CORE_TEST_DISK_IMG  := build/test-disk-core.img
 
 -include Makefile.local
 
@@ -128,6 +130,21 @@ $(TEST_TARGETS): build/testfs/bin/%: build/libc/crt.S.o build/libc.a | build/tes
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 endif
+
+# Lightweight test disk for targeted kernel validation.  This includes only
+# local tests/* binaries and intentionally skips Sortix/open-posix payloads.
+CORE_TEST_TARGETS := $(patsubst tests/%,build/testfs-core/bin/%,$(TEST_SRC_DIRS))
+
+build/testfs-core/.dirs:
+	@mkdir -p build/testfs-core/bin
+	@touch $@
+
+$(CORE_TEST_TARGETS): build/testfs-core/bin/%: build/libc/crt.S.o build/libc.a | build/testfs-core/.dirs
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
+
+build/testfs-core/.prepared: build/testfs-core/.dirs $(CORE_TEST_TARGETS)
+	@touch $@
 
 # Prepare base rootfs before building os-tests
 build/rootfs/.prepared: $(USER_BIN)
@@ -246,6 +263,16 @@ $(TEST_DISK_IMG): build/tools/mkext2img build/testfs/.prepared
 	build/tools/mkext2img $@ $$size_mb build/testfs
 endif
 
+$(CORE_TEST_DISK_IMG): build/tools/mkext2img build/testfs-core/.prepared
+	@size_mb=$(CORE_TEST_DISK_SIZE); \
+	used_mb=$$(du -sm build/testfs-core | cut -f1); \
+	auto_mb=$$((used_mb + used_mb / 2 + 16)); \
+	if [ $$auto_mb -gt $$size_mb ]; then \
+		size_mb=$$auto_mb; \
+	fi; \
+	echo "Building core test disk image ($${size_mb}MB for $${used_mb}MB staged testfs-core)"; \
+	build/tools/mkext2img $@ $$size_mb build/testfs-core
+
 ifdef BUILD_TESTS
 QEMU_TEST_DRIVE_ARGS := -drive file=$(TEST_DISK_IMG),format=raw,if=none,id=hd1 \
 	-device virtio-blk-pci-non-transitional,drive=hd1
@@ -258,6 +285,17 @@ qemu: build/kernel.elf $(DISK_IMG) $(if $(BUILD_TESTS),$(TEST_DISK_IMG))
 		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-pci-non-transitional,drive=hd0 \
 		$(QEMU_TEST_DRIVE_ARGS) \
+		-device virtio-gpu-pci \
+		-device virtio-net-pci-non-transitional,netdev=net0 \
+		-netdev user,id=net0 \
+		-nographic
+
+qemu-core-tests: build/kernel.elf $(DISK_IMG) $(CORE_TEST_DISK_IMG)
+	qemu-system-riscv64 -machine virt -bios default -kernel $< \
+		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
+		-device virtio-blk-pci-non-transitional,drive=hd0 \
+		-drive file=$(CORE_TEST_DISK_IMG),format=raw,if=none,id=hd1 \
+		-device virtio-blk-pci-non-transitional,drive=hd1 \
 		-device virtio-gpu-pci \
 		-device virtio-net-pci-non-transitional,netdev=net0 \
 		-netdev user,id=net0 \

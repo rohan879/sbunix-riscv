@@ -355,6 +355,8 @@ static void handle_timer_interrupt(void) {
                 } else {
                     /* One-shot: disarm timer */
                     p->timers[i].next_expiry_ticks = 0;
+                    if (p->active_timer_count > 0)
+                        p->active_timer_count--;
                 }
             }
         }
@@ -682,7 +684,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* Set up trapframe to call handler(signum[, siginfo, ucontext]) */
     /* Sanity check: handler must be a valid user-space address.
      * If not, fall through to the existing SIG_DFL handling below. */
-    if (handler >= 2 && (handler < 0x1000 || handler >= 0x80000000UL)) {
+    if (handler >= 2 && (handler < 0x1000 || !user_addr_ok(handler))) {
         handler = 0;
     }
     if (handler >= 2) {
@@ -938,6 +940,8 @@ void syscall_init(void) {
 void trap_handler(struct trapframe *tf) {
     unsigned long cause = r_scause();
     unsigned long stval = r_stval();
+    unsigned long sstatus = r_sstatus();
+    int from_user = (sstatus & SSTATUS_SPP) == 0;
 
     if (cause & SCAUSE_INTERRUPT) {
         if (cause == SCAUSE_S_TIMER_INT) {
@@ -953,7 +957,7 @@ void trap_handler(struct trapframe *tf) {
          * temporarily unblock them for the deliverability check. */
         /* BF: Narrowed force_unblock to only SIGKILL/SIGSTOP (same as
          * syscall return path) -- synchronous signals unmasked at fault. */
-        if (current_proc) {
+        if (current_proc && from_user) {
             uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
             uint64_t saved = current_proc->sigmask;
             current_proc->sigmask &= ~fu;
@@ -973,7 +977,7 @@ void trap_handler(struct trapframe *tf) {
             /* --- COW page fault (store fault with COW-marked PTE) --- */
             /* BF: Refactored to use cow_break() which also registers the
              * new private page in anon rmap for the eviction scanner. */
-            if (cause == SCAUSE_STORE_PAGE_FAULT && current_proc) {
+            if (from_user && cause == SCAUSE_STORE_PAGE_FAULT && current_proc) {
                 uint64_t va = PGROUNDDOWN(stval);
                 pte_t *pte = walk(current_proc->pagetable, va, 0);
                 /* BF: Guard — reject kernel-only PTEs in COW handler */
@@ -989,7 +993,7 @@ void trap_handler(struct trapframe *tf) {
             }
 
             /* --- Swap-in: PTE_V=0 with PTE_SWAP marker --- */
-            if (current_proc) {
+            if (from_user && current_proc) {
                 uint64_t sva = PGROUNDDOWN(stval);
                 pte_t *spte = walk(current_proc->pagetable, sva, 0);
                 if (spte && PTE_IS_SWAPPED(*spte)) {
@@ -1025,7 +1029,7 @@ void trap_handler(struct trapframe *tf) {
             }
 
             /* --- Stack auto-grow (any page fault near current stack) --- */
-            if (current_proc && current_proc->stack_top > 0 &&
+            if (from_user && current_proc && current_proc->stack_top > 0 &&
                 stval >= current_proc->stack_bottom - 256 * PAGE_SIZE &&
                 stval < current_proc->stack_top) {
                 uint64_t va = PGROUNDDOWN(stval);
@@ -1055,7 +1059,7 @@ void trap_handler(struct trapframe *tf) {
             }
 
             /* --- Demand paging for VMA regions --- */
-            if (current_proc && stval < 0x80000000UL) {
+            if (from_user && current_proc && user_addr_ok(stval)) {
                 struct vm_area *fvma = vma_find(current_proc, stval);
                 if (fvma) {
                     /* BF: Enforce VMA protection flags -- deliver SIGSEGV if the fault
@@ -1119,10 +1123,7 @@ void trap_handler(struct trapframe *tf) {
                                 /* Short reads are OK — remaining bytes stay zero */
                             }
 
-                            int perm = PTE_U;
-                            if (fvma->prot & PROT_READ)  perm |= PTE_R;
-                            if (fvma->prot & PROT_WRITE) perm |= PTE_W;
-                            if (fvma->prot & PROT_EXEC)  perm |= PTE_X;
+                            int perm = PTE_U | prot_to_pte_flags(fvma->prot);
                             mappages(current_proc->pagetable, va, PAGE_SIZE,
                                      (uint64_t)pg, perm);
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
@@ -1171,16 +1172,10 @@ void trap_handler(struct trapframe *tf) {
                                     goto pagefault_kill;
                                 memcpy(cowpg, (void *)rpa, PAGE_SIZE);
                                 page_ref_dec(rpa);
-                                int perm = PTE_U;
-                                if (fvma->prot & PROT_READ)  perm |= PTE_R;
-                                if (fvma->prot & PROT_WRITE) perm |= PTE_W;
-                                if (fvma->prot & PROT_EXEC)  perm |= PTE_X;
+                                int perm = PTE_U | prot_to_pte_flags(fvma->prot);
                                 *pte = PA2PTE((uint64_t)cowpg) | perm | PTE_V;
                             } else {
-                                int perm = PTE_U;
-                                if (fvma->prot & PROT_READ)  perm |= PTE_R;
-                                if (fvma->prot & PROT_WRITE) perm |= PTE_W;
-                                if (fvma->prot & PROT_EXEC)  perm |= PTE_X;
+                                int perm = PTE_U | prot_to_pte_flags(fvma->prot);
                                 *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | perm;
                             }
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
@@ -1195,7 +1190,7 @@ void trap_handler(struct trapframe *tf) {
             /* Use self-referencing gigapage window to repair PTE without
              * walk() and without depending on the identity-mapped superpages
              * (which are the PTEs being corrupted by DMA). */
-            if (cause == SCAUSE_INST_PAGE_FAULT && stval >= 0x80000000UL) {
+            if (cause == SCAUSE_INST_PAGE_FAULT && stval >= KERNBASE) {
                 if (kernel_pagetable[RECURSIVE_INDEX] & PTE_V) {
                     volatile pte_t *ppte = recursive_l1_pte(PGROUNDDOWN(stval));
                     if (ppte) {
@@ -1257,6 +1252,11 @@ void trap_handler(struct trapframe *tf) {
             }
 
 pagefault_kill:
+            if (!from_user) {
+                printk("Kernel page fault epc=0x%lx stval=0x%lx cause=%lu sstatus=0x%lx\n",
+                       tf->epc, stval, cause, sstatus);
+                while(1) {}
+            }
             if (current_proc) {
                 /* Suppress page-fault noise when the fault is a side-effect of
                  * an ongoing signal kill.  Check three conditions:
@@ -1301,7 +1301,7 @@ pagefault_kill:
             while(1) {}
         }
         /* Handle other user-mode exceptions by delivering a signal */
-        if (current_proc) {
+        if (current_proc && from_user) {
             int sig = SIGKILL;
             if (cause == 2)                    sig = SIGILL;  /* Illegal instruction */
             else if (cause == 0 || cause == 4 || cause == 6) sig = SIGBUS; /* Misaligned */
@@ -1314,8 +1314,8 @@ pagefault_kill:
             deliver_signal(tf, current_proc);
             return;
         }
-        printk("UNEXPECTED TRAP! scause: 0x%lx, epc: 0x%lx, tval: 0x%lx\n",
-               cause, tf->epc, stval);
+        printk("UNEXPECTED TRAP! scause: 0x%lx, epc: 0x%lx, tval: 0x%lx sstatus=0x%lx\n",
+               cause, tf->epc, stval, sstatus);
         while(1) {}
     }
 

@@ -17,6 +17,7 @@ typedef int            pid_t;
 #endif
 
 // For qemu virt machine, physical memory starts at 0x80000000 and is 128MB.
+#define KERNBASE 0x80000000UL
 #define PHYSTOP 0x88000000
 
 // Round a value up to the next multiple of b
@@ -82,9 +83,24 @@ typedef int            pid_t;
 #define RECURSIVE_L2_PTE_VA(vpn2) \
     RECURSIVE_PA2VA((uint64_t)kernel_pagetable + (vpn2) * sizeof(pte_t))
 
-// User address space boundary. 
+// User address space boundary.
 // Set to 1GB to stay safely below kernel space (0x80000000).
 #define MAXVA 0x40000000L
+#define USER_TOP MAXVA
+
+static inline int user_addr_ok(uint64_t va) {
+    return va < USER_TOP;
+}
+
+static inline int user_range_ok(uint64_t va, uint64_t len) {
+    if (len == 0)
+        return va < USER_TOP;
+    if (va >= USER_TOP)
+        return 0;
+    if (len > USER_TOP - va)
+        return 0;
+    return 1;
+}
 
 #define USER_STACK_TOP  MAXVA   /* user stack grows down from top of VA space */
 

@@ -185,15 +185,15 @@ long sys_timer_create_handler(struct trapframe *tf) {
             return (long)-22; /* EINVAL */
     }
 
-    /* Initialize timer */
+    /* Initialize timer.  active_timer_count tracks armed timers only,
+     * not merely allocated slots, so newly-created disarmed timers do not
+     * keep the timer interrupt on the slow NPTIMER scan path forever. */
     current_proc->timers[tid].used = 1;
     current_proc->timers[tid].clockid = clockid;
     current_proc->timers[tid].interval_ticks = 0;
     current_proc->timers[tid].next_expiry_ticks = 0;
     current_proc->timers[tid].signo = signo;
     current_proc->timers[tid].overrun = 0;
-    /* OPT: Track active count so timer interrupt can skip idle processes */
-    current_proc->active_timer_count++;
 
     /* Return timer_t (just the index) */
     if (copyout(current_proc->pagetable, timerid_uaddr, &tid, sizeof(int)) < 0)
@@ -206,10 +206,11 @@ long sys_timer_delete_handler(struct trapframe *tf) {
     int tid = (int)tf->a0;
     if (tid < 0 || tid >= NPTIMER || !current_proc->timers[tid].used)
         return (long)-22; /* EINVAL */
-    current_proc->timers[tid].used = 0;
-    /* OPT: Decrement active count to allow timer interrupt early-exit */
-    if (current_proc->active_timer_count > 0)
+    if (current_proc->timers[tid].next_expiry_ticks != 0 &&
+        current_proc->active_timer_count > 0)
         current_proc->active_timer_count--;
+    current_proc->timers[tid].used = 0;
+    current_proc->timers[tid].next_expiry_ticks = 0;
     return (long)0;
 }
 
@@ -252,6 +253,8 @@ long sys_timer_settime_handler(struct trapframe *tf) {
         if (copyout(current_proc->pagetable, old_uaddr, &old_ispec, 32) < 0)
             return (long)-14; /* EFAULT */
     }
+
+    int was_armed = current_proc->timers[tid].next_expiry_ticks != 0;
 
     /* Set new timer values */
     current_proc->timers[tid].interval_ticks = (uint64_t)kispec.int_sec * TIMER_FREQ +
@@ -308,6 +311,14 @@ long sys_timer_settime_handler(struct trapframe *tf) {
             current_proc->timers[tid].next_expiry_ticks = r_time() + value_ticks;
         }
         current_proc->timers[tid].overrun = 0;
+    }
+
+    int is_armed = current_proc->timers[tid].next_expiry_ticks != 0;
+    if (!was_armed && is_armed) {
+        current_proc->active_timer_count++;
+    } else if (was_armed && !is_armed &&
+               current_proc->active_timer_count > 0) {
+        current_proc->active_timer_count--;
     }
 
     return (long)0;

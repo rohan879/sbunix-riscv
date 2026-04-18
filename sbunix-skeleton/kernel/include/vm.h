@@ -9,6 +9,17 @@
 #define PROT_WRITE  0x02
 #define PROT_EXEC   0x04
 
+static inline int prot_to_pte_flags(int prot) {
+  int flags = 0;
+  if (prot & (PROT_READ | PROT_WRITE))
+    flags |= PTE_R;
+  if (prot & PROT_WRITE)
+    flags |= PTE_W;
+  if (prot & PROT_EXEC)
+    flags |= PTE_X;
+  return flags;
+}
+
 /* Mapping flags for vm_area (must match libc MAP_* values) */
 #define MAP_PRIVATE   0x02
 #define MAP_ANON      0x20
@@ -38,6 +49,16 @@ struct vm_area {
 
 struct proc; /* forward declaration */
 
+enum pte_kind {
+  PTE_KIND_EMPTY = 0,
+  PTE_KIND_NONLEAF,
+  PTE_KIND_LEAF,
+  PTE_KIND_COW_LEAF,
+  PTE_KIND_SWAPPED,
+  PTE_KIND_PROT_NONE,
+  PTE_KIND_RESERVED
+};
+
 int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags);
 struct vm_area *vma_find(struct proc *p, uint64_t addr);
 int vma_remove(struct proc *p, uint64_t start, uint64_t end);
@@ -50,6 +71,9 @@ void kvminit(void);
 void kvmmap(uint64_t va, uint64_t pa, uint64_t sz, int perm);
 int mappages(pagetable_t pagetable, uint64_t va, uint64_t size, uint64_t pa, int perm);
 pte_t *walk(pagetable_t pagetable, uint64_t va, int alloc);
+enum pte_kind pte_classify(pte_t pte, int level);
+const char *pte_kind_name(enum pte_kind kind);
+int vm_check_pagetable(pagetable_t pagetable, const char *label);
 
 /* 2MB super page support */
 int  mappages_super(pagetable_t pagetable, uint64_t va, uint64_t size,
