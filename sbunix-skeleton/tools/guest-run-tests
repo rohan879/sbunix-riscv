@@ -39,6 +39,8 @@ echo "=== Running sigtest ==="
 /test/bin/sigtest
 echo "=== Running sighandtest ==="
 /test/bin/sighandtest
+echo "=== Running safetyabitest ==="
+/test/bin/safetyabitest
 echo "=== Running dirtest ==="
 /test/bin/dirtest
 echo "=== Running procfstest ==="

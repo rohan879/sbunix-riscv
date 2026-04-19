@@ -366,7 +366,7 @@ bad:
 /* sys_wait4: wait for a child to exit                                  */
 /* ------------------------------------------------------------------ */
 /* RF: Made static -- only called from sys_wait4_handler in this module */
-static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
+static pid_t sys_wait4(pid_t wpid, uint64_t status_uaddr, int options) {
     for (;;) {
         int found_child = 0;
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
@@ -382,14 +382,18 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
             found_child = 1;
             if (p->state == ZOMBIE) {
                 pid_t pid = p->pid;
-                if (wstatus) {
-                    if (p->killed_by_signal) {
-                        /* Signal kill: low 7 bits = signal number */
-                        *wstatus = p->killed_by_signal & 0x7f;
-                    } else {
-                        /* Normal exit: exit code in upper byte, low byte = 0 */
-                        *wstatus = (p->exit_status & 0xff) << 8;
-                    }
+                int kwstatus;
+                if (p->killed_by_signal) {
+                    /* Signal kill: low 7 bits = signal number */
+                    kwstatus = p->killed_by_signal & 0x7f;
+                } else {
+                    /* Normal exit: exit code in upper byte, low byte = 0 */
+                    kwstatus = (p->exit_status & 0xff) << 8;
+                }
+                if (status_uaddr) {
+                    if (copyout(current_proc->pagetable, status_uaddr,
+                                &kwstatus, sizeof(kwstatus)) < 0)
+                        return (pid_t)-EFAULT;
                 }
                 /* free child resources */
                 /* BF: Free all pages of the kernel stack (1 or 2 pages) */
@@ -409,8 +413,12 @@ static pid_t sys_wait4(pid_t wpid, int *wstatus, int options) {
             /* WUNTRACED: report stopped children */
             if ((options & 2) && p->stopped_signal) {
                 pid_t pid = p->pid;
-                if (wstatus)
-                    *wstatus = (p->stopped_signal << 8) | 0x7f;
+                int kwstatus = (p->stopped_signal << 8) | 0x7f;
+                if (status_uaddr) {
+                    if (copyout(current_proc->pagetable, status_uaddr,
+                                &kwstatus, sizeof(kwstatus)) < 0)
+                        return (pid_t)-EFAULT;
+                }
                 /* Clear stopped_signal so we don't report it again */
                 p->stopped_signal = 0;
                 return pid;
@@ -914,14 +922,7 @@ long sys_fexecve_handler(struct trapframe *tf) {
 long sys_wait4_handler(struct trapframe *tf) {
     pid_t wpid   = (pid_t)(int)tf->a0;
     int options  = (int)tf->a2;
-    int kwstatus = 0;
-    pid_t ret = sys_wait4(wpid, tf->a1 ? &kwstatus : NULL, options);
-    if (ret > 0 && tf->a1) {
-        if (copyout(current_proc->pagetable, tf->a1, &kwstatus, sizeof(kwstatus)) < 0) {
-            return (long)-EFAULT;
-        }
-    }
-    return (long)ret;
+    return (long)sys_wait4(wpid, tf->a1, options);
 }
 
 long sys_getpid_handler(struct trapframe *tf) {

@@ -12,6 +12,21 @@
 #include <vm.h>
 #include <errno.h>
 
+static int rt_sigsetsize_valid(uint64_t sigsetsize) {
+    return sigsetsize == sizeof(uint64_t);
+}
+
+static void restore_user_signal_context(struct trapframe *dst,
+                                        const struct trapframe *src) {
+    uint64_t safe_sstatus = dst->saved_sstatus;
+    safe_sstatus &= ~SSTATUS_SPP;
+    safe_sstatus |= SSTATUS_SPIE;
+
+    memcpy(dst, src, __builtin_offsetof(struct trapframe, saved_sstatus));
+    dst->saved_sstatus = safe_sstatus;
+    dst->return_to_user = 1;
+}
+
 long sys_kill_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
     int sig = (int)tf->a1;
@@ -181,6 +196,10 @@ long sys_rt_sigaction_handler(struct trapframe *tf) {
     int signum = (int)tf->a0;
     uint64_t act_uaddr = tf->a1;
     uint64_t oldact_uaddr = tf->a2;
+    uint64_t sigsetsize = tf->a3;
+
+    if (!rt_sigsetsize_valid(sigsetsize))
+        return (long)-22;
 
     if (signum < 1 || signum >= 32 || signum == 9 || signum == 19) {
         return (long)-22;
@@ -241,6 +260,10 @@ long sys_rt_sigprocmask_handler(struct trapframe *tf) {
     int how = (int)tf->a0;
     uint64_t set_uaddr = tf->a1;
     uint64_t oldset_uaddr = tf->a2;
+    uint64_t sigsetsize = tf->a3;
+
+    if (!rt_sigsetsize_valid(sigsetsize))
+        return (long)-22;
 
     if (oldset_uaddr) {
         uint64_t oldmask = current_proc->sigmask;
@@ -278,7 +301,7 @@ long sys_rt_sigreturn_handler(struct trapframe *tf) {
     }
 
     current_proc->sigmask = frame.saved_sigmask;
-    memcpy(tf, &frame.saved_tf, sizeof(frame.saved_tf));
+    restore_user_signal_context(tf, &frame.saved_tf);
 
     /* BF: Clear SS_ONSTACK if the restored sp is outside the alternate
      * signal stack.  POSIX requires SS_ONSTACK to reflect whether the
@@ -296,6 +319,9 @@ long sys_rt_sigreturn_handler(struct trapframe *tf) {
 }
 
 long sys_rt_sigsuspend_handler(struct trapframe *tf) {
+    if (!rt_sigsetsize_valid(tf->a1))
+        return (long)-22;
+
     uint64_t mask;
     if (copyin(current_proc->pagetable, &mask, tf->a0, sizeof(uint64_t)) < 0)
         return -EFAULT; // EFAULT
@@ -335,6 +361,9 @@ long sys_rt_sigsuspend_handler(struct trapframe *tf) {
 }
 
 long sys_rt_sigpending_handler(struct trapframe *tf) {
+    if (!rt_sigsetsize_valid(tf->a1))
+        return (long)-22;
+
     uint64_t pending = current_proc->sigpending & current_proc->sigmask;
     if (copyout(current_proc->pagetable, tf->a0, &pending, sizeof(uint64_t)) < 0)
         return -EFAULT;
@@ -347,6 +376,10 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
     uint64_t set_uaddr = tf->a0;
     uint64_t info_uaddr = tf->a1;
     uint64_t timeout_uaddr = tf->a2;
+    uint64_t sigsetsize = tf->a3;
+
+    if (!rt_sigsetsize_valid(sigsetsize))
+        return (long)-22; /* EINVAL */
 
     if (!set_uaddr)
         return (long)-EFAULT; /* EFAULT */
