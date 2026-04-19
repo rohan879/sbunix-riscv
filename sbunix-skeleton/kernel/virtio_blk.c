@@ -3,6 +3,7 @@
 #include <printk.h>
 #include <string.h>
 #include <vm.h>
+#include <mmio.h>
 
 #define MAX_VIRTIO_BLK_DEVS 4
 
@@ -41,32 +42,32 @@ static inline volatile void *ecam_addr(uint32_t bus, uint32_t dev,
 
 static inline uint8_t pci_read8(uint32_t bus, uint32_t dev,
                                  uint32_t fn,  uint32_t off) {
-    return *(volatile uint8_t *)ecam_addr(bus, dev, fn, off);
+    return mmio_read8(ecam_addr(bus, dev, fn, off));
 }
 
 static inline uint16_t pci_read16(uint32_t bus, uint32_t dev,
                                    uint32_t fn,  uint32_t off) {
-    return *(volatile uint16_t *)ecam_addr(bus, dev, fn, off);
+    return mmio_read16(ecam_addr(bus, dev, fn, off));
 }
 
 static inline uint32_t pci_read32(uint32_t bus, uint32_t dev,
                                    uint32_t fn,  uint32_t off) {
-    return *(volatile uint32_t *)ecam_addr(bus, dev, fn, off);
+    return mmio_read32(ecam_addr(bus, dev, fn, off));
 }
 
 static inline void pci_write16(uint32_t bus, uint32_t dev,
                                 uint32_t fn,  uint32_t off, uint16_t val) {
-    *(volatile uint16_t *)ecam_addr(bus, dev, fn, off) = val;
+    mmio_write16((volatile void *)ecam_addr(bus, dev, fn, off), val);
 }
 
 static inline void pci_write32(uint32_t bus, uint32_t dev,
                                 uint32_t fn,  uint32_t off, uint32_t val) {
-    *(volatile uint32_t *)ecam_addr(bus, dev, fn, off) = val;
+    mmio_write32((volatile void *)ecam_addr(bus, dev, fn, off), val);
 }
 
 /* Memory barrier */
 static inline void mb(void) {
-    asm volatile("fence iorw, iorw" ::: "memory");
+    mmio_fence_iorw();
 }
 
 /* ------------------------------------------------------------------ *
@@ -74,22 +75,22 @@ static inline void mb(void) {
  * packed-struct unaligned-access code-gen issues on RISC-V).          *
  * ------------------------------------------------------------------ */
 static inline uint8_t  ccfg_r8 (volatile uint8_t *b, uint32_t off) {
-    return *(volatile uint8_t  *)(b + off);
+    return mmio_read8(b + off);
 }
 static inline uint16_t ccfg_r16(volatile uint8_t *b, uint32_t off) {
-    return *(volatile uint16_t *)(b + off);
+    return mmio_read16(b + off);
 }
 static inline uint32_t ccfg_r32(volatile uint8_t *b, uint32_t off) {
-    return *(volatile uint32_t *)(b + off);
+    return mmio_read32(b + off);
 }
 static inline void ccfg_w8 (volatile uint8_t *b, uint32_t off, uint8_t  v) {
-    *(volatile uint8_t  *)(b + off) = v;
+    mmio_write8(b + off, v);
 }
 static inline void ccfg_w16(volatile uint8_t *b, uint32_t off, uint16_t v) {
-    *(volatile uint16_t *)(b + off) = v;
+    mmio_write16(b + off, v);
 }
 static inline void ccfg_w32(volatile uint8_t *b, uint32_t off, uint32_t v) {
-    *(volatile uint32_t *)(b + off) = v;
+    mmio_write32(b + off, v);
 }
 
 /* ------------------------------------------------------------------ *

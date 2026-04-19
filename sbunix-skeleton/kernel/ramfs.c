@@ -13,7 +13,7 @@
 #include <printk.h>
 #include <kmalloc.h>
 #include <kalloc.h>
-#include <riscv.h>  /* BF: for r_time() used in inode timestamp init */
+#include <timekeeping.h>
 
 /* ================================================================== */
 /* Inode / directory-entry structures                                   */
@@ -71,11 +71,7 @@ static struct ramfs_inode *ramfs_alloc_inode(enum ramfs_type type, uint32_t mode
       inodes[i].type = type;
       inodes[i].mode = mode;
       inodes[i].nlink = 1;
-      /* BF: Initialize timestamps to current time (in seconds since
-       * boot).  Proper epoch time would require get_wall_time, which
-       * is only available in trap.c; the real timestamps will be set
-       * by utimensat from userspace. */
-      uint64_t now = r_time() / 10000000UL; /* ticks -> approx seconds */
+      uint64_t now = timekeeping_now_seconds();
       inodes[i].atime_sec = now;
       inodes[i].mtime_sec = now;
       inodes[i].ctime_sec = now;
@@ -391,7 +387,7 @@ static int64_t ramfs_write(void *fs_data, void *private, const char *buf,
    * Without this, timestamps remained frozen at creation time, causing
    * mmap atime/mtime consistency tests to fail. */
   if (total > 0) {
-    ino->mtime_sec = r_time() / 10000000UL;
+    ino->mtime_sec = timekeeping_now_seconds();
     ino->ctime_sec = ino->mtime_sec;
   }
 

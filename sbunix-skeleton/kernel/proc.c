@@ -11,6 +11,17 @@ struct proc proc[NPROC];
 struct proc *current_proc = NULL;
 struct context scheduler_context;
 
+_Static_assert(sizeof(struct trapframe) == 272, "trapframe size mismatch with trap.S");
+_Static_assert(__builtin_offsetof(struct trapframe, t0) == 8, "TF_T0 mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, t1) == 16, "TF_T1 mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, t6) == 56, "TF_T6 mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, sp) == 240, "TF_SP mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, epc) == 248, "TF_EPC mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, saved_sstatus) == 256,
+               "TF_SSTATUS mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, return_to_user) == 264,
+               "TF_RETURN_TO_USER mismatch");
+
 int nextpid = 1;
 
 void procinit(void) {
@@ -42,7 +53,6 @@ void forkret(void) {
     uint64_t kstack_top = (uint64_t)current_proc->kstack
                          + (uint64_t)current_proc->kstack_npages * PAGE_SIZE;
     struct trapframe *kstack_tf = (struct trapframe *)(kstack_top - sizeof(struct trapframe));
-    _Static_assert(sizeof(struct trapframe) == 272, "trapframe size mismatch with trap.S");
     memcpy(kstack_tf, current_proc->trapframe, sizeof(struct trapframe));
     trap_restore(kstack_tf);
 }
