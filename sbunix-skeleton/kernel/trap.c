@@ -13,55 +13,20 @@
 #include <tty.h>
 #include <swap.h>
 #include <mm.h>
+#include <rtc.h>
 /* RF: New headers for trap.c modular decomposition */
 #include <syscall_handlers.h>
 #include <trap_internal.h>
 #include <pipe.h>
 
-/* Goldfish RTC at 0x101000 (QEMU virt machine) */
-#define GOLDFISH_RTC_BASE 0x101000UL
-#define GOLDFISH_RTC_TIME_LOW  0x00
-#define GOLDFISH_RTC_TIME_HIGH 0x04
-
 /* RF: Made non-static for access by extracted syscall modules via trap_internal.h */
-unsigned long boot_time;
 unsigned long ticks;
 
 /* Get current tick count - accessible from other modules */
 unsigned long get_ticks(void) {
   return ticks;
 }
-/* RF: Made non-static for access by extracted syscall modules via trap_internal.h */
-uint64_t boot_epoch_ns;  /* RTC nanoseconds at boot */
 unsigned char last_key = 0;
-
-/* RF: Made non-static for access by extracted time syscall module */
-uint64_t ns_to_time_ticks(uint64_t ns) {
-    return (ns + 99) / 100;
-}
-
-/* RF: Made non-static for access by extracted time syscall module */
-uint64_t timespec_rel_deadline(uint64_t sec, uint64_t nsec) {
-    uint64_t delta = sec * TIMER_FREQ + ns_to_time_ticks(nsec);
-    return r_time() + delta;
-}
-
-static void rtc_init(void) {
-    volatile uint32_t *rtc = (volatile uint32_t *)GOLDFISH_RTC_BASE;
-    uint32_t lo = rtc[0];  /* TIME_LOW */
-    uint32_t hi = rtc[1];  /* TIME_HIGH */
-    boot_epoch_ns = ((uint64_t)hi << 32) | (uint64_t)lo;
-}
-
-/* Get current wall-clock time as {sec, nsec}
- * RF: Made non-static for access by extracted time syscall module */
-void get_wall_time(int64_t *sec, int64_t *nsec) {
-    uint64_t elapsed_ticks = r_time() - boot_time;
-    uint64_t elapsed_ns = elapsed_ticks * 100; /* 10MHz -> ns */
-    uint64_t now_ns = boot_epoch_ns + elapsed_ns;
-    *sec  = (int64_t)(now_ns / 1000000000ULL);
-    *nsec = (int64_t)(now_ns % 1000000000ULL);
-}
 
 /* ------------------------------------------------------------------ */
 /* File descriptor helpers                                              */
@@ -173,15 +138,27 @@ static inline void sbi_set_timer(unsigned long stime) {
 }
 
 void timer_init(void) {
-    boot_time = r_time();
+    uint64_t boot_ticks = r_time();
+    uint64_t epoch_ns = 0;
+    int realtime_valid = 0;
+
     ticks = 0;
     rtc_init();
+
+    if (rtc_available()) {
+        epoch_ns = rtc_read_epoch_ns();
+        uint64_t epoch_sec = epoch_ns / NSEC_PER_SEC;
+        if (epoch_sec >= 1577836800ULL && epoch_sec < 4102444800ULL)
+            realtime_valid = 1;
+    }
+
+    timekeeping_init(boot_ticks, epoch_ns, realtime_valid);
     sbi_set_timer(r_time() + TIMER_FREQ);
 }
 
 /* Return seconds elapsed since boot (for /proc/uptime) */
 unsigned long get_uptime_secs(void) {
-    uint64_t elapsed = r_time() - boot_time;
+    uint64_t elapsed = timekeeping_elapsed_ticks();
     return (unsigned long)(elapsed / TIMER_FREQ);
 }
 
@@ -208,7 +185,7 @@ static void display_key(void) {
 }
 
 static void display_time(void) {
-    unsigned long elapsed = (r_time() - boot_time) / TIMER_FREQ;
+    unsigned long elapsed = timekeeping_elapsed_ticks() / TIMER_FREQ;
     unsigned long hours = elapsed / 3600;
     unsigned long minutes = (elapsed % 3600) / 60;
     unsigned long seconds = elapsed % 60;
@@ -373,6 +350,48 @@ static void handle_timer_interrupt(void) {
 /* Signal delivery                                                      */
 /* ------------------------------------------------------------------ */
 
+static void signal_default_terminate(struct proc *p, int signum) {
+    p->exit_status = 128 + signum;
+    p->killed_by_signal = signum;
+    p->stopped_signal = 0;
+    cleanup_proc_resources(p);
+    p->state = ZOMBIE;
+    if (p->parent) {
+        sig_set_pending_ex(p->parent, SIGCHLD,
+                           (int32_t)p->pid, 0, K_CLD_KILLED,
+                           p->killed_by_signal);
+        if (p->parent->state == SLEEPING)
+            p->parent->state = RUNNABLE;
+        struct kern_sigaction *psa = proc_sigactions(p->parent);
+        if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
+            struct proc *initproc = 0;
+            for (struct proc *q = proc; q < &proc[NPROC]; q++) {
+                if (q->pid == 1 && q->state != UNUSED) {
+                    initproc = q;
+                    break;
+                }
+            }
+            p->parent = initproc;
+            if (initproc && initproc->state == SLEEPING)
+                initproc->state = RUNNABLE;
+        }
+    }
+    swtch(&p->context, &scheduler_context);
+}
+
+static void signal_frame_fault(struct proc *p) {
+    if (p->has_saved_sigmask) {
+        p->sigmask = p->saved_sigmask_restore;
+        p->has_saved_sigmask = 0;
+    }
+    p->sigmask &= ~signal_bit(SIGSEGV);
+    p->sigpending &= ~signal_bit(SIGSEGV);
+    struct kern_sigaction *sa = proc_sigactions(p);
+    sa[SIGSEGV].handler = 0;
+    sa[SIGSEGV].flags = 0;
+    signal_default_terminate(p, SIGSEGV);
+}
+
 /* RF: Made non-static for access by extracted signal syscall module */
 void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* BF: Only SIGKILL and SIGSTOP are truly unblockable per POSIX.
@@ -480,34 +499,8 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
             return;
         }
 
-        /* Default: terminate process */
-        p->exit_status = 128 + signum;
-        p->killed_by_signal = signum;
-        p->stopped_signal = 0;
-        cleanup_proc_resources(p);
-        p->state = ZOMBIE;
-        if (p->parent) {
-            /* BF: Capture child metadata for parent's SIGCHLD handler */
-            sig_set_pending_ex(p->parent, SIGCHLD,
-                               (int32_t)p->pid, 0, K_CLD_KILLED,
-                               p->killed_by_signal);
-            if (p->parent->state == SLEEPING)
-                p->parent->state = RUNNABLE;
-            /* BF: SA_NOCLDWAIT on parent means auto-reap -- reparent to
-             * init so waitpid in parent doesn't block on this zombie.
-             * Mirrors the same logic in sys_exit_handler. */
-            struct kern_sigaction *psa = proc_sigactions(p->parent);
-            if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
-                struct proc *initproc = 0;
-                for (struct proc *q = proc; q < &proc[NPROC]; q++) {
-                    if (q->pid == 1 && q->state != UNUSED) { initproc = q; break; }
-                }
-                p->parent = initproc;
-                if (initproc && initproc->state == SLEEPING)
-                    initproc->state = RUNNABLE;
-            }
-        }
-        swtch(&p->context, &scheduler_context);
+        CONSUME_DEFERRED_MASK(p);
+        signal_default_terminate(p, signum);
         return;
     }
 
@@ -587,20 +580,10 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         sp -= 128;
         sp &= ~15UL;
         siginfo_uaddr = sp;
-        /* BF: Demand-page siginfo target (same lazy-alloc issue as signal frame) */
-        {
-            pte_t *pte = walk(p->pagetable, sp & ~(uint64_t)(PAGE_SIZE - 1), 0);
-            if (!pte || !(*pte & PTE_V)) {
-                char *mem = kalloc();
-                if (mem) {
-                    memset(mem, 0, PAGE_SIZE);
-                    mappages(p->pagetable, sp & ~(uint64_t)(PAGE_SIZE - 1),
-                             PAGE_SIZE, (uint64_t)mem, PTE_R | PTE_W | PTE_U);
-                }
-            }
-        }
-        if (copyout(p->pagetable, sp, ksi, 128) < 0)
+        if (copyout_proc(p, sp, ksi, 128) < 0) {
+            signal_frame_fault(p);
             return;
+        }
     }
 
     /* Push signal frame onto user stack.  For SA_SIGINFO this goes on
@@ -637,30 +620,10 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         frame.saved_tf.a5 = p->saved_a5;
     }
 
-    /* BF: Ensure signal frame target pages are mapped before copyout.
-     * Alt stack memory allocated via malloc/mmap may be lazily mapped —
-     * no page fault fires because the user never touched the memory before
-     * the kernel tries to write the signal frame.  Walk the page table for
-     * each page spanned by the frame and demand-allocate if unmapped. */
-    {
-        uint64_t frame_end = sp + sizeof(frame);
-        for (uint64_t pg = (sp & ~(uint64_t)(PAGE_SIZE - 1));
-             pg < frame_end; pg += PAGE_SIZE) {
-            pte_t *pte = walk(p->pagetable, pg, 0);
-            if (!pte || !(*pte & PTE_V)) {
-                char *mem = kalloc();
-                if (mem) {
-                    memset(mem, 0, PAGE_SIZE);
-                    mappages(p->pagetable, pg, PAGE_SIZE,
-                             (uint64_t)mem, PTE_R | PTE_W | PTE_U);
-                }
-            }
-        }
+    if (copyout_proc(p, sp, &frame, sizeof(frame)) < 0) {
+        signal_frame_fault(p);
+        return;
     }
-
-    /* Copy signal frame to user stack via copyout */
-    if (copyout(p->pagetable, sp, &frame, sizeof(frame)) < 0)
-        return; /* can't deliver signal -- just drop it */
 
     /* BF: Use per-process sigtrampoline page mapped at SIGTRAMP_VA when
      * no sa_restorer is set.  External binaries may not set restorer —

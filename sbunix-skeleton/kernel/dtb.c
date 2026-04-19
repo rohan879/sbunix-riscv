@@ -11,6 +11,7 @@ static const char *devtype_name(enum dtb_dev_type t) {
     case DTB_DEV_CLINT:      return "CLINT";
     case DTB_DEV_VIRTIO_MMIO:return "VIRTIO_MMIO";
     case DTB_DEV_PCI:        return "PCI";
+    case DTB_DEV_RTC:        return "RTC";
     default:                 return "UNKNOWN";
     }
 }
@@ -29,7 +30,19 @@ static enum dtb_dev_type classify(const char *compat) {
         return DTB_DEV_VIRTIO_MMIO;
     if (strncmp(compat, "pci-host-ecam", 13) == 0)
         return DTB_DEV_PCI;
+    if (strcmp(compat, "google,goldfish-rtc") == 0)
+        return DTB_DEV_RTC;
     return DTB_DEV_UNKNOWN;
+}
+
+static void copy_compatible(char *dst, const char *src, uint32_t len) {
+    uint32_t n = len;
+    if (n >= 64)
+        n = 63;
+    if (n > 0 && src[n - 1] == '\0')
+        n--;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
 }
 
 /* Align up to 4 bytes */
@@ -111,8 +124,8 @@ void dtb_parse(void *dtb) {
 
             if (depth == 3 && in_soc) {
                 if (strcmp(propname, "compatible") == 0) {
-                    cur.compatible = data;
-                    cur.type = classify(data);
+                    copy_compatible(cur.compatible, data, len);
+                    cur.type = classify(cur.compatible);
                 } else if (strcmp(propname, "reg") == 0 && len >= 16) {
                     /* Assume #address-cells=2, #size-cells=2 */
                     uint32_t *cells = (uint32_t *)data;

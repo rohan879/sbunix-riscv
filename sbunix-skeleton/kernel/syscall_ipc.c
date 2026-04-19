@@ -387,14 +387,18 @@ long sys_timerfd_settime_handler(struct trapframe *tf) {
     memcpy(&int_nsec, kits + 8, 8);
     memcpy(&val_sec, kits + 16, 8);
     memcpy(&val_nsec, kits + 24, 8);
+    if (int_nsec < 0 || int_nsec >= (int64_t)NSEC_PER_SEC ||
+        val_nsec < 0 || val_nsec >= (int64_t)NSEC_PER_SEC ||
+        int_sec < 0 || val_sec < 0)
+        return (long)-EINVAL;
     uint64_t now = r_time();
     if (val_sec > 0 || val_nsec > 0) {
-        tp->expiry_ticks = now + (uint64_t)val_sec * TIMER_FREQ +
-                           (uint64_t)val_nsec / 100;
+        tp->expiry_ticks = now + timespec_to_ticks((uint64_t)val_sec,
+                                                   (uint64_t)val_nsec);
     } else {
         tp->expiry_ticks = 0; /* disarm */
     }
-    tp->interval = (uint64_t)int_sec * TIMER_FREQ + (uint64_t)int_nsec / 100;
+    tp->interval = timespec_to_ticks((uint64_t)int_sec, (uint64_t)int_nsec);
     tp->expirations = 0;
     return 0;
 }
@@ -408,16 +412,18 @@ long sys_timerfd_gettime_handler(struct trapframe *tf) {
     if (!tp) return (long)-22;
     uint8_t kits[32];
     memset(kits, 0, 32);
-    int64_t int_sec = (int64_t)(tp->interval / TIMER_FREQ);
-    int64_t int_nsec = (int64_t)((tp->interval % TIMER_FREQ) * 100);
+    int64_t int_sec;
+    int64_t int_nsec;
+    ticks_to_timespec(tp->interval, &int_sec, &int_nsec);
     memcpy(kits, &int_sec, 8);
     memcpy(kits + 8, &int_nsec, 8);
     if (tp->expiry_ticks > 0) {
         uint64_t now = r_time();
         int64_t remaining = (int64_t)(tp->expiry_ticks - now);
         if (remaining < 0) remaining = 0;
-        int64_t rem_sec = remaining / (int64_t)TIMER_FREQ;
-        int64_t rem_nsec = (remaining % (int64_t)TIMER_FREQ) * 100;
+        int64_t rem_sec;
+        int64_t rem_nsec;
+        ticks_to_timespec((uint64_t)remaining, &rem_sec, &rem_nsec);
         memcpy(kits + 16, &rem_sec, 8);
         memcpy(kits + 24, &rem_nsec, 8);
     }

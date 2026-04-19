@@ -4,20 +4,14 @@
 #define _TRAP_INTERNAL_H
 
 #include <proc.h>
+#include <timekeeping.h>
 
-#define TIMER_FREQ 10000000UL  /* 10 MHz timebase */
-
-/* Time state (defined in trap.c) */
-extern unsigned long boot_time;
+/* Trap/timer state (defined in trap.c) */
 extern unsigned long ticks;
-extern uint64_t boot_epoch_ns;
 extern unsigned char last_key;
 
-/* Time helpers (defined in trap.c) */
+/* Timer helpers */
 unsigned long get_ticks(void);
-void get_wall_time(int64_t *sec, int64_t *nsec);
-uint64_t timespec_rel_deadline(uint64_t sec, uint64_t nsec);
-uint64_t ns_to_time_ticks(uint64_t ns);
 
 /* MAP_SHARED writeback (defined in syscall_memory.c) */
 void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end);

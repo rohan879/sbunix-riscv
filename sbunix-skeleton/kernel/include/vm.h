@@ -87,7 +87,10 @@ int uvmmap(pagetable_t pagetable, uint64_t va, uint64_t pa, uint64_t sz, int per
 void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len);
 void proc_freepagetable(pagetable_t pagetable);
 int uvmmap_kernel(pagetable_t pt);
-int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len);
+int copyout_proc(struct proc *p, uint64_t dstva, const void *src, uint64_t len);
+int copyin_proc(struct proc *p, void *dst, uint64_t srcva, uint64_t len);
+int copyinstr_proc(struct proc *p, char *dst, uint64_t srcva, uint64_t max);
+int copyout(pagetable_t pagetable, uint64_t dstva, const void *src, uint64_t len);
 int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len);
 int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max);
 
