@@ -19,6 +19,7 @@
 #include <swap.h>
 #include <tar.h>
 #include <kmalloc.h>
+#include <errno.h>
 
 extern char _tarfs_start[];
 extern char _tarfs_end[];
@@ -484,7 +485,7 @@ long sys_clone_handler(struct trapframe *tf) {
 long sys_execve_handler(struct trapframe *tf) {
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
-        return (long)-14;
+        return (long)-EFAULT;
     }
 
     uint64_t uargv = tf->a1;
@@ -522,7 +523,7 @@ long sys_execve_handler(struct trapframe *tf) {
                 if (copyin(current_proc->pagetable, &probe, uptr, 1) < 0) {
                     /* BF: kenvbuf not yet allocated at this point, only free kstrbuf */
                     kfree(kstrbuf);
-                    return (long)-14; /* -EFAULT */
+                    return (long)-EFAULT; /* -EFAULT */
                 }
             }
             if (copyinstr(current_proc->pagetable, kstrbuf + kstroff, uptr, remaining) < 0) {
@@ -562,7 +563,7 @@ long sys_execve_handler(struct trapframe *tf) {
                 if (copyin(current_proc->pagetable, &probe, uptr, 1) < 0) {
                     kfree(kstrbuf);
                     kfree(kenvbuf);
-                    return (long)-14; /* -EFAULT */
+                    return (long)-EFAULT; /* -EFAULT */
                 }
             }
             if (copyinstr(current_proc->pagetable, kenvbuf + kenvoff, uptr, remaining) < 0) {
@@ -896,7 +897,7 @@ long sys_fexecve_handler(struct trapframe *tf) {
     /* Copy path to user space */
     if (copyout(current_proc->pagetable, user_path_addr, kpath_page, path_len + 1) < 0) {
         kfree(kpath_page);
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
     }
 
     kfree(kpath_page);
@@ -917,7 +918,7 @@ long sys_wait4_handler(struct trapframe *tf) {
     pid_t ret = sys_wait4(wpid, tf->a1 ? &kwstatus : NULL, options);
     if (ret > 0 && tf->a1) {
         if (copyout(current_proc->pagetable, tf->a1, &kwstatus, sizeof(kwstatus)) < 0) {
-            return (long)-14;
+            return (long)-EFAULT;
         }
     }
     return (long)ret;
@@ -1053,7 +1054,7 @@ long sys_ps_handler(struct trapframe *tf) {
         }
         if (written > 0) {
             if (copyout(current_proc->pagetable, tf->a0, kps, (uint64_t)written * 24) < 0) {
-                return (long)-14;
+                return (long)-EFAULT;
             }
         }
     }

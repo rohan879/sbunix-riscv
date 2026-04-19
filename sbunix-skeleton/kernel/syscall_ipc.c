@@ -11,6 +11,7 @@
 #include <printk.h>
 #include <kmalloc.h>
 #include <vm.h>
+#include <errno.h>
 
 /* ------------------------------------------------------------------ */
 /* Kernel pipe table                                                    */
@@ -141,7 +142,7 @@ long sys_pipe2_handler(struct trapframe *tf) {
             if (copyout(current_proc->pagetable, tf->a0, kfds, sizeof(kfds)) < 0) {
                 close_ofile(current_proc, rfd);
                 close_ofile(current_proc, wfd);
-                return (long)-14;
+                return (long)-EFAULT;
             }
             return (long)0;
         }
@@ -167,7 +168,7 @@ long sys_futex_handler(struct trapframe *tf) {
         /* Read the current value at uaddr */
         uint32_t curval;
         if (copyin(current_proc->pagetable, &curval, uaddr, sizeof(curval)) < 0)
-            return (long)-14; /* EFAULT */
+            return (long)-EFAULT; /* EFAULT */
         /* If value changed, return EAGAIN */
         if (curval != val)
             return (long)-11; /* EAGAIN */
@@ -263,7 +264,7 @@ long sys_epoll_ctl_handler(struct trapframe *tf) {
     /* Read epoll_event from user: {uint32_t events, uint64_t data} = 12 bytes */
     uint8_t kevt[16];
     if (event_uva && copyin(current_proc->pagetable, kevt, event_uva, 12) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     uint32_t events = 0;
     uint64_t data = 0;
     if (event_uva) {
@@ -328,7 +329,7 @@ long sys_epoll_pwait_handler(struct trapframe *tf) {
             memcpy(kevt, &revents, 4);
             memcpy(kevt + 4, &ep->entries[i].data, 8);
             if (copyout(current_proc->pagetable, events_uva + (uint64_t)nready * 12, kevt, 12) < 0)
-                return (long)-14;
+                return (long)-EFAULT;
             nready++;
         }
     }
@@ -380,7 +381,7 @@ long sys_timerfd_settime_handler(struct trapframe *tf) {
     if (!tp) return (long)-22;
     /* Read struct itimerspec: {interval{sec,nsec}, value{sec,nsec}} = 32 bytes */
     uint8_t kits[32];
-    if (copyin(current_proc->pagetable, kits, new_uva, 32) < 0) return (long)-14;
+    if (copyin(current_proc->pagetable, kits, new_uva, 32) < 0) return (long)-EFAULT;
     int64_t val_sec, val_nsec, int_sec, int_nsec;
     memcpy(&int_sec, kits, 8);
     memcpy(&int_nsec, kits + 8, 8);
@@ -420,7 +421,7 @@ long sys_timerfd_gettime_handler(struct trapframe *tf) {
         memcpy(kits + 16, &rem_sec, 8);
         memcpy(kits + 24, &rem_nsec, 8);
     }
-    if (copyout(current_proc->pagetable, out_uva, kits, 32) < 0) return (long)-14;
+    if (copyout(current_proc->pagetable, out_uva, kits, 32) < 0) return (long)-EFAULT;
     return 0;
 }
 
@@ -470,7 +471,7 @@ long sys_inotify_add_watch_handler(struct trapframe *tf) {
     if (!ip || ip->count >= MAX_INOTIFY_WATCHES) return (long)-28;
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, path_uva, sizeof(kpath)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     int wd = ip->next_wd++;
     struct inotify_watch *w = &ip->watches[ip->count++];
     int len = strlen(kpath);
@@ -519,7 +520,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
     uint8_t kfds[NOFILE * 8];
     int fds_size = nfds * 8;
     if (fds_size > 0 && copyin(current_proc->pagetable, kfds, fds_uaddr, (uint64_t)fds_size) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     /* Handle sigmask swap */
     uint64_t old_mask = current_proc->sigmask;
@@ -531,7 +532,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
     if (sigmask_uaddr != 0) {
         uint64_t new_mask;
         if (copyin(current_proc->pagetable, &new_mask, sigmask_uaddr, 8) < 0)
-            return (long)-14;
+            return (long)-EFAULT;
         current_proc->sigmask = new_mask;
     }
 
@@ -563,7 +564,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
         uint64_t kts[2];
         if (copyin(current_proc->pagetable, kts, timeout_uaddr, 16) < 0) {
             current_proc->sigmask = old_mask;
-            return (long)-14;
+            return (long)-EFAULT;
         }
         if (kts[0] == 0 && kts[1] == 0) {
             /* Non-blocking poll */
@@ -652,7 +653,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
 
     /* Copyout results */
     if (fds_size > 0 && copyout(current_proc->pagetable, fds_uaddr, kfds, (uint64_t)fds_size) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     return (long)ready;
 }
@@ -698,15 +699,15 @@ long sys_pselect6_handler(struct trapframe *tf) {
     uint64_t rfds = 0, wfds = 0, efds = 0;
     if (readfds_uaddr && copyin(current_proc->pagetable, &rfds, readfds_uaddr, 8) < 0) {
         if (has_sigmask) current_proc->sigmask = old_mask;
-        return (long)-14;
+        return (long)-EFAULT;
     }
     if (writefds_uaddr && copyin(current_proc->pagetable, &wfds, writefds_uaddr, 8) < 0) {
         if (has_sigmask) current_proc->sigmask = old_mask;
-        return (long)-14;
+        return (long)-EFAULT;
     }
     if (exceptfds_uaddr && copyin(current_proc->pagetable, &efds, exceptfds_uaddr, 8) < 0) {
         if (has_sigmask) current_proc->sigmask = old_mask;
-        return (long)-14;
+        return (long)-EFAULT;
     }
 
     /* Parse timeout */
@@ -716,7 +717,7 @@ long sys_pselect6_handler(struct trapframe *tf) {
         uint64_t kts[2];
         if (copyin(current_proc->pagetable, kts, timeout_uaddr, 16) < 0) {
             if (has_sigmask) current_proc->sigmask = old_mask;
-            return (long)-14;
+            return (long)-EFAULT;
         }
         if (kts[0] == 0 && kts[1] == 0) {
             /* Non-blocking */
@@ -853,11 +854,11 @@ long sys_pselect6_handler(struct trapframe *tf) {
 
     /* Copyout modified fd_sets */
     if (readfds_uaddr && copyout(current_proc->pagetable, readfds_uaddr, &out_rfds, 8) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     if (writefds_uaddr && copyout(current_proc->pagetable, writefds_uaddr, &out_wfds, 8) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     if (exceptfds_uaddr && copyout(current_proc->pagetable, exceptfds_uaddr, &out_efds, 8) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     return (long)ready;
 }

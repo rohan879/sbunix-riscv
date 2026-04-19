@@ -10,6 +10,7 @@
 #include <string.h>
 #include <printk.h>
 #include <vm.h>
+#include <errno.h>
 
 long sys_kill_handler(struct trapframe *tf) {
     pid_t target_pid = (pid_t)(int)tf->a0;
@@ -196,7 +197,7 @@ long sys_rt_sigaction_handler(struct trapframe *tf) {
             old.pad = 0;
             old.restorer = sig_sa[signum].restorer;
             if (copyout(current_proc->pagetable, oldact_uaddr, &old, sizeof(old)) < 0) {
-                return (long)-14;
+                return (long)-EFAULT;
             }
         }
         if (act_uaddr) {
@@ -205,7 +206,7 @@ long sys_rt_sigaction_handler(struct trapframe *tf) {
                 int flags; int pad; uint64_t restorer;
             } act;
             if (copyin(current_proc->pagetable, &act, act_uaddr, sizeof(act)) < 0) {
-                return (long)-14;
+                return (long)-EFAULT;
             }
             sig_sa[signum].handler = act.handler;
             /* BF: POSIX forbids blocking SIGKILL or SIGSTOP via sa_mask.
@@ -244,13 +245,13 @@ long sys_rt_sigprocmask_handler(struct trapframe *tf) {
     if (oldset_uaddr) {
         uint64_t oldmask = current_proc->sigmask;
         if (copyout(current_proc->pagetable, oldset_uaddr, &oldmask, sizeof(oldmask)) < 0) {
-            return (long)-14;
+            return (long)-EFAULT;
         }
     }
     if (set_uaddr) {
         uint64_t newset = 0;
         if (copyin(current_proc->pagetable, &newset, set_uaddr, sizeof(newset)) < 0) {
-            return (long)-14;
+            return (long)-EFAULT;
         }
         /* BF: POSIX forbids blocking SIGKILL or SIGSTOP.  Strip these from
          * any mask modification.  Also return -EINVAL for invalid how. */
@@ -273,7 +274,7 @@ long sys_rt_sigreturn_handler(struct trapframe *tf) {
     struct signal_frame frame;
     memset(&frame, 0, sizeof(frame));
     if (copyin(current_proc->pagetable, &frame, usp, sizeof(frame)) < 0) {
-        return (long)-14;
+        return (long)-EFAULT;
     }
 
     current_proc->sigmask = frame.saved_sigmask;
@@ -297,7 +298,7 @@ long sys_rt_sigreturn_handler(struct trapframe *tf) {
 long sys_rt_sigsuspend_handler(struct trapframe *tf) {
     uint64_t mask;
     if (copyin(current_proc->pagetable, &mask, tf->a0, sizeof(uint64_t)) < 0)
-        return -14; // EFAULT
+        return -EFAULT; // EFAULT
     uint64_t old_mask = current_proc->sigmask;
     current_proc->sigmask = mask;
     /* Suspend until a signal is deliverable.  Check under both the
@@ -336,7 +337,7 @@ long sys_rt_sigsuspend_handler(struct trapframe *tf) {
 long sys_rt_sigpending_handler(struct trapframe *tf) {
     uint64_t pending = current_proc->sigpending & current_proc->sigmask;
     if (copyout(current_proc->pagetable, tf->a0, &pending, sizeof(uint64_t)) < 0)
-        return -14;
+        return -EFAULT;
     return 0;
 }
 
@@ -348,11 +349,11 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
     uint64_t timeout_uaddr = tf->a2;
 
     if (!set_uaddr)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
 
     uint64_t waitset;
     if (copyin(current_proc->pagetable, &waitset, set_uaddr, sizeof(uint64_t)) < 0)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
 
     /* Parse timeout if provided */
     int64_t timeout_sec = 0, timeout_nsec = 0;
@@ -360,7 +361,7 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
     if (timeout_uaddr) {
         struct { int64_t tv_sec; int64_t tv_nsec; } kts;
         if (copyin(current_proc->pagetable, &kts, timeout_uaddr, 16) < 0)
-            return (long)-14; /* EFAULT */
+            return (long)-EFAULT; /* EFAULT */
         if (kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L)
             return (long)-22; /* EINVAL */
         timeout_sec = kts.tv_sec;
@@ -427,7 +428,7 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
                  * siginfo_t is 40 bytes.  Writing 128 corrupts the caller's
                  * stack frame (ra, locals), causing epc=0x0 page faults. */
                 if (copyout(current_proc->pagetable, info_uaddr, kinfo, K_SIGINFO_SIZE) < 0)
-                    return (long)-14; /* EFAULT */
+                    return (long)-EFAULT; /* EFAULT */
             }
 
             return (long)sig;
@@ -502,7 +503,7 @@ long sys_sigaltstack_handler(struct trapframe *tf) {
         *(int32_t *)(kold + 8) = old_flags;
         *(uint64_t *)(kold + 16) = current_proc->ss_size;
         if (copyout(current_proc->pagetable, old_addr, kold, 24) < 0)
-            return (long)-14;
+            return (long)-EFAULT;
     }
 
     if (new_addr != 0) {
@@ -521,7 +522,7 @@ long sys_sigaltstack_handler(struct trapframe *tf) {
 
         uint8_t knew[24];
         if (copyin(current_proc->pagetable, knew, new_addr, 24) < 0)
-            return (long)-14;
+            return (long)-EFAULT;
 
         int new_flags = (int)(*(int32_t *)(knew + 8));
         uint64_t new_size = *(uint64_t *)(knew + 16);

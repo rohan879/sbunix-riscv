@@ -8,12 +8,13 @@
 #include <string.h>
 #include <printk.h>
 #include <vm.h>
+#include <errno.h>
 
 long sys_clock_gettime_handler(struct trapframe *tf) {
     uint64_t clk_id   = tf->a0;
     uint64_t ts_uaddr = tf->a1;
     if (!ts_uaddr)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
 
     struct { int64_t tv_sec; int64_t tv_nsec; } kts;
 
@@ -45,7 +46,7 @@ long sys_clock_gettime_handler(struct trapframe *tf) {
     }
 
     if (copyout(current_proc->pagetable, ts_uaddr, &kts, 16) < 0)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
     return (long)0;
 }
 
@@ -69,7 +70,7 @@ long sys_clock_getres_handler(struct trapframe *tf) {
     kres.tv_nsec = 1; /* 1 nanosecond resolution */
 
     if (copyout(current_proc->pagetable, res_uaddr, &kres, 16) < 0)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
     return (long)0;
 }
 
@@ -78,7 +79,7 @@ long sys_clock_settime_handler(struct trapframe *tf) {
     uint64_t ts_uaddr = tf->a1;
 
     if (!ts_uaddr)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
 
     /* Only CLOCK_REALTIME (0) is settable */
     if (clk_id != 0)
@@ -86,7 +87,7 @@ long sys_clock_settime_handler(struct trapframe *tf) {
 
     struct { int64_t tv_sec; int64_t tv_nsec; } kts;
     if (copyin(current_proc->pagetable, &kts, ts_uaddr, 16) < 0)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
 
     /* Validate nsec field */
     if (kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L)
@@ -107,7 +108,7 @@ long sys_nanosleep_handler(struct trapframe *tf) {
     if (req_uaddr && current_proc) {
         uint64_t kreq[2];
         if (copyin(current_proc->pagetable, kreq, req_uaddr, 16) < 0)
-            return (long)-14;
+            return (long)-EFAULT;
         if (kreq[1] >= 1000000000UL)
             return (long)-22;
         if (kreq[0] != 0 || kreq[1] != 0) {
@@ -129,7 +130,7 @@ long sys_gettimeofday_handler(struct trapframe *tf) {
         ktv.sec = sec;
         ktv.usec = nsec / 1000;
         if (copyout(current_proc->pagetable, tv_uaddr, &ktv, sizeof(ktv)) < 0) {
-            return (long)-14;
+            return (long)-EFAULT;
         }
     }
     return (long)0;
@@ -179,7 +180,7 @@ long sys_timer_create_handler(struct trapframe *tf) {
         /* Minimal parsing: just read sigev_signo at offset 4 */
         int32_t ksigevent[8]; /* sigevent is ~64 bytes */
         if (copyin(current_proc->pagetable, ksigevent, evp_uaddr, 32) < 0)
-            return (long)-14; /* EFAULT */
+            return (long)-EFAULT; /* EFAULT */
         signo = ksigevent[1]; /* sigev_signo */
         if (signo <= 0 || signo >= 32)
             return (long)-22; /* EINVAL */
@@ -197,7 +198,7 @@ long sys_timer_create_handler(struct trapframe *tf) {
 
     /* Return timer_t (just the index) */
     if (copyout(current_proc->pagetable, timerid_uaddr, &tid, sizeof(int)) < 0)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
 
     return (long)0;
 }
@@ -227,7 +228,7 @@ long sys_timer_settime_handler(struct trapframe *tf) {
     /* struct itimerspec: { struct timespec it_interval; struct timespec it_value; } = 32 bytes */
     struct { int64_t int_sec; int64_t int_nsec; int64_t val_sec; int64_t val_nsec; } kispec;
     if (copyin(current_proc->pagetable, &kispec, new_uaddr, 32) < 0)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
 
     /* Validate nsec fields */
     if (kispec.int_nsec < 0 || kispec.int_nsec >= 1000000000L ||
@@ -251,7 +252,7 @@ long sys_timer_settime_handler(struct trapframe *tf) {
             old_ispec.val_nsec = 0;
         }
         if (copyout(current_proc->pagetable, old_uaddr, &old_ispec, 32) < 0)
-            return (long)-14; /* EFAULT */
+            return (long)-EFAULT; /* EFAULT */
     }
 
     int was_armed = current_proc->timers[tid].next_expiry_ticks != 0;
@@ -350,7 +351,7 @@ long sys_timer_gettime_handler(struct trapframe *tf) {
     }
 
     if (copyout(current_proc->pagetable, value_uaddr, &kispec, 32) < 0)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
 
     return (long)0;
 }
@@ -372,7 +373,7 @@ long sys_clock_nanosleep_handler(struct trapframe *tf) {
     int flags = (int)tf->a1;
     uint64_t kreq[2]; /* {tv_sec, tv_nsec} */
     if (copyin(current_proc->pagetable, kreq, tf->a2, 16) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     if (kreq[1] >= 1000000000UL)
         return (long)-22;
@@ -417,7 +418,7 @@ long sys_getrusage_handler(struct trapframe *tf) {
     memcpy(kru + 0, &sec, 8);   /* ru_utime.tv_sec */
     memcpy(kru + 8, &usec, 8);  /* ru_utime.tv_usec */
     if (copyout(current_proc->pagetable, uaddr, kru, 128) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     return 0;
 }
 
@@ -442,7 +443,7 @@ long sys_times_handler(struct trapframe *tf) {
     /* tms_stime, tms_cutime, tms_cstime remain zero */
 
     if (copyout(current_proc->pagetable, uaddr, ktms, 32) < 0)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
 
     /* Return value: elapsed real time in clock ticks since arbitrary point in the past */
     return ticks;

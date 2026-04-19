@@ -17,6 +17,7 @@
 #include <kalloc.h>
 #include <tty.h>
 #include <tar.h>
+#include <errno.h>
 
 /* ------------------------------------------------------------------ */
 /* File lock infrastructure                                            */
@@ -214,7 +215,7 @@ long sys_write_handler(struct trapframe *tf) {
             while (n > 0) {
                 int chunk = n > (int)sizeof(kchunk) ? (int)sizeof(kchunk) : n;
                 if (copyin(current_proc->pagetable, kchunk, ubuf + written, chunk) < 0) {
-                    return (written > 0) ? (long)written : (long)-14;
+                    return (written > 0) ? (long)written : (long)-EFAULT;
                 }
                 for (int i = 0; i < chunk; i++) {
                     pipes[pid].buf[pipes[pid].wpos % KPIPE_BUF] = kchunk[i];
@@ -246,7 +247,7 @@ long sys_write_handler(struct trapframe *tf) {
             uint64_t chunk = len - total;
             if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
             if (copyin(current_proc->pagetable, kbuf, ubuf + total, chunk) < 0) {
-                return (total > 0) ? (long)total : (long)-14;
+                return (total > 0) ? (long)total : (long)-EFAULT;
             }
             int64_t ret = f->ops->write(f->fs_data, f->private, kbuf, chunk,
                                         &f->offset);
@@ -319,7 +320,7 @@ long sys_read_handler(struct trapframe *tf) {
             char kc = pipes[pid].buf[pipes[pid].rpos % KPIPE_BUF];
             pipes[pid].rpos++;
             if (copyout(current_proc->pagetable, ubuf + read_bytes, &kc, 1) < 0) {
-                return (read_bytes > 0) ? (long)read_bytes : (long)-14;
+                return (read_bytes > 0) ? (long)read_bytes : (long)-EFAULT;
             }
             read_bytes++;
         }
@@ -342,7 +343,7 @@ pipe_eof:
             if (ret < 0) { return (total > 0) ? (long)total : (long)ret; }
             if (ret == 0) break;
             if (copyout(current_proc->pagetable, ubuf + total, kbuf, ret) < 0) {
-                return (total > 0) ? (long)total : (long)-14;
+                return (total > 0) ? (long)total : (long)-EFAULT;
             }
             total += ret;
             if ((uint64_t)ret < chunk) break;
@@ -358,7 +359,7 @@ long sys_openat_handler(struct trapframe *tf) {
 
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-14;
+        return (long)-EFAULT;
     }
 
     char resolved[128];
@@ -494,7 +495,7 @@ long sys_dup3_handler(struct trapframe *tf) {
 }
 
 long sys_getcwd_handler(struct trapframe *tf) {
-    if (tf->a0 == 0) return (long)-14; /* -EFAULT: NULL buffer */
+    if (tf->a0 == 0) return (long)-EFAULT; /* -EFAULT: NULL buffer */
     size_t sz = (size_t)tf->a1;
     const char *cwd = current_proc->cwd;
     if (!cwd[0]) cwd = "/";
@@ -503,7 +504,7 @@ long sys_getcwd_handler(struct trapframe *tf) {
         return (long)-34; /* -ERANGE: buffer too small */
     }
     if (copyout(current_proc->pagetable, tf->a0, (void *)cwd, len + 1) < 0) {
-        return (long)-14; /* -EFAULT */
+        return (long)-EFAULT; /* -EFAULT */
     }
     return (long)tf->a0; /* return buf pointer */
 }
@@ -511,7 +512,7 @@ long sys_getcwd_handler(struct trapframe *tf) {
 long sys_chdir_handler(struct trapframe *tf) {
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
-        return (long)-14;
+        return (long)-EFAULT;
     }
     /* Empty path is invalid */
     if (kpath[0] == '\0') return (long)-2; /* -ENOENT */
@@ -589,7 +590,7 @@ long sys_fstat_handler(struct trapframe *tf) {
         return (long)-9; /* EBADF */
     }
     if (!tf->a1) {
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
     }
     if (f->is_pipe) {
         uint8_t kstat[128];
@@ -603,7 +604,7 @@ long sys_fstat_handler(struct trapframe *tf) {
         memcpy(kstat + 20, &nlink, 4);
         memcpy(kstat + 56, &blksz, 4);
         if (copyout(current_proc->pagetable, tf->a1, kstat, 128) < 0) {
-            return (long)-14;
+            return (long)-EFAULT;
         }
         return (long)0;
     } else if (f->ops && f->ops->fstat) {
@@ -611,7 +612,7 @@ long sys_fstat_handler(struct trapframe *tf) {
         int ret = f->ops->fstat(f->fs_data, f->private, kstat);
         if (ret == 0) {
             if (copyout(current_proc->pagetable, tf->a1, kstat, 128) < 0) {
-                return (long)-14;
+                return (long)-EFAULT;
             }
         }
         return (long)(int64_t)ret;
@@ -637,7 +638,7 @@ long sys_fstat_handler(struct trapframe *tf) {
         memcpy(kstat + 104, &sec, 8);
         memcpy(kstat + 112, &nsec, 8);
         if (copyout(current_proc->pagetable, tf->a1, kstat, 128) < 0) {
-            return (long)-14;
+            return (long)-EFAULT;
         }
         return (long)0;
     }
@@ -649,7 +650,7 @@ long sys_newfstatat_handler(struct trapframe *tf) {
     }
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-14;
+        return (long)-EFAULT;
     }
     char resolved[128];
     /* BF: Propagate ENAMETOOLONG from resolve_path */
@@ -674,7 +675,7 @@ long sys_newfstatat_handler(struct trapframe *tf) {
         int ret = ops->stat(mnt->fs_data, relpath, kstat);
         if (ret == 0) {
             if (copyout(current_proc->pagetable, tf->a2, kstat, 128) < 0) {
-                return (long)-14;
+                return (long)-EFAULT;
             }
         }
         return (long)(int64_t)ret;
@@ -737,7 +738,7 @@ long sys_getdents64_handler(struct trapframe *tf) {
             if (written > 0) {
                 if (copyout(current_proc->pagetable, ubuf_va, kbuf, written) < 0) {
                     kfree(kbuf);
-                    return (long)-14;
+                    return (long)-EFAULT;
                 }
             }
             kfree(kbuf);
@@ -759,7 +760,7 @@ long sys_writev_handler(struct trapframe *tf) {
         if (iovcnt > 16) iovcnt = 16;
         struct { uint64_t base; uint64_t len; } kiov[16];
         if (copyin(current_proc->pagetable, kiov, iov_uaddr, iovcnt * 16) < 0) {
-            return (long)-14;
+            return (long)-EFAULT;
         }
         int64_t total = 0;
         for (int i = 0; i < iovcnt; i++) {
@@ -767,7 +768,7 @@ long sys_writev_handler(struct trapframe *tf) {
             uint64_t len = kiov[i].len;
             if (len == 0) continue;
             if (!buf_uaddr) {
-                if (total == 0) total = -14;
+                if (total == 0) total = -EFAULT;
                 break;
             }
             if (f->is_pipe) {
@@ -786,7 +787,7 @@ long sys_writev_handler(struct trapframe *tf) {
                     uint64_t clen = len - done;
                     if (clen > sizeof(kchunk)) clen = sizeof(kchunk);
                     if (copyin(current_proc->pagetable, kchunk, buf_uaddr + done, clen) < 0) {
-                        if (total == 0) total = -14;
+                        if (total == 0) total = -EFAULT;
                         goto writev_out;
                     }
                     for (uint64_t j = 0; j < clen; j++) {
@@ -848,7 +849,7 @@ long sys_writev_handler(struct trapframe *tf) {
                     uint64_t clen = len - done;
                     if (clen > sizeof(kchunk)) clen = sizeof(kchunk);
                     if (copyin(current_proc->pagetable, kchunk, buf_uaddr + done, clen) < 0) {
-                        if (total == 0) total = -14;
+                        if (total == 0) total = -EFAULT;
                         goto writev_out;
                     }
                     int64_t n = f->ops->write(f->fs_data, f->private,
@@ -879,7 +880,7 @@ long sys_readv_handler(struct trapframe *tf) {
         if (iovcnt > 16) iovcnt = 16;
         struct { uint64_t base; uint64_t len; } kiov[16];
         if (copyin(current_proc->pagetable, kiov, iov_uaddr, iovcnt * 16) < 0) {
-            return (long)-14;
+            return (long)-EFAULT;
         }
         int64_t total = 0;
         for (int i = 0; i < iovcnt; i++) {
@@ -887,7 +888,7 @@ long sys_readv_handler(struct trapframe *tf) {
             uint64_t len = kiov[i].len;
             if (len == 0) continue;
             if (!buf_uaddr) {
-                if (total == 0) total = -14;
+                if (total == 0) total = -EFAULT;
                 break;
             }
             if (f->is_pipe) {
@@ -931,7 +932,7 @@ long sys_readv_handler(struct trapframe *tf) {
                         pipes[pid].rpos++;
                     }
                     if (k > 0 && copyout(current_proc->pagetable, buf_uaddr + j, kchunk, k) < 0) {
-                        if (total == 0) total = -14;
+                        if (total == 0) total = -EFAULT;
                         goto readv_out;
                     }
                     j += k;
@@ -948,7 +949,7 @@ long sys_readv_handler(struct trapframe *tf) {
                     if (n < 0) { if (total == 0) total = n; goto readv_out; }
                     if (n == 0) break;
                     if (copyout(current_proc->pagetable, buf_uaddr + done, kchunk, n) < 0) {
-                        if (total == 0) total = -14;
+                        if (total == 0) total = -EFAULT;
                         goto readv_out;
                     }
                     total += n;
@@ -985,7 +986,7 @@ long sys_pread64_handler(struct trapframe *tf) {
         int64_t nr = f->ops->read(f->fs_data, f->private, kbuf, chunk, &off);
         if (nr <= 0) break;
         if (copyout(current_proc->pagetable, ubuf + total, kbuf, (uint64_t)nr) < 0)
-            return total > 0 ? (long)total : (long)-14;
+            return total > 0 ? (long)total : (long)-EFAULT;
         total += (size_t)nr;
         if ((size_t)nr < chunk) break;
     }
@@ -1010,7 +1011,7 @@ long sys_pwrite64_handler(struct trapframe *tf) {
         size_t chunk = count - total;
         if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
         if (copyin(current_proc->pagetable, kbuf, ubuf + total, chunk) < 0)
-            return total > 0 ? (long)total : (long)-14;
+            return total > 0 ? (long)total : (long)-EFAULT;
         int64_t nw = f->ops->write(f->fs_data, f->private, kbuf, chunk, &off);
         if (nw <= 0) break;
         total += (size_t)nw;
@@ -1083,7 +1084,7 @@ long sys_fcntl_handler(struct trapframe *tf) {
         struct { short l_type; short l_whence; int64_t l_start;
                  int64_t l_len; pid_t l_pid; } kfl;
         if (copyin(current_proc->pagetable, &kfl, tf->a2, sizeof(kfl)) < 0)
-            return (long)-14; /* EFAULT */
+            return (long)-EFAULT; /* EFAULT */
         int is_ofd = (cmd == 36);
         /* Convert l_whence-relative offset to absolute (SEEK_CUR=1, SEEK_END=2) */
         if (kfl.l_whence == 1) { /* SEEK_CUR */
@@ -1104,7 +1105,7 @@ long sys_fcntl_handler(struct trapframe *tf) {
         kfl.l_pid = is_ofd ? -1 : op;
         kfl.l_whence = 0;
         if (copyout(current_proc->pagetable, tf->a2, &kfl, sizeof(kfl)) < 0)
-            return (long)-14;
+            return (long)-EFAULT;
         return (long)0;
     } else if (cmd == 6 || cmd == 7 || cmd == 37 || cmd == 38) {
         /* F_SETLK (6) / F_SETLKW (7) / F_OFD_SETLK (37) / F_OFD_SETLKW (38)
@@ -1113,7 +1114,7 @@ long sys_fcntl_handler(struct trapframe *tf) {
         struct { short l_type; short l_whence; int64_t l_start;
                  int64_t l_len; pid_t l_pid; } kfl;
         if (copyin(current_proc->pagetable, &kfl, tf->a2, sizeof(kfl)) < 0)
-            return (long)-14;
+            return (long)-EFAULT;
         int is_ofd = (cmd == 37 || cmd == 38);
         int wait = (cmd == 7 || cmd == 38);
         /* Convert l_whence-relative offset to absolute */
@@ -1142,7 +1143,7 @@ long sys_fcntl_handler(struct trapframe *tf) {
 long sys_faccessat_handler(struct trapframe *tf) {
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-14;
+        return (long)-EFAULT;
     }
 
     char resolved[128];
@@ -1169,7 +1170,7 @@ long sys_unlinkat_handler(struct trapframe *tf) {
     int flags = (int)tf->a2;
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-14;
+        return (long)-EFAULT;
     }
     {
         char resolved[128];
@@ -1204,9 +1205,9 @@ long sys_linkat_handler(struct trapframe *tf) {
     /* a0 = olddirfd (AT_FDCWD), a1 = oldpath, a2 = newdirfd, a3 = newpath, a4 = flags */
     char kold[128], knew[256];
     if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     if (copyinstr(current_proc->pagetable, knew, tf->a3, sizeof(knew)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     char old_resolved[128], new_resolved[256];
     /* BF: Propagate ENAMETOOLONG from resolve_path */
@@ -1245,9 +1246,9 @@ long sys_linkat_handler(struct trapframe *tf) {
 long sys_renameat2_handler(struct trapframe *tf) {
     char kold[128], knew[256];
     if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     if (copyinstr(current_proc->pagetable, knew, tf->a3, sizeof(knew)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     char old_resolved[128], new_resolved[256];
     /* BF: Propagate ENAMETOOLONG from resolve_path */
@@ -1276,7 +1277,7 @@ long sys_mkdirat_handler(struct trapframe *tf) {
     int mode = (int)tf->a2;
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-14;
+        return (long)-EFAULT;
     }
     {
         char resolved[128];
@@ -1303,7 +1304,7 @@ long sys_mknodat_handler(struct trapframe *tf) {
     uint32_t rdev = (uint32_t)tf->a3;
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-14;
+        return (long)-EFAULT;
     }
     {
         char resolved[128];
@@ -1333,7 +1334,7 @@ long sys_mknodat_handler(struct trapframe *tf) {
 long sys_readlinkat_handler(struct trapframe *tf) {
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     int bufsiz = (int)tf->a3;
     if (bufsiz <= 0)
@@ -1357,16 +1358,16 @@ long sys_readlinkat_handler(struct trapframe *tf) {
         return (long)(int64_t)ret;
 
     if (copyout(current_proc->pagetable, tf->a2, kbuf, (uint64_t)ret) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     return (long)ret;
 }
 
 long sys_symlinkat_handler(struct trapframe *tf) {
     char ktarget[128], klinkpath[256];
     if (copyinstr(current_proc->pagetable, ktarget, tf->a0, sizeof(ktarget)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     if (copyinstr(current_proc->pagetable, klinkpath, tf->a2, sizeof(klinkpath)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     char resolved[128];
     /* BF: Propagate ENAMETOOLONG from resolve_path */
@@ -1405,7 +1406,7 @@ long sys_fchmodat_handler(struct trapframe *tf) {
     /* a0 = dirfd (AT_FDCWD), a1 = user path, a2 = mode, a3 = flags */
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
 
     /* Resolve path and verify it exists via stat */
     char resolved[128];
