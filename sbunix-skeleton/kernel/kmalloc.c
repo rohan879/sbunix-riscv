@@ -82,8 +82,10 @@ void *kmalloc(uint64_t size) {
     if (npages > 1)
       return 0;
     void *page = kalloc();
-    if (page)
+    if (page) {
       km_owner_set(page, KM_PAGE_LARGE);
+      page_set_type((uint64_t)page, PAGE_SLAB);
+    }
     return page;
   }
 
@@ -103,6 +105,7 @@ void *kmalloc(uint64_t size) {
   if (!page)
     return 0;
   km_owner_set(page, (uint8_t)(b + 1));
+  page_set_type((uint64_t)page, PAGE_SLAB);
   memset(page, 0, PAGE_SIZE);
 
   int chunk_size = bucket_size[b];
@@ -134,6 +137,7 @@ void kmfree(void *ptr, uint64_t size) {
       return;
     }
     km_owner_set(ptr, KM_PAGE_NONE);
+    page_set_type((uint64_t)ptr, PAGE_UNKNOWN);
     kfree(ptr);
     return;
   }

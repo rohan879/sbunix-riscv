@@ -25,10 +25,6 @@ static uint64_t page_last_free_ra[MAX_PAGES];
 static int kfree_debug_warn_count;
 
 /* Track page usage type for debugging */
-#define PAGE_TYPE_FREE    0
-#define PAGE_TYPE_DATA    1
-#define PAGE_TYPE_PTPAGE  2  /* page table page */
-#define PAGE_TYPE_KSTACK  3  /* kernel stack */
 static uint8_t page_type[MAX_PAGES];
 
 /* Process table high water mark tracking */
@@ -37,16 +33,30 @@ static int proc_alloc_total = 0;
 static int proc_exhaustion_count = 0;
 
 static int pa_to_index(uint64_t pa) {
-    return (int)((pa - 0x80000000UL) / PAGE_SIZE);
+    if (pa < KERNBASE || pa >= PHYSTOP)
+        return -1;
+    return (int)((pa - KERNBASE) / PAGE_SIZE);
 }
 
-/* Mark a page as being used for a page table */
-void page_mark_ptpage(uint64_t pa) {
+const char *page_type_name(enum page_frame_type type) {
+    switch (type) {
+    case PAGE_UNKNOWN: return "unknown";
+    case PAGE_FREE: return "free";
+    case PAGE_PAGETABLE: return "pagetable";
+    case PAGE_USER: return "user";
+    case PAGE_SLAB: return "slab";
+    case PAGE_DMA: return "dma";
+    case PAGE_KERNEL: return "kernel";
+    default: return "bad";
+    }
+}
+
+void page_set_type(uint64_t pa, enum page_frame_type type) {
     int idx = pa_to_index(pa);
     if (idx >= 0 && idx < MAX_PAGES) {
         unsigned long old = r_sstatus();
         w_sstatus(old & ~SSTATUS_SIE);
-        if (page_type[idx] == PAGE_TYPE_PTPAGE) {
+        if (type == PAGE_PAGETABLE && page_type[idx] == PAGE_PAGETABLE) {
             /* Already marked as ptpage - this might indicate double-use */
             /* Only warn if we haven't seen too many warnings */
             if (kfree_debug_warn_count < 32) {
@@ -54,17 +64,33 @@ void page_mark_ptpage(uint64_t pa) {
                        pa, page_refcount[idx]);
             }
         }
-        page_type[idx] = PAGE_TYPE_PTPAGE;
+        page_type[idx] = (uint8_t)type;
         w_sstatus(old);
     }
 }
 
-/* Check if a page is marked as a page table page */
-int page_is_ptpage(uint64_t pa) {
+enum page_frame_type page_get_type(uint64_t pa) {
     int idx = pa_to_index(pa);
     if (idx >= 0 && idx < MAX_PAGES)
-        return page_type[idx] == PAGE_TYPE_PTPAGE;
-    return 0;
+        return (enum page_frame_type)page_type[idx];
+    return PAGE_UNKNOWN;
+}
+
+void page_mark_range(uint64_t start, uint64_t end, enum page_frame_type type) {
+    uint64_t a = PGROUNDDOWN(start);
+    uint64_t last = PGROUNDUP(end);
+    for (; a < last; a += PAGE_SIZE)
+        page_set_type(a, type);
+}
+
+/* Mark a page as being used for a page table */
+void page_mark_ptpage(uint64_t pa) {
+    page_set_type(pa, PAGE_PAGETABLE);
+}
+
+/* Check if a page is marked as a page table page */
+int page_is_ptpage(uint64_t pa) {
+    return page_get_type(pa) == PAGE_PAGETABLE;
 }
 
 /* Track process table usage */
@@ -153,8 +179,9 @@ void kfree(void *pa) {
         }
         if (page_refcount[idx] == 0) {
             if (kfree_debug_warn_count < 32) {
-                printk("WARNING: double kfree pa=0x%lx prev_ra=0x%lx curr_ra=0x%lx type=%d\n",
-                       (uint64_t)pa, page_last_free_ra[idx], caller_ra, page_type[idx]);
+                printk("WARNING: double kfree pa=0x%lx prev_ra=0x%lx curr_ra=0x%lx type=%s\n",
+                       (uint64_t)pa, page_last_free_ra[idx], caller_ra,
+                       page_type_name((enum page_frame_type)page_type[idx]));
                 kfree_debug_warn_count++;
             }
             w_sstatus(old);
@@ -162,7 +189,7 @@ void kfree(void *pa) {
         }
         page_refcount[idx] = 0;
         page_last_free_ra[idx] = caller_ra;
-        page_type[idx] = PAGE_TYPE_FREE;
+        page_type[idx] = PAGE_FREE;
     }
 
     r = (struct run*)pa;
@@ -182,6 +209,7 @@ void kinit(void) {
 
     // Start page-aligning from the end of the kernel data.
     p = (char*)ROUNDUP((unsigned long)_kernel_end, PAGE_SIZE);
+    page_mark_range(KERNBASE, (uint64_t)p, PAGE_KERNEL);
 
     printk("kinit: initializing memory from 0x%lx to 0x%lx\n", (unsigned long)p, (unsigned long)PHYSTOP);
 
@@ -211,7 +239,9 @@ void *kalloc(void) {
     if(r) {
         kmem.freelist = r->next;
         free_page_count--;
-        page_refcount[pa_to_index((uint64_t)r)] = 1;
+        int idx = pa_to_index((uint64_t)r);
+        page_refcount[idx] = 1;
+        page_type[idx] = PAGE_UNKNOWN;
     }
 
     w_sstatus(old);
@@ -305,8 +335,10 @@ void *kalloc_contiguous(int npages) {
         }
         free_page_count -= removed;
         /* Set refcount for all pages in the block */
-        for (int i = 0; i < npages; i++)
+        for (int i = 0; i < npages; i++) {
             page_refcount[base + i] = 1;
+            page_type[base + i] = PAGE_UNKNOWN;
+        }
 
         w_sstatus(old);
         /* BF: Zero contiguous pages — same rationale as kalloc(). */
@@ -386,6 +418,8 @@ void *kalloc_super(void) {
 
         /* Set base page refcount to 1 */
         page_refcount[base] = 1;
+        for (int i = 0; i < SUPERPAGE_NPAGES; i++)
+            page_type[base + i] = PAGE_UNKNOWN;
         w_sstatus(old);
         return (void *)base_pa;
     }
@@ -431,7 +465,7 @@ void kfree_super(void *pa) {
                 continue;
             }
             page_refcount[idx] = 0;
-            page_type[idx] = PAGE_TYPE_FREE;
+            page_type[idx] = PAGE_FREE;
             struct run *r = (struct run *)sub_pa;
             r->next = kmem.freelist;
             kmem.freelist = r;

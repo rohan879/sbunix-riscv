@@ -340,6 +340,9 @@ static int virtio_blk_init_one(uint32_t bus, uint32_t pdev, uint32_t fn,
             printk("virtio_blk[%d]: out of memory\n", index);
             return -1;
         }
+        page_set_type((uint64_t)page0, PAGE_DMA);
+        page_set_type((uint64_t)page1, PAGE_DMA);
+        page_set_type((uint64_t)page2, PAGE_DMA);
         memset(page0, 0, PAGE_SIZE);
         memset(page1, 0, PAGE_SIZE);
         memset(page2, 0, PAGE_SIZE);

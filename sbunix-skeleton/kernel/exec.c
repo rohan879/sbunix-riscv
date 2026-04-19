@@ -125,7 +125,9 @@ int exec(char *path) {
                 for (uint64_t a = seg_start; a < seg_end_pg; a += PAGE_SIZE) {
                     pte_t *ppte = walk(pagetable, a, 0);
                     if (ppte && (*ppte & PTE_V))
-                        *ppte = (*ppte & ~PTE_W);
+                        pte_update(pagetable, a, ppte, (*ppte & ~PTE_W),
+                                   0, PTE_UPDATE_EXEC_PERM,
+                                   PTE_SFENCE_NONE);
                 }
             }
 
@@ -420,7 +422,9 @@ int exec_vfs(const char *resolved_path) {
                  a += PAGE_SIZE) {
                 pte_t *ppte = walk(pagetable, a, 0);
                 if (ppte && (*ppte & PTE_V))
-                    *ppte = (*ppte & ~PTE_W);
+                    pte_update(pagetable, a, ppte, (*ppte & ~PTE_W),
+                               0, PTE_UPDATE_EXEC_PERM,
+                               PTE_SFENCE_NONE);
             }
         }
 

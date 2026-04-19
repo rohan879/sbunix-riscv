@@ -970,7 +970,13 @@ void trap_handler(struct trapframe *tf) {
                      * BEFORE freeing the slot, so the PTE is never
                      * left with a stale swap marker that freewalk_level
                      * could double-free. */
-                    *spte = PA2PTE((uint64_t)newpage) | sflags | PTE_V;
+                    if (pte_update(current_proc->pagetable, sva, spte,
+                                   PA2PTE((uint64_t)newpage) | sflags | PTE_V,
+                                   0, PTE_UPDATE_SWAPIN,
+                                   PTE_SFENCE_NONE) < 0) {
+                        kfree(newpage);
+                        goto pagefault_kill;
+                    }
                     swap_free(slot);
                     asm volatile("sfence.vma %0, zero" : : "r"(sva));
                     if ((sflags & PTE_X) || cause == SCAUSE_INST_PAGE_FAULT)
@@ -1133,10 +1139,20 @@ void trap_handler(struct trapframe *tf) {
                                 memcpy(cowpg, (void *)rpa, PAGE_SIZE);
                                 page_ref_dec(rpa);
                                 int perm = PTE_U | prot_to_pte_flags(fvma->prot);
-                                *pte = PA2PTE((uint64_t)cowpg) | perm | PTE_V;
+                                if (pte_update(current_proc->pagetable, va, pte,
+                                               PA2PTE((uint64_t)cowpg) | perm | PTE_V,
+                                               0, PTE_UPDATE_COW,
+                                               PTE_SFENCE_NONE) < 0) {
+                                    kfree(cowpg);
+                                    goto pagefault_kill;
+                                }
                             } else {
                                 int perm = PTE_U | prot_to_pte_flags(fvma->prot);
-                                *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | perm;
+                                if (pte_update(current_proc->pagetable, va, pte,
+                                               (*pte & ~(PTE_R | PTE_W | PTE_X)) | perm,
+                                               0, PTE_UPDATE_MPROTECT,
+                                               PTE_SFENCE_NONE) < 0)
+                                    goto pagefault_kill;
                             }
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
                             if ((fvma->prot & PROT_EXEC) || cause == SCAUSE_INST_PAGE_FAULT)
