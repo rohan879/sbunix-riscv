@@ -276,9 +276,9 @@ void mm_age_pages(void) {
   static unsigned long last_age_tick = 0;
   unsigned long current_ticks = get_ticks();
   
-  /* OPT: Raised internal guard from 10 to 100 ticks to match the
-   * caller's new 100-tick modulo in handle_timer_interrupt. */
-  if (current_ticks - last_age_tick < 100) {
+  /* BF: Keep aging frequent enough that reclaim/swap tests do not run with
+   * stale page age data for long stretches. */
+  if (current_ticks - last_age_tick < 10) {
     return;
   }
   last_age_tick = current_ticks;
@@ -296,7 +296,7 @@ void mm_age_pages(void) {
       }
       
       // Also decay access count slowly
-      if (page->access_count > 0 && (current_ticks % 100) == 0) {
+      if (page->access_count > 0 && (current_ticks % 10) == 0) {
         page->access_count = (page->access_count * 3) / 4;
       }
     }

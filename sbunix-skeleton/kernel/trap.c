@@ -280,10 +280,9 @@ static void handle_timer_interrupt(void) {
         printk("timer: repaired %d kernel PTE(s)\n", repairs);
     }
     
-    /* OPT: Age pages every 100 ticks (~10s) instead of every 10 ticks (~1s)
-     * to reduce per-tick overhead; page aging is expensive and infrequent
-     * aging is sufficient for the swap eviction heuristic. */
-    if (ticks % 100 == 0) {
+    /* BF: Reclaim decisions depend on reasonably fresh page aging data; long
+     * intervals made memory-pressure tests run with stale eviction signals. */
+    if (ticks % 10 == 0) {
         extern struct page *page_table;
         if (page_table) {
             mm_age_pages();
