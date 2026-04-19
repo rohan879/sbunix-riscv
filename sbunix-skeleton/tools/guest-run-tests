@@ -53,6 +53,8 @@ echo "=== Running symlinktest ==="
 /test/bin/symlinktest
 echo "=== Running clocktest ==="
 /test/bin/clocktest
+echo "=== Running rtctest ==="
+/test/bin/rtctest
 echo "=== Running exectest ==="
 /test/bin/exectest
 echo "=== Running posixtest ==="
@@ -69,6 +71,12 @@ echo "=== Running malloctest ===" && /test/bin/malloctest
 echo "=== Running shelltests ===" && /test/bin/shelltests
 echo "=== Running mremaptest ===" && /test/bin/mremaptest
 echo "=== Running mprotecttest ===" && /test/bin/mprotecttest
+echo "=== Running mprotect_kernel_addr ===" && /test/bin/mprotect_kernel_addr
+echo "=== Running copyout_lazy ===" && /test/bin/copyout_lazy
+echo "=== Running copyinstr_lazy ===" && /test/bin/copyinstr_lazy
+echo "=== Running sigaltstack_protnone ===" && /test/bin/sigaltstack_protnone
+echo "=== Running trapretstress ===" && /test/bin/trapretstress
+echo "=== Running virtiostress ===" && /test/bin/virtiostress
 echo "=== Running membugstest ===" && /test/bin/membugstest
 echo "=== Running posix_mem_test ===" && /test/bin/posix_mem_test
 echo === C Binary Tests Done ===
