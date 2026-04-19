@@ -34,16 +34,15 @@ void forkret(void) {
     x |= SSTATUS_SPIE;
     w_sstatus(x);
 
-    /* BF: Place trapframe at exact kstack_top - 256 so trap_restore's
-     * "sscratch = sp + 256" computes the correct kernel stack top.
-     * Use hardcoded 256 (matching trap_restore's assumption) rather
-     * than sizeof(struct trapframe) to be resilient to padding.
-     * Previously a stack-local copy was used, but its address was
-     * below kstack_top, causing sscratch to point to the wrong place. */
+    current_proc->trapframe->saved_sstatus = x;
+    current_proc->trapframe->return_to_user = 1;
+
+    /* BF: Place trapframe immediately below kstack_top so trap_restore can
+     * derive the next user-trap sscratch value from the frame size. */
     uint64_t kstack_top = (uint64_t)current_proc->kstack
                          + (uint64_t)current_proc->kstack_npages * PAGE_SIZE;
-    struct trapframe *kstack_tf = (struct trapframe *)(kstack_top - 256);
-    _Static_assert(sizeof(struct trapframe) == 256, "trapframe size mismatch with trap.S");
+    struct trapframe *kstack_tf = (struct trapframe *)(kstack_top - sizeof(struct trapframe));
+    _Static_assert(sizeof(struct trapframe) == 272, "trapframe size mismatch with trap.S");
     memcpy(kstack_tf, current_proc->trapframe, sizeof(struct trapframe));
     trap_restore(kstack_tf);
 }
