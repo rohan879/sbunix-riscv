@@ -28,11 +28,21 @@ void *mmap(void *addr, size_t length, int prot, int flags,
 }
 
 int munmap(void *addr, size_t length) {
-    return (int)syscall(SYS_munmap, addr, length);
+    long ret = syscall(SYS_munmap, addr, length);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return 0;
 }
 
 int mprotect(void *addr, size_t length, int prot) {
-    return (int)syscall(SYS_mprotect, addr, length, prot);
+    long ret = syscall(SYS_mprotect, addr, length, prot);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return 0;
 }
 
 /* ENH: mremap syscall wrapper for memory remapping support */
