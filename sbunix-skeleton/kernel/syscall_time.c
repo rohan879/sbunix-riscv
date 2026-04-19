@@ -21,26 +21,20 @@ long sys_clock_gettime_handler(struct trapframe *tf) {
     if (clk_id == 0) {
         /* CLOCK_REALTIME: wall-clock time */
         int64_t sec, nsec;
-        get_wall_time(&sec, &nsec);
+        if (get_wall_time(&sec, &nsec) < 0)
+            return (long)-ENODEV;
         kts.tv_sec  = sec;
         kts.tv_nsec = nsec;
     } else if (clk_id == 1) {
         /* CLOCK_MONOTONIC: time since boot */
-        uint64_t elapsed = r_time() - boot_time;
-        kts.tv_sec  = (int64_t)(elapsed / TIMER_FREQ);
-        kts.tv_nsec = (int64_t)((elapsed % TIMER_FREQ) * 100);
+        ticks_to_timespec(timekeeping_elapsed_ticks(), &kts.tv_sec, &kts.tv_nsec);
     } else if (clk_id == 2) {
-        /* BF: Return actual per-process CPU time instead of wall-clock.
-         * cputime_ticks is incremented by the timer interrupt (~10Hz),
-         * so each tick represents ~100ms of CPU time. */
-        uint64_t cpu_ns = current_proc->cputime_ticks * 100000000ULL; /* 100ms per tick */
-        kts.tv_sec  = (int64_t)(cpu_ns / 1000000000ULL);
-        kts.tv_nsec = (int64_t)(cpu_ns % 1000000000ULL);
+        uint64_t cpu_ticks = seconds_to_ticks(current_proc->cputime_ticks);
+        ticks_to_timespec(cpu_ticks, &kts.tv_sec, &kts.tv_nsec);
     } else if (clk_id == 3) {
         /* CLOCK_THREAD_CPUTIME_ID: single-hart, so same as process time */
-        uint64_t cpu_ns = current_proc->cputime_ticks * 100000000ULL;
-        kts.tv_sec  = (int64_t)(cpu_ns / 1000000000ULL);
-        kts.tv_nsec = (int64_t)(cpu_ns % 1000000000ULL);
+        uint64_t cpu_ticks = seconds_to_ticks(current_proc->cputime_ticks);
+        ticks_to_timespec(cpu_ticks, &kts.tv_sec, &kts.tv_nsec);
     } else {
         return (long)-22; /* EINVAL */
     }
@@ -63,11 +57,9 @@ long sys_clock_getres_handler(struct trapframe *tf) {
     if (!res_uaddr)
         return (long)0;
 
-    /* Resolution is based on TIMER_FREQ (10MHz = 100ns ticks)
-     * Report 1ns resolution for simplicity */
     struct { int64_t tv_sec; int64_t tv_nsec; } kres;
     kres.tv_sec = 0;
-    kres.tv_nsec = 1; /* 1 nanosecond resolution */
+    kres.tv_nsec = (int64_t)(NSEC_PER_SEC / TIMER_FREQ);
 
     if (copyout(current_proc->pagetable, res_uaddr, &kres, 16) < 0)
         return (long)-EFAULT; /* EFAULT */
@@ -100,7 +92,7 @@ long sys_clock_settime_handler(struct trapframe *tf) {
      * Tests that check clock_settime functionality will get EPERM and
      * report UNRESOLVED rather than hanging indefinitely. */
 
-    return (long)-1; /* EPERM */
+    return (long)-EPERM;
 }
 
 long sys_nanosleep_handler(struct trapframe *tf) {
@@ -125,7 +117,8 @@ long sys_gettimeofday_handler(struct trapframe *tf) {
     uint64_t tv_uaddr = tf->a0;
     if (tv_uaddr) {
         int64_t sec, nsec;
-        get_wall_time(&sec, &nsec);
+        if (get_wall_time(&sec, &nsec) < 0)
+            return (long)-ENODEV;
         struct { int64_t sec; int64_t usec; } ktv;
         ktv.sec = sec;
         ktv.usec = nsec / 1000;
@@ -147,7 +140,7 @@ long sys_alarm_handler(struct trapframe *tf) {
     if (seconds == 0)
         current_proc->alarm_ticks = 0;
     else
-        current_proc->alarm_ticks = now + (uint64_t)seconds * TIMER_FREQ;
+        current_proc->alarm_ticks = now + seconds_to_ticks(seconds);
     return (long)remaining;
 }
 
@@ -239,14 +232,13 @@ long sys_timer_settime_handler(struct trapframe *tf) {
     if (old_uaddr) {
         struct { int64_t int_sec; int64_t int_nsec; int64_t val_sec; int64_t val_nsec; } old_ispec;
         /* Convert current timer state back to itimerspec */
-        old_ispec.int_sec = (int64_t)(current_proc->timers[tid].interval_ticks / TIMER_FREQ);
-        old_ispec.int_nsec = (int64_t)((current_proc->timers[tid].interval_ticks % TIMER_FREQ) * 100);
+        ticks_to_timespec(current_proc->timers[tid].interval_ticks,
+                          &old_ispec.int_sec, &old_ispec.int_nsec);
         if (current_proc->timers[tid].next_expiry_ticks > 0) {
             uint64_t now = r_time();
             uint64_t remaining = (current_proc->timers[tid].next_expiry_ticks > now) ?
                                  (current_proc->timers[tid].next_expiry_ticks - now) : 0;
-            old_ispec.val_sec = (int64_t)(remaining / TIMER_FREQ);
-            old_ispec.val_nsec = (int64_t)((remaining % TIMER_FREQ) * 100);
+            ticks_to_timespec(remaining, &old_ispec.val_sec, &old_ispec.val_nsec);
         } else {
             old_ispec.val_sec = 0;
             old_ispec.val_nsec = 0;
@@ -258,16 +250,16 @@ long sys_timer_settime_handler(struct trapframe *tf) {
     int was_armed = current_proc->timers[tid].next_expiry_ticks != 0;
 
     /* Set new timer values */
-    current_proc->timers[tid].interval_ticks = (uint64_t)kispec.int_sec * TIMER_FREQ +
-                                                (uint64_t)kispec.int_nsec / 100;
+    current_proc->timers[tid].interval_ticks =
+        timespec_to_ticks((uint64_t)kispec.int_sec, (uint64_t)kispec.int_nsec);
 
     if (kispec.val_sec == 0 && kispec.val_nsec == 0) {
         /* Disarm timer */
         current_proc->timers[tid].next_expiry_ticks = 0;
         current_proc->timers[tid].overrun = 0;
     } else {
-        uint64_t value_ticks = (uint64_t)kispec.val_sec * TIMER_FREQ +
-                               (uint64_t)kispec.val_nsec / 100;
+        uint64_t value_ticks =
+            timespec_to_ticks((uint64_t)kispec.val_sec, (uint64_t)kispec.val_nsec);
         if (flags & 1) { /* TIMER_ABSTIME */
             /* BF: The old code used value_ticks (user epoch time in
              * 10MHz ticks) directly as next_expiry_ticks (boot ticks).
@@ -280,10 +272,11 @@ long sys_timer_settime_handler(struct trapframe *tf) {
             if (clockid == 0) {
                 /* CLOCK_REALTIME: compare against wall-clock time */
                 int64_t now_sec, now_nsec;
-                get_wall_time(&now_sec, &now_nsec);
-                uint64_t now_total_ns = (uint64_t)now_sec * 1000000000UL +
+                if (get_wall_time(&now_sec, &now_nsec) < 0)
+                    return (long)-ENODEV;
+                uint64_t now_total_ns = (uint64_t)now_sec * NSEC_PER_SEC +
                                         (uint64_t)now_nsec;
-                uint64_t target_ns = (uint64_t)kispec.val_sec * 1000000000UL +
+                uint64_t target_ns = (uint64_t)kispec.val_sec * NSEC_PER_SEC +
                                      (uint64_t)kispec.val_nsec;
                 if (target_ns <= now_total_ns) {
                     /* Already past: fire immediately */
@@ -295,7 +288,7 @@ long sys_timer_settime_handler(struct trapframe *tf) {
                 }
             } else if (clockid == 1) {
                 /* CLOCK_MONOTONIC: compare against boot-relative time */
-                uint64_t elapsed = r_time() - boot_time;
+                uint64_t elapsed = timekeeping_elapsed_ticks();
                 if (value_ticks <= elapsed) {
                     current_proc->timers[tid].next_expiry_ticks = r_time();
                 } else {
@@ -335,16 +328,15 @@ long sys_timer_gettime_handler(struct trapframe *tf) {
     struct { int64_t int_sec; int64_t int_nsec; int64_t val_sec; int64_t val_nsec; } kispec;
 
     /* it_interval */
-    kispec.int_sec = (int64_t)(current_proc->timers[tid].interval_ticks / TIMER_FREQ);
-    kispec.int_nsec = (int64_t)((current_proc->timers[tid].interval_ticks % TIMER_FREQ) * 100);
+    ticks_to_timespec(current_proc->timers[tid].interval_ticks,
+                      &kispec.int_sec, &kispec.int_nsec);
 
     /* it_value (time remaining until next expiry) */
     if (current_proc->timers[tid].next_expiry_ticks > 0) {
         uint64_t now = r_time();
         uint64_t remaining = (current_proc->timers[tid].next_expiry_ticks > now) ?
                              (current_proc->timers[tid].next_expiry_ticks - now) : 0;
-        kispec.val_sec = (int64_t)(remaining / TIMER_FREQ);
-        kispec.val_nsec = (int64_t)((remaining % TIMER_FREQ) * 100);
+        ticks_to_timespec(remaining, &kispec.val_sec, &kispec.val_nsec);
     } else {
         kispec.val_sec = 0;
         kispec.val_nsec = 0;
@@ -369,7 +361,7 @@ long sys_timer_getoverrun_handler(struct trapframe *tf) {
 }
 
 long sys_clock_nanosleep_handler(struct trapframe *tf) {
-    /* a0=clockid (ignored), a1=flags, a2=request, a3=remain */
+    int clockid = (int)tf->a0;
     int flags = (int)tf->a1;
     uint64_t kreq[2]; /* {tv_sec, tv_nsec} */
     if (copyin(current_proc->pagetable, kreq, tf->a2, 16) < 0)
@@ -378,18 +370,32 @@ long sys_clock_nanosleep_handler(struct trapframe *tf) {
     if (kreq[1] >= 1000000000UL)
         return (long)-22;
 
+    if (clockid != 0 && clockid != 1 && clockid != 2 && clockid != 3)
+        return (long)-EINVAL;
+
     uint64_t deadline = timespec_rel_deadline(kreq[0], kreq[1]);
 
     if (flags & 1) {
-        /* TIMER_ABSTIME: kreq is absolute wall time */
-        int64_t now_sec, now_nsec;
-        get_wall_time(&now_sec, &now_nsec);
-        uint64_t now_total = (uint64_t)now_sec * 1000000000UL + (uint64_t)now_nsec;
-        uint64_t target = kreq[0] * 1000000000UL + kreq[1];
-        if (target <= now_total)
-            return 0; /* already past */
-        uint64_t diff_ns = target - now_total;
-        deadline = r_time() + ns_to_time_ticks(diff_ns);
+        uint64_t target_ticks = timespec_to_ticks(kreq[0], kreq[1]);
+        uint64_t elapsed_ticks;
+        if (clockid == 0) {
+            int64_t now_sec, now_nsec;
+            if (get_wall_time(&now_sec, &now_nsec) < 0)
+                return (long)-ENODEV;
+            uint64_t now_ns = (uint64_t)now_sec * NSEC_PER_SEC +
+                              (uint64_t)now_nsec;
+            uint64_t target_ns = kreq[0] * NSEC_PER_SEC + kreq[1];
+            if (target_ns <= now_ns)
+                return 0;
+            deadline = r_time() + ns_to_time_ticks(target_ns - now_ns);
+        } else if (clockid == 1) {
+            elapsed_ticks = timekeeping_elapsed_ticks();
+            if (target_ticks <= elapsed_ticks)
+                return 0;
+            deadline = r_time() + (target_ticks - elapsed_ticks);
+        } else {
+            deadline = r_time() + target_ticks;
+        }
     }
 
     current_proc->sleep_until = deadline;
@@ -412,9 +418,10 @@ long sys_getrusage_handler(struct trapframe *tf) {
     uint8_t kru[128];
     memset(kru, 0, sizeof(kru));
     /* Approximate user time from elapsed ticks */
-    uint64_t elapsed = r_time() - boot_time;
-    int64_t sec = (int64_t)(elapsed / TIMER_FREQ);
-    int64_t usec = (int64_t)((elapsed % TIMER_FREQ) / 10);
+    uint64_t elapsed = timekeeping_elapsed_ticks();
+    int64_t sec;
+    int64_t usec;
+    ticks_to_timeval(elapsed, &sec, &usec);
     memcpy(kru + 0, &sec, 8);   /* ru_utime.tv_sec */
     memcpy(kru + 8, &usec, 8);  /* ru_utime.tv_usec */
     if (copyout(current_proc->pagetable, uaddr, kru, 128) < 0)
@@ -436,8 +443,8 @@ long sys_times_handler(struct trapframe *tf) {
      * tms_cutime = user CPU time of waited-for children
      * tms_cstime = system CPU time of waited-for children
      * For simplicity, report elapsed time as user time */
-    uint64_t elapsed = r_time() - boot_time;
-    int64_t ticks = (int64_t)(elapsed / (TIMER_FREQ / 100)); /* convert to clock ticks (100 Hz) */
+    uint64_t elapsed = timekeeping_elapsed_ticks();
+    int64_t ticks = (int64_t)timekeeping_to_clock_ticks(elapsed);
 
     memcpy(ktms + 0, &ticks, 8);  /* tms_utime */
     /* tms_stime, tms_cutime, tms_cstime remain zero */

@@ -8,6 +8,7 @@
 #include <swap.h>
 #include <mm.h>  /* BF: needed for anon_vma_get/link/unlink in vma_remove splits */
 #include <errno.h>  /* BF: EFAULT for copyinstr page fault distinction */
+#include <dtb.h>
 
 #ifndef VM_FREEWALK_TRACE
 #define VM_FREEWALK_TRACE 0
@@ -273,8 +274,13 @@ void kvminit(void) {
     // UART registers: too small for super page, use 4KB
     kvmmap(0x10000000, 0x10000000, PAGE_SIZE, PTE_R | PTE_W);
 
-    // Goldfish RTC at 0x101000 (one 4KB page)
-    kvmmap(0x101000, 0x101000, PAGE_SIZE, PTE_R | PTE_W);
+    struct dtb_device *rtc = dtb_find_device(DTB_DEV_RTC);
+    if (rtc) {
+      kvmmap(rtc->base_addr, rtc->base_addr,
+             rtc->size ? rtc->size : PAGE_SIZE, PTE_R | PTE_W);
+    } else {
+      kvmmap(0x101000, 0x101000, PAGE_SIZE, PTE_R | PTE_W);
+    }
 
     // PCIe ECAM config space (0x30000000, 254 MiB) -- 2MB-aligned
     // Reduced by 2MB to free VPN[1]=511 for TRAMPOLINE_VA mapping

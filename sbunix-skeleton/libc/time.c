@@ -788,19 +788,17 @@ time_t time(time_t *t) {
     return ts.tv_sec;
 }
 
-/*
- * gettimeofday() — get time of day with microsecond resolution.
- * Wraps clock_gettime(CLOCK_REALTIME) and converts to struct timeval.
- */
 int gettimeofday(struct timeval *tv, void *tz) {
     (void)tz;
-    if (!tv)
+    if (!tv) {
+        errno = EINVAL;
         return -1;
-    struct timespec ts;
-    if (clock_gettime(CLOCK_REALTIME, &ts) < 0)
+    }
+    long ret = syscall(SYS_gettimeofday, tv, tz);
+    if (ret < 0) {
+        errno = (int)(-ret);
         return -1;
-    tv->tv_sec = ts.tv_sec;
-    tv->tv_usec = ts.tv_nsec / 1000;
+    }
     return 0;
 }
 
@@ -816,11 +814,11 @@ clock_t clock(void) {
      * The previous implementation made a full ecall per call, causing
      * POSIX tests that call clock() in tight loops (e.g., clock_gettime/4-1
      * with 900,000 iterations) to time out under the 5-second alarm.
-     * TIMER_FREQ = 10000000 (10MHz), CLOCKS_PER_SEC = 1000000, so
-     * ticks / 10 converts hardware ticks to POSIX clock_t units. */
+     * SBUnix exposes QEMU virt's 10MHz user rdtime ABI here; wall-clock
+     * calls still route through kernel syscalls. */
     unsigned long ticks;
     asm volatile("rdtime %0" : "=r"(ticks));
-    return (clock_t)(ticks / 10);
+    return (clock_t)(ticks / (10000000UL / CLOCKS_PER_SEC));
 }
 
 double difftime(time_t time1, time_t time0) {
