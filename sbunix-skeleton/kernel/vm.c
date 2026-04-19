@@ -70,7 +70,6 @@ int kernel_va_executable(uint64_t va) {
 }
 
 enum pte_kind pte_classify(pte_t pte, int level) {
-  (void)level;
   if (PTE_IS_SWAPPED(pte))
     return PTE_KIND_SWAPPED;
   if (!(pte & PTE_V))
@@ -82,7 +81,10 @@ enum pte_kind pte_classify(pte_t pte, int level) {
       return PTE_KIND_COW_LEAF;
     return PTE_KIND_LEAF;
   }
-  if (pte & PTE_U)
+  /* SBUnix encodes PROT_NONE as a valid L0 user PTE with no R/W/X bits.
+   * Sv39 non-leaf entries also have no R/W/X bits, so never classify
+   * upper-level entries as PROT_NONE. */
+  if (level == 0 && (pte & PTE_U))
     return PTE_KIND_PROT_NONE;
   return PTE_KIND_NONLEAF;
 }
@@ -1125,22 +1127,22 @@ int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
  *
  * Only demand-allocates anonymous VMAs to avoid deadlock (file-backed
  * demand paging would re-enter VFS read paths). */
-static uint64_t vm_resolve_user_page(pagetable_t pagetable, uint64_t va,
-                                     int write) {
-  if (!current_proc)
+static uint64_t vm_resolve_user_page(struct proc *p, pagetable_t pagetable,
+                                     uint64_t va, int write) {
+  if (!p || pagetable != p->pagetable)
     return 0;
 
   /* Recursion guard: if we're already inside a demand-fault from a copy
    * path, bail out to prevent infinite recursion on the 8KB kernel stack. */
-  if (current_proc->in_copy_fault)
+  if (p->in_copy_fault)
     return 0;
-  current_proc->in_copy_fault = 1;
+  p->in_copy_fault = 1;
 
   uint64_t result = 0;
   uint64_t page_va = PGROUNDDOWN(va);
 
   /* Look up VMA to validate the access */
-  struct vm_area *vma = vma_find(current_proc, page_va);
+  struct vm_area *vma = vma_find(p, page_va);
   if (!vma) {
     /* No VMA covers this address — EFAULT */
     goto out;
@@ -1211,7 +1213,7 @@ static uint64_t vm_resolve_user_page(pagetable_t pagetable, uint64_t va,
   result = PTE2PA(*pte) + (va - page_va);
 
 out:
-  current_proc->in_copy_fault = 0;
+  p->in_copy_fault = 0;
   return result;
 }
 
@@ -1221,19 +1223,16 @@ static int pte_is_user_leaf(pte_t pte) {
          (kind == PTE_KIND_LEAF || kind == PTE_KIND_COW_LEAF);
 }
 
-static int current_vma_allows_write(uint64_t va) {
-  if (!current_proc)
+static int vma_allows_write(struct proc *p, uint64_t va) {
+  if (!p)
     return 0;
-  struct vm_area *vma = vma_find(current_proc, PGROUNDDOWN(va));
+  struct vm_area *vma = vma_find(p, PGROUNDDOWN(va));
   return vma && (vma->prot & PROT_WRITE);
 }
 
-// Copy from kernel to user.
-// Copy len bytes from src to virtual address dstva in a given page table.
-// Return 0 on success, -1 on error.
-// Handles both 4KB pages and 2MB super pages.
-int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
-  char *s = (char *)src;
+static int copyout_impl(struct proc *p, pagetable_t pagetable, uint64_t dstva,
+                        const void *src, uint64_t len) {
+  const char *s = (const char *)src;
   while (len > 0) {
     if (!user_addr_ok(dstva))
       return -1;
@@ -1244,7 +1243,7 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
      * This handles lazy brk pages and swapped-out pages that haven't
      * been faulted in yet (e.g., write() to freshly brk'd memory). */
     if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
-      uint64_t pa = vm_resolve_user_page(pagetable, dstva, 1);
+      uint64_t pa = vm_resolve_user_page(p, pagetable, dstva, 1);
       if (pa == 0)
         return -1;
       /* After resolution, re-walk to get the proper PTE and level */
@@ -1262,13 +1261,12 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
     if (level == 0) {
       uint64_t old_pa = PTE2PA(*pte);
       int ref = page_ref_get(old_pa);
-      if ((*pte & PTE_W) == 0 && !current_vma_allows_write(dstva))
+      if ((*pte & PTE_W) == 0 && !vma_allows_write(p, dstva))
         return -1;
       if ((*pte & PTE_COW) || (ref > 1 && !(*pte & PTE_W))) {
         /* Use cow_break for proper rmap registration of new page */
         uint64_t va_page = PGROUNDDOWN(dstva);
-        struct vm_area *vma = current_proc ?
-            vma_find(current_proc, va_page) : 0;
+        struct vm_area *vma = p ? vma_find(p, va_page) : 0;
         if (cow_break(pagetable, pte, va_page, vma) < 0)
           return -1;
       }
@@ -1296,9 +1294,8 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
   return 0;
 }
 
-// Copy from user virtual address srcva to kernel buffer dst.
-// Returns 0 on success, -1 on error (unmapped/invalid user page).
-int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len) {
+static int copyin_impl(struct proc *p, pagetable_t pagetable, void *dst,
+                       uint64_t srcva, uint64_t len) {
   char *d = (char *)dst;
   while (len > 0) {
     if (!user_addr_ok(srcva))
@@ -1310,7 +1307,7 @@ int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len) {
      * This handles lazy brk pages and swapped-out pages that haven't
      * been faulted in yet (e.g., read() from freshly brk'd memory). */
     if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
-      uint64_t pa = vm_resolve_user_page(pagetable, srcva, 0);
+      uint64_t pa = vm_resolve_user_page(p, pagetable, srcva, 0);
       if (pa == 0)
         return -1;
       pte = walk_super(pagetable, srcva, &level);
@@ -1336,12 +1333,8 @@ int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len) {
   return 0;
 }
 
-/* Copy null-terminated string from user virtual address srcva to kernel buffer dst.
- * Copies at most max bytes (including the null).
- * Returns:  0 on success (null terminator found),
- *          -EFAULT if a page is unmapped/inaccessible (bad user pointer),
- *          -1 if the buffer was exhausted before a null terminator (E2BIG). */
-int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
+static int copyinstr_impl(struct proc *p, pagetable_t pagetable, char *dst,
+                          uint64_t srcva, uint64_t max) {
   int got_null = 0;
   while (max > 0) {
     /* BF: Return -EFAULT for invalid user addresses so callers can
@@ -1356,7 +1349,7 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
      * Return -EFAULT (not -1) so callers can distinguish page faults
      * from buffer exhaustion (E2BIG). */
     if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
-      uint64_t pa = vm_resolve_user_page(pagetable, srcva, 0);
+      uint64_t pa = vm_resolve_user_page(p, pagetable, srcva, 0);
       if (pa == 0)
         return -EFAULT;
       pte = walk_super(pagetable, srcva, &level);
@@ -1390,6 +1383,44 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
   }
   /* Buffer exhaustion: string did not fit in max bytes */
   return got_null ? 0 : -1;
+}
+
+// Copy from kernel to user for an explicitly-owned process pagetable.
+int copyout_proc(struct proc *p, uint64_t dstva, const void *src, uint64_t len) {
+  if (!p)
+    return -1;
+  return copyout_impl(p, p->pagetable, dstva, src, len);
+}
+
+int copyin_proc(struct proc *p, void *dst, uint64_t srcva, uint64_t len) {
+  if (!p)
+    return -1;
+  return copyin_impl(p, p->pagetable, dst, srcva, len);
+}
+
+int copyinstr_proc(struct proc *p, char *dst, uint64_t srcva, uint64_t max) {
+  if (!p)
+    return -EFAULT;
+  return copyinstr_impl(p, p->pagetable, dst, srcva, max);
+}
+
+// Legacy wrappers may only resolve lazy/swap/COW faults for current_proc.
+int copyout(pagetable_t pagetable, uint64_t dstva, const void *src, uint64_t len) {
+  struct proc *owner =
+      (current_proc && pagetable == current_proc->pagetable) ? current_proc : NULL;
+  return copyout_impl(owner, pagetable, dstva, src, len);
+}
+
+int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len) {
+  struct proc *owner =
+      (current_proc && pagetable == current_proc->pagetable) ? current_proc : NULL;
+  return copyin_impl(owner, pagetable, dst, srcva, len);
+}
+
+int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
+  struct proc *owner =
+      (current_proc && pagetable == current_proc->pagetable) ? current_proc : NULL;
+  return copyinstr_impl(owner, pagetable, dst, srcva, max);
 }
 
 /* ENH: Insert VMA into an arbitrary list head (for staged exec).

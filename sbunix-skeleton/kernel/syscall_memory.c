@@ -17,6 +17,7 @@
 #include <pipe.h>
 #include <kmalloc.h>
 #include <syscall.h>
+#include <errno.h>
 
 long sys_brk_handler(struct trapframe *tf) {
     uint64_t new_brk = tf->a0;
@@ -354,8 +355,21 @@ long sys_mprotect_handler(struct trapframe *tf) {
     if (!user_range_ok(addr, len))
         return -22; /* -EINVAL */
 
+    for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
+        if (!vma_find(current_proc, va))
+            return -EINVAL;
+    }
+
     /* Build new PTE permission bits */
     int new_flags = prot_to_pte_flags(prot);
+
+    for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
+        int level;
+        pte_t *pte = walk_super(current_proc->pagetable, va, &level);
+        (void)level;
+        if (pte && (*pte & PTE_V) && !(*pte & PTE_U))
+            return -EINVAL;
+    }
 
     /* BF: Preflight allocation — count needed VMA splits and pre-allocate
      * all objects.  If any allocation fails, return -ENOMEM with no PTEs
@@ -420,7 +434,6 @@ long sys_mprotect_handler(struct trapframe *tf) {
 
         if (!pte || !(*pte & PTE_V))
             continue;
-        /* BF: Skip shared kernel MMIO PTEs — must not modify kernel entries */
         if (!(*pte & PTE_U))
             continue;
 
