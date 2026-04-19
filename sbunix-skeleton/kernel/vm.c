@@ -14,6 +14,14 @@
 #define VM_FREEWALK_TRACE 0
 #endif
 
+#ifndef PTE_DEBUG_FAILFAST
+#define PTE_DEBUG_FAILFAST 0
+#endif
+
+#ifndef PTE_UPDATE_TRACE
+#define PTE_UPDATE_TRACE 0
+#endif
+
 #if VM_FREEWALK_TRACE
 static int vm_freewalk_trace_count;
 static void vm_trace_freewalk(const char *kind, pagetable_t pt, int level,
@@ -102,6 +110,169 @@ const char *pte_kind_name(enum pte_kind kind) {
   }
 }
 
+const char *pte_update_reason_name(enum pte_update_reason reason) {
+  switch (reason) {
+  case PTE_UPDATE_PT_ALLOC: return "pt-alloc";
+  case PTE_UPDATE_MAP: return "map";
+  case PTE_UPDATE_SUPER_MAP: return "super-map";
+  case PTE_UPDATE_RECURSIVE_MAP: return "recursive-map";
+  case PTE_UPDATE_KERNEL_SHARE: return "kernel-share";
+  case PTE_UPDATE_KERNEL_REPAIR: return "kernel-repair";
+  case PTE_UPDATE_UNMAP: return "unmap";
+  case PTE_UPDATE_COW: return "cow";
+  case PTE_UPDATE_SWAPOUT: return "swapout";
+  case PTE_UPDATE_SWAPIN: return "swapin";
+  case PTE_UPDATE_MPROTECT: return "mprotect";
+  case PTE_UPDATE_MREMAP: return "mremap";
+  case PTE_UPDATE_EXEC_PERM: return "exec-perm";
+  case PTE_UPDATE_CLEAR_ACCESSED: return "clear-accessed";
+  default: return "unknown";
+  }
+}
+
+static int pte_update_fail(pagetable_t root, uint64_t va, pte_t oldpte,
+                           pte_t newpte, int level,
+                           enum pte_update_reason reason,
+                           const char *why) {
+  printk("pte-update violation: reason=%s root=0x%lx va=0x%lx level=%d "
+         "old=0x%lx(%s) new=0x%lx(%s): %s\n",
+         pte_update_reason_name(reason), (uint64_t)root, PGROUNDDOWN(va),
+         level, oldpte, pte_kind_name(pte_classify(oldpte, level)),
+         newpte, pte_kind_name(pte_classify(newpte, level)), why);
+#if PTE_DEBUG_FAILFAST
+  panic("pte_update invariant violation");
+#endif
+  return -1;
+}
+
+static int pte_leaf_pa_aligned(uint64_t pa, int level) {
+  if (level == 0)
+    return (pa % PAGE_SIZE) == 0;
+  if (level == 1)
+    return IS_SUPERPAGE_ALIGNED(pa);
+  if (level == 2)
+    return (pa & ((1UL << 30) - 1)) == 0;
+  return 0;
+}
+
+static int pte_user_leaf_pa_ok(uint64_t pa, int level) {
+  uint64_t count = (level == 1) ? SUPERPAGE_NPAGES : 1;
+  for (uint64_t i = 0; i < count; i++) {
+    uint64_t sub_pa = pa + i * PAGE_SIZE;
+    enum page_frame_type type = page_get_type(sub_pa);
+    if (type == PAGE_FREE || type == PAGE_PAGETABLE ||
+        type == PAGE_SLAB || type == PAGE_DMA ||
+        type == PAGE_KERNEL)
+      return 0;
+  }
+  return 1;
+}
+
+static void pte_mark_user_leaf(uint64_t pa, int level) {
+  uint64_t count = (level == 1) ? SUPERPAGE_NPAGES : 1;
+  for (uint64_t i = 0; i < count; i++) {
+    uint64_t sub_pa = pa + i * PAGE_SIZE;
+    enum page_frame_type type = page_get_type(sub_pa);
+    if (type == PAGE_UNKNOWN || type == PAGE_USER)
+      page_set_type(sub_pa, PAGE_USER);
+  }
+}
+
+static void pte_do_sfence(uint64_t va, enum pte_sfence_requirement sfence) {
+  if (sfence == PTE_SFENCE_VA)
+    asm volatile("sfence.vma %0, zero" : : "r"(PGROUNDDOWN(va)) : "memory");
+  else if (sfence == PTE_SFENCE_ALL)
+    asm volatile("sfence.vma zero, zero" ::: "memory");
+}
+
+int pte_update(pagetable_t root, uint64_t va, pte_t *slot, pte_t newpte,
+               int level, enum pte_update_reason reason,
+               enum pte_sfence_requirement sfence) {
+  if (!slot)
+    return -1;
+
+  pte_t oldpte = *slot;
+  enum pte_kind newkind = pte_classify(newpte, level);
+
+  if (level < 0 || level > 2)
+    return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                           "bad page-table level");
+
+  if (newkind == PTE_KIND_RESERVED)
+    return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                           "Sv39 reserved PTE encoding");
+
+  if (newkind == PTE_KIND_SWAPPED) {
+    if (level != 0)
+      return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                             "swap PTE outside level 0");
+  } else if (newkind == PTE_KIND_NONLEAF) {
+    uint64_t child_pa = PTE2PA(newpte);
+    if (level == 0)
+      return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                             "non-leaf PTE at level 0");
+    if ((newpte & PTE_U) || (newpte & (PTE_R | PTE_W | PTE_X)))
+      return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                             "non-leaf PTE has privilege or leaf bits");
+    if (!pa_is_valid_page(child_pa) || !page_is_ptpage(child_pa))
+      return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                             "non-leaf target is not a live page-table page");
+  } else if (newkind == PTE_KIND_LEAF ||
+             newkind == PTE_KIND_COW_LEAF ||
+             newkind == PTE_KIND_PROT_NONE) {
+    uint64_t pa = PTE2PA(newpte);
+    if (!pte_leaf_pa_aligned(pa, level))
+      return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                             "leaf physical address is misaligned for level");
+    if ((newpte & PTE_W) && !(newpte & PTE_R))
+      return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                             "leaf PTE grants W without R");
+    if ((newpte & PTE_U) && (root == kernel_pagetable || !user_addr_ok(va)))
+      return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                             "kernel-range PTE grants user access");
+    if ((newpte & PTE_U)) {
+      if (!pa_is_valid_page(pa) ||
+          (level == 1 && !pa_is_valid_superpage(pa)) ||
+          !pte_user_leaf_pa_ok(pa, level))
+        return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                               "user leaf maps invalid or non-user-owned frame");
+    } else {
+      if (newpte & PTE_X) {
+        int expected = 0;
+        if (!kernel_page_expected_perm(va, &expected) || !(expected & PTE_X))
+          return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                                 "kernel/MMIO leaf has unexpected execute");
+      }
+      if (root == kernel_pagetable && va >= KERNBASE && va < PHYSTOP) {
+        int expected = 0;
+        if (kernel_page_expected_perm(va, &expected)) {
+          int actual = (int)(newpte & (PTE_R | PTE_W | PTE_X | PTE_U));
+          if (actual != expected)
+            return pte_update_fail(root, va, oldpte, newpte, level, reason,
+                                   "kernel RAM leaf permission mismatch");
+        }
+      }
+    }
+  }
+
+#if PTE_UPDATE_TRACE
+  printk("pte-update: reason=%s root=0x%lx va=0x%lx level=%d old=0x%lx "
+         "new=0x%lx sfence=%d\n",
+         pte_update_reason_name(reason), (uint64_t)root, PGROUNDDOWN(va),
+         level, oldpte, newpte, sfence);
+#endif
+
+  *slot = newpte;
+  if (newpte & PTE_U) {
+    enum pte_kind stored = pte_classify(newpte, level);
+    if (stored == PTE_KIND_LEAF || stored == PTE_KIND_COW_LEAF ||
+        stored == PTE_KIND_PROT_NONE)
+      pte_mark_user_leaf(PTE2PA(newpte), level);
+  }
+  pte_do_sfence(va, sfence);
+  return 0;
+}
+
 static int pte_walk_stops(pte_t pte, int level) {
   enum pte_kind kind = pte_classify(pte, level);
   return kind == PTE_KIND_LEAF ||
@@ -136,7 +307,12 @@ pte_t *walk(pagetable_t pagetable, uint64_t va, int alloc) {
                 return 0;
             memset(pagetable, 0, PAGE_SIZE);
             page_mark_ptpage((uint64_t)pagetable);  /* Track as page table page */
-            *pte = PA2PTE(pagetable) | PTE_V;
+            if (pte_update(pagetable, va, pte, PA2PTE(pagetable) | PTE_V,
+                           level, PTE_UPDATE_PT_ALLOC,
+                           PTE_SFENCE_NONE) < 0) {
+                kfree((void *)pagetable);
+                return 0;
+            }
         }
     }
     return &pagetable[PX(0, va)];
@@ -205,7 +381,9 @@ static int mappages_flags(pagetable_t pagetable, uint64_t va, uint64_t size,
          * MAP_FLAG_REMAP because boot-time MMIO regions legitimately remap. */
         if((*pte & PTE_V) && !(flags & MAP_FLAG_REMAP))
             return -1;
-        *pte = PA2PTE(pa) | perm | PTE_V;
+        if (pte_update(pagetable, a, pte, PA2PTE(pa) | perm | PTE_V,
+                       0, PTE_UPDATE_MAP, PTE_SFENCE_NONE) < 0)
+            return -1;
         if(a == last)
             break;
         a += PAGE_SIZE;
@@ -250,12 +428,20 @@ int mappages_super(pagetable_t pagetable, uint64_t va, uint64_t size,
             if (!l1pt) return -1;
             memset(l1pt, 0, PAGE_SIZE);
             page_mark_ptpage((uint64_t)l1pt);  /* Track as page table page */
-            *l2pte = PA2PTE(l1pt) | PTE_V;
+            if (pte_update(pagetable, va, l2pte, PA2PTE(l1pt) | PTE_V,
+                           2, PTE_UPDATE_PT_ALLOC,
+                           PTE_SFENCE_NONE) < 0) {
+                kfree((void *)l1pt);
+                return -1;
+            }
         }
 
         pte_t *l1pte = &l1pt[PX(1, va)];
         /* Install leaf PTE at level 1 */
-        *l1pte = PA2PTE(pa) | perm | PTE_V;
+        if (pte_update(pagetable, va, l1pte, PA2PTE(pa) | perm | PTE_V,
+                       1, PTE_UPDATE_SUPER_MAP,
+                       PTE_SFENCE_NONE) < 0)
+            return -1;
     }
     return 0;
 }
@@ -327,14 +513,19 @@ void kvminit(void) {
      * the kernel text/rodata write protection above.
      * No PTE_X (page table data should not be executable).
      * No PTE_U (kernel-only access). */
-    kernel_pagetable[RECURSIVE_INDEX] =
-        PA2PTE(0x80000000UL) | PTE_V | PTE_R;
+    pte_update(kernel_pagetable, RECURSIVE_BASE,
+               &kernel_pagetable[RECURSIVE_INDEX],
+               PA2PTE(0x80000000UL) | PTE_V | PTE_R,
+               2, PTE_UPDATE_RECURSIVE_MAP, PTE_SFENCE_NONE);
 
     // Install the kernel page table (write to satp)
     w_satp(MAKE_SATP(kernel_pagetable));
     sfence_vma(); // flush TLB
 
     printk("kvminit: paging enabled (kernel W^X).\n");
+#if PTE_DEBUG_FAILFAST
+    printk("kvminit: PTE_DEBUG_FAILFAST=1 active.\n");
+#endif
 }
 
 /* Kernel mapping repair/audit helpers.  Historical PTE_X corruption repair
@@ -359,6 +550,13 @@ static int enforce_kernel_pte(uint64_t va, int noisy) {
   if (newpte == old)
     return 0;
 
+#if PTE_DEBUG_FAILFAST
+  printk("kernel PTE repair requested: va=0x%lx pte=0x%lx -> 0x%lx sepc=0x%lx\n",
+         PGROUNDDOWN(va), (unsigned long)old, (unsigned long)newpte,
+         (unsigned long)r_sepc());
+  panic("kernel PTE repair requested");
+#endif
+
   kernel_pte_repair_count++;
   if (noisy) {
     printk("kernel PTE repair #%d: va=0x%lx pte=0x%lx -> 0x%lx sepc=0x%lx\n",
@@ -366,7 +564,9 @@ static int enforce_kernel_pte(uint64_t va, int noisy) {
            (unsigned long)old, (unsigned long)newpte,
            (unsigned long)r_sepc());
   }
-  *pte = newpte;
+  if (pte_update(kernel_pagetable, PGROUNDDOWN(va), pte, newpte, level,
+                 PTE_UPDATE_KERNEL_REPAIR, PTE_SFENCE_NONE) < 0)
+    return 0;
   return 1;
 }
 
@@ -426,8 +626,13 @@ int kernel_wx_audit(void) {
 int uvmmap_kernel(pagetable_t pt) {
   /* Share VPN[2]=1..511: these root entries cover kernel RAM, PCIe MMIO BAR,
    * and other regions entirely above user space. */
-  for (int i = 1; i < 512; i++)
-    pt[i] = kernel_pagetable[i];
+  for (int i = 1; i < 512; i++) {
+    uint64_t va = (uint64_t)i << 30;
+    if (pte_update(pt, va, &pt[i], kernel_pagetable[i],
+                   2, PTE_UPDATE_KERNEL_SHARE,
+                   PTE_SFENCE_NONE) < 0)
+      return -1;
+  }
 
   /* VPN[2]=0: user and kernel MMIO share this region.  The user already
    * has its own level-1 table (created by mappages for code/stack).
@@ -446,8 +651,13 @@ int uvmmap_kernel(pagetable_t pt) {
    * Limit = USER_MMAP_FLOOR / SUPERPAGE_SIZE = 0x10200000 / 0x200000 = 129. */
   int share_limit = USER_MMAP_FLOOR / SUPERPAGE_SIZE;
   for (int j = 0; j < share_limit; j++) {
-    if ((kernel_L1[j] & PTE_V) && !(user_L1[j] & PTE_V))
-      user_L1[j] = kernel_L1[j];
+    if ((kernel_L1[j] & PTE_V) && !(user_L1[j] & PTE_V)) {
+      uint64_t va = (uint64_t)j * SUPERPAGE_SIZE;
+      if (pte_update(pt, va, &user_L1[j], kernel_L1[j],
+                     1, PTE_UPDATE_KERNEL_SHARE,
+                     PTE_SFENCE_NONE) < 0)
+        return -1;
+    }
   }
   return 0;
 }
@@ -558,7 +768,9 @@ void superpage_split(pagetable_t pagetable, uint64_t va) {
     int flags = PTE_FLAGS(*pte);
 
     /* Clear the super page PTE */
-    *pte = 0;
+    if (pte_update(pagetable, va, pte, 0, level,
+                   PTE_UPDATE_UNMAP, PTE_SFENCE_NONE) < 0)
+        return;
 
     /* Create 512 level-0 PTEs */
     for (int i = 0; i < SUPERPAGE_NPAGES; i++) {
@@ -1100,13 +1312,22 @@ int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
      * uvmunmap does NOT call page_remove_rmap, so the page's original
      * rmap entry (if any) survives parent exit.  Adding rmap again
      * here would double-count. */
-    *pte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
+    if (pte_update(pagetable, va, pte,
+                   PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W),
+                   0, PTE_UPDATE_COW, PTE_SFENCE_NONE) < 0)
+      return -1;
   } else {
     char *newpage = kalloc();
     if (!newpage) return -1;
     memcpy(newpage, (void *)pa, PAGE_SIZE);
     page_ref_dec(pa);
-    *pte = PA2PTE((uint64_t)newpage) | ((flags & ~PTE_COW) | PTE_W);
+    if (pte_update(pagetable, va, pte,
+                   PA2PTE((uint64_t)newpage) |
+                   ((flags & ~PTE_COW) | PTE_W),
+                   0, PTE_UPDATE_COW, PTE_SFENCE_NONE) < 0) {
+      kfree(newpage);
+      return -1;
+    }
     /* Register new page in anon rmap unconditionally so the eviction
      * scanner can find and unmap it from all sharing processes. */
     if (vma && vma->anon_vma) {
@@ -1165,7 +1386,12 @@ static uint64_t vm_resolve_user_page(struct proc *p, pagetable_t pagetable,
     char *newpage = kalloc();
     if (!newpage) goto out;
     swap_read(slot, newpage);
-    *pte = PA2PTE((uint64_t)newpage) | sflags | PTE_V;
+    if (pte_update(pagetable, page_va, pte,
+                   PA2PTE((uint64_t)newpage) | sflags | PTE_V,
+                   0, PTE_UPDATE_SWAPIN, PTE_SFENCE_NONE) < 0) {
+      kfree(newpage);
+      goto out;
+    }
     swap_free(slot);
     asm volatile("sfence.vma %0, zero" : : "r"(page_va));
     /* Register in rmap if anonymous */

@@ -430,6 +430,7 @@ long sys_mprotect_handler(struct trapframe *tf) {
         if (pte && (*pte & PTE_V) && level == 1) {
             superpage_split(current_proc->pagetable, va & ~(uint64_t)SUPERPAGE_MASK);
             pte = walk(current_proc->pagetable, va, 0);
+            level = 0;
         }
 
         if (!pte || !(*pte & PTE_V))
@@ -443,7 +444,11 @@ long sys_mprotect_handler(struct trapframe *tf) {
         if (*pte & PTE_COW) {
           pte_new_flags &= ~PTE_W;
         }
-        *pte = (*pte & ~(PTE_R | PTE_W | PTE_X)) | pte_new_flags;
+        if (pte_update(current_proc->pagetable, va, pte,
+                       (*pte & ~(PTE_R | PTE_W | PTE_X)) | pte_new_flags,
+                       level, PTE_UPDATE_MPROTECT,
+                       PTE_SFENCE_NONE) < 0)
+            return -EINVAL;
     }
 
     /* BF: Mutation phase — VMA splits using pre-allocated objects.
@@ -684,7 +689,11 @@ long sys_mremap_handler(struct trapframe *tf) {
           } else if (PTE_IS_SWAPPED(*old_pte)) {
             pte_t *new_pte = walk(current_proc->pagetable, new_va + off, 1);
             if (!new_pte) { copy_failed = 1; copied_up_to = off; break; }
-            *new_pte = *old_pte;
+            if (pte_update(current_proc->pagetable, new_va + off,
+                           new_pte, *old_pte, 0,
+                           PTE_UPDATE_MREMAP, PTE_SFENCE_NONE) < 0) {
+              copy_failed = 1; copied_up_to = off; break;
+            }
           }
         }
         if (!copy_failed) goto mremap_phase2;

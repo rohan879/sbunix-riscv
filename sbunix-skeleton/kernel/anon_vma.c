@@ -313,7 +313,9 @@ int try_to_unmap(struct page *page, int swap_slot) {
           /* Found mapping — encode swap entry or zero the PTE */
           if (swap_slot >= 0) {
             /* BF: Encode swap entry so the page can be faulted back in */
-            *pte = PTE_SWAP_ENCODE(swap_slot, PTE_FLAGS(*pte));
+            pte_update(owner_pt, address, pte,
+                       PTE_SWAP_ENCODE(swap_slot, PTE_FLAGS(*pte)),
+                       0, PTE_UPDATE_SWAPOUT, PTE_SFENCE_NONE);
           } else {
             *pte = 0;
           }

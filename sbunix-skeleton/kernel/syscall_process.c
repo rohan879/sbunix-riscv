@@ -72,7 +72,11 @@ int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
                 swap_free(new_slot);
                 return -1;
             }
-            *cpte = child_pte;
+            if (pte_update(dst, va, cpte, child_pte, 0,
+                           PTE_UPDATE_SWAPOUT, PTE_SFENCE_NONE) < 0) {
+                swap_free(new_slot);
+                return -1;
+            }
             va += PAGE_SIZE;
             continue;
         }
@@ -94,7 +98,11 @@ int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
 
         if (flags & PTE_W) {
             /* Writable page: mark read-only + COW in both parent and child */
-            *pte = PA2PTE(pa) | ((flags & ~PTE_W) | PTE_COW | PTE_V);
+            if (pte_update(src, va, pte,
+                           PA2PTE(pa) |
+                           ((flags & ~PTE_W) | PTE_COW | PTE_V),
+                           0, PTE_UPDATE_COW, PTE_SFENCE_NONE) < 0)
+                return -1;
             flags = (flags & ~PTE_W) | PTE_COW;
         }
 
@@ -103,7 +111,8 @@ int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
         if (mappages(dst, va, PAGE_SIZE, pa, flags) < 0) {
             /* BF: Rollback — restore parent PTE and decrement refcount
              * leaked by the failed child mapping attempt. */
-            *pte = PA2PTE(pa) | orig_flags;
+            pte_update(src, va, pte, PA2PTE(pa) | orig_flags,
+                       0, PTE_UPDATE_COW, PTE_SFENCE_NONE);
             page_ref_dec(pa);
             sfence_vma();
             return -1;

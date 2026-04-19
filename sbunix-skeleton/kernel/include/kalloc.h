@@ -27,6 +27,22 @@ void  kfree_contiguous(void *pa, int npages); /* free npages contiguous pages */
 void *kalloc_super(void);      /* allocate 2MB-aligned contiguous block */
 void  kfree_super(void *pa);   /* free a 2MB contiguous block */
 
+/* Debug page-frame ownership tracking. */
+enum page_frame_type {
+  PAGE_UNKNOWN = 0,
+  PAGE_FREE,
+  PAGE_PAGETABLE,
+  PAGE_USER,
+  PAGE_SLAB,
+  PAGE_DMA,
+  PAGE_KERNEL,
+};
+
+void page_set_type(uint64_t pa, enum page_frame_type type);
+enum page_frame_type page_get_type(uint64_t pa);
+const char *page_type_name(enum page_frame_type type);
+void page_mark_range(uint64_t start, uint64_t end, enum page_frame_type type);
+
 /* Page table page tracking for debugging */
 void page_mark_ptpage(uint64_t pa);
 int  page_is_ptpage(uint64_t pa);

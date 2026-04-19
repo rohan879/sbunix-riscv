@@ -59,6 +59,29 @@ enum pte_kind {
   PTE_KIND_RESERVED
 };
 
+enum pte_update_reason {
+  PTE_UPDATE_PT_ALLOC = 0,
+  PTE_UPDATE_MAP,
+  PTE_UPDATE_SUPER_MAP,
+  PTE_UPDATE_RECURSIVE_MAP,
+  PTE_UPDATE_KERNEL_SHARE,
+  PTE_UPDATE_KERNEL_REPAIR,
+  PTE_UPDATE_UNMAP,
+  PTE_UPDATE_COW,
+  PTE_UPDATE_SWAPOUT,
+  PTE_UPDATE_SWAPIN,
+  PTE_UPDATE_MPROTECT,
+  PTE_UPDATE_MREMAP,
+  PTE_UPDATE_EXEC_PERM,
+  PTE_UPDATE_CLEAR_ACCESSED,
+};
+
+enum pte_sfence_requirement {
+  PTE_SFENCE_NONE = 0,
+  PTE_SFENCE_VA,
+  PTE_SFENCE_ALL,
+};
+
 int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags);
 struct vm_area *vma_find(struct proc *p, uint64_t addr);
 int vma_remove(struct proc *p, uint64_t start, uint64_t end);
@@ -73,6 +96,10 @@ int mappages(pagetable_t pagetable, uint64_t va, uint64_t size, uint64_t pa, int
 pte_t *walk(pagetable_t pagetable, uint64_t va, int alloc);
 enum pte_kind pte_classify(pte_t pte, int level);
 const char *pte_kind_name(enum pte_kind kind);
+const char *pte_update_reason_name(enum pte_update_reason reason);
+int pte_update(pagetable_t root, uint64_t va, pte_t *slot, pte_t newpte,
+               int level, enum pte_update_reason reason,
+               enum pte_sfence_requirement sfence);
 int vm_check_pagetable(pagetable_t pagetable, const char *label);
 
 /* 2MB super page support */

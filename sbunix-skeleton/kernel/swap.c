@@ -199,11 +199,11 @@ int swap_evict_pages(int n) {
         }
         
         /* Enhanced aging: use age_score instead of simple accessed bit */
-        if (*pte & (1L << 6)) {
+        if (*pte & PTE_A) {
           /* Page was accessed - update our tracking */
           mark_page_accessed(page);
-          *pte &= ~(1L << 6);
-          asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+          pte_update(p->pagetable, clock_va, pte, *pte & ~PTE_A,
+                     0, PTE_UPDATE_CLEAR_ACCESSED, PTE_SFENCE_VA);
         }
         
         /* Multi-level aging decision */
@@ -231,9 +231,9 @@ int swap_evict_pages(int n) {
           goto advance;
           
         /* Fallback to simple accessed bit check */
-        if (*pte & (1L << 6)) {
-          *pte &= ~(1L << 6);
-          asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+        if (*pte & PTE_A) {
+          pte_update(p->pagetable, clock_va, pte, *pte & ~PTE_A,
+                     0, PTE_UPDATE_CLEAR_ACCESSED, PTE_SFENCE_VA);
           goto advance;
         }
       }
@@ -251,21 +251,24 @@ int swap_evict_pages(int n) {
         unmapped_count = try_to_unmap(page, slot);
         if (unmapped_count == 0) {
           /* Could not unmap - manually unmap from current process */
-          *pte = PTE_SWAP_ENCODE(slot, PTE_FLAGS(*pte));
-          asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+          pte_update(p->pagetable, clock_va, pte,
+                     PTE_SWAP_ENCODE(slot, PTE_FLAGS(*pte)),
+                     0, PTE_UPDATE_SWAPOUT, PTE_SFENCE_VA);
         }
         /* BF: After try_to_unmap, the clock-scanning PTE (current process)
          * may still be valid if it was not in the anon_vma chain.  Encode
          * it too so the page can be freed safely. */
         if (unmapped_count > 0 && (*pte & PTE_V)) {
-          *pte = PTE_SWAP_ENCODE(slot, PTE_FLAGS(*pte));
-          asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+          pte_update(p->pagetable, clock_va, pte,
+                     PTE_SWAP_ENCODE(slot, PTE_FLAGS(*pte)),
+                     0, PTE_UPDATE_SWAPOUT, PTE_SFENCE_VA);
         }
       } else {
         /* Non-anonymous page or no page descriptor - use old method */
         int orig_flags = PTE_FLAGS(*pte);
-        *pte = PTE_SWAP_ENCODE(slot, orig_flags);
-        asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+        pte_update(p->pagetable, clock_va, pte,
+                   PTE_SWAP_ENCODE(slot, orig_flags),
+                   0, PTE_UPDATE_SWAPOUT, PTE_SFENCE_VA);
       }
 
       /* Write to swap */
