@@ -500,9 +500,8 @@ int virtio_blk_rw_on_dev(int dev_index, uint64_t sector, void *buf, int write) {
     notify_reg = (volatile uint16_t *)(blkdev->notify_base +
                   (uint64_t)blkdev->queue_notify_off *
                   blkdev->notify_off_multiplier);
-    /* Guard: check kernel code PTE before DMA notify, since the
-     * virtio DMA path is known to intermittently corrupt PTE_X.
-     * Uses the self-referencing gigapage window (not walk). */
+    /* Guard: check kernel code PTE before DMA notify.  The repair path
+     * enforces the kernel W^X page policy if stale corruption is seen. */
     recursive_check_kcode_pte();
 
     /* Notify device by writing the queue index into the notify register.
@@ -516,8 +515,7 @@ int virtio_blk_rw_on_dev(int dev_index, uint64_t sector, void *buf, int write) {
         mb();
     blkdev->last_used_idx++;
 
-    /* Guard: check kernel code PTE after DMA completion, since the
-     * device DMA may have corrupted the L1 PTE during the I/O. */
+    /* Guard: check kernel code PTE after DMA completion. */
     recursive_check_kcode_pte();
 
     /* Restore interrupt state before returning */

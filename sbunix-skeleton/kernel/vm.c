@@ -29,6 +29,13 @@ static void vm_trace_freewalk(const char *kind, pagetable_t pt, int level,
 
 pagetable_t kernel_pagetable;
 
+extern char _kernel_start[];
+extern char _kernel_text_start[];
+extern char _kernel_text_end[];
+extern char _kernel_ro_start[];
+extern char _kernel_ro_end[];
+extern char _kernel_rw_start[];
+
 static int pa_is_valid_page(uint64_t pa);
 static int pa_is_valid_superpage(uint64_t pa);
 static int pa_is_live_page(uint64_t pa);
@@ -36,6 +43,30 @@ static int pa_is_live_superpage(uint64_t pa);
 static int pa_is_live_ptpage(uint64_t pa);
 static int vm_check_pagetable_level(pagetable_t pt, int level,
                                     const char *label, int *printed);
+
+static int kernel_page_expected_perm(uint64_t va, int *perm_out) {
+  uint64_t page = PGROUNDDOWN(va);
+  if (page < KERNBASE || page >= PHYSTOP)
+    return 0;
+
+  uint64_t text_start = PGROUNDDOWN((uint64_t)_kernel_text_start);
+  uint64_t text_end = PGROUNDUP((uint64_t)_kernel_text_end);
+  uint64_t ro_start = PGROUNDDOWN((uint64_t)_kernel_ro_start);
+  uint64_t ro_end = PGROUNDUP((uint64_t)_kernel_ro_end);
+
+  if (page >= text_start && page < text_end)
+    *perm_out = PTE_R | PTE_X;
+  else if (page >= ro_start && page < ro_end)
+    *perm_out = PTE_R;
+  else
+    *perm_out = PTE_R | PTE_W;
+  return 1;
+}
+
+int kernel_va_executable(uint64_t va) {
+  int perm = 0;
+  return kernel_page_expected_perm(va, &perm) && (perm & PTE_X);
+}
 
 enum pte_kind pte_classify(pte_t pte, int level) {
   (void)level;
@@ -258,82 +289,126 @@ void kvminit(void) {
     kvmmap_super(0x0c000000, 0x0c000000, 0x400000, PTE_R | PTE_W);
     kvmmap_super(0x0c200000, 0x0c200000, 0x400000, PTE_R | PTE_W);
 
-    // Kernel RAM: 128MB from 0x80000000, 2MB-aligned -- use super pages
-    kvmmap_super(0x80000000, 0x80000000, PHYSTOP - 0x80000000,
-                 PTE_R | PTE_W | PTE_X);
+    /* Kernel RAM is mapped with W^X permissions.  The executable text,
+     * read-only data, and writable kernel heap/data ranges intentionally
+     * use 4KB leaves so no kernel RAM page is both writable and executable.
+     * The small RAM prefix below the linked kernel image is kept RW/NX for
+     * compatibility with the virt memory layout. */
+    uint64_t image_start = PGROUNDDOWN((uint64_t)_kernel_start);
+    uint64_t text_start = PGROUNDDOWN((uint64_t)_kernel_text_start);
+    uint64_t text_end = PGROUNDUP((uint64_t)_kernel_text_end);
+    uint64_t ro_start = PGROUNDDOWN((uint64_t)_kernel_ro_start);
+    uint64_t ro_end = PGROUNDUP((uint64_t)_kernel_ro_end);
+    uint64_t rw_start = PGROUNDDOWN((uint64_t)_kernel_rw_start);
+
+    if (image_start > KERNBASE)
+      kvmmap(KERNBASE, KERNBASE, image_start - KERNBASE, PTE_R | PTE_W);
+    if (text_end > text_start)
+      kvmmap(text_start, text_start, text_end - text_start, PTE_R | PTE_X);
+    if (ro_end > ro_start)
+      kvmmap(ro_start, ro_start, ro_end - ro_start, PTE_R);
+    if (PHYSTOP > rw_start)
+      kvmmap(rw_start, rw_start, PHYSTOP - rw_start, PTE_R | PTE_W);
 
     /* Sv39 self-referencing page table: install a 1GB leaf gigapage
      * at L2[510] that maps physical RAM [0x80000000, 0xC0000000) to
-     * a dedicated VA window.  This provides a redundant access path
-     * to page table pages that is independent of the L1 superpages
-     * (which are the PTEs being corrupted by DMA).
+     * a dedicated read-only VA window for diagnostics.
      *
-     * Leaf gigapage: PTE_R | PTE_W makes this a leaf at L2 level.
+     * Leaf gigapage: PTE_R makes this a leaf at L2 level.
+     * No PTE_W, because a writable physical-memory alias would bypass
+     * the kernel text/rodata write protection above.
      * No PTE_X (page table data should not be executable).
      * No PTE_U (kernel-only access). */
     kernel_pagetable[RECURSIVE_INDEX] =
-        PA2PTE(0x80000000UL) | PTE_V | PTE_R | PTE_W;
+        PA2PTE(0x80000000UL) | PTE_V | PTE_R;
 
     // Install the kernel page table (write to satp)
     w_satp(MAKE_SATP(kernel_pagetable));
     sfence_vma(); // flush TLB
 
-    printk("kvminit: paging enabled (with 2MB super pages).\n");
+    printk("kvminit: paging enabled (kernel W^X).\n");
 }
 
-/* PTE_X corruption tracking — log context when repair is needed.
- * Helps narrow the root cause (QEMU TCG bug vs kernel code path). */
-static int ptex_repair_count = 0;
+/* Kernel mapping repair/audit helpers.  Historical PTE_X corruption repair
+ * used to blindly set execute on kernel RAM superpages.  With W^X mappings,
+ * repair must enforce the expected permission for each page instead. */
+static int kernel_pte_repair_count;
 
-/* Check and repair the kernel code L1 PTE via the self-referencing
- * gigapage window.  Returns 1 if repair was needed, 0 if PTE was
- * correct.  Does NOT call walk(). */
+static int enforce_kernel_pte(uint64_t va, int noisy) {
+  int expected = 0;
+  int level = -1;
+  pte_t *pte;
+
+  if (!kernel_page_expected_perm(va, &expected))
+    return 0;
+
+  pte = walk_super(kernel_pagetable, PGROUNDDOWN(va), &level);
+  if (!pte || !(*pte & PTE_V) || !(*pte & (PTE_R | PTE_W | PTE_X)))
+    return 0;
+
+  pte_t old = *pte;
+  pte_t newpte = (old & ~(PTE_R | PTE_W | PTE_X | PTE_U)) | expected | PTE_V;
+  if (newpte == old)
+    return 0;
+
+  kernel_pte_repair_count++;
+  if (noisy) {
+    printk("kernel PTE repair #%d: va=0x%lx pte=0x%lx -> 0x%lx sepc=0x%lx\n",
+           kernel_pte_repair_count, PGROUNDDOWN(va),
+           (unsigned long)old, (unsigned long)newpte,
+           (unsigned long)r_sepc());
+  }
+  *pte = newpte;
+  return 1;
+}
+
+int recursive_repair_kernel_pte(uint64_t va) {
+  int repaired = enforce_kernel_pte(va, 1);
+  if (repaired) {
+    asm volatile("sfence.vma zero, zero" ::: "memory");
+    if (kernel_va_executable(va))
+      asm volatile("fence.i" ::: "memory");
+  }
+  return repaired;
+}
+
 int recursive_check_kcode_pte(void) {
-  volatile pte_t *ppte = recursive_l1_pte(0x80200000UL);
-  if (!ppte) return 0;
-  pte_t pte = *ppte;
-  if ((pte & PTE_V) && !(pte & PTE_X)) {
-    /* ENH: Log corruption details for root cause analysis.
-     * PTE value shows which bits are affected (is it only PTE_X?).
-     * sepc shows what code was running when we detected it.
-     * Repair count tracks frequency. */
-    ptex_repair_count++;
-    printk("PTE_X repair #%d: pte=0x%lx sepc=0x%lx ppte=%p\n",
-           ptex_repair_count, (unsigned long)pte,
-           (unsigned long)r_sepc(), ppte);
-    *ppte = pte | PTE_X;
-    asm volatile("sfence.vma zero, zero" ::: "memory");
-    return 1;
-  }
-  if (!(pte & PTE_V)) {
-    ptex_repair_count++;
-    printk("PTE_X repair #%d (INVALID): pte=0x%lx sepc=0x%lx ppte=%p\n",
-           ptex_repair_count, (unsigned long)pte,
-           (unsigned long)r_sepc(), ppte);
-    *ppte = PA2PTE(0x80200000UL) | PTE_V | PTE_R | PTE_W | PTE_X;
-    asm volatile("sfence.vma zero, zero" ::: "memory");
-    return 1;
-  }
-  return 0;
+  return recursive_repair_kernel_pte((uint64_t)_kernel_text_start);
 }
 
-/* Scan all 64 kernel RAM L1 PTEs (0x80000000-0x87FFFFFF) via the
- * self-referencing window.  Fix any that lost PTE_X. */
 int recursive_check_all_kernel_ptes(void) {
   int repairs = 0;
-  for (int i = 0; i < 64; i++) {
-    uint64_t va = 0x80000000UL + (uint64_t)i * SUPERPAGE_SIZE;
-    volatile pte_t *ppte = recursive_l1_pte(va);
-    if (!ppte) continue;
-    pte_t pte = *ppte;
-    if ((pte & PTE_V) && !(pte & PTE_X)) {
-      *ppte = pte | PTE_X;
-      repairs++;
-    }
-  }
-  if (repairs > 0)
+  for (uint64_t va = KERNBASE; va < PHYSTOP; va += PAGE_SIZE)
+    repairs += enforce_kernel_pte(va, 0);
+  if (repairs > 0) {
     asm volatile("sfence.vma zero, zero" ::: "memory");
+    asm volatile("fence.i" ::: "memory");
+  }
   return repairs;
+}
+
+int kernel_wx_audit(void) {
+  int bad = 0;
+  for (uint64_t va = KERNBASE; va < PHYSTOP; va += PAGE_SIZE) {
+    int expected = 0;
+    int level = -1;
+    pte_t *pte;
+
+    if (!kernel_page_expected_perm(va, &expected))
+      continue;
+    pte = walk_super(kernel_pagetable, va, &level);
+    if (!pte || !(*pte & PTE_V) || !(*pte & (PTE_R | PTE_W | PTE_X))) {
+      bad++;
+      continue;
+    }
+
+    pte_t flags = *pte & (PTE_R | PTE_W | PTE_X | PTE_U);
+    if ((flags & (PTE_W | PTE_X)) == (PTE_W | PTE_X))
+      bad++;
+    if (flags != (uint64_t)expected)
+      bad++;
+  }
+  return bad;
 }
 
 /* Map kernel page table entries into a user page table by sharing
