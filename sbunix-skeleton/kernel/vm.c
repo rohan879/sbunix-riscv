@@ -68,6 +68,14 @@ const char *pte_kind_name(enum pte_kind kind) {
   }
 }
 
+static int pte_walk_stops(pte_t pte, int level) {
+  enum pte_kind kind = pte_classify(pte, level);
+  return kind == PTE_KIND_LEAF ||
+         kind == PTE_KIND_COW_LEAF ||
+         kind == PTE_KIND_PROT_NONE ||
+         kind == PTE_KIND_RESERVED;
+}
+
 // Return the address of the PTE in page table pagetable
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page-table pages.
@@ -77,11 +85,13 @@ pte_t *walk(pagetable_t pagetable, uint64_t va, int alloc) {
     for (int level = 2; level > 0; level--) {
         pte_t *pte = &pagetable[PX(level, va)];
         if (*pte & PTE_V) {
-            if (PTE_IS_LEAF(*pte) || (*pte & PTE_U)) {
+            if (pte_walk_stops(*pte, level)) {
                 /* This is a super page (level 1) or giga page (level 2).
                  * Cannot descend further -- return this leaf PTE. */
                 return pte;
             }
+            if (pte_classify(*pte, level) != PTE_KIND_NONLEAF)
+                return 0;
             uint64_t child_pa = PTE2PA(*pte);
             if (!pa_is_valid_page(child_pa)) {
                 return 0;
@@ -106,9 +116,13 @@ pte_t *walk_super(pagetable_t pagetable, uint64_t va, int *level_out) {
     for (int level = 2; level > 0; level--) {
         pte_t *pte = &pagetable[PX(level, va)];
         if (*pte & PTE_V) {
-            if (PTE_IS_LEAF(*pte) || (*pte & PTE_U)) {
+            if (pte_walk_stops(*pte, level)) {
                 if (level_out) *level_out = level;
                 return pte;
+            }
+            if (pte_classify(*pte, level) != PTE_KIND_NONLEAF) {
+                if (level_out) *level_out = -1;
+                return 0;
             }
             uint64_t child_pa = PTE2PA(*pte);
             if (!pa_is_valid_page(child_pa)) {
@@ -844,12 +858,19 @@ int vm_check_pagetable(pagetable_t pagetable, const char *label) {
 static void freewalk_level(pagetable_t pt, int level) {
   for (int i = 0; i < 512; i++) {
     pte_t pte = pt[i];
-    if (!(pte & PTE_V) && !PTE_IS_SWAPPED(pte))
+    enum pte_kind kind = pte_classify(pte, level);
+    if (kind == PTE_KIND_EMPTY)
       continue;
-    if (PTE_IS_SWAPPED(pte)) {
+    if (kind == PTE_KIND_SWAPPED) {
       swap_free(PTE_SWAP_SLOT(pte));
       pt[i] = 0;
-    } else if (pte & PTE_U) {
+    } else if (kind == PTE_KIND_LEAF ||
+               kind == PTE_KIND_COW_LEAF ||
+               kind == PTE_KIND_PROT_NONE) {
+      if (!(pte & PTE_U)) {
+        /* Kernel-only leaf entries point to MMIO/kernel RAM. */
+        continue;
+      }
       /* User leaf PTEs can legally have no R/W/X bits (for example after
        * mprotect(PROT_NONE)). Treat them as leaves before the non-leaf case. */
       uint64_t pa = PTE2PA(pte);
@@ -863,7 +884,7 @@ static void freewalk_level(pagetable_t pt, int level) {
         kfree((void *)pa);
       }
       pt[i] = 0;
-    } else if (!(pte & (PTE_R | PTE_W | PTE_X))) {
+    } else if (kind == PTE_KIND_NONLEAF) {
       if (level == 0) {
         pt[i] = 0;
         continue;
@@ -888,8 +909,9 @@ static void freewalk_level(pagetable_t pt, int level) {
         freewalk_level(child, level - 1);
       vm_trace_freewalk("pt-child", pt, level, i, pte, (uint64_t)child);
       kfree((void *)child);
+    } else if (kind == PTE_KIND_RESERVED) {
+      pt[i] = 0;
     }
-    /* Kernel-only leaf entries (no PTE_U): leave them, they point to MMIO */
   }
 }
 
@@ -927,20 +949,31 @@ void proc_freepagetable(pagetable_t pagetable) {
     }
 
     for (int j = 0; j < 512; j++) {
-      if (user_L1[j] & PTE_V) {
+      pte_t pte = user_L1[j];
+      enum pte_kind kind = pte_classify(pte, 1);
+      if (kind == PTE_KIND_EMPTY) {
+        continue;
+      } else if (kind == PTE_KIND_SWAPPED) {
+        swap_free(PTE_SWAP_SLOT(pte));
+        user_L1[j] = 0;
+      } else if (kind == PTE_KIND_LEAF ||
+                 kind == PTE_KIND_COW_LEAF ||
+                 kind == PTE_KIND_PROT_NONE) {
         /* User-owned entry — free recursively. A user leaf may have no R/W/X
-         * bits after mprotect(PROT_NONE), so handle PTE_U before non-leaf. */
-        if (user_L1[j] & PTE_U) {
-          uint64_t pa = PTE2PA(user_L1[j]);
+         * bits after mprotect(PROT_NONE), so classify before non-leaf. */
+        if (pte & PTE_U) {
+          uint64_t pa = PTE2PA(pte);
           if (pa_is_live_superpage(pa)) {
-            vm_trace_freewalk("l1-super", user_L1, 1, j, user_L1[j], pa);
+            vm_trace_freewalk("l1-super", user_L1, 1, j, pte, pa);
             kfree_super((void *)pa);
           }
-        } else if (!(user_L1[j] & (PTE_R | PTE_W | PTE_X))) {
+          user_L1[j] = 0;
+        }
+      } else if (kind == PTE_KIND_NONLEAF) {
           /* Non-leaf: recurse into level-0 table */
-          pagetable_t child = (pagetable_t)PTE2PA(user_L1[j]);
+          pagetable_t child = (pagetable_t)PTE2PA(pte);
 #if VM_FREEWALK_TRACE
-          pte_t saved_pte = user_L1[j];  /* save for trace after clearing */
+          pte_t saved_pte = pte;  /* save for trace after clearing */
 #endif
           if (pa_is_live_ptpage((uint64_t)child)) {
             /* Clear PTE before recursion to prevent double-free */
@@ -954,11 +987,7 @@ void proc_freepagetable(pagetable_t pagetable) {
             /* Corrupted/reused L0 page — silently detach */
             user_L1[j] = 0;
           }
-        } else {
-          user_L1[j] = 0;
-        }
-      } else if (PTE_IS_SWAPPED(user_L1[j])) {
-        swap_free(PTE_SWAP_SLOT(user_L1[j]));
+      } else if (kind == PTE_KIND_RESERVED) {
         user_L1[j] = 0;
       }
     }
@@ -1105,6 +1134,19 @@ out:
   return result;
 }
 
+static int pte_is_user_leaf(pte_t pte) {
+  enum pte_kind kind = pte_classify(pte, 0);
+  return (pte & PTE_V) && (pte & PTE_U) &&
+         (kind == PTE_KIND_LEAF || kind == PTE_KIND_COW_LEAF);
+}
+
+static int current_vma_allows_write(uint64_t va) {
+  if (!current_proc)
+    return 0;
+  struct vm_area *vma = vma_find(current_proc, PGROUNDDOWN(va));
+  return vma && (vma->prot & PROT_WRITE);
+}
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
@@ -1129,6 +1171,8 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
       if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
         return -1;
     }
+    if (!pte_is_user_leaf(*pte))
+      return -1;
 
     /* BF: Resolve COW page before writing via cow_break() which also
      * registers the new private page in anon rmap.  Also handle the case
@@ -1137,6 +1181,8 @@ int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len) {
     if (level == 0) {
       uint64_t old_pa = PTE2PA(*pte);
       int ref = page_ref_get(old_pa);
+      if ((*pte & PTE_W) == 0 && !current_vma_allows_write(dstva))
+        return -1;
       if ((*pte & PTE_COW) || (ref > 1 && !(*pte & PTE_W))) {
         /* Use cow_break for proper rmap registration of new page */
         uint64_t va_page = PGROUNDDOWN(dstva);
@@ -1190,6 +1236,8 @@ int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len) {
       if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
         return -1;
     }
+    if (!pte_is_user_leaf(*pte) || (*pte & PTE_R) == 0)
+      return -1;
 
     uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
     uint64_t va0 = (level == 1) ? SPGROUNDDOWN(srcva) : PGROUNDDOWN(srcva);
@@ -1234,6 +1282,8 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
       if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
         return -EFAULT;
     }
+    if (!pte_is_user_leaf(*pte) || (*pte & PTE_R) == 0)
+      return -EFAULT;
 
     uint64_t page_size = (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
     uint64_t va0 = (level == 1) ? SPGROUNDDOWN(srcva) : PGROUNDDOWN(srcva);

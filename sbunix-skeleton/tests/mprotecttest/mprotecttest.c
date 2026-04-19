@@ -6,6 +6,7 @@
  *  1. mprotect_file_backed: file mmap, PROT_NONE then PROT_READ, verify data
  *  2. mprotect_partial_vma: mprotect middle of large anon mapping
  *  3. mprotect_anon_metadata: anon mmap, write, RO then RW, verify data
+ *  4. mprotect_syscall_usercopy: syscalls cannot bypass PROT_NONE
  */
 
 #include <stdio.h>
@@ -14,6 +15,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #define PAGE 4096
 
@@ -172,12 +174,48 @@ static void test_mprotect_anon_metadata(void) {
   CHECK("mprotect_anon_metadata", ok);
 }
 
+/*
+ * Test 4: mprotect_syscall_usercopy -- PROT_NONE must block supervisor
+ * copyin/copyout helpers as well as ordinary user-mode loads/stores.
+ */
+static void test_mprotect_syscall_usercopy(void) {
+  void *p = mmap(NULL, PAGE, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (p == MAP_FAILED) {
+    CHECK("mprotect_syscall_usercopy", 0);
+    return;
+  }
+
+  memset(p, 'X', PAGE);
+  int ok = (mprotect(p, PAGE, PROT_NONE) == 0);
+
+  errno = 0;
+  ssize_t wr = write(1, p, 1);
+  if (!(wr == -1 && errno == EFAULT))
+    ok = 0;
+
+  char *cwd = getcwd((char *)p, PAGE);
+  if (cwd != NULL)
+    ok = 0;
+
+  if (mprotect(p, PAGE, PROT_READ | PROT_WRITE) != 0)
+    ok = 0;
+  if (ok) {
+    ((char *)p)[0] = 'Y';
+    ok = ((char *)p)[0] == 'Y';
+  }
+
+  munmap(p, PAGE);
+  CHECK("mprotect_syscall_usercopy", ok);
+}
+
 int main(void) {
   printf("=== mprotecttest: mprotect test suite ===\n");
 
   test_mprotect_file_backed();
   test_mprotect_partial_vma();
   test_mprotect_anon_metadata();
+  test_mprotect_syscall_usercopy();
 
   printf("\n=== mprotecttest: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
