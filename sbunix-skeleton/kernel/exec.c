@@ -36,6 +36,14 @@ static int map_sigtrampoline(pagetable_t pt) {
   return 0;
 }
 
+static void trapframe_prepare_user_return(struct trapframe *tf) {
+  uint64_t sstatus = r_sstatus();
+  sstatus &= ~SSTATUS_SPP;
+  sstatus |= SSTATUS_SPIE;
+  tf->saved_sstatus = sstatus;
+  tf->return_to_user = 1;
+}
+
 static uint64_t exec_mmap_base(uint64_t sz) {
     uint64_t base = PGROUNDUP(sz) + PAGE_SIZE;
     if (base < USER_MMAP_FLOOR)
@@ -266,6 +274,7 @@ int exec(char *path) {
     // 7. Initialize trapframe
     memset(tf, 0, sizeof(*tf));
     tf->epc = ehdr->e_entry;
+    trapframe_prepare_user_return(tf);
 
     // Set up initial stack: crt.S expects [argc, argv..., NULL, envp..., NULL]
     // For no args/env: [0, NULL, NULL] = 24 bytes, padded to 32 for alignment
@@ -541,6 +550,7 @@ int exec_vfs(const char *resolved_path) {
     /* 8. Initialize trapframe */
     memset(tf, 0, sizeof(*tf));
     tf->epc = ehdr.e_entry;
+    trapframe_prepare_user_return(tf);
 
     uint64_t *stp = (uint64_t *)(top_page_mem_vfs + PAGE_SIZE);
     stp[-1] = 0; stp[-2] = 0; stp[-3] = 0; stp[-4] = 0;

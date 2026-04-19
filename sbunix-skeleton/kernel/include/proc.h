@@ -30,9 +30,8 @@ struct context {
   uint64_t s11;
 };
 
-// Trapframe: user registers + kernel scratch area for the trampoline.
-// The first 256 bytes hold saved user registers (offsets match trap.S).
-// Bytes 256-279 hold kernel values loaded by the trampoline on trap entry.
+// Trapframe: user registers plus trap-entry provenance.
+// Offsets must match kernel/trap.S.
 struct trapframe {
   /*   0 */ uint64_t ra;
   /*   8 */ uint64_t t0;
@@ -66,6 +65,8 @@ struct trapframe {
   /* 232 */ uint64_t tp;
   /* 240 */ uint64_t sp;
   /* 248 */ uint64_t epc;
+  /* 256 */ uint64_t saved_sstatus;
+  /* 264 */ uint64_t return_to_user;
 };
 
 struct signal_frame {
