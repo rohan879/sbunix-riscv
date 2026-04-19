@@ -52,11 +52,14 @@ void boot(uint64_t hartid, void *dtb) {
   syscall_init();
   userinit();
 
-  /* Verify kernel code PTE integrity via self-referencing page table window.
-   * The gigapage at L2[510] provides a redundant access path to the L1 PTE
-   * that does not depend on the identity-mapped superpages. */
+  /* Verify kernel code PTE integrity and W^X policy before scheduling. */
   if (recursive_check_kcode_pte())
-    printk("boot: repaired kernel code PTE_X via recursive mapping\n");
+    printk("boot: repaired kernel code PTE permissions\n");
+  int wx_bad = kernel_wx_audit();
+  if (wx_bad == 0)
+    printk("boot: kernel W^X verified\n");
+  else
+    printk("boot: WARNING kernel W^X audit found %d bad mapping(s)\n", wx_bad);
   /* Verify the self-referencing window is functional by reading a
    * known L2 entry through the window and comparing to direct access */
   {

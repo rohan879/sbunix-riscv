@@ -269,9 +269,8 @@ static void handle_timer_interrupt(void) {
     if (current_proc)
         current_proc->cputime_ticks++;
 
-    /* Fast per-tick check of critical kernel code PTE via self-referencing
-     * gigapage window (single volatile load + conditional store).
-     * Catches DMA-induced PTE_X corruption before it causes faults. */
+    /* Fast per-tick check of critical kernel code PTE.  The repair path
+     * enforces W^X instead of blindly restoring execute permission. */
     recursive_check_kcode_pte();
     /* Full scan every 100 ticks (~10s at 10Hz) */
     if (ticks % 100 == 50) {
@@ -1186,48 +1185,15 @@ void trap_handler(struct trapframe *tf) {
                 }
             }
 
-            /* Use self-referencing gigapage window to repair PTE without
-             * walk() and without depending on the identity-mapped superpages
-             * (which are the PTEs being corrupted by DMA). */
             if (cause == SCAUSE_INST_PAGE_FAULT && stval >= KERNBASE) {
-                if (kernel_pagetable[RECURSIVE_INDEX] & PTE_V) {
-                    volatile pte_t *ppte = recursive_l1_pte(PGROUNDDOWN(stval));
-                    if (ppte) {
-                        pte_t pte = *ppte;
-                        if ((pte & PTE_V) && !(pte & PTE_X)) {
-                            *ppte = pte | PTE_X;
-                            asm volatile("sfence.vma zero, zero" ::: "memory");
-                            asm volatile("fence.i" ::: "memory");
-                            return;
-                        }
-                        if (!(pte & PTE_V)) {
-                            uint64_t pa = SPGROUNDDOWN(stval);
-                            *ppte = PA2PTE(pa) | PTE_V | PTE_R | PTE_W | PTE_X;
-                            asm volatile("sfence.vma zero, zero" ::: "memory");
-                            asm volatile("fence.i" ::: "memory");
-                            return;
-                        }
-                    }
-                }
-                /* Fallback: direct identity-map access (works if identity
-                 * map is not corrupted) */
-                {
-                    pte_t l2pte = kernel_pagetable[2];
-                    if (l2pte & PTE_V) {
-                        pagetable_t l1 = (pagetable_t)PTE2PA(l2pte);
-                        int idx = PX(1, stval);
-                        if ((l1[idx] & PTE_V) && !(l1[idx] & PTE_X)) {
-                            l1[idx] |= PTE_X;
-                            asm volatile("sfence.vma zero, zero" ::: "memory");
-                            asm volatile("fence.i" ::: "memory");
-                            return;
-                        }
-                    }
-                }
-                /* BF: If we reach here, the PTE already has PTE_X -- the timer
-                 * interrupt may have repaired it between the CPU fault and our
-                 * handler entry.  Retry the faulting instruction, but limit
-                 * retries to avoid infinite loops from persistent corruption. */
+                if (recursive_repair_kernel_pte(PGROUNDDOWN(stval)))
+                    return;
+                if (!kernel_va_executable(stval))
+                    goto pagefault_kill;
+                /* If we reach here, the executable kernel PTE may already have
+                 * been repaired between the CPU fault and our handler entry.
+                 * Retry the faulting instruction, but limit retries to avoid
+                 * infinite loops from persistent corruption. */
                 {
                     static int kpte_retry_count;
                     static uint64_t kpte_retry_epc;

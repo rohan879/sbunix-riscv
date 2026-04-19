@@ -62,12 +62,9 @@ typedef int            pid_t;
  * the gigapage gives the MMU a one-step translation, and software
  * computes PTE offsets within the window.
  *
- * Purpose: the kernel code PTE at 0x87ffa008 intermittently loses
- * PTE_X during heavy virtio_blk DMA.  The identity-mapped L1
- * superpages (kvminit line 191) ARE the corrupted PTEs, so the
- * identity mapping itself may become unreliable.  This gigapage
- * provides a redundant access path via a separate L2 entry
- * (root[510] vs root[2]) that is never touched by DMA. */
+ * Purpose: provide a read-only diagnostic alias for physical RAM and
+ * page-table inspection without creating a writable alias of executable
+ * kernel text. */
 #define RECURSIVE_INDEX   510
 #define RECURSIVE_BASE    0xFFFFFFFF80000000UL  /* VPN[2]=510, sign-extended */
 #define PHYS_RAM_BASE     0x80000000UL
