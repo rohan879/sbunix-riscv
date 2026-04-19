@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <time.h>
 #include <sys/time.h>
+#include <syscall.h>
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -22,6 +23,11 @@ static int g_fail = 0;
 
 /* Epoch timestamp for Jan 1 2020 00:00:00 UTC */
 #define EPOCH_2020 1577836800L
+#define EPOCH_2100 4102444800L
+
+static int sec_in_expected_range(long sec) {
+    return sec >= EPOCH_2020 && sec < EPOCH_2100;
+}
 
 /* -----------------------------------------------------------------------
  * 1. clock_realtime_valid: clock_gettime(CLOCK_REALTIME) returns
@@ -31,7 +37,7 @@ static void test_clock_realtime_valid(void) {
     struct timespec ts;
     int r = clock_gettime(CLOCK_REALTIME, &ts);
     CHECK("clock_realtime_valid",
-          r == 0 && ts.tv_sec > EPOCH_2020);
+          r == 0 && sec_in_expected_range(ts.tv_sec));
 }
 
 /* -----------------------------------------------------------------------
@@ -122,6 +128,22 @@ static void test_clock_monotonic_no_backward(void) {
     CHECK("clock_monotonic_no_backward", ok);
 }
 
+static void test_clock_realtime_no_backward(void) {
+    struct timespec prev, cur;
+    clock_gettime(CLOCK_REALTIME, &prev);
+
+    int ok = 1;
+    for (int i = 0; i < 100; i++) {
+        clock_gettime(CLOCK_REALTIME, &cur);
+        if (ts_less(&cur, &prev)) {
+            ok = 0;
+            break;
+        }
+        prev = cur;
+    }
+    CHECK("clock_realtime_no_backward", ok);
+}
+
 /* -----------------------------------------------------------------------
  * 8. gettimeofday_valid: gettimeofday returns time > 1577836800
  * ----------------------------------------------------------------------- */
@@ -129,7 +151,15 @@ static void test_gettimeofday_valid(void) {
     struct timeval tv;
     int r = gettimeofday(&tv, NULL);
     CHECK("gettimeofday_valid",
-          r == 0 && tv.tv_sec > EPOCH_2020);
+          r == 0 && sec_in_expected_range(tv.tv_sec));
+}
+
+static void test_raw_gettimeofday_valid(void) {
+    struct timeval tv;
+    long r = syscall(SYS_gettimeofday, &tv, NULL);
+    CHECK("raw_gettimeofday_valid",
+          r == 0 && sec_in_expected_range(tv.tv_sec) &&
+          tv.tv_usec >= 0 && tv.tv_usec < 1000000);
 }
 
 /* -----------------------------------------------------------------------
@@ -153,7 +183,7 @@ static void test_gettimeofday_matches_clockgettime(void) {
  * ----------------------------------------------------------------------- */
 static void test_time_returns_epoch(void) {
     time_t t = time(NULL);
-    CHECK("time_returns_epoch", t > EPOCH_2020);
+    CHECK("time_returns_epoch", sec_in_expected_range(t));
 }
 
 /* ----------------------------------------------------------------------- */
@@ -168,7 +198,9 @@ int main(void) {
     test_clock_realtime_advances();
     test_clock_monotonic_advances();
     test_clock_monotonic_no_backward();
+    test_clock_realtime_no_backward();
     test_gettimeofday_valid();
+    test_raw_gettimeofday_valid();
     test_gettimeofday_matches_clockgettime();
     test_time_returns_epoch();
 

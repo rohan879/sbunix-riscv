@@ -43,6 +43,7 @@ enum dtb_dev_type {
     DTB_DEV_CLINT,
     DTB_DEV_VIRTIO_MMIO,
     DTB_DEV_PCI,
+    DTB_DEV_RTC,
 };
 
 #define DTB_MAX_DEVICES 32
@@ -52,7 +53,7 @@ struct dtb_device {
     uint64_t base_addr;
     uint64_t size;
     uint32_t irq;
-    const char *compatible;
+    char compatible[64];
 };
 
 struct dtb_info {

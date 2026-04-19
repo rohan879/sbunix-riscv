@@ -373,8 +373,8 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
     uint64_t deadline_ticks = 0;
     if (has_timeout) {
         uint64_t now = r_time();
-        uint64_t timeout_ticks = (uint64_t)timeout_sec * TIMER_FREQ +
-                                 (uint64_t)timeout_nsec / 100;
+        uint64_t timeout_ticks =
+            timespec_to_ticks((uint64_t)timeout_sec, (uint64_t)timeout_nsec);
         deadline_ticks = now + timeout_ticks;
     }
 
