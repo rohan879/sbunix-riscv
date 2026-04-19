@@ -37,6 +37,7 @@ static const char *dev_type_name(enum dtb_dev_type t) {
     case DTB_DEV_CLINT:       return "clint";
     case DTB_DEV_VIRTIO_MMIO: return "virtio";
     case DTB_DEV_PCI:         return "pci";
+    case DTB_DEV_RTC:         return "rtc";
     default:                  return "unknown";
   }
 }
@@ -80,6 +81,8 @@ static int find_device_by_name(const char *name, int *out_index) {
     target_type = DTB_DEV_VIRTIO_MMIO;
   else if (prefix_len == 3 && memcmp(name, "pci", 3) == 0)
     target_type = DTB_DEV_PCI;
+  else if (prefix_len == 3 && memcmp(name, "rtc", 3) == 0)
+    target_type = DTB_DEV_RTC;
   else
     return -1;
 
@@ -229,7 +232,7 @@ static int sysfs_open(void *fs_data, const char *path, int flags, void **private
       priv->len = fmt_hex64(priv->buf, dev->size);
     } else if (strcmp(attr, "irq") == 0 && dev->irq > 0) {
       priv->len = fmt_dec64(priv->buf, (uint64_t)dev->irq);
-    } else if (strcmp(attr, "compatible") == 0 && dev->compatible) {
+    } else if (strcmp(attr, "compatible") == 0 && dev->compatible[0]) {
       int cl = strlen(dev->compatible);
       if (cl > (int)sizeof(priv->buf) - 2) cl = (int)sizeof(priv->buf) - 2;
       memcpy(priv->buf, dev->compatible, cl);
@@ -389,7 +392,7 @@ static int sysfs_stat(void *fs_data, const char *path, uint8_t *st) {
     if (strcmp(attr, "address") == 0) attr_id = 0;
     else if (strcmp(attr, "size") == 0) attr_id = 1;
     else if (strcmp(attr, "irq") == 0 && dv->irq > 0) attr_id = 2;
-    else if (strcmp(attr, "compatible") == 0 && dv->compatible) attr_id = 3;
+    else if (strcmp(attr, "compatible") == 0 && dv->compatible[0]) attr_id = 3;
     else if (strcmp(attr, "capacity") == 0 &&
              dv->type == DTB_DEV_VIRTIO_MMIO &&
              dev_type_index(dev_idx) == 0) attr_id = 4;
@@ -525,7 +528,7 @@ static int sysfs_readdir(void *fs_data, void *private, char *ubuf,
     EMIT_DIRENT("size", (uint64_t)(700 + priv->dev_index * 10 + 1), 8);
     if (dv->irq > 0)
       EMIT_DIRENT("irq", (uint64_t)(700 + priv->dev_index * 10 + 2), 8);
-    if (dv->compatible)
+    if (dv->compatible[0])
       EMIT_DIRENT("compatible", (uint64_t)(700 + priv->dev_index * 10 + 3), 8);
     if (dv->type == DTB_DEV_VIRTIO_MMIO && dev_type_index(priv->dev_index) == 0) {
       EMIT_DIRENT("capacity", (uint64_t)(700 + priv->dev_index * 10 + 4), 8);
