@@ -14,6 +14,7 @@
 #include <vm.h>
 #include <kmalloc.h>
 #include <tty.h>
+#include <errno.h>
 
 long sys_ioctl_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
@@ -31,7 +32,7 @@ long sys_ioctl_handler(struct trapframe *tf) {
             if (argp) {
                 struct { uint16_t row, col, xpix, ypix; } ws = {24, 80, 0, 0};
                 if (copyout(current_proc->pagetable, argp, &ws, sizeof(ws)) < 0) {
-                    return (long)-14;
+                    return (long)-EFAULT;
                 }
             }
             return (long)0;
@@ -43,12 +44,12 @@ long sys_ioctl_handler(struct trapframe *tf) {
         int kpgid = 0;
         if (request == 0x5410 && argp) {
             if (copyin(current_proc->pagetable, &kpgid, argp, sizeof(kpgid)) < 0)
-                return (long)-14;
+                return (long)-EFAULT;
         }
         long result = (long)tty_ioctl(request, (void *)&kpgid);
         if (request == 0x540F && argp) {
             if (copyout(current_proc->pagetable, argp, &kpgid, sizeof(kpgid)) < 0)
-                return (long)-14;
+                return (long)-EFAULT;
         }
         return result;
     } else if (request >= TCGETS && request <= TCSETSF) {
@@ -57,13 +58,13 @@ long sys_ioctl_handler(struct trapframe *tf) {
             memset(ktermios, 0, sizeof(ktermios));
             if (request != TCGETS && argp) {
                 if (copyin(current_proc->pagetable, ktermios, argp, 60) < 0) {
-                    return (long)-14;
+                    return (long)-EFAULT;
                 }
             }
             long result = (long)tty_ioctl(request, (void *)ktermios);
             if (request == TCGETS && argp) {
                 if (copyout(current_proc->pagetable, argp, ktermios, 60) < 0) {
-                    return (long)-14;
+                    return (long)-EFAULT;
                 }
             }
             return result;
@@ -115,7 +116,7 @@ long sys_prlimit64_handler(struct trapframe *tf) {
             rlim[1] = 0xFFFFFFFFFFFFFFFFULL;
         }
         if (copyout(current_proc->pagetable, old_uaddr, rlim, 16) < 0) {
-            return (long)-14;
+            return (long)-EFAULT;
         }
     }
     return (long)0;
@@ -235,7 +236,7 @@ long sys_uname_handler(struct trapframe *tf) {
     memcpy(kbuf + 260, "riscv64", 7);
 
     if (copyout(current_proc->pagetable, tf->a0, kbuf, sizeof(kbuf)) < 0)
-        return (long)-14; /* EFAULT */
+        return (long)-EFAULT; /* EFAULT */
     return 0;
 }
 
@@ -246,11 +247,11 @@ static int mount_path_next = 0;
 long sys_mount_handler(struct trapframe *tf) {
     char ksrc[128], ktgt[256], kfstype[64];
     if (copyinstr(current_proc->pagetable, ksrc, tf->a0, sizeof(ksrc)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     if (copyinstr(current_proc->pagetable, ktgt, tf->a1, sizeof(ktgt)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     if (copyinstr(current_proc->pagetable, kfstype, tf->a2, sizeof(kfstype)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     char source_resolved[128], target_resolved[256];
     /* BF: Propagate ENAMETOOLONG from resolve_path */
@@ -283,7 +284,7 @@ long sys_mount_handler(struct trapframe *tf) {
 long sys_umount2_handler(struct trapframe *tf) {
     char ktgt[128];
     if (copyinstr(current_proc->pagetable, ktgt, tf->a0, sizeof(ktgt)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     char resolved[128];
     /* BF: Propagate ENAMETOOLONG from resolve_path */
@@ -331,7 +332,7 @@ long sys_utimensat_handler(struct trapframe *tf) {
     int has_times = 0;
     if (times_uaddr) {
         if (copyin(current_proc->pagetable, ktimes, times_uaddr, 32) < 0)
-            return (long)-14; /* EFAULT */
+            return (long)-EFAULT; /* EFAULT */
         has_times = 1;
     }
 
@@ -366,7 +367,7 @@ long sys_utimensat_handler(struct trapframe *tf) {
 
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, path_uva, sizeof(kpath)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     char resolved[128];
     /* BF: Propagate ENAMETOOLONG from resolve_path */
@@ -414,7 +415,7 @@ long sys_statfs_handler(struct trapframe *tf) {
     /* a0 = path, a1 = buf (struct statfs, 120 bytes on RISC-V) */
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
 
     char resolved[128];
     /* BF: Propagate ENAMETOOLONG from resolve_path */
@@ -455,7 +456,7 @@ long sys_statfs_handler(struct trapframe *tf) {
     }
 
     if (copyout(current_proc->pagetable, tf->a1, kbuf, 120) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     return 0;
 }
 
@@ -481,7 +482,7 @@ long sys_fstatfs_handler(struct trapframe *tf) {
     memcpy(kbuf, vals, sizeof(kbuf));
 
     if (copyout(current_proc->pagetable, tf->a1, kbuf, 120) < 0)
-        return (long)-14;
+        return (long)-EFAULT;
     return 0;
 }
 
