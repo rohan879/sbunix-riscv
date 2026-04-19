@@ -1352,7 +1352,7 @@ long sys_readlinkat_handler(struct trapframe *tf) {
         return (long)-22; /* EINVAL */
 
     char kbuf[128];
-    int maxread = bufsiz > 256 ? 256 : bufsiz;
+    int maxread = bufsiz > (int)sizeof(kbuf) ? (int)sizeof(kbuf) : bufsiz;
     int ret = ops->readlink(mnt->fs_data, relpath, kbuf, maxread);
     if (ret < 0)
         return (long)(int64_t)ret;

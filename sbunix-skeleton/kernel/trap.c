@@ -422,9 +422,6 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         }
     }
 
-    /* Clear from pending */
-    p->sigpending &= ~signal_bit(signum);
-
     struct kern_sigaction *sa = proc_sigactions(p);
     
     /* Force SIG_DFL for SIG_IGN on unblockable/synchronous signals */
@@ -433,6 +430,13 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     }
     
     uint64_t handler = sa[signum].handler;
+
+    if (handler >= 2 && (handler < 0x1000 || !user_addr_ok(handler))) {
+        handler = 0;
+    }
+
+    /* Clear from pending only after the disposition is known. */
+    p->sigpending &= ~signal_bit(signum);
 
     /* BF: Helper macro — consume deferred sigsuspend mask on any path
      * that does NOT build a user signal frame (where sigreturn would
@@ -643,11 +647,6 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     }
 
     /* Set up trapframe to call handler(signum[, siginfo, ucontext]) */
-    /* Sanity check: handler must be a valid user-space address.
-     * If not, fall through to the existing SIG_DFL handling below. */
-    if (handler >= 2 && (handler < 0x1000 || !user_addr_ok(handler))) {
-        handler = 0;
-    }
     if (handler >= 2) {
         /* BF: Bump epoch so ppoll/pselect6 can detect that a signal was
          * handled between their mask swap and the blocking sleep. */
