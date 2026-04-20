@@ -24,6 +24,10 @@ static struct ext2_fs ext2_filesystems[EXT2_MAX_FS] = {
 #define ext2_mounted (fs->mounted)
 #define bcache_hand (fs->bcache_hand)
 
+#define EXT2_MAX_FILE_BLOCKS (EXT2_NDIRECT + EXT2_NINDIRECT)
+#define EXT2_MAX_FILE_SIZE \
+  ((uint64_t)EXT2_MAX_FILE_BLOCKS * EXT2_BLOCK_SIZE)
+
 /* ================================================================== */
 /* Block I/O (low-level)                                               */
 /* ================================================================== */
@@ -456,6 +460,152 @@ static uint32_t ext2_bmap(struct ext2_fs *fs, struct ext2_inode_mem *ip,
   return blk;
 }
 
+static int ext2_zero_block_range(struct ext2_fs *fs, uint32_t blockno,
+                                 uint32_t off, uint32_t len) {
+  if (blockno == 0 || len == 0)
+    return 0;
+  if (off >= EXT2_BLOCK_SIZE)
+    return 0;
+  if (len > EXT2_BLOCK_SIZE - off)
+    len = EXT2_BLOCK_SIZE - off;
+
+  struct bcache_entry *e = bcache_get(fs, blockno);
+  if (!e)
+    return -EIO;
+  memset(e->data + off, 0, len);
+  bcache_mark_dirty(e);
+  bcache_release(e);
+  return 0;
+}
+
+static int ext2_zero_file_range(struct ext2_fs *fs,
+                                struct ext2_inode_mem *ip,
+                                uint32_t start, uint32_t end) {
+  while (start < end) {
+    uint32_t file_block = start / EXT2_BLOCK_SIZE;
+    uint32_t block_off = start % EXT2_BLOCK_SIZE;
+    uint32_t chunk = EXT2_BLOCK_SIZE - block_off;
+    if (chunk > end - start)
+      chunk = end - start;
+
+    uint32_t disk_blk = ext2_bmap(fs, ip, file_block);
+    if (disk_blk) {
+      int ret = ext2_zero_block_range(fs, disk_blk, block_off, chunk);
+      if (ret < 0)
+        return ret;
+    }
+
+    start += chunk;
+  }
+  return 0;
+}
+
+static int ext2_release_blocks_after(struct ext2_fs *fs,
+                                     struct ext2_inode_mem *ip,
+                                     uint32_t keep_blocks,
+                                     uint32_t old_blocks) {
+  if (old_blocks > EXT2_MAX_FILE_BLOCKS)
+    old_blocks = EXT2_MAX_FILE_BLOCKS;
+  if (keep_blocks >= old_blocks)
+    return 0;
+
+  struct bcache_entry *ind = NULL;
+  if (old_blocks > EXT2_NDIRECT && ip->indirect) {
+    ind = bcache_get(fs, ip->indirect);
+    if (!ind)
+      return -EIO;
+  }
+
+  uint32_t direct_start = keep_blocks;
+  if (direct_start < EXT2_NDIRECT) {
+    uint32_t direct_end = old_blocks;
+    if (direct_end > EXT2_NDIRECT)
+      direct_end = EXT2_NDIRECT;
+    for (uint32_t i = direct_start; i < direct_end; i++) {
+      if (ip->direct[i]) {
+        ext2_free_block(fs, ip->direct[i]);
+        ip->direct[i] = 0;
+        ip->dirty = 1;
+      }
+    }
+  }
+
+  if (ind) {
+    uint32_t *ptrs = (uint32_t *)ind->data;
+    uint32_t indirect_start = 0;
+    if (keep_blocks > EXT2_NDIRECT)
+      indirect_start = keep_blocks - EXT2_NDIRECT;
+    uint32_t indirect_end = old_blocks - EXT2_NDIRECT;
+    if (indirect_end > EXT2_NINDIRECT)
+      indirect_end = EXT2_NINDIRECT;
+
+    for (uint32_t i = indirect_start; i < indirect_end; i++) {
+      if (ptrs[i]) {
+        ext2_free_block(fs, ptrs[i]);
+        ptrs[i] = 0;
+        bcache_mark_dirty(ind);
+      }
+    }
+
+    int empty = 1;
+    for (uint32_t i = 0; i < EXT2_NINDIRECT; i++) {
+      if (ptrs[i]) {
+        empty = 0;
+        break;
+      }
+    }
+    bcache_release(ind);
+
+    if (empty) {
+      ext2_free_block(fs, ip->indirect);
+      ip->indirect = 0;
+      ip->dirty = 1;
+    }
+  }
+
+  return 0;
+}
+
+static int ext2_resize_file(struct ext2_fs *fs, struct ext2_inode_mem *ip,
+                            uint64_t length) {
+  if (length > EXT2_MAX_FILE_SIZE)
+    return -EFBIG;
+
+  uint32_t new_size = (uint32_t)length;
+  uint32_t old_size = ip->size;
+  if (new_size == old_size)
+    return 0;
+
+  if (new_size < old_size) {
+    if (new_size % EXT2_BLOCK_SIZE) {
+      int ret = ext2_zero_file_range(fs, ip, new_size,
+                                     ((new_size / EXT2_BLOCK_SIZE) + 1) *
+                                     EXT2_BLOCK_SIZE);
+      if (ret < 0)
+        return ret;
+    }
+
+    uint32_t keep_blocks =
+      (new_size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
+    /* BF: Scan the full mapping table so stale pointers beyond i_size
+     * are reclaimed the next time the file is shrunk. */
+    uint32_t old_blocks = EXT2_MAX_FILE_BLOCKS;
+    int ret = ext2_release_blocks_after(fs, ip, keep_blocks, old_blocks);
+    if (ret < 0)
+      return ret;
+  } else {
+    /* BF: Growing exposes bytes that may map to a previously allocated
+     * partial block, so clear any mapped blocks in the new range first. */
+    int ret = ext2_zero_file_range(fs, ip, old_size, new_size);
+    if (ret < 0)
+      return ret;
+  }
+
+  ip->size = new_size;
+  ip->dirty = 1;
+  return 0;
+}
+
 /* bmap_alloc: like bmap but allocates blocks on demand.
  * Returns disk block number, or 0 on failure. */
 static uint32_t ext2_bmap_alloc(struct ext2_fs *fs, struct ext2_inode_mem *ip,
@@ -832,30 +982,8 @@ static struct ext2_inode_mem *ext2_namei(struct ext2_fs *fs, const char *path) {
 /* Truncate -- free all data blocks of an inode                        */
 /* ================================================================== */
 
-static void ext2_truncate(struct ext2_fs *fs, struct ext2_inode_mem *ip) {
-  /* Free direct blocks */
-  for (int i = 0; i < EXT2_NDIRECT; i++) {
-    if (ip->direct[i]) {
-      ext2_free_block(fs, ip->direct[i]);
-      ip->direct[i] = 0;
-    }
-  }
-  /* Free indirect blocks */
-  if (ip->indirect) {
-    struct bcache_entry *e = bcache_get(fs, ip->indirect);
-    if (e) {
-      uint32_t *ptrs = (uint32_t *)e->data;
-      for (int i = 0; i < EXT2_NINDIRECT; i++) {
-        if (ptrs[i])
-          ext2_free_block(fs, ptrs[i]);
-      }
-      bcache_release(e);
-    }
-    ext2_free_block(fs, ip->indirect);
-    ip->indirect = 0;
-  }
-  ip->size = 0;
-  ip->dirty = 1;
+static int ext2_truncate(struct ext2_fs *fs, struct ext2_inode_mem *ip) {
+  return ext2_resize_file(fs, ip, 0);
 }
 
 /* ================================================================== */
@@ -920,8 +1048,14 @@ static int ext2_open(void *fs_data, const char *path, int flags,
 
   /* Handle O_TRUNC */
   if ((flags & EXT2_O_TRUNC) && ip->type == EXT2_TYPE_FILE) {
-    ext2_truncate(fs, ip);
+    int ret = ext2_truncate(fs, ip);
+    if (ret < 0) {
+      icache_release(ip);
+      return ret;
+    }
     icache_writeback(fs, ip);
+    sb_flush_if_dirty(fs);
+    bcache_sync(fs);
   }
 
   /* Allocate private data */
@@ -2077,9 +2211,21 @@ int ext2_ftruncate_ino(void *fs_data, uint32_t ino, uint64_t length) {
   if (!fs || !ext2_mounted) return -EROFS;
   struct ext2_inode_mem *ip = icache_get(fs, ino);
   if (!ip) return -1;
-  ip->size = (uint32_t)length;
-  ip->dirty = 1;
+
+  if (ip->type == EXT2_TYPE_DIR) {
+    icache_release(ip);
+    return -EISDIR;
+  }
+
+  int ret = ext2_resize_file(fs, ip, length);
+  if (ret < 0) {
+    icache_release(ip);
+    return ret;
+  }
+
   icache_writeback(fs, ip);
+  sb_flush_if_dirty(fs);
+  bcache_sync(fs);
   icache_release(ip);
   return 0;
 }
@@ -2129,9 +2275,15 @@ int ext2_hardlink(void *fs_data, const char *newpath, uint32_t src_ino) {
     return -ENOENT;
   }
 
+  /* BF: Keep ext2 safe even if the VFS/path layer misses directory policy. */
+  if (src->type == EXT2_TYPE_DIR) {
+    icache_release(src);
+    icache_release(parent);
+    return -EPERM;
+  }
+
   uint8_t ftype = EXT2_FT_FILE;
-  if (src->type == EXT2_TYPE_DIR) ftype = EXT2_FT_DIR;
-  else if (src->type == EXT2_TYPE_SYMLINK) ftype = EXT2_FT_SYMLINK;
+  if (src->type == EXT2_TYPE_SYMLINK) ftype = EXT2_FT_SYMLINK;
 
   /* Add directory entry pointing to existing inode */
   int ret = ext2_dir_add(fs, parent, basename, src_ino, ftype);
@@ -2145,9 +2297,12 @@ int ext2_hardlink(void *fs_data, const char *newpath, uint32_t src_ino) {
   src->link_count++;
   src->dirty = 1;
   icache_writeback(fs, src);
+  icache_writeback(fs, parent);
 
   icache_release(src);
   icache_release(parent);
+  sb_flush_if_dirty(fs);
+  bcache_sync(fs);
   return 0;
 }
 
@@ -2168,9 +2323,9 @@ void ext2_sync(void *fs_data) {
       icache_writeback(fs, &icache[i]);
   }
 
-  /* Write back all dirty bcache entries */
-  bcache_sync(fs);
-
   /* Write superblock if dirty */
   sb_flush_if_dirty(fs);
+
+  /* Write back all dirty bcache entries */
+  bcache_sync(fs);
 }

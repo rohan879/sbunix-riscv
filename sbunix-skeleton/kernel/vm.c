@@ -787,6 +787,26 @@ void superpage_split(pagetable_t pagetable, uint64_t va) {
 /* VMA management functions                                             */
 /* ------------------------------------------------------------------ */
 
+static int vma_can_merge(struct vm_area *a, struct vm_area *b) {
+  if (!a || !b)
+    return 0;
+  if (a->end < b->start || a->prot != b->prot || a->flags != b->flags)
+    return 0;
+  if (a->file || b->file)
+    return 0;
+  /* BF: Anonymous VMAs carry anon_vma chains, page offsets, and resident
+   * counts.  Do not merge them until that metadata can be combined
+   * without losing reverse-map ownership. */
+  if ((a->flags & MAP_ANON) || (b->flags & MAP_ANON))
+    return 0;
+  if (a->anon_vma || b->anon_vma ||
+      !list_empty(&a->anon_vma_chain) || !list_empty(&b->anon_vma_chain))
+    return 0;
+  if (a->resident_pages || b->resident_pages)
+    return 0;
+  return 1;
+}
+
 /* Add a VMA covering [start, end) with given prot/flags.
  * Inserts into the sorted linked list, merging with adjacent VMAs
  * that have matching prot and flags. Returns 0 on success, -1 on error. */
@@ -833,10 +853,7 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   *pp = vma;
 
   /* Merge with next if they touch and have same prot/flags */
-  while (vma->next && vma->next->start <= vma->end &&
-         vma->next->prot == vma->prot && vma->next->flags == vma->flags &&
-         (vma->flags & MAP_ANON) && (vma->next->flags & MAP_ANON) &&
-         vma->file == NULL && vma->next->file == NULL) {
+  while (vma->next && vma_can_merge(vma, vma->next)) {
     struct vm_area *nxt = vma->next;
     if (nxt->end > vma->end)
       vma->end = nxt->end;
@@ -852,10 +869,7 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   pp = &p->vma_list;
   while (*pp && *pp != vma) {
     struct vm_area *prev = *pp;
-    if (prev->next == vma && prev->end >= vma->start &&
-        prev->prot == vma->prot && prev->flags == vma->flags &&
-        (prev->flags & MAP_ANON) && (vma->flags & MAP_ANON) &&
-        prev->file == NULL && vma->file == NULL) {
+    if (prev->next == vma && vma_can_merge(prev, vma)) {
       if (vma->end > prev->end)
         prev->end = vma->end;
       prev->next = vma->next;
@@ -954,7 +968,7 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
         anon_vma_unlink(v);
       }
       if (v->file) {
-        vfs_free_file(v->file);
+        vfs_close_file(v->file);
         v->file = NULL;
       }
       kmfree(v, sizeof(struct vm_area));
@@ -1028,7 +1042,7 @@ void vma_free_all(struct proc *p) {
     struct vm_area *nxt = v->next;
     /* Release file reference for file-backed mappings */
     if (v->file) {
-      vfs_free_file(v->file);
+      vfs_close_file(v->file);
       v->file = NULL;
     }
     
@@ -1666,7 +1680,7 @@ void vma_free_chain(struct vm_area *head) {
   while (head) {
     struct vm_area *next = head->next;
     if (head->file) {
-      vfs_free_file(head->file);
+      vfs_close_file(head->file);
       head->file = NULL;
     }
     if ((head->flags & MAP_ANON) && head->anon_vma) {

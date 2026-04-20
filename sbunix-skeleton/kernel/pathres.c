@@ -9,6 +9,8 @@
 #include <riscv.h>
 #include <proc.h>
 #include <printk.h>
+#include <errno.h>
+#include <syscall.h>
 
 /* Convert an absolute/relative path to the tarfs "./..." format.
  * tarfs uses paths like "./bin/echo", "./etc/rc", etc.
@@ -137,6 +139,23 @@ int resolve_path(const char *cwd, const char *path, char *out) {
 
     /* BF: Propagate ENAMETOOLONG from normalize_path */
     return normalize_path(raw, out);
+}
+
+/* BF: Centralize dirfd semantics for implemented *at syscalls so relative
+ * paths consistently use AT_FDCWD or an open directory fd's saved path. */
+int resolve_path_at(int dirfd, const char *path, char *out) {
+    if (path[0] == '/' || dirfd == AT_FDCWD)
+        return resolve_path(current_proc->cwd, path, out);
+
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (dirfd < 0 || dirfd >= NOFILE || !ftab[dirfd])
+        return -EBADF;
+
+    struct open_file *dir = ftab[dirfd];
+    if (dir->is_pipe || dir->path[0] == '\0' || !vfs_is_dir(dir->path))
+        return -ENOTDIR;
+
+    return resolve_path(dir->path, path, out);
 }
 
 /* Check if a resolved path exists as a directory by trying to open it */

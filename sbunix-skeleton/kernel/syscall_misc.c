@@ -370,9 +370,9 @@ long sys_utimensat_handler(struct trapframe *tf) {
         return (long)-EFAULT;
 
     char resolved[128];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+    { int rr = resolve_path_at(dirfd, kpath, resolved);
+      if (rr < 0) return (long)rr; }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -488,7 +488,25 @@ long sys_fstatfs_handler(struct trapframe *tf) {
 
 /* Ownership/credential stubs — single-user OS, always uid/gid 0 */
 long sys_fchownat_handler(struct trapframe *tf) {
-    (void)tf;
+    char kpath[128];
+    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
+        return (long)-EFAULT;
+
+    char resolved[128];
+    { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
+      if (rr < 0) return (long)rr; }
+
+    const char *relpath;
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
+    if (ops && ops->stat) {
+        uint8_t st[128];
+        int ret = ops->stat(mnt->fs_data, relpath, st);
+        if (ret < 0)
+            return (long)(int64_t)ret;
+    } else {
+        return (long)-ENOENT;
+    }
     return (long)0;
 }
 

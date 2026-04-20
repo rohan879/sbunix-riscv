@@ -132,6 +132,28 @@ void vfs_free_file(struct open_file *f) {
   }
 }
 
+void vfs_close_file(struct open_file *f) {
+  if (!f) return;
+  if (!vfs_file_ptr_valid(f)) {
+    if (vfs_bad_free_warnings < 16) {
+      printk("vfs: invalid file close 0x%lx ignored\n", (uint64_t)f);
+      vfs_bad_free_warnings++;
+    }
+    return;
+  }
+
+  f->refcount--;
+  if (f->refcount <= 0) {
+    /* BF: Centralize final open-file teardown so fd close and VMA release
+     * both run filesystem close callbacks and release OFD locks exactly
+     * when the last reference is dropped. */
+    file_locks_release_ofd(f);
+    if (!f->is_pipe && f->ops && f->ops->close)
+      f->ops->close(f->fs_data, f->private);
+    memset(f, 0, sizeof(struct open_file));
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* vfs_get_child_mounts — return basenames of mounts under dir         */
 /* ------------------------------------------------------------------ */
