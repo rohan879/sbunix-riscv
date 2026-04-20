@@ -21,6 +21,7 @@ static inline int prot_to_pte_flags(int prot) {
 }
 
 /* Mapping flags for vm_area (must match libc MAP_* values) */
+#define MAP_SHARED    0x01
 #define MAP_PRIVATE   0x02
 #define MAP_ANON      0x20
 

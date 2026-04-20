@@ -229,6 +229,11 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     /* CLONE_SIGHAND requires CLONE_VM (Linux semantics) */
     if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
         return -22; /* -EINVAL */
+    /* BF: Reject CLONE_VM until the kernel has a shared mm owner for the
+     * pagetable, VMA list, mmap_base, and lifecycle teardown.  Sharing the
+     * page table while deep-copying VMAs corrupts address-space ownership. */
+    if (clone_flags & CLONE_VM)
+        return -22; /* -EINVAL */
 
     struct proc *p = allocproc();
     if (!p) return -1;
@@ -304,11 +309,10 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
          * copy_pagetable_cow so pt[0] exists for MMIO level-1 sharing) */
         if (uvmmap_kernel(new_pt) < 0) goto bad;
 
-        p->pagetable = new_pt;
-        new_pt = 0; /* success — ownership transferred to p */
-
         /* Deep copy VMA list */
-        vma_dup(current_proc, p);
+        p->pagetable = new_pt;
+        if (vma_dup(current_proc, p) < 0)
+            goto bad;
     }
 
     /* ---- CLONE_FILES: share file descriptor table ---- */
@@ -357,6 +361,7 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     /* BF: Fork child inherits parent's kstack_npages for proper stack top */
     p->context.sp = (uint64_t)p->kstack + (uint64_t)p->kstack_npages * PAGE_SIZE;
 
+    new_pt = 0; /* success — ownership transferred to p */
     p->state = RUNNABLE;
     return p->pid;
 
@@ -365,8 +370,30 @@ bad:
      * walks the user address space, freeing COW-shared pages (via
      * kfree/refcount) AND any duplicated swap slots, preventing both
      * memory leaks and swap-slot double-frees. */
+    vma_free_all(p);
     if (new_pt)
         proc_freepagetable(new_pt);
+    if (p->shared_ft) {
+        p->shared_ft->refcount--;
+        p->shared_ft = NULL;
+    } else {
+        for (int i = 0; i < NOFILE; i++) {
+            if (p->ofile[i])
+                close_ofile(p, i);
+        }
+    }
+    if (p->shared_sa) {
+        p->shared_sa->refcount--;
+        p->shared_sa = NULL;
+    }
+    if (p->kstack) {
+        kfree_contiguous(p->kstack, p->kstack_npages);
+        p->kstack = NULL;
+    }
+    if (p->trapframe) {
+        kfree(p->trapframe);
+        p->trapframe = NULL;
+    }
     p->state = UNUSED;
     return -1;
 }

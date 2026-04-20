@@ -114,17 +114,9 @@ void close_ofile(struct proc *p, int fd) {
     }
   }
 
-  f->refcount--;
-  if (f->refcount <= 0) {
-    /* Release any OFD locks held by this open_file before freeing it.
-     * POSIX: OFD locks are tied to the open file description, so they
-     * must be released when the last fd referencing it is closed. */
-    file_locks_release_ofd(f);
-    /* Last reference -- call VFS close if applicable */
-    if (!f->is_pipe && f->ops && f->ops->close)
-      f->ops->close(f->fs_data, f->private);
-    vfs_free_file(f);
-  }
+  /* BF: Use the shared VFS drop path so file-backed VMAs and fd closes
+   * have identical last-reference teardown semantics. */
+  vfs_close_file(f);
 }
 
 /* ------------------------------------------------------------------ */

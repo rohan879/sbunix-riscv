@@ -413,11 +413,19 @@ long sys_mprotect_handler(struct trapframe *tf) {
         }
         return -12;  /* -ENOMEM */
       }
-      /* Pre-allocate anon_vma_chain if source VMA has anon_vma —
-       * we'll check this during mutation, but allocate speculatively
-       * to avoid a second pass. */
       prealloc_avc[i] = (struct anon_vma_chain *)kmalloc(sizeof(struct anon_vma_chain));
-      /* avc allocation failure is non-fatal — only needed if VMA has anon_vma */
+      if (!prealloc_avc[i]) {
+        /* BF: Split mutation must not allocate or fail after PTE updates.
+         * Preallocate anon_vma_chain nodes for every possible split, even
+         * if some are later freed unused for non-anonymous VMAs. */
+        for (int j = 0; j <= i; j++) {
+          if (prealloc_vma[j])
+            kmfree(prealloc_vma[j], sizeof(struct vm_area));
+          if (prealloc_avc[j])
+            kmfree(prealloc_avc[j], sizeof(struct anon_vma_chain));
+        }
+        return -12;  /* -ENOMEM */
+      }
     }
     int prealloc_idx = 0;
 
@@ -486,11 +494,10 @@ long sys_mprotect_handler(struct trapframe *tf) {
              * chain entry.  anon_vma_unlink does one put per chain plus
              * one put for vma->anon_vma, so we need both. */
             anon_vma_get(v->anon_vma);
-            if (avc) {
-              anon_vma_link_prealloc(suffix, avc);
-            } else {
-              anon_vma_link(suffix);  /* fallback if avc alloc failed */
-            }
+            anon_vma_link_prealloc(suffix, avc);
+          } else if (avc) {
+            kmfree(avc, sizeof(struct anon_vma_chain));
+            prealloc_avc[prealloc_idx - 1] = NULL;
           }
           suffix->next = v->next;
           v->end = range_start;
@@ -522,11 +529,10 @@ long sys_mprotect_handler(struct trapframe *tf) {
             /* BF: Take a reference for the VMA's own anon_vma pointer.
              * Same rationale as prefix split above. */
             anon_vma_get(v->anon_vma);
-            if (avc) {
-              anon_vma_link_prealloc(tail, avc);
-            } else {
-              anon_vma_link(tail);  /* fallback if avc alloc failed */
-            }
+            anon_vma_link_prealloc(tail, avc);
+          } else if (avc) {
+            kmfree(avc, sizeof(struct anon_vma_chain));
+            prealloc_avc[prealloc_idx - 1] = NULL;
           }
           tail->next = v->next;
           v->end = range_end;

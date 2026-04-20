@@ -172,13 +172,14 @@ int swap_evict_pages(int n) {
     if (!(*pte & PTE_U))
       goto advance;
 
-    /* BF: Do not evict file-backed MAP_SHARED pages — they must be
-     * written back to the file, not to anonymous swap.  Swap entries
-     * have no file-backed metadata, so swapped-out shared pages would
-     * lose their backing file association and corrupt data on swap-in. */
+    /* BF: Do not evict COW or MAP_SHARED pages until reverse-map/page
+     * ownership metadata is authoritative for every sharing case. */
+    if (*pte & PTE_COW)
+      goto advance;
+
     {
       struct vm_area *ev_vma = vma_find(p, clock_va);
-      if (ev_vma && ev_vma->file && (ev_vma->flags & 0x01 /* MAP_SHARED */))
+      if (ev_vma && (ev_vma->flags & MAP_SHARED))
         goto advance;
     }
 
@@ -189,6 +190,9 @@ int swap_evict_pages(int n) {
       if (pa < (uint64_t)_kernel_end)
         goto advance;
 
+      if (page_ref_get(pa) > 1)
+        goto advance;
+
       /* Enhanced victim selection using page descriptors */
       struct page *page = virt_to_page((void *)pa);
       if (page) {
@@ -196,6 +200,18 @@ int swap_evict_pages(int n) {
         int mapcount = atomic_read(&page->mapcount);
         if (mapcount > 0) {
           goto advance;
+        }
+
+        if (PageAnon(page)) {
+          struct vm_area *ev_vma = vma_find(p, clock_va);
+          /* BF: Anonymous eviction depends on rmap being complete.
+           * If a page has no anon_vma, a mismatched owner, or more than
+           * one candidate VMA, leave it resident instead of losing an
+           * address-space mapping during swapout. */
+          if (!ev_vma || !page->anon_vma ||
+              ev_vma->anon_vma != page->anon_vma ||
+              page_mapped_in_vma_count(page) != 1)
+            goto advance;
         }
         
         /* Enhanced aging: use age_score instead of simple accessed bit */

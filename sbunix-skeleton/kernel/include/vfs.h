@@ -62,6 +62,7 @@ struct mount {
 /* VFS functions */
 struct open_file *vfs_alloc_file(void);
 void vfs_free_file(struct open_file *f);
+void vfs_close_file(struct open_file *f);
 struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath);
 struct mount *vfs_lookup_mount_entry(const char *path, const char **relpath);
 void vfs_register_mount(const char *path, struct vfs_ops *ops, void *fs_data,
