@@ -66,6 +66,50 @@ long sys_clock_getres_handler(struct trapframe *tf) {
     return (long)0;
 }
 
+static int valid_rel_timespec(int64_t sec, int64_t nsec) {
+    return sec >= 0 && nsec >= 0 && nsec < (int64_t)NSEC_PER_SEC;
+}
+
+static long copyout_ticks_as_timespec(uint64_t uaddr, uint64_t ticks) {
+    struct { int64_t tv_sec; int64_t tv_nsec; } kts;
+    ticks_to_timespec(ticks, &kts.tv_sec, &kts.tv_nsec);
+    if (copyout(current_proc->pagetable, uaddr, &kts, sizeof(kts)) < 0)
+        return (long)-EFAULT;
+    return 0;
+}
+
+static long sleep_until_deadline(uint64_t deadline, uint64_t rem_uaddr,
+                                 int write_rem_on_interrupt) {
+    while (r_time() < deadline) {
+        current_proc->sleep_until = deadline;
+        current_proc->waiting_for_uart = 2;
+        current_proc->state = SLEEPING;
+        swtch(&current_proc->context, &scheduler_context);
+
+        uint64_t now = r_time();
+        if (current_proc->waiting_for_uart != 2) {
+            current_proc->waiting_for_uart = 0;
+            break;
+        }
+
+        current_proc->waiting_for_uart = 0;
+        if (current_proc->sigpending & ~current_proc->sigmask) {
+            if (write_rem_on_interrupt && rem_uaddr) {
+                uint64_t remaining = deadline > now ? deadline - now : 0;
+                long ret = copyout_ticks_as_timespec(rem_uaddr, remaining);
+                if (ret < 0)
+                    return ret;
+            }
+            /* nanosleep and clock_nanosleep are not SA_RESTART syscalls. */
+            current_proc->in_syscall = 0;
+            return (long)-EINTR;
+        }
+    }
+
+    current_proc->waiting_for_uart = 0;
+    return 0;
+}
+
 long sys_clock_settime_handler(struct trapframe *tf) {
     uint64_t clk_id   = tf->a0;
     uint64_t ts_uaddr = tf->a1;
@@ -97,20 +141,21 @@ long sys_clock_settime_handler(struct trapframe *tf) {
 
 long sys_nanosleep_handler(struct trapframe *tf) {
     uint64_t req_uaddr = tf->a0;
-    if (req_uaddr && current_proc) {
-        uint64_t kreq[2];
-        if (copyin(current_proc->pagetable, kreq, req_uaddr, 16) < 0)
-            return (long)-EFAULT;
-        if (kreq[1] >= 1000000000UL)
-            return (long)-22;
-        if (kreq[0] != 0 || kreq[1] != 0) {
-            current_proc->sleep_until = timespec_rel_deadline(kreq[0], kreq[1]);
-            current_proc->waiting_for_uart = 2;
-            current_proc->state = SLEEPING;
-            swtch(&current_proc->context, &scheduler_context);
-        }
-    }
-    return (long)0;
+    uint64_t rem_uaddr = tf->a1;
+    struct { int64_t tv_sec; int64_t tv_nsec; } kreq;
+
+    if (!req_uaddr || !current_proc)
+        return (long)-EFAULT;
+    if (copyin(current_proc->pagetable, &kreq, req_uaddr, sizeof(kreq)) < 0)
+        return (long)-EFAULT;
+    if (!valid_rel_timespec(kreq.tv_sec, kreq.tv_nsec))
+        return (long)-EINVAL;
+    if (kreq.tv_sec == 0 && kreq.tv_nsec == 0)
+        return 0;
+
+    uint64_t deadline =
+        timespec_rel_deadline((uint64_t)kreq.tv_sec, (uint64_t)kreq.tv_nsec);
+    return sleep_until_deadline(deadline, rem_uaddr, 1);
 }
 
 long sys_gettimeofday_handler(struct trapframe *tf) {
@@ -363,20 +408,32 @@ long sys_timer_getoverrun_handler(struct trapframe *tf) {
 long sys_clock_nanosleep_handler(struct trapframe *tf) {
     int clockid = (int)tf->a0;
     int flags = (int)tf->a1;
-    uint64_t kreq[2]; /* {tv_sec, tv_nsec} */
-    if (copyin(current_proc->pagetable, kreq, tf->a2, 16) < 0)
+    uint64_t rem_uaddr = tf->a3;
+    struct { int64_t tv_sec; int64_t tv_nsec; } kreq;
+
+    if (copyin(current_proc->pagetable, &kreq, tf->a2, sizeof(kreq)) < 0)
         return (long)-EFAULT;
 
-    if (kreq[1] >= 1000000000UL)
-        return (long)-22;
+    if ((flags & ~1) != 0)
+        return (long)-EINVAL;
 
     if (clockid != 0 && clockid != 1 && clockid != 2 && clockid != 3)
         return (long)-EINVAL;
 
-    uint64_t deadline = timespec_rel_deadline(kreq[0], kreq[1]);
+    if (kreq.tv_nsec < 0 || kreq.tv_nsec >= (int64_t)NSEC_PER_SEC)
+        return (long)-EINVAL;
+    if (kreq.tv_sec < 0) {
+        if (flags & 1)
+            return 0;
+        return (long)-EINVAL;
+    }
+
+    uint64_t deadline =
+        timespec_rel_deadline((uint64_t)kreq.tv_sec, (uint64_t)kreq.tv_nsec);
 
     if (flags & 1) {
-        uint64_t target_ticks = timespec_to_ticks(kreq[0], kreq[1]);
+        uint64_t target_ticks =
+            timespec_to_ticks((uint64_t)kreq.tv_sec, (uint64_t)kreq.tv_nsec);
         uint64_t elapsed_ticks;
         if (clockid == 0) {
             int64_t now_sec, now_nsec;
@@ -384,7 +441,8 @@ long sys_clock_nanosleep_handler(struct trapframe *tf) {
                 return (long)-ENODEV;
             uint64_t now_ns = (uint64_t)now_sec * NSEC_PER_SEC +
                               (uint64_t)now_nsec;
-            uint64_t target_ns = kreq[0] * NSEC_PER_SEC + kreq[1];
+            uint64_t target_ns = (uint64_t)kreq.tv_sec * NSEC_PER_SEC +
+                                 (uint64_t)kreq.tv_nsec;
             if (target_ns <= now_ns)
                 return 0;
             deadline = r_time() + ns_to_time_ticks(target_ns - now_ns);
@@ -398,17 +456,10 @@ long sys_clock_nanosleep_handler(struct trapframe *tf) {
         }
     }
 
-    current_proc->sleep_until = deadline;
-    current_proc->waiting_for_uart = 2;
-    current_proc->state = SLEEPING;
-    swtch(&current_proc->context, &scheduler_context);
+    if (!(flags & 1) && kreq.tv_sec == 0 && kreq.tv_nsec == 0)
+        return 0;
 
-    /* If remain ptr and relative mode, report remaining */
-    if (tf->a3 != 0 && !(flags & 1)) {
-        uint64_t krem[2] = {0, 0};
-        copyout(current_proc->pagetable, tf->a3, krem, 16);
-    }
-    return 0;
+    return sleep_until_deadline(deadline, rem_uaddr, !(flags & 1));
 }
 
 long sys_getrusage_handler(struct trapframe *tf) {

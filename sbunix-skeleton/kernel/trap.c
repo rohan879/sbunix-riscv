@@ -392,6 +392,66 @@ static void signal_frame_fault(struct proc *p) {
     signal_default_terminate(p, SIGSEGV);
 }
 
+struct user_ucontext {
+    uint64_t uc_link;
+    uint64_t uc_sigmask;
+    struct {
+        uint64_t ss_sp;
+        int32_t ss_flags;
+        int32_t pad;
+        uint64_t ss_size;
+    } uc_stack;
+    uint64_t regs[32];
+};
+
+static void fill_user_ucontext(struct user_ucontext *uc,
+                               const struct trapframe *tf,
+                               struct proc *p,
+                               uint64_t saved_sigmask) {
+    memset(uc, 0, sizeof(*uc));
+    uc->uc_link = 0;
+    uc->uc_sigmask = saved_sigmask;
+    uc->uc_stack.ss_sp = p->ss_sp;
+    if (p->ss_sp == 0 || p->ss_size == 0)
+        uc->uc_stack.ss_flags = 2; /* SS_DISABLE */
+    else
+        uc->uc_stack.ss_flags = p->ss_flags;
+    uc->uc_stack.ss_size = p->ss_size;
+
+    uc->regs[0] = 0;
+    uc->regs[1] = tf->ra;
+    uc->regs[2] = tf->sp;
+    uc->regs[3] = tf->gp;
+    uc->regs[4] = tf->tp;
+    uc->regs[5] = tf->t0;
+    uc->regs[6] = tf->t1;
+    uc->regs[7] = tf->t2;
+    uc->regs[8] = tf->s0;
+    uc->regs[9] = tf->s1;
+    uc->regs[10] = tf->a0;
+    uc->regs[11] = tf->a1;
+    uc->regs[12] = tf->a2;
+    uc->regs[13] = tf->a3;
+    uc->regs[14] = tf->a4;
+    uc->regs[15] = tf->a5;
+    uc->regs[16] = tf->a6;
+    uc->regs[17] = tf->a7;
+    uc->regs[18] = tf->s2;
+    uc->regs[19] = tf->s3;
+    uc->regs[20] = tf->s4;
+    uc->regs[21] = tf->s5;
+    uc->regs[22] = tf->s6;
+    uc->regs[23] = tf->s7;
+    uc->regs[24] = tf->s8;
+    uc->regs[25] = tf->s9;
+    uc->regs[26] = tf->s10;
+    uc->regs[27] = tf->s11;
+    uc->regs[28] = tf->t3;
+    uc->regs[29] = tf->t4;
+    uc->regs[30] = tf->t5;
+    uc->regs[31] = tf->t6;
+}
+
 /* RF: Made non-static for access by extracted signal syscall module */
 void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* BF: Only SIGKILL and SIGSTOP are truly unblockable per POSIX.
@@ -531,6 +591,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
      * frame must be at sp (sigreturn reads from sp), so we push
      * siginfo first, then the signal frame on top. */
     uint64_t siginfo_uaddr = 0;
+    uint64_t ucontext_uaddr = 0;
     if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
         /* BF: Populate all required siginfo_t fields at their correct offsets.
          * siginfo_t layout: { int si_signo(0), si_errno(4), si_code(8);
@@ -549,6 +610,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
                 p->sigqueue_buf[qi].signum == signum) {
                 memcpy(ksi, p->sigqueue_buf[qi].info, 128);
                 p->sigqueue_buf[qi].valid = 0;
+                p->sig_sender[signum].valid = 0;
                 found_queued = 1;
                 /* BF: Force si_signo to match delivered signal (POSIX requires this) */
                 int32_t si_signo = (int32_t)signum;
@@ -585,6 +647,18 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         sp &= ~15UL;
         siginfo_uaddr = sp;
         if (copyout_proc(p, sp, ksi, 128) < 0) {
+            signal_frame_fault(p);
+            return;
+        }
+
+        uint64_t frame_sigmask =
+            p->has_saved_sigmask ? p->saved_sigmask_restore : p->sigmask;
+        struct user_ucontext uctx;
+        fill_user_ucontext(&uctx, tf, p, frame_sigmask);
+        sp -= sizeof(uctx);
+        sp &= ~15UL;
+        ucontext_uaddr = sp;
+        if (copyout_proc(p, sp, &uctx, sizeof(uctx)) < 0) {
             signal_frame_fault(p);
             return;
         }
@@ -655,7 +729,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         tf->a0 = (uint64_t)signum;           /* first arg: signal number */
         if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
             tf->a1 = siginfo_uaddr;         /* second arg: siginfo_t * */
-            tf->a2 = 0;                     /* third arg: ucontext_t * (NULL) */
+            tf->a2 = ucontext_uaddr;        /* third arg: ucontext_t * */
         }
         tf->sp = sp;                         /* stack points to saved trapframe */
         /* tf->ra already set above: SIGTRAMP_VA or sa[signum].restorer */

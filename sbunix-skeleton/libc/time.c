@@ -735,7 +735,9 @@ size_t strftime_l(char *s, size_t max, const char *fmt,
  * If interrupted, the remaining time is written to *rem (if non-NULL).
  */
 int nanosleep(const struct timespec *req, struct timespec *rem) {
-    return (int)syscall(SYS_nanosleep, req, rem);
+    long ret = syscall(SYS_nanosleep, req, rem);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return 0;
 }
 
 /*
