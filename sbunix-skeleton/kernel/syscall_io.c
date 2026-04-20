@@ -355,6 +355,7 @@ pipe_eof:
 }
 
 long sys_openat_handler(struct trapframe *tf) {
+    int dirfd = (int)tf->a0;
     int flags = (int)tf->a2;
 
     char kpath[128];
@@ -363,9 +364,9 @@ long sys_openat_handler(struct trapframe *tf) {
     }
 
     char resolved[128];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+    { int rr = resolve_path_at(dirfd, kpath, resolved);
+      if (rr < 0) return (long)rr; }
 
     /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
     {
@@ -653,9 +654,9 @@ long sys_newfstatat_handler(struct trapframe *tf) {
         return (long)-EFAULT;
     }
     char resolved[128];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+    { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
+      if (rr < 0) return (long)rr; }
 
     /* Resolve symlinks: intermediate always, final unless AT_SYMLINK_NOFOLLOW */
     int at_flags = (int)tf->a3;
@@ -1147,9 +1148,9 @@ long sys_faccessat_handler(struct trapframe *tf) {
     }
 
     char resolved[128];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+    { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
+      if (rr < 0) return (long)rr; }
     /* BF: Propagate all negative errors from resolve_symlinks_in_path */
     { int sr = resolve_symlinks_in_path(resolved, 6, 1);
       if (sr < 0) return (long)sr; }
@@ -1167,6 +1168,7 @@ long sys_faccessat_handler(struct trapframe *tf) {
 }
 
 long sys_unlinkat_handler(struct trapframe *tf) {
+    int dirfd = (int)tf->a0;
     int flags = (int)tf->a2;
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
@@ -1174,9 +1176,9 @@ long sys_unlinkat_handler(struct trapframe *tf) {
     }
     {
         char resolved[128];
-        /* BF: Propagate ENAMETOOLONG from resolve_path */
-        if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
-            return (long)-36; /* -ENAMETOOLONG */
+        /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+        { int rr = resolve_path_at(dirfd, kpath, resolved);
+          if (rr < 0) return (long)rr; }
         /* BF: Propagate all negative errors from resolve_symlinks_in_path */
         { int sr = resolve_symlinks_in_path(resolved, 6, 0);
           if (sr < 0) return (long)sr; }
@@ -1203,6 +1205,8 @@ long sys_unlinkat_handler(struct trapframe *tf) {
 
 long sys_linkat_handler(struct trapframe *tf) {
     /* a0 = olddirfd (AT_FDCWD), a1 = oldpath, a2 = newdirfd, a3 = newpath, a4 = flags */
+    int olddirfd = (int)tf->a0;
+    int newdirfd = (int)tf->a2;
     char kold[128], knew[256];
     if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
         return (long)-EFAULT;
@@ -1210,13 +1214,13 @@ long sys_linkat_handler(struct trapframe *tf) {
         return (long)-EFAULT;
 
     char old_resolved[128], new_resolved[256];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, kold, old_resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
-    if (resolve_path(current_proc->cwd, knew, new_resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+    { int rr = resolve_path_at(olddirfd, kold, old_resolved);
+      if (rr < 0) return (long)rr; }
+    { int rr = resolve_path_at(newdirfd, knew, new_resolved);
+      if (rr < 0) return (long)rr; }
 
-    /* Both paths must be on ext2 (same filesystem) */
+    /* Both paths must be on the same filesystem. */
     const char *old_rel, *new_rel;
     struct mount *old_mnt = vfs_lookup_mount_entry(old_resolved, &old_rel);
     struct mount *new_mnt = vfs_lookup_mount_entry(new_resolved, &new_rel);
@@ -1225,6 +1229,17 @@ long sys_linkat_handler(struct trapframe *tf) {
     if (old_ops != new_ops ||
         (old_mnt && new_mnt && old_mnt->fs_data != new_mnt->fs_data))
         return (long)-18; /* EXDEV: cross-device link */
+    if (old_ops && old_ops->stat) {
+        uint8_t st[128];
+        int ret = old_ops->stat(old_mnt->fs_data, old_rel, st);
+        if (ret < 0)
+            return (long)(int64_t)ret;
+        uint32_t mode;
+        memcpy(&mode, st + 16, 4);
+        /* BF: Reject directory hardlinks before filesystem link operations. */
+        if ((mode & 0xF000) == 0x4000)
+            return (long)-EPERM;
+    }
     if (ext2_is_ops(old_ops)) {
         /* ext2: use inode-based hard link */
         void *priv = NULL;
@@ -1244,6 +1259,8 @@ long sys_linkat_handler(struct trapframe *tf) {
 }
 
 long sys_renameat2_handler(struct trapframe *tf) {
+    int olddirfd = (int)tf->a0;
+    int newdirfd = (int)tf->a2;
     char kold[128], knew[256];
     if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
         return (long)-EFAULT;
@@ -1251,11 +1268,11 @@ long sys_renameat2_handler(struct trapframe *tf) {
         return (long)-EFAULT;
 
     char old_resolved[128], new_resolved[256];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, kold, old_resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
-    if (resolve_path(current_proc->cwd, knew, new_resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+    { int rr = resolve_path_at(olddirfd, kold, old_resolved);
+      if (rr < 0) return (long)rr; }
+    { int rr = resolve_path_at(newdirfd, knew, new_resolved);
+      if (rr < 0) return (long)rr; }
 
     const char *old_relpath, *new_relpath;
     struct mount *old_mnt = vfs_lookup_mount_entry(old_resolved, &old_relpath);
@@ -1274,6 +1291,7 @@ long sys_renameat2_handler(struct trapframe *tf) {
 }
 
 long sys_mkdirat_handler(struct trapframe *tf) {
+    int dirfd = (int)tf->a0;
     int mode = (int)tf->a2;
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
@@ -1281,9 +1299,9 @@ long sys_mkdirat_handler(struct trapframe *tf) {
     }
     {
         char resolved[128];
-        /* BF: Propagate ENAMETOOLONG from resolve_path */
-        if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
-            return (long)-36; /* -ENAMETOOLONG */
+        /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+        { int rr = resolve_path_at(dirfd, kpath, resolved);
+          if (rr < 0) return (long)rr; }
         /* BF: Propagate all negative errors from resolve_symlinks_in_path */
         { int sr = resolve_symlinks_in_path(resolved, 6, 0);
           if (sr < 0) return (long)sr; }
@@ -1300,6 +1318,7 @@ long sys_mkdirat_handler(struct trapframe *tf) {
 }
 
 long sys_mknodat_handler(struct trapframe *tf) {
+    int dirfd = (int)tf->a0;
     uint32_t mode = (uint32_t)tf->a2;
     uint32_t rdev = (uint32_t)tf->a3;
     char kpath[128];
@@ -1308,9 +1327,9 @@ long sys_mknodat_handler(struct trapframe *tf) {
     }
     {
         char resolved[128];
-        /* BF: Propagate ENAMETOOLONG from resolve_path */
-        if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
-            return (long)-36; /* -ENAMETOOLONG */
+        /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+        { int rr = resolve_path_at(dirfd, kpath, resolved);
+          if (rr < 0) return (long)rr; }
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
         struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -1341,9 +1360,9 @@ long sys_readlinkat_handler(struct trapframe *tf) {
         return (long)-22;
 
     char resolved[128];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+    { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
+      if (rr < 0) return (long)rr; }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1370,9 +1389,9 @@ long sys_symlinkat_handler(struct trapframe *tf) {
         return (long)-EFAULT;
 
     char resolved[128];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, klinkpath, resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+    { int rr = resolve_path_at((int)tf->a1, klinkpath, resolved);
+      if (rr < 0) return (long)rr; }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1410,9 +1429,9 @@ long sys_fchmodat_handler(struct trapframe *tf) {
 
     /* Resolve path and verify it exists via stat */
     char resolved[128];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    /* BF: Propagate dirfd resolution errors before VFS dispatch. */
+    { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
+      if (rr < 0) return (long)rr; }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
