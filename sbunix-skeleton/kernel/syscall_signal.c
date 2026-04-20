@@ -16,6 +16,20 @@ static int rt_sigsetsize_valid(uint64_t sigsetsize) {
     return sigsetsize == sizeof(uint64_t);
 }
 
+static int signal_send_allowed(struct proc *target) {
+    if (!current_proc || !target)
+        return 0;
+    return current_proc->uid == 0 || current_proc->uid == target->uid;
+}
+
+static struct proc *find_signal_target(pid_t pid) {
+    for (int i = 0; i < NPROC; i++) {
+        if (proc[i].state != UNUSED && proc[i].pid == pid)
+            return &proc[i];
+    }
+    return NULL;
+}
+
 static void restore_user_signal_context(struct trapframe *dst,
                                         const struct trapframe *src) {
     uint64_t safe_sstatus = dst->saved_sstatus;
@@ -44,9 +58,7 @@ long sys_kill_handler(struct trapframe *tf) {
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pgid == pgid) {
-                /* BF: POSIX requires kill() to check UID permissions */
-                if (current_proc->uid != 0 &&
-                    current_proc->uid != proc[i].uid) {
+                if (!signal_send_allowed(&proc[i])) {
                     eperm = 1;
                     continue;
                 }
@@ -70,9 +82,7 @@ long sys_kill_handler(struct trapframe *tf) {
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pgid == pgid) {
-                /* BF: POSIX requires kill() to check UID permissions */
-                if (current_proc->uid != 0 &&
-                    current_proc->uid != proc[i].uid) {
+                if (!signal_send_allowed(&proc[i])) {
                     eperm = 1;
                     continue;
                 }
@@ -96,9 +106,7 @@ long sys_kill_handler(struct trapframe *tf) {
         for (int i = 0; i < NPROC; i++) {
             if (proc[i].state != UNUSED && proc[i].state != ZOMBIE &&
                 proc[i].pid != 1 && &proc[i] != current_proc) {
-                /* BF: POSIX requires kill() to check UID permissions */
-                if (current_proc->uid != 0 &&
-                    current_proc->uid != proc[i].uid) {
+                if (!signal_send_allowed(&proc[i])) {
                     eperm = 1;
                     continue;
                 }
@@ -113,18 +121,11 @@ long sys_kill_handler(struct trapframe *tf) {
     }
 
     /* Positive pid: send to specific process */
-    struct proc *target = NULL;
-    for (int i = 0; i < NPROC; i++) {
-        if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
-            target = &proc[i];
-            break;
-        }
-    }
+    struct proc *target = find_signal_target(target_pid);
     if (!target)
         return (long)-3; /* -ESRCH */
 
-    /* BF: POSIX requires kill() to check UID permissions */
-    if (current_proc->uid != 0 && current_proc->uid != target->uid)
+    if (!signal_send_allowed(target))
         return (long)-1; /* -EPERM */
 
     /* BF: sig=0 is existence/permission check only -- no signal sent.
@@ -147,18 +148,15 @@ long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
     if (sig < 0 || (!signal_is_valid(sig) && sig != 0))
         return (long)-22; /* -EINVAL */
 
-    if (sig == 0)
-        return 0; /* permission check only */
-
-    struct proc *target = NULL;
-    for (int i = 0; i < NPROC; i++) {
-        if (proc[i].state != UNUSED && proc[i].pid == target_pid) {
-            target = &proc[i];
-            break;
-        }
-    }
+    struct proc *target = find_signal_target(target_pid);
     if (!target)
         return (long)-3; /* -ESRCH */
+
+    if (!signal_send_allowed(target))
+        return (long)-EPERM;
+
+    if (sig == 0)
+        return 0; /* permission check only */
 
     /* BF: Store the user-provided siginfo_t in the target's queue so
      * that sigtimedwait can later retrieve si_value / si_code.  Without
@@ -177,12 +175,12 @@ long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
             /* BF: Zero kinfo before copyin so bytes past K_SIGINFO_SIZE
              * are zeros, not uninitialized kernel stack data. */
             memset(kinfo, 0, sizeof(kinfo));
-            if (copyin(current_proc->pagetable, kinfo, info_uaddr, K_SIGINFO_SIZE) >= 0) {
-                /* BF: Full 128 bytes intentional — kinfo zero-padded past K_SIGINFO_SIZE */
-                memcpy(target->sigqueue_buf[slot].info, kinfo, 128);
-                target->sigqueue_buf[slot].signum = sig;
-                target->sigqueue_buf[slot].valid = 1;
-            }
+            if (copyin(current_proc->pagetable, kinfo, info_uaddr, K_SIGINFO_SIZE) < 0)
+                return (long)-EFAULT;
+            /* BF: Full 128 bytes intentional — kinfo zero-padded past K_SIGINFO_SIZE */
+            memcpy(target->sigqueue_buf[slot].info, kinfo, 128);
+            target->sigqueue_buf[slot].signum = sig;
+            target->sigqueue_buf[slot].valid = 1;
         }
         /* If queue is full, signal is still delivered but info is lost
          * (POSIX allows EAGAIN but we prefer delivery over rejection) */
@@ -395,7 +393,7 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
         struct { int64_t tv_sec; int64_t tv_nsec; } kts;
         if (copyin(current_proc->pagetable, &kts, timeout_uaddr, 16) < 0)
             return (long)-EFAULT; /* EFAULT */
-        if (kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L)
+        if (kts.tv_sec < 0 || kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L)
             return (long)-22; /* EINVAL */
         timeout_sec = kts.tv_sec;
         timeout_nsec = kts.tv_nsec;
@@ -426,6 +424,8 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
 
             /* Clear the signal from pending set */
             current_proc->sigpending &= ~(1UL << (sig - 1));
+            if (current_proc->waiting_for_uart == 2)
+                current_proc->waiting_for_uart = 0;
 
             /* Fill siginfo_t if requested */
             if (info_uaddr) {
@@ -439,6 +439,7 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
                         current_proc->sigqueue_buf[qi].signum == sig) {
                         memcpy(kinfo, current_proc->sigqueue_buf[qi].info, 128);
                         current_proc->sigqueue_buf[qi].valid = 0;
+                        current_proc->sig_sender[sig].valid = 0;
                         found_queued = 1;
                         break;
                     }
@@ -469,42 +470,52 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
 
         /* BF: POSIX specifies EAGAIN (not ETIMEDOUT) when sigtimedwait
          * times out without a signal becoming pending. */
-        if (has_timeout && r_time() >= deadline_ticks)
-            return (long)-11; /* EAGAIN */
+        if (has_timeout && r_time() >= deadline_ticks) {
+            if (current_proc->waiting_for_uart == 2)
+                current_proc->waiting_for_uart = 0;
+            return (long)-EAGAIN;
+        }
 
-        /* Sleep and retry */
+        /* Sleep and retry.  Timed waits must join the timer wakeup path;
+         * otherwise a pure timeout can sleep forever when no signal arrives. */
+        if (has_timeout) {
+            current_proc->sleep_until = deadline_ticks;
+            current_proc->waiting_for_uart = 2;
+        }
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
+        if (has_timeout && current_proc->waiting_for_uart == 2)
+            current_proc->waiting_for_uart = 0;
 
         /* Check for other signals that should interrupt the wait */
         uint64_t other_signals = current_proc->sigpending & ~waitset & ~current_proc->sigmask;
         if (other_signals)
-            return (long)-4; /* EINTR */
+            return (long)-EINTR;
     }
 }
 
 long sys_tgkill_handler(struct trapframe *tf) {
+    pid_t tgid = (pid_t)tf->a0;
     pid_t tid = (pid_t)tf->a1;
     int sig = (int)tf->a2;
-    if (sig == 0) {
-        return (long)0;
-    } else if (signal_is_valid(sig)) {
-        long result = (long)-3;
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->pid == tid && p->state != UNUSED) {
-                /* BF: Capture sender metadata for SA_SIGINFO delivery */
-                sig_set_pending(p, sig, (int32_t)current_proc->pid, 0,
-                                K_SI_USER);
-                if (p->state == SLEEPING)
-                    p->state = RUNNABLE;
-                result = 0;
-                break;
-            }
-        }
-        return result;
-    } else {
-        return (long)-22;
-    }
+
+    if (tgid <= 0 || tid <= 0)
+        return (long)-EINVAL;
+    if (sig < 0 || (sig != 0 && !signal_is_valid(sig)))
+        return (long)-EINVAL;
+
+    struct proc *target = find_signal_target(tid);
+    if (!target || target->pid != tgid)
+        return (long)-ESRCH;
+
+    if (!signal_send_allowed(target))
+        return (long)-EPERM;
+
+    if (sig == 0)
+        return 0;
+
+    kill_deliver(target, sig);
+    return 0;
 }
 
 long sys_sigaltstack_handler(struct trapframe *tf) {
