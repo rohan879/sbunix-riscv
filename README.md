@@ -53,6 +53,75 @@ Notes:
 - Exit with `Ctrl-A`, then `X`
 - The system boots into `init`, runs `/etc/rc`, then drops into `sbush`
 
+## Vendored Third-Party Workloads
+
+The repository vendors a small set of prebuilt third-party workload binaries in
+`sbunix-skeleton/thirdparty/`. These are staged into the guest image by
+`sbunix-skeleton/tools/stage-thirdparty.sh` during rootfs preparation.
+
+### What Gets Included
+
+On a fresh `make`, `make qemu`, or any build that recreates `build/rootfs`, the
+following guest-visible paths are populated automatically:
+
+- `thirdparty/bin/micropython` -> `/bin/micropython`
+- `thirdparty/bin/tcc` -> `/bin/tcc`
+- `thirdparty/bin/pdpmake` -> `/bin/pdpmake`
+- `thirdparty/bin/busybox` -> `/bin/busybox`
+- `/bin/make` -> symlink to `pdpmake`
+- `thirdparty/tcc-sysroot/...` -> `/usr/lib/tcc/...`
+- `thirdparty/busybox-root/...` -> `/usr/lib/busybox/...`
+
+The Makefile path is:
+
+- `build/rootfs/.prepared` runs `tools/stage-thirdparty.sh`
+- `build/tarfs.o` is rebuilt from that prepared rootfs
+- `build/kernel.elf` embeds the resulting tarfs
+- `make qemu` boots that kernel image
+
+### Refreshing After Third-Party Changes
+
+If you only replace files under `sbunix-skeleton/thirdparty/`, a plain
+`make qemu` may reuse the existing prepared rootfs. To force the vendored
+payloads back into the image, use one of:
+
+```bash
+make thirdparty
+```
+
+or:
+
+```bash
+rm -f build/rootfs/.prepared build/tarfs.o
+make qemu
+```
+
+### Running The Vendored Binaries In SBUnix
+
+From the `sbush$` prompt inside QEMU:
+
+```sh
+micropython -c 'print(42)'
+busybox echo busybox-ok
+/usr/lib/busybox/bin/echo busybox-applet-ok
+
+printf 'all:; echo pdpmake-ok\n' >/mnt/pd.mk
+pdpmake -f /mnt/pd.mk
+make -f /mnt/pd.mk
+
+printf 'int main(void) { return 0; }\n' >/mnt/hello.c
+tcc /mnt/hello.c -o /mnt/hello
+/mnt/hello
+```
+
+Nested shell execution also works:
+
+```sh
+sbush -c 'micropython -c "print(42)"'
+sbush -c 'busybox echo nested-ok'
+sbush -c 'tcc /mnt/hello.c -o /mnt/hello && /mnt/hello'
+```
+
 ## Run A User Binary Directly
 
 To run the shell binary in user-mode emulation instead of booting the full kernel:
@@ -246,3 +315,7 @@ make submit
 ```
 
 This exports the current tree to `/submit/sbunix`.
+
+Important: the current `make submit` rule excludes `sbunix-skeleton/thirdparty/`.
+That means the submission bundle will not contain the vendored workload
+binaries or the staged TCC sysroot unless you change the submit rule first.
