@@ -79,6 +79,10 @@ The Makefile path is:
 - `build/kernel.elf` embeds the resulting tarfs
 - `make qemu` boots that kernel image
 
+These payloads stay in the normal guest rootfs. They are not mirrored into
+`build/testfs` or `build/test-disk.img`; the separate test disk is reserved for
+`/test` binaries, manifests, logs, and persistence fixtures.
+
 ### Refreshing After Third-Party Changes
 
 If you only replace files under `sbunix-skeleton/thirdparty/`, a plain
@@ -224,6 +228,10 @@ This automated path validates the local `run-tests` regression set plus the
 two-boot persistence flow. It builds the Sortix and Open POSIX suites into the
 test disk, but it does not automatically execute `run-os-test` or
 `run-open-posix-test`; those remain explicit in-guest commands from `sbush`.
+The vendored `micropython`, BusyBox, `pdpmake`, and `tcc` coverage runs against
+the rootfs-installed `/bin/*` and `/usr/lib/*` payloads, not copies on the test
+disk. This avoids `mkext2img`'s ext2-lite large-file limit on the staged TCC
+archives.
 
 ### Option 2: Manual via QEMU
 
@@ -254,7 +262,9 @@ via `sbush` and now includes guest-side, unmocked integration coverage for the
 vendored `micropython`, BusyBox, `pdpmake`/`make`, and `tcc` workloads across
 both direct execution and nested `sbush -c` command dispatch. There is no new
 build command for this coverage; it is included automatically when you build
-the documented test disk with `BUILD_TESTS=1`.
+the documented test disk with `BUILD_TESTS=1`. Those workload binaries are read
+from the normal guest rootfs, while the separate test disk provides `/test`
+binaries, manifests, logs, and persistence fixtures only.
 
 To run a single test:
 

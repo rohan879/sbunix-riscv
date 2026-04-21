@@ -30,6 +30,11 @@ This compiles:
 1. All regular test binaries from `tests/*/`
 2. The Sortix os-test suite from `tests/thirdparty/sortix/os-test/`
 
+The separate test disk built by `BUILD_TESTS=1` carries `/test` binaries,
+manifests, logs, and persistence fixtures. Vendored third-party workloads such
+as `micropython`, BusyBox, `pdpmake`, and `tcc` are staged into the normal
+guest rootfs instead of being mirrored into `build/testfs`.
+
 Tests that fail to compile (due to missing POSIX features in SBUnix libc) are
 skipped with a warning - no stubs are created.
 

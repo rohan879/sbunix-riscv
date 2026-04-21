@@ -257,13 +257,12 @@ $(DISK_IMG): build/tools/mkfs
 
 # MODIFIED: BEGIN added
 ifdef BUILD_TESTS
-build/testfs/.prepared: build/testfs/.dirs $(TEST_TARGETS) $(OS_TEST_MARKER) $(OPEN_POSIX_TEST_MARKER) tools/stage-thirdparty.sh
+build/testfs/.prepared: build/testfs/.dirs $(TEST_TARGETS) $(OS_TEST_MARKER) $(OPEN_POSIX_TEST_MARKER)
 	@if [ -x tools/generate-priority-manifest ]; then \
 		tools/generate-priority-manifest; \
 	fi
-	@# ENH: Mirror imported third-party payloads into /test so guest-side smoke
-	@# runs can validate them without inflating the root tarfs unnecessarily.
-	@tools/stage-thirdparty.sh build/testfs testfs
+	@# Keep vendored third-party payloads in the normal guest rootfs only. The
+	@# separate test disk carries /test binaries, manifests, and logs.
 	@touch $@
 
 $(TEST_DISK_IMG): build/tools/mkext2img build/testfs/.prepared
