@@ -117,6 +117,7 @@ long sys_sched_yield_handler(struct trapframe *tf);
 long sys_gettid_handler(struct trapframe *tf);
 long sys_ioctl_handler(struct trapframe *tf);
 long sys_umask_handler(struct trapframe *tf);
+long sys_prctl_handler(struct trapframe *tf);
 long sys_geteuid_handler(struct trapframe *tf);
 long sys_getegid_handler(struct trapframe *tf);
 long sys_set_tid_address_handler(struct trapframe *tf);

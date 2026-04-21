@@ -6,6 +6,7 @@
 #include <pathres.h>
 #include <pipe.h>
 #include <proc.h>
+#include <syscall.h>
 #include <vfs.h>
 #include <ext2.h>
 #include <riscv.h>
@@ -98,6 +99,39 @@ long sys_getegid_handler(struct trapframe *tf) {
 long sys_set_tid_address_handler(struct trapframe *tf) {
     (void)tf;
     return (long)current_proc->pid;
+}
+
+long sys_prctl_handler(struct trapframe *tf) {
+    int option = (int)tf->a0;
+    uint64_t uaddr = tf->a1;
+    char namebuf[sizeof(current_proc->name)];
+
+    /* Third-party BusyBox probes task names through prctl() during startup.
+     * Support the Linux-compatible name operations and reject the rest. */
+    switch (option) {
+    case PR_SET_NAME:
+        if (!uaddr)
+            return (long)-EFAULT;
+        memset(namebuf, 0, sizeof(namebuf));
+        if (copyin(current_proc->pagetable, namebuf, uaddr, sizeof(namebuf)) < 0)
+            return (long)-EFAULT;
+        memcpy(current_proc->name, namebuf, sizeof(current_proc->name));
+        current_proc->name[sizeof(current_proc->name) - 1] = '\0';
+        return (long)0;
+
+    case PR_GET_NAME:
+        if (!uaddr)
+            return (long)-EFAULT;
+        memset(namebuf, 0, sizeof(namebuf));
+        memcpy(namebuf, current_proc->name, sizeof(current_proc->name));
+        namebuf[sizeof(namebuf) - 1] = '\0';
+        if (copyout(current_proc->pagetable, uaddr, namebuf, sizeof(namebuf)) < 0)
+            return (long)-EFAULT;
+        return (long)0;
+
+    default:
+        return (long)-EINVAL;
+    }
 }
 
 long sys_prlimit64_handler(struct trapframe *tf) {

@@ -1,0 +1,63 @@
+diff --git a/riscv64-link.c b/riscv64-link.c
+index 5ddc15f..9f21987 100644
+--- a/riscv64-link.c
++++ b/riscv64-link.c
+@@ -36,6 +36,9 @@ ST_FUNC int code_reloc (int reloc_type)
+     case R_RISCV_GOT_HI20:
+     case R_RISCV_PCREL_HI20:
+     case R_RISCV_PCREL_LO12_I:
++    case R_RISCV_HI20:
++    case R_RISCV_LO12_I:
++    case R_RISCV_LO12_S:
+     case R_RISCV_PCREL_LO12_S:
+     case R_RISCV_32_PCREL:
+     case R_RISCV_SET6:
+@@ -79,6 +82,9 @@ ST_FUNC int gotplt_entry_type (int reloc_type)
+     case R_RISCV_SUB16:
+     case R_RISCV_SET_ULEB128:
+     case R_RISCV_SUB_ULEB128:
++    case R_RISCV_HI20:
++    case R_RISCV_LO12_I:
++    case R_RISCV_LO12_S:
+         return NO_GOTPLT_ENTRY;
+ 
+     case R_RISCV_BRANCH:
+@@ -258,6 +264,14 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
+         write32le(ptr, (read32le(ptr) & 0xfff)
+                        | ((off64 & 0xfffff) << 12));
+         riscv64_record_pcrel_hi(s1, addr, val);
++        return;
++    case R_RISCV_HI20:
++        off64 = (int64_t)(val + 0x800) >> 12;
++        if ((off64 + ((uint64_t)1 << 20)) >> 21)
++          tcc_error_noabort("R_RISCV_HI20 relocation failed"
++                    " (val=%lx)", (long)val);
++        write32le(ptr, (read32le(ptr) & 0xfff)
++                       | ((off64 & 0xfffff) << 12));
+         return;
+     case R_RISCV_PCREL_LO12_I:
+ #ifdef DEBUG_RELOC
+@@ -269,6 +283,10 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
+         write32le(ptr, (read32le(ptr) & 0xfffff)
+                        | (((val - addr) & 0xfff) << 20));
+         return;
++    case R_RISCV_LO12_I:
++        write32le(ptr, (read32le(ptr) & 0xfffff)
++                       | ((val & 0xfff) << 20));
++        return;
+     case R_RISCV_PCREL_LO12_S:
+         addr = val;
+         if (!riscv64_lookup_pcrel_hi(s1, addr, &val))
+@@ -278,6 +296,12 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
+                        | ((off32 & 0xfe0) << 20)
+                        | ((off32 & 0x01f) << 7));
+         return;
++    case R_RISCV_LO12_S:
++        off32 = val;
++        write32le(ptr, (read32le(ptr) & ~0xfe000f80)
++                       | ((off32 & 0xfe0) << 20)
++                       | ((off32 & 0x01f) << 7));
++        return;
+ 
+     case R_RISCV_RVC_BRANCH:
+         off64 = (val - addr);

@@ -212,6 +212,7 @@ found:
   /* BF: Initialize waiting_for_child so recycled slots don't carry
    * stale values from previous process occupants. */
   p->waiting_for_child = 0;
+  p->waiting_for_vfork = 0;
 
   /* BF: Initialize deferred sigmask restore fields so recycled slots
    * don't carry stale saved_sigmask from previous occupants.  Without

@@ -298,20 +298,56 @@ git clone https://repo.or.cz/tinycc.git
 cd tinycc
 git checkout mob
 
+# Apply the local RISC-V linker fix before rebuilding. Without it, startup
+# objects from the musl sysroot still trip plain HI20/LO12 relocations during
+# final link, and `tcc hello.c -o hello` fails before the guest can run it.
+patch -p1 < /home/adebayo/CSE506/sbunix-skeleton/thirdparty/patches/tcc-riscv64-hi20-lo12.patch
+
+# Align the emitted ELF flags and predefines with SBUnix's rv64imac/lp64
+# target so plain integer binaries are marked soft-float instead of lp64d.
+patch -p1 < /home/adebayo/CSE506/sbunix-skeleton/thirdparty/patches/tcc-riscv64-soft-float.patch
+
+# The TCC build prepends --cross-prefix to CC/AR itself. Clear exported
+# toolchain variables first or configure will generate doubled names like
+# riscv64-linux-musl-riscv64-linux-musl-gcc.
+unset CC AR
+
 ./configure \
   --prefix=/usr \
+  --tccdir=/usr/lib/tcc \
   --cpu=riscv64 \
   --targetos=Linux \
   --cross-prefix="${CROSS_COMPILE}" \
+  --cc='gcc -static -no-pie' \
+  --ar='ar' \
+  --triplet=riscv64-linux-musl \
   --config-musl \
   --disable-rpath \
+  --sysincludepaths='{B}/include' \
+  --libpaths='{B}/lib' \
+  --crtprefix='{B}/lib' \
+  --tcc-switches='-static' \
   --extra-cflags="-Os -fno-pie -march=rv64imac -mabi=lp64" \
   --extra-ldflags="-static -no-pie"
 
-make -j"$(nproc)"
+# BF: Bootstrap libtcc1.a with GCC so the first RV64 TCC build does not need
+# the final guest sysroot layout to exist inside the source tree.
+make -j"$(nproc)" riscv64-libtcc1-usegcc=yes
 ${STRIP} tcc || true
 cp tcc /home/adebayo/third-party-stage/bin/tcc
+cp libtcc1.a /home/adebayo/third-party-stage/tcc-sysroot/lib/libtcc1.a
 ```
+
+Why the extra switches:
+
+- `--tcc-switches='-static'` makes plain `tcc hello.c -o hello` emit the
+  static executable shape SBUnix can run directly, instead of a PT_INTERP
+  binary that expects a musl loader path.
+- The local patch adds `R_RISCV_HI20`, `R_RISCV_LO12_I`, and
+  `R_RISCV_LO12_S` relocation handling to the RISC-V backend, which the
+  musl `crt1.o` startup path uses.
+- The soft-float patch replaces TinyCC's hardcoded `lp64d` RISC-V metadata
+  with the `rv64imac/lp64` shape SBUnix actually targets.
 
 If the build produces a prefixed executable instead of `tcc`, locate it before staging:
 

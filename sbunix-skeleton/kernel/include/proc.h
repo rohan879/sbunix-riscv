@@ -249,6 +249,10 @@ struct proc {
    * futex sleepers that also have waiting_for_uart unset. */
   int waiting_for_child;
 
+  /* BF: Parent blocks here for Linux-style vfork until the child either
+   * execs successfully or exits, preventing concurrent use of the shared mm. */
+  pid_t waiting_for_vfork;
+
   /* BF: Per-process signal info queue for rt_sigqueueinfo / sigtimedwait.
    * Stores the siginfo_t provided by sigqueue so that sigtimedwait can
    * retrieve si_value and si_code.  Without this, queued signal data

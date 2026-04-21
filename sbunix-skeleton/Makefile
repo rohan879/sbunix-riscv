@@ -152,16 +152,20 @@ build/testfs-core/.prepared: build/testfs-core/.dirs $(CORE_TEST_TARGETS)
 	@touch $@
 
 # Prepare base rootfs before building os-tests
-build/rootfs/.prepared: $(USER_BIN)
+build/rootfs/.prepared: $(USER_BIN) tools/stage-thirdparty.sh
 	mkdir -p build/rootfs
 	rm -rf build/rootfs/bin/os-test build/rootfs/os-test-manifest \
 		build/rootfs/os-test-expect build/rootfs/var/log/os-test \
 		build/rootfs/bin/open-posix-test build/rootfs/open-posix-test-manifest \
 		build/rootfs/var/log/open-posix-test
+	rm -f build/rootfs/bin/run-tests
 	rm -f $(LEGACY_TEST_TARFS_TARGETS)
 	cp -a rootfs/. build/rootfs/ # MODIFIED: originally in tarfs
 	ln -sf sbush build/rootfs/bin/sh # MODIFIED: added
 	ln -sf test build/rootfs/bin/[ # MODIFIED: added
+	# ENH: Stage vendored third-party payloads into the normal guest image so
+	# workload validation does not depend on manual post-build copying.
+	tools/stage-thirdparty.sh build/rootfs rootfs
 ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests # MODIFIED: added
 	# run-os-test is now built as C binary via $(C_BIN) pattern
@@ -232,8 +236,10 @@ build/tarfs.o: build/rootfs/.prepared # MODIFIED: originally just : $(USER_BIN)
 build/kernel.elf: $(KERN_ALL) build/tarfs.o
 	$(LD) -T kernel/kernel.ld $(KERN_ALL) build/tarfs.o -o $@
 
-thirdparty: build/libc/crt.S.o build/libc.a
-	$(MAKE) -C thirdparty install
+thirdparty: build/rootfs/.prepared
+	# ENH: Re-stage imported third-party payloads on demand and rebuild tarfs so
+	# iterative workload testing can refresh the guest image with one command.
+	tools/stage-thirdparty.sh build/rootfs rootfs
 	@rm -f build/tarfs.o
 	$(MAKE) build/kernel.elf
 
@@ -251,10 +257,13 @@ $(DISK_IMG): build/tools/mkfs
 
 # MODIFIED: BEGIN added
 ifdef BUILD_TESTS
-build/testfs/.prepared: build/testfs/.dirs $(TEST_TARGETS) $(OS_TEST_MARKER) $(OPEN_POSIX_TEST_MARKER)
+build/testfs/.prepared: build/testfs/.dirs $(TEST_TARGETS) $(OS_TEST_MARKER) $(OPEN_POSIX_TEST_MARKER) tools/stage-thirdparty.sh
 	@if [ -x tools/generate-priority-manifest ]; then \
 		tools/generate-priority-manifest; \
 	fi
+	@# ENH: Mirror imported third-party payloads into /test so guest-side smoke
+	@# runs can validate them without inflating the root tarfs unnecessarily.
+	@tools/stage-thirdparty.sh build/testfs testfs
 	@touch $@
 
 $(TEST_DISK_IMG): build/tools/mkext2img build/testfs/.prepared

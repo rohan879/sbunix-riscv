@@ -429,8 +429,9 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
   if (strncmp(p, "self/", 5) == 0) {
     /* Rewrite as /proc/<selfpid>/<rest> by substituting self_pid */
     const char *rest = p + 5; /* after "self/" */
-    /* Continue processing as if we had "<pid>/<rest>" */
-    struct proc *target = find_proc(self_pid);
+    /* BF: /proc/self must describe the live caller even when that short-lived
+     * child has not become discoverable through a proc-table lookup yet. */
+    struct proc *target = current_proc ? current_proc : find_proc(self_pid);
     if (!target) { kmfree(priv, sizeof(*priv)); return -2; }
     priv->pid = self_pid;
     if (*rest == '\0') {
@@ -656,8 +657,9 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
   if (strncmp(p, "self/", 5) == 0) {
     /* Delegate to numeric pid path */
     p += 5;
-    /* Process below */
-    struct proc *target = find_proc(self_pid);
+    /* BF: Mirror procfs_open's live-task handling so self stat/lookups do not
+     * fail just because the current child is transient in the proc table. */
+    struct proc *target = current_proc ? current_proc : find_proc(self_pid);
     if (!target) return -2;
     if (*p == '\0') { STAT_DIR((uint64_t)(300 + self_pid)); }
     if (strcmp(p, "status") == 0 || strcmp(p, "cmdline") == 0 ||
@@ -907,7 +909,9 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
   pid_t target_pid;
   const char *rest;
 
+  int self_path = 0;
   if (strncmp(p, "self/", 5) == 0) {
+    self_path = 1;
     target_pid = current_proc ? current_proc->pid : 1;
     rest = p + 5;
   } else {
@@ -923,7 +927,10 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
     while (*rest == '/') rest++;
   }
 
-  struct proc *target = find_proc(target_pid);
+  /* BF: /proc/self/{exe,cwd} must resolve against the live caller, not only
+   * whatever is presently discoverable through the proc table. */
+  struct proc *target = self_path && current_proc ? current_proc
+                                                  : find_proc(target_pid);
   if (!target) return -2; /* ENOENT */
 
   /* /proc/<pid>/exe -> exe_path */

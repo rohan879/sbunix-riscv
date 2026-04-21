@@ -93,6 +93,7 @@
 /* Credentials */
 #define SYS_geteuid     175
 #define SYS_getegid     177
+#define SYS_prctl       167
 
 /* Memory */
 #define SYS_brk         214
@@ -158,6 +159,10 @@
 #define SYS_setgid      144
 #define SYS_setuid      146
 
+/* prctl options used by third-party userland */
+#define PR_SET_NAME     15
+#define PR_GET_NAME     16
+
 /* Execute */
 #define SYS_fexecve     281   /* fexecve(fd, argv, envp) */
 
@@ -178,5 +183,6 @@
 #define CLONE_VM        0x00000100
 #define CLONE_FILES     0x00000400
 #define CLONE_SIGHAND   0x00000800
+#define CLONE_VFORK     0x00004000
 
 #endif

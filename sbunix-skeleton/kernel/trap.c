@@ -348,6 +348,7 @@ static void signal_default_terminate(struct proc *p, int signum) {
     p->stopped_signal = 0;
     cleanup_proc_resources(p);
     p->state = ZOMBIE;
+    release_vfork_parent(p);
     if (p->parent) {
         sig_set_pending_ex(p->parent, SIGCHLD,
                            (int32_t)p->pid, 0, K_CLD_KILLED,
@@ -779,6 +780,7 @@ void kill_deliver(struct proc *target, int sig) {
             sfence_vma();
         }
         target->state = ZOMBIE;
+        release_vfork_parent(target);
         if (target->parent) {
             /* BF: Capture child metadata for parent's SIGCHLD handler */
             sig_set_pending_ex(target->parent, SIGCHLD,
@@ -899,6 +901,7 @@ void syscall_init(void) {
     syscall_table[SYS_mkdirat]         = sys_mkdirat_handler;
     syscall_table[SYS_mknodat]         = sys_mknodat_handler;
     syscall_table[SYS_umask]           = sys_umask_handler;
+    syscall_table[SYS_prctl]           = sys_prctl_handler;
     syscall_table[SYS_geteuid]         = sys_geteuid_handler;
     syscall_table[SYS_getegid]         = sys_getegid_handler;
     syscall_table[SYS_set_tid_address] = sys_set_tid_address_handler;

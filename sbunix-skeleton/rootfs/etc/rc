@@ -7,7 +7,9 @@ echo SBUnix booting...
 # These may already come from init's envp, but export them explicitly
 # so child processes always inherit them.
 export HOME=/
-export PATH=/bin
+# ENH: Keep native /bin ahead of the BusyBox applet tree so imported
+# applets are available without silently replacing the native utilities.
+export PATH=/bin:/usr/lib/busybox/bin
 export SHELL=/bin/sbush
 
 if test -f /test/bin/badfd; then

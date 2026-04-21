@@ -24,6 +24,19 @@
 extern char _tarfs_start[];
 extern char _tarfs_end[];
 
+/* Minimal Linux-style auxiliary vector entries for external userlands. */
+#define AT_NULL    0
+#define AT_PAGESZ  6
+#define AT_ENTRY   9
+#define AT_UID     11
+#define AT_EUID    12
+#define AT_GID     13
+#define AT_EGID    14
+#define AT_SECURE  23
+#define AT_RANDOM  25
+#define AT_EXECFN  31
+#define EXECVE_AUXV_PAIRS 10
+
 /* ------------------------------------------------------------------ */
 /* copy_pagetable_cow: COW-share user pages from src to dst           */
 /* ------------------------------------------------------------------ */
@@ -215,6 +228,27 @@ void cleanup_proc_resources(struct proc *p) {
 }
 
 /* ------------------------------------------------------------------ */
+/* release_vfork_parent: unblock the parent once the vfork child is     */
+/* past the shared-mm window via successful exec or any exit path.      */
+/* ------------------------------------------------------------------ */
+void release_vfork_parent(struct proc *child) {
+    if (!(child->clone_flags & CLONE_VFORK))
+        return;
+
+    child->clone_flags &= ~CLONE_VFORK;
+    if (!child->parent)
+        return;
+
+    /* BF: Only clear the specific outstanding vfork wait so unrelated child
+     * exits cannot spuriously release a parent that is blocked on another pid. */
+    if (child->parent->waiting_for_vfork == child->pid) {
+        child->parent->waiting_for_vfork = 0;
+        if (child->parent->state == SLEEPING)
+            child->parent->state = RUNNABLE;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* sys_clone: fork or create a thread in the current process            */
 /* a0 = flags (CLONE_VM | CLONE_FILES | CLONE_SIGHAND | SIGCHLD etc.)  */
 /* a1 = child stack pointer (0 means inherit parent sp)                 */
@@ -229,10 +263,15 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     /* CLONE_SIGHAND requires CLONE_VM (Linux semantics) */
     if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
         return -22; /* -EINVAL */
-    /* BF: Reject CLONE_VM until the kernel has a shared mm owner for the
-     * pagetable, VMA list, mmap_base, and lifecycle teardown.  Sharing the
-     * page table while deep-copying VMAs corrupts address-space ownership. */
-    if (clone_flags & CLONE_VM)
+    /* BF: Keep CLONE_VM narrowly scoped to Linux-style vfork for now.
+     * pdpmake only needs CLONE_VM|CLONE_VFORK|SIGCHLD, and wider shared-mm
+     * clone shapes still need stronger thread lifecycle guarantees. */
+    if ((clone_flags & CLONE_VFORK) && !(clone_flags & CLONE_VM))
+        return -22; /* -EINVAL */
+    if ((clone_flags & CLONE_VM) &&
+        (clone_flags & ~(CLONE_VM | CLONE_VFORK)))
+        return -22; /* -EINVAL */
+    if ((clone_flags & CLONE_VM) && !(clone_flags & CLONE_VFORK))
         return -22; /* -EINVAL */
 
     struct proc *p = allocproc();
@@ -363,6 +402,18 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
 
     new_pt = 0; /* success — ownership transferred to p */
     p->state = RUNNABLE;
+
+    if (clone_flags & CLONE_VFORK) {
+        current_proc->waiting_for_vfork = p->pid;
+        /* BF: vfork blocks the parent until the child execs or exits.
+         * Re-check after every wake because UART or unrelated child exits can
+         * still cause harmless spurious wakeups in the current scheduler. */
+        while (current_proc->waiting_for_vfork == p->pid) {
+            current_proc->state = SLEEPING;
+            swtch(&current_proc->context, &scheduler_context);
+        }
+    }
+
     return p->pid;
 
 bad:
@@ -827,21 +878,74 @@ long sys_execve_handler(struct trapframe *tf) {
 
         int argv_ptrs_sz = (kargc + 1) * 8;
         int envp_ptrs_sz = (kenvc + 1) * 8;
+        int execfn_len   = (int)strlen(resolved) + 1;
+        int random_len   = 16;
+        uint64_t auxv[EXECVE_AUXV_PAIRS * 2];
+        int auxc = 0;
         int header       = 8;
-        int total        = header + argv_ptrs_sz + envp_ptrs_sz + kstroff + kenvoff;
+        int auxv_sz;
+        int total;
+
+        /* BF: External musl binaries scan a Linux-style auxv immediately
+         * after envp[].  Without a real AT_NULL-terminated vector, they
+         * parse argv string bytes as aux entries and misinitialize startup
+         * state such as page size and canary pointers. */
+        auxv[auxc * 2] = AT_PAGESZ;
+        auxv[auxc * 2 + 1] = PAGE_SIZE;
+        auxc++;
+        auxv[auxc * 2] = AT_ENTRY;
+        auxv[auxc * 2 + 1] = newtf->epc;
+        auxc++;
+        auxv[auxc * 2] = AT_UID;
+        auxv[auxc * 2 + 1] = (uint64_t)current_proc->uid;
+        auxc++;
+        auxv[auxc * 2] = AT_EUID;
+        auxv[auxc * 2 + 1] = (uint64_t)current_proc->uid;
+        auxc++;
+        auxv[auxc * 2] = AT_GID;
+        auxv[auxc * 2 + 1] = (uint64_t)current_proc->gid;
+        auxc++;
+        auxv[auxc * 2] = AT_EGID;
+        auxv[auxc * 2 + 1] = (uint64_t)current_proc->gid;
+        auxc++;
+        auxv[auxc * 2] = AT_SECURE;
+        auxv[auxc * 2 + 1] = 0;
+        auxc++;
+        auxv[auxc * 2] = AT_RANDOM;
+        auxv[auxc * 2 + 1] = 0; /* filled in after stack layout is fixed */
+        auxc++;
+        auxv[auxc * 2] = AT_EXECFN;
+        auxv[auxc * 2 + 1] = 0; /* filled in after stack layout is fixed */
+        auxc++;
+        auxv[auxc * 2] = AT_NULL;
+        auxv[auxc * 2 + 1] = 0;
+        auxc++;
+
+        auxv_sz = auxc * 2 * 8;
+        total = header + argv_ptrs_sz + envp_ptrs_sz + auxv_sz +
+                kstroff + kenvoff + execfn_len + random_len;
         total = (total + 15) & ~15;
 
         uint64_t sp            = USER_STACK_TOP - 32 - total;
         uint64_t argv_ptr_base = sp + header;
         uint64_t envp_ptr_base = sp + header + argv_ptrs_sz;
-        uint64_t argv_str_base = sp + header + argv_ptrs_sz + envp_ptrs_sz;
+        uint64_t auxv_base     = sp + header + argv_ptrs_sz + envp_ptrs_sz;
+        uint64_t argv_str_base = auxv_base + auxv_sz;
         uint64_t envp_str_base = argv_str_base + kstroff;
+        uint64_t execfn_base   = envp_str_base + kenvoff;
+        uint64_t random_base   = execfn_base + execfn_len;
+        uint64_t random_words[2];
+
+        random_words[0] = r_time() ^ ((uint64_t)current_proc->pid << 32);
+        random_words[1] = r_time() ^ newtf->epc ^ execfn_base;
+        auxv[7 * 2 + 1] = random_base;
+        auxv[8 * 2 + 1] = execfn_base;
 
         /* BF: Use multi-chunk copyout to avoid kbuf overflow.
          * The old code copied header + pointer arrays + all strings into a
-         * single 4096-byte kalloc page, but total could reach ~8KB when
+         * single 4096-byte kalloc page, but total could exceed that when
          * argv and envp strings fill their respective pages.  Now we copy
-         * only the header + pointer arrays into kbuf (max ~536 bytes),
+         * only the header + pointer arrays + auxv into kbuf (still < 1KB),
          * then copyout argv and envp strings directly from their own
          * already-allocated pages. */
         char *kbuf = (char *)kalloc();
@@ -871,13 +975,17 @@ long sys_execve_handler(struct trapframe *tf) {
             ptrs[kenvc] = 0;
             memcpy(kbuf + off, ptrs, envp_ptrs_sz);
             off += envp_ptrs_sz;
+            memcpy(kbuf + off, auxv, auxv_sz);
+            off += auxv_sz;
 
-            /* Multi-chunk copyout: header+ptrs first, then string pages */
+            /* Multi-chunk copyout: header+ptrs+auxv first, then string data. */
             copyout(current_proc->pagetable, sp, kbuf, off);
             if (kstroff > 0)
                 copyout(current_proc->pagetable, argv_str_base, kstrbuf, kstroff);
             if (kenvoff > 0)
                 copyout(current_proc->pagetable, envp_str_base, kenvbuf, kenvoff);
+            copyout(current_proc->pagetable, execfn_base, resolved, execfn_len);
+            copyout(current_proc->pagetable, random_base, random_words, random_len);
             kfree(kbuf);
 
             newtf->sp = sp;
@@ -899,6 +1007,9 @@ long sys_execve_handler(struct trapframe *tf) {
      * When tf already points to current_proc->trapframe, no copy is needed. */
     if (tf != current_proc->trapframe)
         memcpy(tf, current_proc->trapframe, sizeof(struct trapframe));
+    /* BF: Release a blocked vfork parent only after execve has finished
+     * rebuilding argv/envp/auxv so the child is ready to enter user mode. */
+    release_vfork_parent(current_proc);
     return SYSCALL_NORETURN;
 }
 
@@ -1009,6 +1120,7 @@ long sys_exit_handler(struct trapframe *tf) {
             struct proc *par = current_proc->parent;
             struct kern_sigaction *psa = proc_sigactions(par);
             current_proc->state = ZOMBIE;
+            release_vfork_parent(current_proc);
             /* BF: Capture child metadata for parent's SIGCHLD SA_SIGINFO handler.
              * CLD_EXITED for normal exit, CLD_KILLED if terminated by signal. */
             {
@@ -1035,6 +1147,7 @@ long sys_exit_handler(struct trapframe *tf) {
             }
         } else {
             current_proc->state = ZOMBIE;
+            release_vfork_parent(current_proc);
         }
         /* Reparent orphan children to init (pid 1) */
         struct proc *initproc = NULL;

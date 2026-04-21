@@ -225,13 +225,17 @@ int exec(char *path) {
     vma_free_chain(old_vma_list);
 
     // 6. Update process state
+    /* BF: Linux loaders expose a page-aligned initial program break.
+     * Third-party musl allocators immediately place a MAP_FIXED guard page
+     * at brk(0), which fails with EINVAL if exec leaves sz unaligned. */
+    uint64_t exec_brk = PGROUNDUP(sz);
     current_proc->pagetable = pagetable;
-    current_proc->sz = sz;
+    current_proc->sz = exec_brk;
 
     // Initialize stack bounds for auto-grow
     current_proc->stack_top = USER_STACK_TOP;
     current_proc->stack_bottom = stack_va;
-    current_proc->mmap_base = exec_mmap_base(sz);
+    current_proc->mmap_base = exec_mmap_base(exec_brk);
 
     /* Update process name from the last component of the path */
     {
@@ -516,11 +520,14 @@ int exec_vfs(const char *resolved_path) {
     vma_free_chain(old_vma_list);
 
     /* 7. Update process */
+    /* BF: Match Linux's page-aligned initial brk so external allocators can
+     * reserve a guard page at brk(0) with MAP_FIXED during startup. */
+    uint64_t exec_brk = PGROUNDUP(sz);
     current_proc->pagetable = pagetable;
-    current_proc->sz = sz;
+    current_proc->sz = exec_brk;
     current_proc->stack_top = USER_STACK_TOP;
     current_proc->stack_bottom = stack_va;
-    current_proc->mmap_base = exec_mmap_base(sz);
+    current_proc->mmap_base = exec_mmap_base(exec_brk);
 
     /* Update process name and exe_path */
     {

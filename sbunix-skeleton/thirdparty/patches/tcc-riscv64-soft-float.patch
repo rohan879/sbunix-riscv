@@ -1,0 +1,33 @@
+diff --git a/riscv64-gen.c b/riscv64-gen.c
+index e51df7b..17fe6c5 100644
+--- a/riscv64-gen.c
++++ b/riscv64-gen.c
+@@ -43,11 +43,8 @@ ST_DATA const char * const target_machine_defs =
+ ST_DATA const char * const target_machine_defs =
+     "__riscv\0"
+     "__riscv_xlen 64\0"
+-    "__riscv_flen 64\0"
+     "__riscv_div\0"
+     "__riscv_mul\0"
+-    "__riscv_fdiv\0"
+-    "__riscv_fsqrt\0"
+-    "__riscv_float_abi_double\0"
++    "__riscv_float_abi_soft\0"
+     ;
+ 
+diff --git a/tccelf.c b/tccelf.c
+index 4222f59..d817f1b 100644
+--- a/tccelf.c
++++ b/tccelf.c
+@@ -2631,8 +2631,9 @@ static int tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr)
+ #elif defined TCC_TARGET_ARM
+     ehdr.e_ident[EI_OSABI] = ELFOSABI_ARM;
+ #elif defined TCC_TARGET_RISCV64
+-    /* XXX should be configurable */
+-    ehdr.e_flags = EF_RISCV_FLOAT_ABI_DOUBLE;
++    /* SBUnix targets rv64imac/lp64, so mark emitted binaries as
++       soft-float instead of the old hardcoded double-float default. */
++    ehdr.e_flags = EF_RISCV_FLOAT_ABI_SOFT;
+ #endif
+ 
+     if (file_type == TCC_OUTPUT_OBJ) {
