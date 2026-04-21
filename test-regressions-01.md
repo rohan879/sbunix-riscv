@@ -111,3 +111,41 @@ Conclusion:
 3. `timer_getoverrun/2-1`
    Immediate cause of `ERR`: same 5-second watchdog, but the test intentionally sleeps 12 seconds.
    Likely underlying functional cause of the earlier `FAIL`: timer overrun accounting does not track expirations that occur while the timer signal is already pending and coalesced.
+
+## Ranked Solutions
+
+### 1. `os-test: basic/unistd/fchownat`
+
+1. Stage the os-test fixture/source tree that the test expects into the guest image and keep the stricter `fchownat` implementation.
+   Why ranked first: it preserves the more correct syscall behavior from `22cf54a` while restoring the runtime layout that this os-test case assumes.
+2. Materialize only the specific os-test files or directories referenced by path-sensitive tests before running them.
+   Why ranked second: it is smaller than staging the whole source tree, but it is brittle and will likely miss future path-based cases.
+3. Revert `sys_fchownat_handler` back to the old unconditional success stub.
+   Why ranked third: it would likely recover the historical pass, but only by weakening semantics and hiding real `ENOENT` cases.
+
+### 2. `open-posix: conformance/interfaces/timer_getoverrun/1-1`
+
+1. Increase or parameterize the `run-open-posix-test` watchdog so tests with intentional 8-12 second sleeps can finish.
+   Why ranked first: it fixes the actual regression mechanism without changing kernel behavior or test expectations.
+2. Keep the watchdog but exempt the long-running timer suite or use a larger timeout for single-test targeted runs.
+   Why ranked second: it is narrower in scope, but it leaves the harness with suite-specific policy and more maintenance burden.
+3. Reclassify watchdog kills from `ERR` to `UNRESOLVED`.
+   Why ranked third: it would improve reporting, but the test would still not execute to completion.
+
+### 3. `open-posix: conformance/interfaces/timer_getoverrun/2-1`
+
+1. Apply the same watchdog fix as `1-1`, with the timeout raised above the test's 12-second sleep window.
+   Why ranked first: this is the direct fix for the observed `FAIL -> ERR` transition.
+2. Split long-running timer tests into a separate invocation path with a looser watchdog than the default open-posix run.
+   Why ranked second: it avoids slowing the whole suite, but it complicates the runner and reporting flow.
+3. Map watchdog terminations to `UNRESOLVED` instead of `ERR`.
+   Why ranked third: it avoids a misleading hard error classification, but it still masks the real functional result.
+
+### 4. `timer_getoverrun/2-1` underlying overrun accounting
+
+1. Track per-timer pending-delivery state and increment `overrun` whenever that same timer expires again before its notification is consumed.
+   Why ranked first: it matches POSIX timer semantics more closely than the current signal-level coalescing shortcut and avoids ambiguity when multiple timers share a signal.
+2. As a narrower patch, increment `overrun` when the timer expires and its signal is already pending, even if the extra expiration happens in a later interrupt pass.
+   Why ranked second: it likely fixes this test with less code churn, but it is less robust if multiple timers target the same signal.
+3. Keep the current kernel logic and mark the case as a known limitation after the harness timeout is fixed.
+   Why ranked third: it is operationally cheap, but it concedes a standards-visible functional bug.
