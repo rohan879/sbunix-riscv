@@ -215,11 +215,15 @@ This runs `tools/run_tests.sh`, which:
 - compiles ~2000 Sortix os-test binaries and ~1000 Open POSIX test binaries
 - builds `build/disk.img` and `build/test-disk.img`
 - boots QEMU twice (Boot 1: all tests + persistence write + poweroff; Boot 2: persistence verify)
-- runs the local `run-tests` regression set inside SBUnix from `sbush`, including the vendored third-party integration test for `micropython`, BusyBox, `pdpmake`, and `tcc`
+- runs the local `run-tests` regression set inside SBUnix from `sbush`, including the vendored third-party integration test for `micropython`, BusyBox, `pdpmake`, and `tcc` across both direct exec and nested `sbush -c` dispatch
 - parses `[PASS]` and `[FAIL]` lines from serial output
 - prints a pass/fail summary
 
 Fully automated, no interaction needed. First run is slow (~40 min for test compilation).
+This automated path validates the local `run-tests` regression set plus the
+two-boot persistence flow. It builds the Sortix and Open POSIX suites into the
+test disk, but it does not automatically execute `run-os-test` or
+`run-open-posix-test`; those remain explicit in-guest commands from `sbush`.
 
 ### Option 2: Manual via QEMU
 
@@ -247,9 +251,10 @@ run-priority-tests         # Priority subset of both suites, ~1030 tests (~15 mi
 
 `run-tests` is the local full regression entrypoint. It runs from inside SBUnix
 via `sbush` and now includes guest-side, unmocked integration coverage for the
-vendored `micropython`, BusyBox, `pdpmake`/`make`, and `tcc` workloads. There
-is no new build command for this coverage; it is included automatically when you
-build the documented test disk with `BUILD_TESTS=1`.
+vendored `micropython`, BusyBox, `pdpmake`/`make`, and `tcc` workloads across
+both direct execution and nested `sbush -c` command dispatch. There is no new
+build command for this coverage; it is included automatically when you build
+the documented test disk with `BUILD_TESTS=1`.
 
 To run a single test:
 

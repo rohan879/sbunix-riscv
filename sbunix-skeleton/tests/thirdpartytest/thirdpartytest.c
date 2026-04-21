@@ -2,8 +2,9 @@
  * thirdpartytest.c -- integration coverage for vendored external workloads.
  *
  * These checks run the staged Micropython, BusyBox, pdpmake, and TCC payloads
- * against the real SBUnix filesystem/process stack.  The goal is to catch
- * regressions that native test binaries can miss in external runtimes.
+ * against the real SBUnix filesystem/process stack. The goal is to catch
+ * regressions that native test binaries can miss in external runtimes,
+ * including nested sbush -c dispatch of the imported workloads.
  */
 
 #include <errno.h>
@@ -397,6 +398,104 @@ static void test_tcc(void)
   rmdir(base);
 }
 
+static void test_sbush_nested(void)
+{
+  const char *base = "/mnt/thirdpartytest-subsh";
+  const char *mpy = "/mnt/thirdpartytest-subsh/mpy.py";
+  const char *makefile = "/mnt/thirdpartytest-subsh/Makefile";
+  const char *marker = "/mnt/thirdpartytest-subsh/marker.txt";
+  const char *src = "/mnt/thirdpartytest-subsh/hello.c";
+  const char *bin = "/mnt/thirdpartytest-subsh/hello";
+  char makebuf[512];
+  char outbuf[1024];
+  char *mpy_argv[] = {
+      "/bin/sbush",
+      "-c",
+      "micropython /mnt/thirdpartytest-subsh/mpy.py",
+      NULL,
+  };
+  char *busybox_argv[] = {
+      "/bin/sbush",
+      "-c",
+      "busybox echo busybox-subsh && /usr/lib/busybox/bin/echo applet-subsh",
+      NULL,
+  };
+  char *make_argv[] = {
+      "/bin/sbush",
+      "-c",
+      "make -f /mnt/thirdpartytest-subsh/Makefile all",
+      NULL,
+  };
+  char *tcc_argv[] = {
+      "/bin/sbush",
+      "-c",
+      "tcc /mnt/thirdpartytest-subsh/hello.c -o /mnt/thirdpartytest-subsh/hello && /mnt/thirdpartytest-subsh/hello",
+      NULL,
+  };
+  int status = 0;
+
+  unlink(bin);
+  unlink(src);
+  unlink(marker);
+  unlink(makefile);
+  unlink(mpy);
+  rmdir(base);
+
+  CHECK("subsh: base dir created", ensure_dir(base) == 0);
+  CHECK("subsh: micropython script written",
+        write_text(mpy,
+                   "import os\n"
+                   "print('mpy-subsh cwd=' + os.getcwd())\n"
+                   "print('mpy-subsh ok')\n",
+                   0644) == 0);
+  CHECK("subsh: nested micropython runs",
+        run_capture("/bin/sbush", mpy_argv, outbuf, sizeof(outbuf), &status) == 0 &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+        strstr(outbuf, "mpy-subsh cwd=/\n") != NULL &&
+        strstr(outbuf, "mpy-subsh ok\n") != NULL);
+
+  CHECK("subsh: nested busybox applets run",
+        run_capture("/bin/sbush", busybox_argv, outbuf, sizeof(outbuf), &status) == 0 &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+        strstr(outbuf, "busybox-subsh\n") != NULL &&
+        strstr(outbuf, "applet-subsh\n") != NULL);
+
+  snprintf(makebuf, sizeof(makebuf),
+           "all:\n"
+           "\t/bin/echo subsh-make > %s\n",
+           marker);
+  CHECK("subsh: makefile written", write_text(makefile, makebuf, 0644) == 0);
+  CHECK("subsh: nested make runs",
+        run_capture("/bin/sbush", make_argv, outbuf, sizeof(outbuf), &status) == 0 &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+        access(marker, F_OK) == 0);
+  if (read_file(marker, outbuf, sizeof(outbuf)) >= 0) {
+    CHECK("subsh: nested make output content", strcmp(outbuf, "subsh-make\n") == 0);
+  } else {
+    CHECK("subsh: nested make output content", 0);
+  }
+
+  CHECK("subsh: nested tcc source written",
+        write_text(src,
+                   "#include <stdio.h>\n"
+                   "int main(void) {\n"
+                   "  printf(\"subsh-tcc-ok\\n\");\n"
+                   "  return 0;\n"
+                   "}\n",
+                   0644) == 0);
+  CHECK("subsh: nested tcc compile and run",
+        run_capture("/bin/sbush", tcc_argv, outbuf, sizeof(outbuf), &status) == 0 &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+        strstr(outbuf, "subsh-tcc-ok\n") != NULL);
+
+  unlink(bin);
+  unlink(src);
+  unlink(marker);
+  unlink(makefile);
+  unlink(mpy);
+  rmdir(base);
+}
+
 int main(void)
 {
   printf("=== thirdpartytest: vendored workload integration ===\n");
@@ -405,6 +504,7 @@ int main(void)
   test_busybox();
   test_pdpmake();
   test_tcc();
+  test_sbush_nested();
 
   printf("thirdpartytest: %d passed, %d failed\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
