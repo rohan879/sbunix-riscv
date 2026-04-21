@@ -71,6 +71,7 @@ echo "=== Running mmaphitest ===" && /test/bin/mmaphitest
 echo "=== Running envtest ===" && /test/bin/envtest
 echo "=== Running malloctest ===" && /test/bin/malloctest
 echo "=== Running shelltests ===" && /test/bin/shelltests
+echo "=== Running thirdpartytest ===" && /test/bin/thirdpartytest
 echo "=== Running mremaptest ===" && /test/bin/mremaptest
 echo "=== Running mprotecttest ===" && /test/bin/mprotecttest
 echo "=== Running mprotect_kernel_addr ===" && /test/bin/mprotect_kernel_addr

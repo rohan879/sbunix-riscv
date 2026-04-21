@@ -215,6 +215,7 @@ This runs `tools/run_tests.sh`, which:
 - compiles ~2000 Sortix os-test binaries and ~1000 Open POSIX test binaries
 - builds `build/disk.img` and `build/test-disk.img`
 - boots QEMU twice (Boot 1: all tests + persistence write + poweroff; Boot 2: persistence verify)
+- runs the local `run-tests` regression set inside SBUnix from `sbush`, including the vendored third-party integration test for `micropython`, BusyBox, `pdpmake`, and `tcc`
 - parses `[PASS]` and `[FAIL]` lines from serial output
 - prints a pass/fail summary
 
@@ -243,6 +244,12 @@ run-os-test                # Sortix os-test suite, 4071 tests (~40 min)
 run-open-posix-test        # Open POSIX test suite, 989 tests (~30 min)
 run-priority-tests         # Priority subset of both suites, ~1030 tests (~15 min)
 ```
+
+`run-tests` is the local full regression entrypoint. It runs from inside SBUnix
+via `sbush` and now includes guest-side, unmocked integration coverage for the
+vendored `micropython`, BusyBox, `pdpmake`/`make`, and `tcc` workloads. There
+is no new build command for this coverage; it is included automatically when you
+build the documented test disk with `BUILD_TESTS=1`.
 
 To run a single test:
 
