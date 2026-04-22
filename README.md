@@ -203,9 +203,13 @@ Most submodule tests fail to compile due to missing headers (e.g., `pthread.h`, 
 
 ## Running Tests
 
-There are two ways to run the test suites: fully automated (`make test`) or manual via QEMU.
+There are three useful test entrypoints:
 
-### Option 1: Automated (`make test`)
+- `make test` or `bash tools/run_tests.sh` for the local automated regression
+- `bash tools/run_tests_capture.sh` for the one-shot full guest suite
+- `BUILD_TESTS=1 make qemu` for manual interactive runs inside `sbush`
+
+### Option 1: Automated local regression (`make test`)
 
 ```bash
 cd sbunix-skeleton
@@ -233,7 +237,50 @@ the rootfs-installed `/bin/*` and `/usr/lib/*` payloads, not copies on the test
 disk. This avoids `mkext2img`'s ext2-lite large-file limit on the staged TCC
 archives.
 
-### Option 2: Manual via QEMU
+Use this path when you want the standard host-side regression quickly. If you
+need the full guest-visible suite in one command, use the captured runner below.
+
+### Option 2: One-shot full guest suite (`tools/run_tests_capture.sh`)
+
+```bash
+cd sbunix-skeleton
+source tools/sourceme.sh
+bash tools/run_tests_capture.sh
+```
+
+This wrapper is the documented one-command path for the full suite. It:
+
+- rebuilds with `BUILD_TESTS=1`
+- builds both `build/disk.img` and `build/test-disk.img`
+- boots QEMU twice
+- lets `/etc/rc` run the local `run-tests` regression on Boot 1
+- waits for the first `sbush$` prompt, then runs `run-os-test`,
+  `run-open-posix-test`, and `/test/bin/persisttest`
+- boots a second time so persistence verification runs and powers off
+- preserves raw per-boot logs and a host status file
+
+By default the artifacts are written to:
+
+```bash
+/home/adebayo/test-findings/code-review-08-artifacts/final
+```
+
+You can override the output directory and timeout:
+
+```bash
+SBUNIX_RUN_TESTS_CAPTURE_DIR=/tmp/sbunix-full TIMEOUT=10800 bash tools/run_tests_capture.sh
+```
+
+Important notes:
+
+- This is much slower than `make test` because it executes the local regression,
+  the full Sortix os-test suite, the full Open POSIX suite, and the two-boot
+  persistence flow in a single run.
+- The default timeout is `7200` seconds.
+- The wrapper assumes `BUILD_TESTS=1` support is available and will rebuild the
+  test disk itself; you do not need to run `make BUILD_TESTS=1` separately.
+
+### Option 3: Manual via QEMU
 
 ```bash
 cd sbunix-skeleton
@@ -316,6 +363,7 @@ cd sbunix-skeleton
 source tools/sourceme.sh
 make
 bash tools/run_tests.sh
+# use bash tools/run_tests_capture.sh when you want the full guest suite
 make qemu
 ```
 
