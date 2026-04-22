@@ -66,6 +66,31 @@ static uint64_t mmap_search_base(struct proc *p) {
   return base;
 }
 
+/* BF: Treat supervisor-only MMIO aliases in the user page table as reserved
+ * holes.  This keeps MAP_FIXED, munmap, mprotect, and mremap from walking
+ * into shared kernel MMIO slots that would break zero-fill semantics. */
+static int mmap_reserved_range(struct proc *p, uint64_t start, uint64_t len,
+                               uint64_t *next_va) {
+  uint64_t end = start + len;
+
+  for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+    int level = -1;
+    pte_t *pte = walk_super(p->pagetable, va, &level);
+    if (!pte || !(*pte & PTE_V) || (*pte & PTE_U))
+      continue;
+
+    if (next_va) {
+      if (level == 1)
+        *next_va = SPGROUNDUP(va + 1);
+      else
+        *next_va = PGROUNDUP(va + 1);
+    }
+    return 1;
+  }
+
+  return 0;
+}
+
 /* BF: Find a hole in the user address space for a new mapping of len bytes.
  * Walks the VMA list to skip overlaps.  Returns 0 on failure (ENOMEM). */
 static uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
@@ -76,6 +101,13 @@ static uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
   for (;;) {
     if (candidate > USER_STACK_TOP || len > USER_STACK_TOP - candidate)
       return 0;
+    {
+      uint64_t reserved_end = 0;
+      if (mmap_reserved_range(p, candidate, len, &reserved_end)) {
+        candidate = PGROUNDUP(reserved_end);
+        continue;
+      }
+    }
     struct vm_area *v = p->vma_list;
     int overlap = 0;
     while (v) {
@@ -164,15 +196,8 @@ long sys_mmap_handler(struct trapframe *tf) {
          * overflows uint64_t. */
         if (!user_range_ok(va, len))
             return (long)-22; /* EINVAL */
-        /* BF: Reject MAP_FIXED in shared MMIO range below mmap floor.
-         * L1 entries for PLIC/UART are kernel superpages — user demand-paging
-         * cannot service them. */
-        if (va < USER_MMAP_FLOOR) {
-            int level = -1;
-            pte_t *mpte = walk_super(current_proc->pagetable, va, &level);
-            if (mpte && (*mpte & PTE_V) && !(*mpte & PTE_U))
-                return (long)-22; /* EINVAL */
-        }
+        if (mmap_reserved_range(current_proc, va, len, 0))
+            return (long)-22; /* EINVAL */
         /* BF: POSIX requires MAP_FIXED to replace any existing mappings
          * in the target range [va, va+len).  Without this, old PTEs and
          * VMA entries persist, causing incorrect data reads. */
@@ -289,6 +314,8 @@ long sys_munmap_handler(struct trapframe *tf) {
 
     if (!user_range_ok(addr, len))
         return -22; /* -EINVAL */
+    if (mmap_reserved_range(current_proc, addr, len, 0))
+        return -22; /* -EINVAL */
 
     /* Write back MAP_SHARED pages before unmapping */
     mmap_writeback_shared(current_proc, addr, addr + len);
@@ -306,33 +333,10 @@ long sys_munmap_handler(struct trapframe *tf) {
      * inconsistent, but pages are safely freed above. */
     vma_remove(current_proc, addr, addr + len);
 
-    /* BF: Scan VMA list for highest non-stack allocated address.
-     * Resets mmap_base to allow address space reuse after munmap.
-     * Without this, 100k mmap/munmap cycles exhaust the address space
-     * since mmap_base only moves forward.  Excludes the stack region
-     * (which extends up to USER_STACK_TOP) from the scan so that
-     * mmap_base does not get pushed to the ceiling of the address
-     * space where mmap_find_hole would have no room to allocate. */
-    {
-        uint64_t highest = mmap_search_base(current_proc);
-        struct vm_area *v = current_proc->vma_list;
-        while (v) {
-            /* BF: Skip the stack VMA — it reaches USER_STACK_TOP and
-             * would push mmap_base to the address space ceiling. */
-            if (v->end <= current_proc->stack_bottom ||
-                v->start >= current_proc->stack_top) {
-              /* Not a stack VMA — include in scan */
-            } else {
-              v = v->next;
-              continue;
-            }
-            uint64_t end = v->end;
-            if (end > highest)
-                highest = end;
-            v = v->next;
-        }
-        current_proc->mmap_base = highest;
-    }
+    /* BF: Reset the search hint after unmap so future allocations can
+     * reuse low holes without inheriting stale stack-top or MMIO-adjacent
+     * placement from older mappings. */
+    current_proc->mmap_base = mmap_search_base(current_proc);
 
     return 0;
 }
@@ -354,6 +358,8 @@ long sys_mprotect_handler(struct trapframe *tf) {
         return 0;
     if (!user_range_ok(addr, len))
         return -22; /* -EINVAL */
+    if (mmap_reserved_range(current_proc, addr, len, 0))
+        return -EINVAL;
 
     for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
         if (!vma_find(current_proc, va))
@@ -596,10 +602,7 @@ long sys_mremap_handler(struct trapframe *tf) {
     int can_expand = 1;
     for (uint64_t va = old_addr + old_size; va < old_addr + new_size; va += PAGE_SIZE) {
         struct vm_area *existing = vma_find(current_proc, va);
-        /* BF: Also check for shared kernel MMIO PTEs blocking expansion */
-        int level = -1;
-        pte_t *epte = walk_super(current_proc->pagetable, va, &level);
-        if (existing || (epte && (*epte & PTE_V) && !(*epte & PTE_U))) {
+        if (existing || mmap_reserved_range(current_proc, va, PAGE_SIZE, 0)) {
             can_expand = 0; break;
         }
     }
