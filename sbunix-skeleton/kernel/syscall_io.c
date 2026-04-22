@@ -1219,6 +1219,13 @@ long sys_linkat_handler(struct trapframe *tf) {
       if (rr < 0) return (long)rr; }
     { int rr = resolve_path_at(newdirfd, knew, new_resolved);
       if (rr < 0) return (long)rr; }
+    /* BF: linkat must follow symlinked parent directories while preserving
+     * the final path component, otherwise /mnt/linkdir/file is treated as a
+     * literal ext2 entry instead of resolving through the symlinked parent. */
+    { int sr = resolve_symlinks_in_path(old_resolved, 6, 0);
+      if (sr < 0) return (long)sr; }
+    { int sr = resolve_symlinks_in_path(new_resolved, 6, 0);
+      if (sr < 0) return (long)sr; }
 
     /* Both paths must be on the same filesystem. */
     const char *old_rel, *new_rel;
@@ -1273,6 +1280,13 @@ long sys_renameat2_handler(struct trapframe *tf) {
       if (rr < 0) return (long)rr; }
     { int rr = resolve_path_at(newdirfd, knew, new_resolved);
       if (rr < 0) return (long)rr; }
+    /* BF: renameat2 follows symlinked parent directories but must leave the
+     * source and destination basenames unresolved so renaming a symlink still
+     * acts on the link itself rather than the target. */
+    { int sr = resolve_symlinks_in_path(old_resolved, 6, 0);
+      if (sr < 0) return (long)sr; }
+    { int sr = resolve_symlinks_in_path(new_resolved, 6, 0);
+      if (sr < 0) return (long)sr; }
 
     const char *old_relpath, *new_relpath;
     struct mount *old_mnt = vfs_lookup_mount_entry(old_resolved, &old_relpath);
