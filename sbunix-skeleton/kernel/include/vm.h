@@ -9,7 +9,19 @@
 #define PROT_WRITE  0x02
 #define PROT_EXEC   0x04
 
+static inline int prot_to_pte_flags(int prot) {
+  int flags = 0;
+  if (prot & (PROT_READ | PROT_WRITE))
+    flags |= PTE_R;
+  if (prot & PROT_WRITE)
+    flags |= PTE_W;
+  if (prot & PROT_EXEC)
+    flags |= PTE_X;
+  return flags;
+}
+
 /* Mapping flags for vm_area (must match libc MAP_* values) */
+#define MAP_SHARED    0x01
 #define MAP_PRIVATE   0x02
 #define MAP_ANON      0x20
 
@@ -38,6 +50,39 @@ struct vm_area {
 
 struct proc; /* forward declaration */
 
+enum pte_kind {
+  PTE_KIND_EMPTY = 0,
+  PTE_KIND_NONLEAF,
+  PTE_KIND_LEAF,
+  PTE_KIND_COW_LEAF,
+  PTE_KIND_SWAPPED,
+  PTE_KIND_PROT_NONE,
+  PTE_KIND_RESERVED
+};
+
+enum pte_update_reason {
+  PTE_UPDATE_PT_ALLOC = 0,
+  PTE_UPDATE_MAP,
+  PTE_UPDATE_SUPER_MAP,
+  PTE_UPDATE_RECURSIVE_MAP,
+  PTE_UPDATE_KERNEL_SHARE,
+  PTE_UPDATE_KERNEL_REPAIR,
+  PTE_UPDATE_UNMAP,
+  PTE_UPDATE_COW,
+  PTE_UPDATE_SWAPOUT,
+  PTE_UPDATE_SWAPIN,
+  PTE_UPDATE_MPROTECT,
+  PTE_UPDATE_MREMAP,
+  PTE_UPDATE_EXEC_PERM,
+  PTE_UPDATE_CLEAR_ACCESSED,
+};
+
+enum pte_sfence_requirement {
+  PTE_SFENCE_NONE = 0,
+  PTE_SFENCE_VA,
+  PTE_SFENCE_ALL,
+};
+
 int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags);
 struct vm_area *vma_find(struct proc *p, uint64_t addr);
 int vma_remove(struct proc *p, uint64_t start, uint64_t end);
@@ -50,6 +95,13 @@ void kvminit(void);
 void kvmmap(uint64_t va, uint64_t pa, uint64_t sz, int perm);
 int mappages(pagetable_t pagetable, uint64_t va, uint64_t size, uint64_t pa, int perm);
 pte_t *walk(pagetable_t pagetable, uint64_t va, int alloc);
+enum pte_kind pte_classify(pte_t pte, int level);
+const char *pte_kind_name(enum pte_kind kind);
+const char *pte_update_reason_name(enum pte_update_reason reason);
+int pte_update(pagetable_t root, uint64_t va, pte_t *slot, pte_t newpte,
+               int level, enum pte_update_reason reason,
+               enum pte_sfence_requirement sfence);
+int vm_check_pagetable(pagetable_t pagetable, const char *label);
 
 /* 2MB super page support */
 int  mappages_super(pagetable_t pagetable, uint64_t va, uint64_t size,
@@ -63,19 +115,20 @@ int uvmmap(pagetable_t pagetable, uint64_t va, uint64_t pa, uint64_t sz, int per
 void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len);
 void proc_freepagetable(pagetable_t pagetable);
 int uvmmap_kernel(pagetable_t pt);
-int copyout(pagetable_t pagetable, uint64_t dstva, void *src, uint64_t len);
+int copyout_proc(struct proc *p, uint64_t dstva, const void *src, uint64_t len);
+int copyin_proc(struct proc *p, void *dst, uint64_t srcva, uint64_t len);
+int copyinstr_proc(struct proc *p, char *dst, uint64_t srcva, uint64_t max);
+int copyout(pagetable_t pagetable, uint64_t dstva, const void *src, uint64_t len);
 int copyin(pagetable_t pagetable, void *dst, uint64_t srcva, uint64_t len);
 int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max);
 
-/* Recursive paging: check/repair kernel code PTEs via the gigapage
- * window at L2[510], bypassing the identity-mapped superpages that
- * are susceptible to DMA-induced PTE_X corruption. */
+/* Recursive paging: read-only diagnostic view of kernel RAM through
+ * the gigapage window at L2[510]. */
 
 /* Two-step L1 PTE access through the self-referencing gigapage window.
  * Step 1: Read the L2 entry via the window to find the L1 table PA.
  * Step 2: Access the L1 PTE through the window.
- * This does NOT call walk() and does NOT depend on the identity-mapped
- * L1 superpages (which are the ones losing PTE_X).
+ * This does NOT call walk(); callers must not write through this alias.
  * Defined inline in the header so both vm.c and trap.c can use it. */
 static inline volatile pte_t *recursive_l1_pte(uint64_t va) {
   /* Step 1: read L2 entry for VPN[2] of va */
@@ -91,5 +144,17 @@ static inline volatile pte_t *recursive_l1_pte(uint64_t va) {
 
 int recursive_check_kcode_pte(void);
 int recursive_check_all_kernel_ptes(void);
+int recursive_repair_kernel_pte(uint64_t va);
+int kernel_va_executable(uint64_t va);
+int kernel_wx_audit(void);
+
+/* BF: Centralized COW break — ref count, page copy, PTE update, rmap */
+int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
+              struct vm_area *vma);
+
+/* ENH: Staged exec VMA helpers — build a VMA list independently of
+ * process state so exec can roll back on failure. */
+void vma_add_to_list(struct vm_area **list_head, struct vm_area *vma);
+void vma_free_chain(struct vm_area *head);
 
 #endif

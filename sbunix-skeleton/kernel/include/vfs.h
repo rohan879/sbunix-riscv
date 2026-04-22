@@ -25,6 +25,9 @@ struct vfs_ops {
   int (*symlink)(void *fs_data, const char *target, const char *linkpath);
   int (*readlink)(void *fs_data, const char *path, char *buf, int bufsiz);
   int (*rename)(void *fs_data, const char *oldpath, const char *newpath);
+  /* ENH: Hard link support for linkat(2).  Creates a new directory entry
+   * (newpath) that refers to the same inode as oldpath. */
+  int (*link)(void *fs_data, const char *oldpath, const char *newpath);
 };
 
 /* Open file description -- stored in proc->ofile[] */
@@ -59,6 +62,7 @@ struct mount {
 /* VFS functions */
 struct open_file *vfs_alloc_file(void);
 void vfs_free_file(struct open_file *f);
+void vfs_close_file(struct open_file *f);
 struct vfs_ops *vfs_lookup_mount(const char *path, const char **relpath);
 struct mount *vfs_lookup_mount_entry(const char *path, const char **relpath);
 void vfs_register_mount(const char *path, struct vfs_ops *ops, void *fs_data,

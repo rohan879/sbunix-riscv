@@ -4,6 +4,16 @@
 
 .extern trap_handler
 
+.equ TF_SIZE, 272
+.equ TF_T0, 8
+.equ TF_T1, 16
+.equ TF_T6, 56
+.equ TF_SP, 240
+.equ TF_EPC, 248
+.equ TF_SSTATUS, 256
+.equ TF_RETURN_TO_USER, 264
+.equ SSTATUS_SPP_BIT, 0x100
+
 kernel_trap_handler:
   # Swap sp with sscratch
   csrrw sp, sscratch, sp
@@ -14,13 +24,13 @@ kernel_trap_handler:
 _trap_from_user:
   # sp now points to kernel stack, sscratch has user sp.
   # Allocate trapframe on kernel stack
-  addi sp, sp, -256
+  addi sp, sp, -TF_SIZE
   j _save_all
 
 _trap_from_kernel:
   # Restore sp and save on current kernel stack
   csrrw sp, sscratch, sp
-  addi sp, sp, -256
+  addi sp, sp, -TF_SIZE
 
 _save_all:
   # Save all registers
@@ -58,13 +68,22 @@ _save_all:
   # Save the original sp
   csrr t0, sscratch
   bnez t0, _got_user_sp
-  addi t0, sp, 256
+  addi t0, sp, TF_SIZE
 _got_user_sp:
   sd t0, 240(sp)
 
   # Save sepc
   csrr t0, sepc
-  sd t0, 248(sp)
+  sd t0, TF_EPC(sp)
+
+  # Save trap provenance from hardware state.  SPP=0 means the trap was
+  # taken from U-mode; trap_restore uses this instead of guessing from sp.
+  csrr t0, sstatus
+  sd t0, TF_SSTATUS(sp)
+  li t1, SSTATUS_SPP_BIT
+  and t0, t0, t1
+  seqz t0, t0
+  sd t0, TF_RETURN_TO_USER(sp)
 
   # Clear sscratch so nested kernel traps are detected correctly.
   # sscratch=0 means "in kernel mode" for kernel_trap_handler.
@@ -83,19 +102,24 @@ trap_restore:
   # a0 points to the trapframe
   mv sp, a0
 
+  # Restore sstatus/sepc from the saved trap provenance.
+  ld t0, TF_SSTATUS(sp)
+  csrw sstatus, t0
+
   # Restore sepc
-  ld t0, 248(sp)
+  ld t0, TF_EPC(sp)
   csrw sepc, t0
 
-  # Restore registers
+  # Keep return mode in t6 until after the common register restore.
+  ld t6, TF_RETURN_TO_USER(sp)
+
+  # Restore registers.  Keep t0/t1/t6 until the final return path because
+  # trap_restore needs scratch registers after the common restore.
   ld ra, 0(sp)
-  ld t0, 8(sp)
-  ld t1, 16(sp)
   ld t2, 24(sp)
   ld t3, 32(sp)
   ld t4, 40(sp)
   ld t5, 48(sp)
-  ld t6, 56(sp)
   ld a0, 64(sp)
   ld a1, 72(sp)
   ld a2, 80(sp)
@@ -119,26 +143,24 @@ trap_restore:
   ld gp, 224(sp)
   ld tp, 232(sp)
 
-  # Final stack restore
-  ld t0, 240(sp)
-  li t1, 0x80000000
-  blt t0, t1, _ret_user
-
-_ret_kernel:
-  addi sp, sp, 256
-  sret
+  beqz t6, _ret_kernel
 
 _ret_user:
-  # t0 = saved user sp from trapframe[240].
-  # sscratch must hold kernel stack top for next user trap.
-  # For normal trap returns: sscratch was cleared to 0 by _save_all, so
-  # we must set it here from the on-stack trapframe base.
-  # For forkret: scheduler already set sscratch to kstack + PAGE_SIZE.
-  # We use a uniform approach: always compute from sp (trapframe base).
-  # For normal traps, sp = on-stack tf (within kstack) → sp+256 = kstack top. ✓
-  # For forkret, sp = kalloc'd tf page → sp+256 = wrong address.
-  # Fix: forkret must set sscratch itself before calling trap_restore.
-  addi t1, sp, 256
-  csrw sscratch, t1
-  mv sp, t0
+  # sscratch must hold the kernel stack top for the next user trap.
+  addi t0, sp, TF_SIZE
+  csrw sscratch, t0
+
+  # Restore scratch registers, then atomically load the saved user sp using
+  # the old trapframe base.  ld sp, offset(sp) uses the pre-write base.
+  ld t6, TF_T6(sp)
+  ld t1, TF_T1(sp)
+  ld t0, TF_T0(sp)
+  ld sp, TF_SP(sp)
+  sret
+
+_ret_kernel:
+  ld t6, TF_T6(sp)
+  ld t1, TF_T1(sp)
+  ld t0, TF_T0(sp)
+  addi sp, sp, TF_SIZE
   sret

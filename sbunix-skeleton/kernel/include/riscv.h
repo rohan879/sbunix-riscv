@@ -17,6 +17,7 @@ typedef int            pid_t;
 #endif
 
 // For qemu virt machine, physical memory starts at 0x80000000 and is 128MB.
+#define KERNBASE 0x80000000UL
 #define PHYSTOP 0x88000000
 
 // Round a value up to the next multiple of b
@@ -41,6 +42,8 @@ typedef int            pid_t;
 #define PTE_W (1L << 2)
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // user can access
+#define PTE_A (1L << 6) // accessed
+#define PTE_D (1L << 7) // dirty
 #define PTE_COW (1L << 8) // RSW bit 0: copy-on-write marker
 
 // Shift a physical address to the right place for a PTE.
@@ -61,12 +64,9 @@ typedef int            pid_t;
  * the gigapage gives the MMU a one-step translation, and software
  * computes PTE offsets within the window.
  *
- * Purpose: the kernel code PTE at 0x87ffa008 intermittently loses
- * PTE_X during heavy virtio_blk DMA.  The identity-mapped L1
- * superpages (kvminit line 191) ARE the corrupted PTEs, so the
- * identity mapping itself may become unreliable.  This gigapage
- * provides a redundant access path via a separate L2 entry
- * (root[510] vs root[2]) that is never touched by DMA. */
+ * Purpose: provide a read-only diagnostic alias for physical RAM and
+ * page-table inspection without creating a writable alias of executable
+ * kernel text. */
 #define RECURSIVE_INDEX   510
 #define RECURSIVE_BASE    0xFFFFFFFF80000000UL  /* VPN[2]=510, sign-extended */
 #define PHYS_RAM_BASE     0x80000000UL
@@ -82,12 +82,38 @@ typedef int            pid_t;
 #define RECURSIVE_L2_PTE_VA(vpn2) \
     RECURSIVE_PA2VA((uint64_t)kernel_pagetable + (vpn2) * sizeof(pte_t))
 
-// User address space boundary. 
+// User address space boundary.
 // Set to 1GB to stay safely below kernel space (0x80000000).
 #define MAXVA 0x40000000L
+#define USER_TOP MAXVA
 
-#define USER_MMAP_FLOOR 0x10200000UL
+static inline int user_addr_ok(uint64_t va) {
+    return va < USER_TOP;
+}
+
+static inline int user_range_ok(uint64_t va, uint64_t len) {
+    if (len == 0)
+        return va < USER_TOP;
+    if (va >= USER_TOP)
+        return 0;
+    if (len > USER_TOP - va)
+        return 0;
+    return 1;
+}
+
 #define USER_STACK_TOP  MAXVA   /* user stack grows down from top of VA space */
+
+/* BF: Per-process sigtrampoline page VA — executes rt_sigreturn when
+ * no sa_restorer is set.  In L1 index 252 (0x3F000000 >> 21 = 504 >> 2),
+ * above uvmmap_kernel share_limit (129), well below user stack. */
+#define SIGTRAMP_VA     0x3F000000UL
+
+/* BF: Floor for user mmap allocations — above all shared kernel MMIO L1
+ * entries.  L1[128] = UART at 0x10000000 is the highest safe device.
+ * L1[129] starts at 0x10200000, so mmap allocations begin here.
+ * PCIe ECAM at L1[384-510] (0x30000000+) is excluded from user page
+ * tables entirely by the uvmmap_kernel() share limit. */
+#define USER_MMAP_FLOOR 0x10200000UL
 
 typedef uint64_t pte_t;
 typedef uint64_t *pagetable_t; // 512 PTEs

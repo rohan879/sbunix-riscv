@@ -211,20 +211,25 @@ static int procfs_render_stat_file(char *buf, int bufsz, struct proc *p) {
   pos = append_int(buf, bufsz, pos, p->sid);
   if (pos < bufsz) buf[pos++] = ' ';
 
-  /* Fields 7-52 (46 fields): tty_nr(7) tpgid(8) flags(9) minflt(10) cminflt(11)
-   * majflt(12) cmajflt(13) utime(14) stime(15) cutime(16) cstime(17) priority(18)
-   * nice(19) num_threads(20) itrealvalue(21) starttime(22) vsize(23) rss(24)
-   * rsslim(25) startcode(26) endcode(27) startstack(28) kstkesp(29) kstkeip(30)
-   * signal(31) blocked(32) sigignore(33) sigcatch(34) wchan(35) nswap(36)
-   * cnswap(37) exit_signal(38) processor(39) rt_priority(40) policy(41)
-   * delayacct_blkio_ticks(42) guest_time(43) cguest_time(44) start_data(45)
-   * end_data(46) start_brk(47) arg_start(48) arg_end(49) env_start(50)
-   * env_end(51) exit_code(52) */
+  /* BF: Fields 7-52 (46 fields) following pid(1) (comm)(2) state(3) ppid(4)
+   * pgid(5) sid(6).  The pre-vsize string must have exactly 16 values
+   * (fields 7-22); the previous version had 18, shifting vsize from
+   * field 23 to 25 and breaking Linux /proc/pid/stat parsers.
+   * tty_nr(7) tpgid(8) flags(9) minflt(10) cminflt(11)
+   * majflt(12) cmajflt(13) utime(14) stime(15) cutime(16) cstime(17)
+   * priority(18)=20 nice(19)=0 num_threads(20)=1 itrealvalue(21)=0
+   * starttime(22)=0  =>  vsize(23)  =>  rss(24) ... exit_code(52) */
   pos = append_str(buf, bufsz, pos,
-    "0 0 0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 0 ");
+    "0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 0 ");
   pos = append_int(buf, bufsz, pos, (long)(p->sz)); /* vsize */
+  /* BF: Fields 24-52 per Linux proc(5). exit_signal is field 38 (SIGCHLD).
+   * Previously had 17 at field 37 (cnswap) instead of field 38.
+   * Layout: 14 zeros (fields 24-37), SIGCHLD (field 38), 14 zeros (39-52). */
   pos = append_str(buf, bufsz, pos,
-    " 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+    " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ");
+  pos = append_int(buf, bufsz, pos, SIGCHLD); /* field 38: exit_signal */
+  pos = append_str(buf, bufsz, pos,
+    " 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
 
   return pos;
 }
@@ -424,8 +429,9 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
   if (strncmp(p, "self/", 5) == 0) {
     /* Rewrite as /proc/<selfpid>/<rest> by substituting self_pid */
     const char *rest = p + 5; /* after "self/" */
-    /* Continue processing as if we had "<pid>/<rest>" */
-    struct proc *target = find_proc(self_pid);
+    /* BF: /proc/self must describe the live caller even when that short-lived
+     * child has not become discoverable through a proc-table lookup yet. */
+    struct proc *target = current_proc ? current_proc : find_proc(self_pid);
     if (!target) { kmfree(priv, sizeof(*priv)); return -2; }
     priv->pid = self_pid;
     if (*rest == '\0') {
@@ -651,8 +657,9 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
   if (strncmp(p, "self/", 5) == 0) {
     /* Delegate to numeric pid path */
     p += 5;
-    /* Process below */
-    struct proc *target = find_proc(self_pid);
+    /* BF: Mirror procfs_open's live-task handling so self stat/lookups do not
+     * fail just because the current child is transient in the proc table. */
+    struct proc *target = current_proc ? current_proc : find_proc(self_pid);
     if (!target) return -2;
     if (*p == '\0') { STAT_DIR((uint64_t)(300 + self_pid)); }
     if (strcmp(p, "status") == 0 || strcmp(p, "cmdline") == 0 ||
@@ -902,7 +909,9 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
   pid_t target_pid;
   const char *rest;
 
+  int self_path = 0;
   if (strncmp(p, "self/", 5) == 0) {
+    self_path = 1;
     target_pid = current_proc ? current_proc->pid : 1;
     rest = p + 5;
   } else {
@@ -918,7 +927,10 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
     while (*rest == '/') rest++;
   }
 
-  struct proc *target = find_proc(target_pid);
+  /* BF: /proc/self/{exe,cwd} must resolve against the live caller, not only
+   * whatever is presently discoverable through the proc table. */
+  struct proc *target = self_path && current_proc ? current_proc
+                                                  : find_proc(target_pid);
   if (!target) return -2; /* ENOENT */
 
   /* /proc/<pid>/exe -> exe_path */

@@ -53,6 +53,79 @@ Notes:
 - Exit with `Ctrl-A`, then `X`
 - The system boots into `init`, runs `/etc/rc`, then drops into `sbush`
 
+## Vendored Third-Party Workloads
+
+The repository vendors a small set of prebuilt third-party workload binaries in
+`sbunix-skeleton/thirdparty/`. These are staged into the guest image by
+`sbunix-skeleton/tools/stage-thirdparty.sh` during rootfs preparation.
+
+### What Gets Included
+
+On a fresh `make`, `make qemu`, or any build that recreates `build/rootfs`, the
+following guest-visible paths are populated automatically:
+
+- `thirdparty/bin/micropython` -> `/bin/micropython`
+- `thirdparty/bin/tcc` -> `/bin/tcc`
+- `thirdparty/bin/pdpmake` -> `/bin/pdpmake`
+- `thirdparty/bin/busybox` -> `/bin/busybox`
+- `/bin/make` -> symlink to `pdpmake`
+- `thirdparty/tcc-sysroot/...` -> `/usr/lib/tcc/...`
+- `thirdparty/busybox-root/...` -> `/usr/lib/busybox/...`
+
+The Makefile path is:
+
+- `build/rootfs/.prepared` runs `tools/stage-thirdparty.sh`
+- `build/tarfs.o` is rebuilt from that prepared rootfs
+- `build/kernel.elf` embeds the resulting tarfs
+- `make qemu` boots that kernel image
+
+These payloads stay in the normal guest rootfs. They are not mirrored into
+`build/testfs` or `build/test-disk.img`; the separate test disk is reserved for
+`/test` binaries, manifests, logs, and persistence fixtures.
+
+### Refreshing After Third-Party Changes
+
+If you only replace files under `sbunix-skeleton/thirdparty/`, a plain
+`make qemu` may reuse the existing prepared rootfs. To force the vendored
+payloads back into the image, use one of:
+
+```bash
+make thirdparty
+```
+
+or:
+
+```bash
+rm -f build/rootfs/.prepared build/tarfs.o
+make qemu
+```
+
+### Running The Vendored Binaries In SBUnix
+
+From the `sbush$` prompt inside QEMU:
+
+```sh
+micropython -c 'print(42)'
+busybox echo busybox-ok
+/usr/lib/busybox/bin/echo busybox-applet-ok
+
+printf 'all:; echo pdpmake-ok\n' >/mnt/pd.mk
+pdpmake -f /mnt/pd.mk
+make -f /mnt/pd.mk
+
+printf 'int main(void) { return 0; }\n' >/mnt/hello.c
+tcc /mnt/hello.c -o /mnt/hello
+/mnt/hello
+```
+
+Nested shell execution also works:
+
+```sh
+sbush -c 'micropython -c "print(42)"'
+sbush -c 'busybox echo nested-ok'
+sbush -c 'tcc /mnt/hello.c -o /mnt/hello && /mnt/hello'
+```
+
 ## Run A User Binary Directly
 
 To run the shell binary in user-mode emulation instead of booting the full kernel:
@@ -130,9 +203,13 @@ Most submodule tests fail to compile due to missing headers (e.g., `pthread.h`, 
 
 ## Running Tests
 
-There are two ways to run the test suites: fully automated (`make test`) or manual via QEMU.
+There are three useful test entrypoints:
 
-### Option 1: Automated (`make test`)
+- `make test` or `bash tools/run_tests.sh` for the local automated regression
+- `bash tools/run_tests_capture.sh` for the one-shot full guest suite
+- `BUILD_TESTS=1 make qemu` for manual interactive runs inside `sbush`
+
+### Option 1: Automated local regression (`make test`)
 
 ```bash
 cd sbunix-skeleton
@@ -146,12 +223,64 @@ This runs `tools/run_tests.sh`, which:
 - compiles ~2000 Sortix os-test binaries and ~1000 Open POSIX test binaries
 - builds `build/disk.img` and `build/test-disk.img`
 - boots QEMU twice (Boot 1: all tests + persistence write + poweroff; Boot 2: persistence verify)
+- runs the local `run-tests` regression set inside SBUnix from `sbush`, including the vendored third-party integration test for `micropython`, BusyBox, `pdpmake`, and `tcc` across both direct exec and nested `sbush -c` dispatch
 - parses `[PASS]` and `[FAIL]` lines from serial output
 - prints a pass/fail summary
 
 Fully automated, no interaction needed. First run is slow (~40 min for test compilation).
+This automated path validates the local `run-tests` regression set plus the
+two-boot persistence flow. It builds the Sortix and Open POSIX suites into the
+test disk, but it does not automatically execute `run-os-test` or
+`run-open-posix-test`; those remain explicit in-guest commands from `sbush`.
+The vendored `micropython`, BusyBox, `pdpmake`, and `tcc` coverage runs against
+the rootfs-installed `/bin/*` and `/usr/lib/*` payloads, not copies on the test
+disk. This avoids `mkext2img`'s ext2-lite large-file limit on the staged TCC
+archives.
 
-### Option 2: Manual via QEMU
+Use this path when you want the standard host-side regression quickly. If you
+need the full guest-visible suite in one command, use the captured runner below.
+
+### Option 2: One-shot full guest suite (`tools/run_tests_capture.sh`)
+
+```bash
+cd sbunix-skeleton
+source tools/sourceme.sh
+bash tools/run_tests_capture.sh
+```
+
+This wrapper is the documented one-command path for the full suite. It:
+
+- rebuilds with `BUILD_TESTS=1`
+- builds both `build/disk.img` and `build/test-disk.img`
+- boots QEMU twice
+- lets `/etc/rc` run the local `run-tests` regression on Boot 1
+- waits for the first `sbush$` prompt, then runs `run-os-test`,
+  `run-open-posix-test`, and `/test/bin/persisttest`
+- boots a second time so persistence verification runs and powers off
+- preserves raw per-boot logs and a host status file
+
+By default the artifacts are written to:
+
+```bash
+/home/adebayo/test-findings/code-review-08-artifacts/final
+```
+
+You can override the output directory and timeout:
+
+```bash
+SBUNIX_RUN_TESTS_CAPTURE_DIR=/tmp/sbunix-full TIMEOUT=10800 bash tools/run_tests_capture.sh
+```
+
+Important notes:
+
+- This is much slower than `make test` because it executes the local regression,
+  the full Sortix os-test suite, the full Open POSIX suite, and the two-boot
+  persistence flow in a single run.
+- The default timeout is `7200` seconds.
+- The wrapper assumes `BUILD_TESTS=1` support is available and will rebuild the
+  test disk itself; you do not need to run `make BUILD_TESTS=1` separately.
+
+### Option 3: Manual via QEMU
 
 ```bash
 cd sbunix-skeleton
@@ -174,6 +303,15 @@ run-os-test                # Sortix os-test suite, 4071 tests (~40 min)
 run-open-posix-test        # Open POSIX test suite, 989 tests (~30 min)
 run-priority-tests         # Priority subset of both suites, ~1030 tests (~15 min)
 ```
+
+`run-tests` is the local full regression entrypoint. It runs from inside SBUnix
+via `sbush` and now includes guest-side, unmocked integration coverage for the
+vendored `micropython`, BusyBox, `pdpmake`/`make`, and `tcc` workloads across
+both direct execution and nested `sbush -c` command dispatch. There is no new
+build command for this coverage; it is included automatically when you build
+the documented test disk with `BUILD_TESTS=1`. Those workload binaries are read
+from the normal guest rootfs, while the separate test disk provides `/test`
+binaries, manifests, logs, and persistence fixtures only.
 
 To run a single test:
 
@@ -225,6 +363,7 @@ cd sbunix-skeleton
 source tools/sourceme.sh
 make
 bash tools/run_tests.sh
+# use bash tools/run_tests_capture.sh when you want the full guest suite
 make qemu
 ```
 
@@ -246,3 +385,7 @@ make submit
 ```
 
 This exports the current tree to `/submit/sbunix`.
+
+Important: the current `make submit` rule excludes `sbunix-skeleton/thirdparty/`.
+That means the submission bundle will not contain the vendored workload
+binaries or the staged TCC sysroot unless you change the submit rule first.

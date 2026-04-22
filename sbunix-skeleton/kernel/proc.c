@@ -11,6 +11,17 @@ struct proc proc[NPROC];
 struct proc *current_proc = NULL;
 struct context scheduler_context;
 
+_Static_assert(sizeof(struct trapframe) == 272, "trapframe size mismatch with trap.S");
+_Static_assert(__builtin_offsetof(struct trapframe, t0) == 8, "TF_T0 mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, t1) == 16, "TF_T1 mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, t6) == 56, "TF_T6 mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, sp) == 240, "TF_SP mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, epc) == 248, "TF_EPC mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, saved_sstatus) == 256,
+               "TF_SSTATUS mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, return_to_user) == 264,
+               "TF_RETURN_TO_USER mismatch");
+
 int nextpid = 1;
 
 void procinit(void) {
@@ -34,12 +45,16 @@ void forkret(void) {
     x |= SSTATUS_SPIE;
     w_sstatus(x);
 
-    /* Copy trapframe onto the kernel stack so trap_restore's _ret_user
-     * can compute sscratch = sp + 256 = kernel stack top correctly.
-     * (The persistent trapframe page is separate from the kernel stack.) */
-    struct trapframe kstack_tf;
-    memcpy(&kstack_tf, current_proc->trapframe, sizeof(struct trapframe));
-    trap_restore(&kstack_tf);
+    current_proc->trapframe->saved_sstatus = x;
+    current_proc->trapframe->return_to_user = 1;
+
+    /* BF: Place trapframe immediately below kstack_top so trap_restore can
+     * derive the next user-trap sscratch value from the frame size. */
+    uint64_t kstack_top = (uint64_t)current_proc->kstack
+                         + (uint64_t)current_proc->kstack_npages * PAGE_SIZE;
+    struct trapframe *kstack_tf = (struct trapframe *)(kstack_top - sizeof(struct trapframe));
+    memcpy(kstack_tf, current_proc->trapframe, sizeof(struct trapframe));
+    trap_restore(kstack_tf);
 }
 
 /* Open /dev/console via VFS and assign to the next free ofile slot.
@@ -127,16 +142,12 @@ found:
     return 0;
   }
 
-  /* BF: Allocate 2 contiguous pages (8KB) for kernel stack.  A single
-   * 4KB page overflows during deep syscall chains (openat -> resolve_path
-   * -> resolve_symlinks -> ext2_open -> bcache -> virtio_blk), corrupting
-   * return addresses.  Falls back to 1 page if contiguous unavailable. */
+  /* Allocate 2 contiguous pages (8KB) for the kernel stack.  A single
+   * 4KB stack is not a supported fallback: deep syscall and VFS paths can
+   * corrupt the trapframe before the fault is diagnosable. */
   p->kstack = kalloc_contiguous(KSTACK_PAGES);
   if (p->kstack) {
     p->kstack_npages = KSTACK_PAGES;
-  } else {
-    p->kstack = kalloc();
-    p->kstack_npages = 1;
   }
   if (!p->kstack) {
     kfree(p->trapframe);
@@ -178,15 +189,16 @@ found:
   p->ss_size = 0;
   p->ss_flags = 2; /* SS_DISABLE */
 
-  /* BF: Zero epoch and sigchld_code to prevent stale values from
-   * recycled process slots affecting ppoll epoch detection or
-   * SIGCHLD si_code delivery. */
+  /* BF: Zero epoch to prevent stale values from recycled process slots
+   * affecting ppoll epoch detection.  sig_sender is zero-initialized
+   * by memset in allocproc's struct zeroing. */
   p->signal_handled_epoch = 0;
-  p->sigchld_code = 0;
 
   // Initialize POSIX timers
   for (int i = 0; i < NPTIMER; i++)
     p->timers[i].used = 0;
+  /* OPT: Reset active timer count for recycled process slots */
+  p->active_timer_count = 0;
 
   // Initialize exec tracking (for POSIX setpgid restrictions)
   p->has_execed = 0;
@@ -200,6 +212,18 @@ found:
   /* BF: Initialize waiting_for_child so recycled slots don't carry
    * stale values from previous process occupants. */
   p->waiting_for_child = 0;
+  p->waiting_for_vfork = 0;
+
+  /* BF: Initialize deferred sigmask restore fields so recycled slots
+   * don't carry stale saved_sigmask from previous occupants.  Without
+   * this, sigsuspend/ppoll could embed a stale mask in signal frames. */
+  p->has_saved_sigmask = 0;
+  p->saved_sigmask_restore = 0;
+
+  /* BF: Initialize in_copy_fault flag for recycled process slots.
+   * Used by copyin/copyout fault path to distinguish user-address
+   * faults from true kernel bugs. */
+  p->in_copy_fault = 0;
 
   return p;
 }
@@ -253,15 +277,14 @@ void scheduler(void) {
     for(p = proc; p < &proc[NPROC]; p++) {
       if(p->state == RUNNABLE) {
         found = 1;
+
+        /* BF: Disable interrupts BEFORE publishing RUNNING/current_proc
+         * to close the race window where a timer interrupt could see
+         * RUNNING but sscratch/satp/context aren't configured yet. */
+        w_sstatus(r_sstatus() & ~SSTATUS_SIE);
+
         p->state = RUNNING;
         current_proc = p;
-
-        /* Disable interrupts before switching to user process context.
-         * The user process may resume inside trap_handler (e.g., from a
-         * sleep in SYS_read).  Interrupts must be off there to avoid
-         * re-entrant trap corruption.  The user's sret will restore SIE
-         * from sstatus.SPIE when it actually returns to user mode. */
-        w_sstatus(r_sstatus() & ~SSTATUS_SIE);
 
         /* Set sscratch and switch to process page table */
                 /* BF: sscratch = top of kernel stack (8KB if contiguous) */

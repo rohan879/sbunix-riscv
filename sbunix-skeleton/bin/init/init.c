@@ -13,7 +13,9 @@ int main(void) {
 
   /* Enriched environment for child processes */
   char *envp[] = {
-    "PATH=/bin",
+    /* ENH: Keep native /bin first, then expose BusyBox applets from the
+     * dedicated tree so imported utilities are available without collisions. */
+    "PATH=/bin:/usr/lib/busybox/bin",
     "HOME=/",
     "TERM=vt100",
     "HOSTNAME=sbunix",
@@ -23,7 +25,9 @@ int main(void) {
   };
 
   char *rc_envp[] = {
-    "PATH=/bin",
+    /* ENH: Match the interactive shell PATH so boot-time workload probes
+     * see the same imported-tool layout as manual guest sessions. */
+    "PATH=/bin:/usr/lib/busybox/bin",
     "HOME=/",
     "TERM=vt100",
     "HOSTNAME=sbunix",

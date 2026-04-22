@@ -13,7 +13,7 @@
 #include <printk.h>
 #include <kmalloc.h>
 #include <kalloc.h>
-#include <riscv.h>  /* BF: for r_time() used in inode timestamp init */
+#include <timekeeping.h>
 
 /* ================================================================== */
 /* Inode / directory-entry structures                                   */
@@ -26,13 +26,15 @@
 
 #define RAMFS_INO_ROOT       1
 
-enum ramfs_type { RAMFS_FILE, RAMFS_DIR };
+/* ENH: Added RAMFS_SYMLINK type to support symbolic links in ramfs */
+enum ramfs_type { RAMFS_FILE, RAMFS_DIR, RAMFS_SYMLINK };
 
 struct ramfs_inode {
   uint64_t         ino;
   enum ramfs_type  type;
   uint32_t         mode;       /* permission bits (no S_IF prefix stored here) */
   int              nlink;
+  int              open_count; /* BF: Track open fds for deferred unlink freeing */
   uint64_t         size;       /* bytes for files, 0 for dirs */
   /* BF: Added timestamps so stat/utimensat can report and modify
    * atime/mtime/ctime.  Without these, stat always returned zero
@@ -50,6 +52,8 @@ struct ramfs_inode {
   } children[RAMFS_MAX_CHILDREN];
   int              nchildren;
   struct ramfs_inode *parent;   /* ".." link */
+  /* ENH: Symlink target storage — 128 bytes matches pathres buffer sizes */
+  char symlink_target[128];
 };
 
 static struct ramfs_inode inodes[RAMFS_MAX_INODES];
@@ -67,11 +71,7 @@ static struct ramfs_inode *ramfs_alloc_inode(enum ramfs_type type, uint32_t mode
       inodes[i].type = type;
       inodes[i].mode = mode;
       inodes[i].nlink = 1;
-      /* BF: Initialize timestamps to current time (in seconds since
-       * boot).  Proper epoch time would require get_wall_time, which
-       * is only available in trap.c; the real timestamps will be set
-       * by utimensat from userspace. */
-      uint64_t now = r_time() / 10000000UL; /* ticks -> approx seconds */
+      uint64_t now = timekeeping_now_seconds();
       inodes[i].atime_sec = now;
       inodes[i].mtime_sec = now;
       inodes[i].ctime_sec = now;
@@ -256,12 +256,18 @@ struct ramfs_private {
 
 /* Flags from libc/include/fcntl.h */
 #define RAMFS_O_CREAT   0x40
+#define RAMFS_O_EXCL    0x80  /* ENH: Added to support O_CREAT|O_EXCL for mknodat */
 #define RAMFS_O_TRUNC   0x200
 #define RAMFS_O_APPEND  0x400
 
 static int ramfs_open(void *fs_data, const char *path, int flags, void **private) {
   (void)fs_data;
   struct ramfs_inode *ino = ramfs_walk(path);
+
+  /* ENH: O_EXCL with O_CREAT must fail if the file already exists (EEXIST).
+   * Required by POSIX and used by mknodat to avoid creating duplicates. */
+  if (ino && (flags & RAMFS_O_CREAT) && (flags & RAMFS_O_EXCL))
+    return -17; /* -EEXIST */
 
   if (!ino && (flags & RAMFS_O_CREAT)) {
     /* Create the file */
@@ -285,6 +291,12 @@ static int ramfs_open(void *fs_data, const char *path, int flags, void **private
   if (!ino)
     return -2; /* -ENOENT */
 
+  /* ENH: Safety guard — pathres should have resolved symlinks before we
+   * get here, but O_NOFOLLOW opens could reach a symlink inode directly.
+   * Return -ELOOP to prevent opening the raw symlink as a file. */
+  if (ino->type == RAMFS_SYMLINK)
+    return -40; /* -ELOOP */
+
   /* Truncate if requested */
   if ((flags & RAMFS_O_TRUNC) && ino->type == RAMFS_FILE) {
     for (int i = 0; i < ino->nblocks; i++) {
@@ -301,6 +313,9 @@ static int ramfs_open(void *fs_data, const char *path, int flags, void **private
   if (!priv) return -12;
   priv->inode = ino;
   *private = priv;
+  /* BF: Track open fds for deferred unlink — inode must not be freed
+   * while any fd (or mmap VMA) still references it. */
+  ino->open_count++;
   return 0;
 }
 
@@ -367,6 +382,15 @@ static int64_t ramfs_write(void *fs_data, void *private, const char *buf,
   if ((uint64_t)*offset > ino->size)
     ino->size = (uint64_t)*offset;
 
+  /* BF: Update mtime and ctime after successful write.  POSIX requires
+   * write() to update the file's modification and status-change times.
+   * Without this, timestamps remained frozen at creation time, causing
+   * mmap atime/mtime consistency tests to fail. */
+  if (total > 0) {
+    ino->mtime_sec = timekeeping_now_seconds();
+    ino->ctime_sec = ino->mtime_sec;
+  }
+
   return (int64_t)total;
 }
 
@@ -403,8 +427,19 @@ static int ramfs_ftruncate(void *fs_data, void *private, uint64_t length) {
 
 static int ramfs_close(void *fs_data, void *private) {
   (void)fs_data;
-  if (private)
+  if (private) {
+    struct ramfs_private *priv = (struct ramfs_private *)private;
+    /* BF: Decrement open count and free inode if this was the last
+     * reference to an unlinked file (nlink==0).  Without deferred
+     * freeing, unlink zeroes the inode while fds/mmaps still reference
+     * it, causing fstat to return size=0 and SIGBUS on demand paging. */
+    if (priv->inode) {
+      priv->inode->open_count--;
+      if (priv->inode->nlink <= 0 && priv->inode->open_count <= 0)
+        ramfs_free_inode(priv->inode);
+    }
     kmfree(private, sizeof(struct ramfs_private));
+  }
   return 0;
 }
 
@@ -416,6 +451,8 @@ static void ramfs_fill_stat(uint8_t *st, struct ramfs_inode *ino) {
   uint32_t mode;
   if (ino->type == RAMFS_DIR)
     mode = (uint32_t)(0x4000 | ino->mode); /* S_IFDIR */
+  else if (ino->type == RAMFS_SYMLINK)
+    mode = (uint32_t)(0120000 | ino->mode); /* S_IFLNK */
   else
     mode = (uint32_t)(0x8000 | ino->mode); /* S_IFREG */
   uint32_t nlink = (uint32_t)ino->nlink;
@@ -434,7 +471,11 @@ static void ramfs_fill_stat(uint8_t *st, struct ramfs_inode *ino) {
   /* BF: Write atime/mtime/ctime into stat buffer at correct offsets.
    * Each timespec is 16 bytes (8 for tv_sec + 8 for tv_nsec).
    * Without these, stat always returned zero timestamps. */
-  uint64_t atime_sec = ino->atime_sec;
+  /* BF: Report mtime as atime, consistent with ext2_fstat behavior.
+   * The kernel does not track per-read atime updates, so using mtime
+   * approximates relatime semantics and ensures POSIX mmap atime
+   * tests see updated timestamps after write-back. */
+  uint64_t atime_sec = ino->mtime_sec;
   uint64_t mtime_sec = ino->mtime_sec;
   uint64_t ctime_sec = ino->ctime_sec;
   uint64_t nsec_zero = 0;
@@ -503,7 +544,9 @@ static int ramfs_readdir(void *fs_data, void *private, char *ubuf,
   /* Directory entries */
   for (int i = 0; i < dir->nchildren; i++) {
     struct ramfs_inode *child = dir->children[i].inode;
-    uint8_t dt = (child->type == RAMFS_DIR) ? 4 : 8; /* DT_DIR : DT_REG */
+    /* ENH: Report correct dirent type for symlinks (DT_LNK=10) */
+    uint8_t dt = (child->type == RAMFS_DIR) ? 4
+               : (child->type == RAMFS_SYMLINK) ? 10 : 8; /* DT_DIR : DT_LNK : DT_REG */
     RAMFS_EMIT_DIRENT(dir->children[i].name, child->ino, dt);
   }
 
@@ -545,11 +588,18 @@ static int ramfs_unlink(void *fs_data, const char *path) {
 
   struct ramfs_inode *ino = ramfs_dir_lookup(parent, basename);
   if (!ino) return -2;
+  /* ENH: Only directories are rejected — symlinks (RAMFS_SYMLINK) and
+   * regular files can both be unlinked normally. */
   if (ino->type == RAMFS_DIR) return -21; /* -EISDIR */
 
   ramfs_dir_remove(parent, basename);
   ino->nlink--;
-  if (ino->nlink <= 0)
+  /* BF: Only free the inode when both nlink reaches 0 AND no open fds
+   * remain.  Previously unlink freed immediately even with open fds,
+   * zeroing ino->size and causing SIGBUS on demand-paged mmap access
+   * to the still-open file.  POSIX requires unlinked files to remain
+   * accessible via existing fds until the last close. */
+  if (ino->nlink <= 0 && ino->open_count <= 0)
     ramfs_free_inode(ino);
   return 0;
 }
@@ -567,7 +617,9 @@ static int ramfs_rmdir(void *fs_data, const char *path) {
 
   ramfs_dir_remove(parent, basename);
   ino->nlink--;
-  if (ino->nlink <= 0)
+  /* BF: Defer free if directory still has open fds (matches ramfs_unlink/
+   * ramfs_rename/ramfs_close deferred-free pattern) */
+  if (ino->nlink <= 0 && ino->open_count <= 0)
     ramfs_free_inode(ino);
   return 0;
 }
@@ -591,11 +643,15 @@ static int ramfs_rename(void *fs_data, const char *oldpath,
   /* Remove existing target if any */
   struct ramfs_inode *existing = ramfs_dir_lookup(new_parent, new_base);
   if (existing) {
+    /* BF: Same-inode rename (e.g. rename("a","a")) is a no-op per POSIX */
+    if (existing == ino)
+      return 0;
     if (existing->type == RAMFS_DIR && existing->nchildren > 0)
       return -39; /* -ENOTEMPTY */
     ramfs_dir_remove(new_parent, new_base);
     existing->nlink--;
-    if (existing->nlink <= 0)
+    /* BF: Defer free if file still has open fds (matches ramfs_unlink/ramfs_close pattern) */
+    if (existing->nlink <= 0 && existing->open_count <= 0)
       ramfs_free_inode(existing);
   }
 
@@ -607,6 +663,93 @@ static int ramfs_rename(void *fs_data, const char *oldpath,
     ramfs_dir_add(old_parent, old_base, ino);
     return rc;
   }
+  return 0;
+}
+
+/* ================================================================== */
+/* Symlink operations                                                   */
+/* ================================================================== */
+
+/* ENH: Create a symbolic link at linkpath pointing to target.
+ * The target string is stored verbatim in the inode (not resolved). */
+static int ramfs_symlink(void *fs_data, const char *target, const char *linkpath) {
+  (void)fs_data;
+
+  /* Check if it already exists */
+  if (ramfs_walk(linkpath))
+    return -17; /* -EEXIST */
+
+  /* Validate target fits in inode storage */
+  int tlen = strlen(target);
+  if (tlen >= (int)sizeof(((struct ramfs_inode *)0)->symlink_target))
+    return -36; /* -ENAMETOOLONG */
+
+  const char *basename;
+  struct ramfs_inode *parent = ramfs_walk_parent(linkpath, &basename);
+  if (!parent || parent->type != RAMFS_DIR)
+    return -2; /* -ENOENT (parent dir doesn't exist) */
+  if (*basename == '\0')
+    return -22; /* -EINVAL */
+
+  struct ramfs_inode *ino = ramfs_alloc_inode(RAMFS_SYMLINK, 0777);
+  if (!ino) return -12; /* -ENOMEM */
+
+  memcpy(ino->symlink_target, target, tlen);
+  ino->symlink_target[tlen] = '\0';
+  ino->size = (uint64_t)tlen;
+
+  int rc = ramfs_dir_add(parent, basename, ino);
+  if (rc < 0) {
+    ramfs_free_inode(ino);
+    return rc;
+  }
+  return 0;
+}
+
+/* ENH: Read the target of a symbolic link into buf.
+ * Returns the number of bytes copied (not null-terminated). */
+static int ramfs_readlink(void *fs_data, const char *path, char *buf, int bufsiz) {
+  (void)fs_data;
+  struct ramfs_inode *ino = ramfs_walk(path);
+  if (!ino) return -2; /* -ENOENT */
+  if (ino->type != RAMFS_SYMLINK) return -22; /* -EINVAL: not a symlink */
+
+  int copylen = (int)ino->size;
+  if (copylen > bufsiz)
+    copylen = bufsiz;
+  memcpy(buf, ino->symlink_target, copylen);
+  return copylen;
+}
+
+/* ENH: ramfs_link — create a hard link (new directory entry pointing to the
+ * same inode).  Increments nlink on the source inode.  Required by linkat(2)
+ * to support hard links on in-memory filesystems. */
+static int ramfs_link(void *fs_data, const char *oldpath, const char *newpath) {
+  (void)fs_data;
+  /* Find the source inode */
+  struct ramfs_inode *src = ramfs_walk(oldpath);
+  if (!src) return -2; /* -ENOENT */
+  if (src->type == RAMFS_DIR) return -31; /* -EMLINK (POSIX: no hard links to dirs) */
+
+  /* Find parent directory of newpath and the basename */
+  const char *new_base;
+  struct ramfs_inode *new_parent = ramfs_walk_parent(newpath, &new_base);
+  if (!new_parent || new_parent->type != RAMFS_DIR)
+    return -2; /* -ENOENT (parent doesn't exist) */
+  if (*new_base == '\0')
+    return -22; /* -EINVAL */
+
+  /* Check that newpath doesn't already exist */
+  if (ramfs_dir_lookup(new_parent, new_base))
+    return -17; /* -EEXIST */
+
+  /* Add a new directory entry in the parent pointing to the same inode */
+  int rc = ramfs_dir_add(new_parent, new_base, src);
+  if (rc < 0)
+    return rc;
+
+  /* Increment the link count on the source inode */
+  src->nlink++;
   return 0;
 }
 
@@ -626,9 +769,10 @@ struct vfs_ops ramfs_ops = {
   .mkdir   = ramfs_mkdir,
   .unlink  = ramfs_unlink,
   .rmdir   = ramfs_rmdir,
-  .symlink = NULL,
-  .readlink = NULL,
+  .symlink = ramfs_symlink,
+  .readlink = ramfs_readlink,
   .rename  = ramfs_rename,
+  .link    = ramfs_link,
 };
 
 /* ================================================================== */

@@ -117,7 +117,8 @@ static void tty_signal_fg(int sig) {
         /* If a foreground group is set, only signal that group */
         if (target_pgid > 0 && p->pgid != target_pgid)
             continue;
-        p->sigpending |= signal_bit(sig);
+        /* BF: Capture sender metadata for SA_SIGINFO delivery */
+        sig_set_pending(p, sig, 0, 0, 0);
         if (p->state == SLEEPING)
             p->state = RUNNABLE;
     }

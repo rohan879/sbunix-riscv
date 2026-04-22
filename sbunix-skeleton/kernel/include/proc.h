@@ -30,9 +30,8 @@ struct context {
   uint64_t s11;
 };
 
-// Trapframe: user registers + kernel scratch area for the trampoline.
-// The first 256 bytes hold saved user registers (offsets match trap.S).
-// Bytes 256-279 hold kernel values loaded by the trampoline on trap entry.
+// Trapframe: user registers plus trap-entry provenance.
+// Offsets must match kernel/trap.S.
 struct trapframe {
   /*   0 */ uint64_t ra;
   /*   8 */ uint64_t t0;
@@ -66,6 +65,8 @@ struct trapframe {
   /* 232 */ uint64_t tp;
   /* 240 */ uint64_t sp;
   /* 248 */ uint64_t epc;
+  /* 256 */ uint64_t saved_sstatus;
+  /* 264 */ uint64_t return_to_user;
 };
 
 struct signal_frame {
@@ -221,9 +222,17 @@ struct proc {
   uint64_t saved_sigmask_restore;
   int      has_saved_sigmask;
 
-  /* BF: SIGCHLD si_code for SA_SIGINFO handlers.  Set by stop/continue/exit
-   * paths so deliver_signal can populate siginfo_t correctly. */
-  int sigchld_code;
+  /* BF: Per-signal sender metadata for SA_SIGINFO delivery.
+   * Captured at generation time, consumed at delivery time.
+   * Standard signals coalesce per POSIX — first sender's metadata is kept.
+   * Replaces the old sigchld_code field with per-signal granularity. */
+  struct {
+    int32_t si_pid;      /* sender PID or child PID (for SIGCHLD) */
+    int32_t si_uid;      /* sender UID */
+    int32_t si_code;     /* K_SI_USER, K_SI_TIMER, K_CLD_STOPPED, etc. */
+    int32_t si_status;   /* SIGCHLD: exit code (CLD_EXITED) or stop signal (CLD_STOPPED) */
+    uint8_t valid;
+  } sig_sender[32];  /* index 0 unused (signal numbers 1-31) */
 
   /* BF: Epoch counter incremented each time deliver_signal dispatches a
    * user handler.  ppoll/pselect6 snapshot this before the mask swap
@@ -240,6 +249,10 @@ struct proc {
    * futex sleepers that also have waiting_for_uart unset. */
   int waiting_for_child;
 
+  /* BF: Parent blocks here for Linux-style vfork until the child either
+   * execs successfully or exits, preventing concurrent use of the shared mm. */
+  pid_t waiting_for_vfork;
+
   /* BF: Per-process signal info queue for rt_sigqueueinfo / sigtimedwait.
    * Stores the siginfo_t provided by sigqueue so that sigtimedwait can
    * retrieve si_value and si_code.  Without this, queued signal data
@@ -250,6 +263,17 @@ struct proc {
     int signum;
     uint8_t info[128]; /* raw siginfo_t bytes */
   } sigqueue_buf[NSIGQUEUE];
+
+  /* BF: Flag set by copyin/copyout fault path to distinguish
+   * user-address faults from true kernel bugs during copy operations.
+   * Must be initialized to 0 in allocproc for recycled process slots. */
+  uint8_t in_copy_fault;
+
+  /* OPT: Count of active POSIX timers so the timer interrupt can skip
+   * the NPTIMER inner loop for processes with no timers.  Maintained by
+   * timer_create (++), timer_delete (--), and overrun-disarm (--).
+   * uint8_t is safe: NPTIMER=32 cannot overflow a uint8_t. */
+  uint8_t active_timer_count;
 };
 
 /* Accessor helpers: return the effective ofile[] and sigactions[] for a proc,
@@ -268,6 +292,59 @@ static inline uint64_t signal_bit(int signum) {
 
 static inline int signal_is_valid(int signum) {
   return signum > 0 && signum < 32;
+}
+
+/* BF: Signal info codes for kernel use (matching Linux ABI values).
+ * Libc defines are unavailable in kernel, so use K_ prefixed literals. */
+#define K_SI_USER       0
+#define K_SI_QUEUE      (-1)
+#define K_SI_TIMER      (-2)
+#define K_CLD_EXITED    1
+#define K_CLD_KILLED    2
+#define K_CLD_STOPPED   5
+#define K_CLD_CONTINUED 6
+
+/* BF: Size of user-space siginfo_t for copyin/copyout to user buffers.
+ * Must match libc/include/signal.h siginfo_t layout (RV64 LP64):
+ *   si_signo(4) + si_errno(4) + si_code(4) + si_pid(4)
+ *   + si_uid(4) + si_status(4) + si_value(8) + si_addr(8) = 40 bytes.
+ * Internal kernel kinfo[128] buffers stay 128 for signal frame delivery
+ * (deliver_signal allocates 128 bytes on user stack via sp -= 128);
+ * only user-facing copyin/copyout must respect this size. */
+#define K_SIGINFO_SIZE 40
+
+/* BF: Set signal pending with sender metadata. Does NOT wake target.
+ * All sig_sender and sigqueue_buf accesses are safe without locking
+ * because SBUnix is a single-hart kernel with no preemption in S-mode. */
+static inline void sig_set_pending(struct proc *target, int sig,
+                                   int32_t si_pid, int32_t si_uid,
+                                   int32_t si_code) {
+    if (!signal_is_valid(sig)) return;
+    /* BF: Only store metadata if signal is not already pending —
+     * standard signals coalesce per POSIX, first sender's metadata kept. */
+    if (!(target->sigpending & signal_bit(sig))) {
+        target->sig_sender[sig].si_pid = si_pid;
+        target->sig_sender[sig].si_uid = si_uid;
+        target->sig_sender[sig].si_code = si_code;
+        target->sig_sender[sig].si_status = 0;
+        target->sig_sender[sig].valid = 1;
+    }
+    target->sigpending |= signal_bit(sig);
+}
+
+/* BF: Extended version with si_status for SIGCHLD */
+static inline void sig_set_pending_ex(struct proc *target, int sig,
+                                      int32_t si_pid, int32_t si_uid,
+                                      int32_t si_code, int32_t si_status) {
+    if (!signal_is_valid(sig)) return;
+    if (!(target->sigpending & signal_bit(sig))) {
+        target->sig_sender[sig].si_pid = si_pid;
+        target->sig_sender[sig].si_uid = si_uid;
+        target->sig_sender[sig].si_code = si_code;
+        target->sig_sender[sig].si_status = si_status;
+        target->sig_sender[sig].valid = 1;
+    }
+    target->sigpending |= signal_bit(sig);
 }
 
 void            procinit(void);

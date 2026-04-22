@@ -37,9 +37,10 @@ DIR *opendir(const char *name) {
         close(fd);
         return (void *)0;
     }
-    dp->fd      = fd;
-    dp->buf_pos = 0;
-    dp->buf_len = 0;
+    dp->fd       = fd;
+    dp->buf_pos  = 0;
+    dp->buf_len  = 0;
+    dp->tell_off = 0; /* BF: init d_off cookie for telldir */
     return dp;
 }
 
@@ -51,9 +52,10 @@ DIR *fdopendir(int fd) {
     DIR *dp = (DIR *)malloc(sizeof(DIR));
     if (!dp)
         return (void *)0;
-    dp->fd = fd;
-    dp->buf_pos = 0;
-    dp->buf_len = 0;
+    dp->fd       = fd;
+    dp->buf_pos  = 0;
+    dp->buf_len  = 0;
+    dp->tell_off = 0; /* BF: init d_off cookie for telldir */
     return dp;
 }
 
@@ -128,6 +130,11 @@ struct dirent *readdir(DIR *dirp) {
             (struct linux_dirent64 *)(dirp->buf + dirp->buf_pos);
         dirp->buf_pos += kd->d_reclen;
 
+        /* BF: Save d_off cookie for telldir/seekdir.  The kernel's d_off
+         * is an opaque position cookie, not a byte offset — using it with
+         * lseek(SEEK_SET) resumes reading from this entry's successor. */
+        dirp->tell_off = kd->d_off;
+
         /* Copy into the POSIX dirent */
         ent.d_ino  = kd->d_ino;
         ent.d_type = kd->d_type;
@@ -158,10 +165,11 @@ long telldir(DIR *dirp) {
         errno = EINVAL;
         return -1;
     }
-    off_t cur = lseek(dirp->fd, 0, SEEK_CUR);
-    if (cur < 0)
-        return -1;
-    return (long)(cur - (dirp->buf_len - dirp->buf_pos));
+    /* BF: Return the d_off cookie from the last readdir entry.
+     * The old code used lseek(SEEK_CUR) minus unread buffer bytes,
+     * which is incorrect — d_off is an opaque kernel cookie, not a
+     * byte offset into a linear stream. */
+    return dirp->tell_off;
 }
 
 void seekdir(DIR *dirp, long loc) {
@@ -189,8 +197,9 @@ void rewinddir(DIR *dirp) {
     if (!dirp)
         return;
     lseek(dirp->fd, 0, SEEK_SET);
-    dirp->buf_pos = 0;
-    dirp->buf_len = 0;
+    dirp->buf_pos  = 0;
+    dirp->buf_len  = 0;
+    dirp->tell_off = 0; /* BF: reset d_off cookie on rewind */
 }
 
 int alphasort(const struct dirent **a, const struct dirent **b) {

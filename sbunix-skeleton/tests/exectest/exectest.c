@@ -405,14 +405,21 @@ static void test_exec_preserves_cwd(const char *self)
           strcmp(buf, cwd_before) == 0);
 }
 
+/* Dummy signal handler for exec_resets_signals test.  POSIX requires that
+ * caught handlers (user function pointers) are reset to SIG_DFL on exec,
+ * while SIG_IGN is preserved.  We must use a real handler to test reset. */
+static void dummy_sigusr1_handler(int sig) { (void)sig; }
+
 /* -----------------------------------------------------------------------
- * 9. exec_resets_signals — custom signal handler reset to SIG_DFL
+ * 9. exec_resets_signals — caught signal handler reset to SIG_DFL
  * ---------------------------------------------------------------------- */
 static void test_exec_resets_signals(const char *self)
 {
-    /* Install a custom handler for SIGUSR1 in the parent */
+    /* Install a caught handler for SIGUSR1 in the parent.
+     * Per POSIX, only caught handlers (value > 1) are reset to SIG_DFL
+     * on exec; SIG_IGN is preserved across exec. */
     struct sigaction sa;
-    sa.sa_handler = SIG_IGN; /* any non-default handler */
+    sa.sa_handler = dummy_sigusr1_handler;
     sa.sa_mask = 0;
     sa.sa_flags = 0;
     sa.sa_restorer = 0;

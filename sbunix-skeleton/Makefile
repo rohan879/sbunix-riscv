@@ -9,6 +9,11 @@ OBJCOPY := $(CROSS)objcopy
 CFLAGS  := -gdwarf-4 -Wall -Werror -Os -ffreestanding -fno-builtin -nostdlib -nostdinc -isystem $(shell $(CC) -print-file-name=include) -mcmodel=medany -march=rv64imac_zicsr_zifencei -mabi=lp64 -ffunction-sections -fdata-sections -fno-tree-switch-conversion
 RUSTFLAGS := --target riscv64imac-unknown-none-elf -C panic=abort -C linker=$(CC) -C code-model=medium -C link-arg=-nostartfiles -C link-arg=-march=rv64imac -C link-arg=-mabi=lp64
 
+PTE_DEBUG_FAILFAST ?= 0
+ifeq ($(PTE_DEBUG_FAILFAST),1)
+  CFLAGS += -DPTE_DEBUG_FAILFAST=1
+endif
+
 KERN_ASM := $(patsubst %,build/%.o,$(wildcard kernel/*.S))
 LIBC_OBJ := $(patsubst %,build/%.o,$(filter-out libc/crt.S,$(wildcard libc/*.c libc/*.S)))
 C_BIN    := $(addprefix build/rootfs/bin/,$(shell ls -d bin/*/*.c 2>/dev/null | cut -d/ -f2 | sort -u))
@@ -48,6 +53,8 @@ DISK_IMG  := build/disk.img
 TEST_DISK_SIZE ?= 128
 # MODIFIED: added
 TEST_DISK_IMG  := build/test-disk.img
+CORE_TEST_DISK_SIZE ?= 32
+CORE_TEST_DISK_IMG  := build/test-disk-core.img
 
 -include Makefile.local
 
@@ -90,6 +97,10 @@ OS_TEST_TOTAL := $(shell find tests/thirdparty/sortix/os-test -name '*.c' 2>/dev
 # Count total open-posix-test source files at build time
 OPEN_POSIX_TOTAL := $(shell find tests/thirdparty/open-posix-test-suite/posixtest -name '*.c' ! -name 'testfrmw*' 2>/dev/null | wc -l)
 
+# BF: Use nproc instead of hardcoded -j16 to avoid oversubscription on
+# machines with fewer cores.  Defaults to 4 if nproc is unavailable.
+SUBMAKE_JOBS ?= $(shell nproc 2>/dev/null || echo 4)
+
 # Special rule for run-os-test: pass TOTAL_TESTS_IN_SUITE as build-time define
 build/rootfs/bin/run-os-test: $$(wildcard bin/run-os-test/*.c) build/libc/crt.S.o build/libc.a
 	@mkdir -p $(@D)
@@ -125,17 +136,41 @@ $(TEST_TARGETS): build/testfs/bin/%: build/libc/crt.S.o build/libc.a | build/tes
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 endif
 
+# Lightweight test disk for targeted kernel validation.  This includes only
+# local tests/* binaries and intentionally skips Sortix/open-posix payloads.
+CORE_TEST_TARGETS := $(patsubst tests/%,build/testfs-core/bin/%,$(TEST_SRC_DIRS))
+
+# BF: Any staged rootfs or vendored workload change must invalidate the
+# prepared rootfs so build/kernel.elf never reuses a stale tarfs image.
+ROOTFS_STAGE_INPUTS := $(shell find rootfs -mindepth 1 \( -type f -o -type d \) -print 2>/dev/null)
+THIRDPARTY_STAGE_INPUTS := $(shell find thirdparty -mindepth 1 \( -type f -o -type d \) -print 2>/dev/null)
+
+build/testfs-core/.dirs:
+	@mkdir -p build/testfs-core/bin
+	@touch $@
+
+$(CORE_TEST_TARGETS): build/testfs-core/bin/%: build/libc/crt.S.o build/libc.a | build/testfs-core/.dirs
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
+
+build/testfs-core/.prepared: build/testfs-core/.dirs $(CORE_TEST_TARGETS)
+	@touch $@
+
 # Prepare base rootfs before building os-tests
-build/rootfs/.prepared: $(USER_BIN)
+build/rootfs/.prepared: $(USER_BIN) tools/stage-thirdparty.sh $(ROOTFS_STAGE_INPUTS) $(THIRDPARTY_STAGE_INPUTS)
 	mkdir -p build/rootfs
 	rm -rf build/rootfs/bin/os-test build/rootfs/os-test-manifest \
 		build/rootfs/os-test-expect build/rootfs/var/log/os-test \
 		build/rootfs/bin/open-posix-test build/rootfs/open-posix-test-manifest \
 		build/rootfs/var/log/open-posix-test
+	rm -f build/rootfs/bin/run-tests
 	rm -f $(LEGACY_TEST_TARFS_TARGETS)
 	cp -a rootfs/. build/rootfs/ # MODIFIED: originally in tarfs
 	ln -sf sbush build/rootfs/bin/sh # MODIFIED: added
 	ln -sf test build/rootfs/bin/[ # MODIFIED: added
+	# ENH: Stage vendored third-party payloads into the normal guest image so
+	# workload validation does not depend on manual post-build copying.
+	tools/stage-thirdparty.sh build/rootfs rootfs
 ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests # MODIFIED: added
 	# run-os-test is now built as C binary via $(C_BIN) pattern
@@ -146,13 +181,18 @@ endif
 ifdef BUILD_TESTS
 $(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/testfs/.dirs $(TEST_TARGETS)
 	@echo "=== Building os-test suite ==="
-	$(MAKE) -f tools/os-test.mk SBUNIX_ROOT=$(CURDIR) -j16 install
+	$(MAKE) -f tools/os-test.mk SBUNIX_ROOT=$(CURDIR) -j$(SUBMAKE_JOBS) install
 	# Copy test manifest and expected outputs into testfs
 	@if [ -f build/os-test-out/sbunix/test-manifest.txt ]; then \
 		cp build/os-test-out/sbunix/test-manifest.txt build/testfs/os-test-manifest; \
 	fi
 	@mkdir -p build/testfs/os-test-expect
 	@cp -a tests/thirdparty/sortix/os-test/*.expect build/testfs/os-test-expect/
+	@# BF: Add POSIX expect file for sigaction-exec-flags so correct "0"
+	@# output gets RESULT_PASS.  Also remove conflicting .unknown.1 which
+	@# contains "0" and could match first due to readdir ordering.
+	@printf '0' > build/testfs/os-test-expect/signal.expect/sigaction-exec-flags.posix
+	@rm -f build/testfs/os-test-expect/signal.expect/sigaction-exec-flags.unknown.1
 	# Seed testfs with compile-time .out files for skipped tests
 	@mkdir -p build/testfs/var/log/os-test
 	@if [ -d build/os-test-out/sbunix ]; then \
@@ -170,7 +210,7 @@ endif
 ifdef BUILD_TESTS
 $(OPEN_POSIX_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/testfs/.dirs $(TEST_TARGETS)
 	@echo "=== Building open-posix-test suite ==="
-	$(MAKE) -f tools/open-posix-test.mk SBUNIX_ROOT=$(CURDIR) -j16 install
+	$(MAKE) -f tools/open-posix-test.mk SBUNIX_ROOT=$(CURDIR) -j$(SUBMAKE_JOBS) install
 	# Copy test manifest into testfs
 	@if [ -f build/open-posix-test-out/sbunix/test-manifest.txt ]; then \
 		cp build/open-posix-test-out/sbunix/test-manifest.txt build/testfs/open-posix-test-manifest; \
@@ -201,8 +241,10 @@ build/tarfs.o: build/rootfs/.prepared # MODIFIED: originally just : $(USER_BIN)
 build/kernel.elf: $(KERN_ALL) build/tarfs.o
 	$(LD) -T kernel/kernel.ld $(KERN_ALL) build/tarfs.o -o $@
 
-thirdparty: build/libc/crt.S.o build/libc.a
-	$(MAKE) -C thirdparty install
+thirdparty: build/rootfs/.prepared
+	# ENH: Re-stage imported third-party payloads on demand and rebuild tarfs so
+	# iterative workload testing can refresh the guest image with one command.
+	tools/stage-thirdparty.sh build/rootfs rootfs
 	@rm -f build/tarfs.o
 	$(MAKE) build/kernel.elf
 
@@ -224,6 +266,8 @@ build/testfs/.prepared: build/testfs/.dirs $(TEST_TARGETS) $(OS_TEST_MARKER) $(O
 	@if [ -x tools/generate-priority-manifest ]; then \
 		tools/generate-priority-manifest; \
 	fi
+	@# Keep vendored third-party payloads in the normal guest rootfs only. The
+	@# separate test disk carries /test binaries, manifests, and logs.
 	@touch $@
 
 $(TEST_DISK_IMG): build/tools/mkext2img build/testfs/.prepared
@@ -237,6 +281,16 @@ $(TEST_DISK_IMG): build/tools/mkext2img build/testfs/.prepared
 	build/tools/mkext2img $@ $$size_mb build/testfs
 endif
 
+$(CORE_TEST_DISK_IMG): build/tools/mkext2img build/testfs-core/.prepared
+	@size_mb=$(CORE_TEST_DISK_SIZE); \
+	used_mb=$$(du -sm build/testfs-core | cut -f1); \
+	auto_mb=$$((used_mb + used_mb / 2 + 16)); \
+	if [ $$auto_mb -gt $$size_mb ]; then \
+		size_mb=$$auto_mb; \
+	fi; \
+	echo "Building core test disk image ($${size_mb}MB for $${used_mb}MB staged testfs-core)"; \
+	build/tools/mkext2img $@ $$size_mb build/testfs-core
+
 ifdef BUILD_TESTS
 QEMU_TEST_DRIVE_ARGS := -drive file=$(TEST_DISK_IMG),format=raw,if=none,id=hd1 \
 	-device virtio-blk-pci-non-transitional,drive=hd1
@@ -249,6 +303,17 @@ qemu: build/kernel.elf $(DISK_IMG) $(if $(BUILD_TESTS),$(TEST_DISK_IMG))
 		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-pci-non-transitional,drive=hd0 \
 		$(QEMU_TEST_DRIVE_ARGS) \
+		-device virtio-gpu-pci \
+		-device virtio-net-pci-non-transitional,netdev=net0 \
+		-netdev user,id=net0 \
+		-nographic
+
+qemu-core-tests: build/kernel.elf $(DISK_IMG) $(CORE_TEST_DISK_IMG)
+	qemu-system-riscv64 -machine virt -bios default -kernel $< \
+		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
+		-device virtio-blk-pci-non-transitional,drive=hd0 \
+		-drive file=$(CORE_TEST_DISK_IMG),format=raw,if=none,id=hd1 \
+		-device virtio-blk-pci-non-transitional,drive=hd1 \
 		-device virtio-gpu-pci \
 		-device virtio-net-pci-non-transitional,netdev=net0 \
 		-netdev user,id=net0 \

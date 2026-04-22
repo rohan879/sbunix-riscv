@@ -66,15 +66,24 @@ static void snp_emit_str_padded(snp_ctx_t *ctx, const char *s,
 }
 
 /* ENH: snp_emit_num extended with sign_plus and sign_space flags to
- * support the '+' and ' ' format flags for signed integer output. */
+ * support the '+' and ' ' format flags for signed integer output.
+ * BF: Added precision parameter for C11 7.21.6.1 compliance:
+ *   - precision specifies minimum number of digits for d/i/u/x/o
+ *   - precision 0 with value 0 produces no digit output
+ *   - when precision is specified, the '0' (zero-pad) flag is ignored */
 static void snp_emit_num(snp_ctx_t *ctx,
                           unsigned long long uval, int is_neg,
                           int base, int upper,
                           int width, int zero_pad, int left_align,
-                          int alt, int sign_plus, int sign_space) {
+                          int alt, int sign_plus, int sign_space,
+                          int precision) {
     char tmp[32];
     char prefix[4];
     int  plen = 0;
+
+    /* C11 7.21.6.1p8: when precision is specified, '0' flag is ignored */
+    if (precision >= 0)
+        zero_pad = 0;
 
     if (is_neg)
         prefix[plen++] = '-';
@@ -89,8 +98,28 @@ static void snp_emit_num(snp_ctx_t *ctx,
     }
     prefix[plen] = '\0';
 
+    /* C11 7.21.6.1p8: precision 0 with value 0 produces no digits */
+    if (precision == 0 && uval == 0) {
+        /* Still need to emit sign prefix and width padding */
+        int total = plen;
+        int pad = width - total;
+        if (!left_align && pad > 0)
+            snp_pad(ctx, pad, ' ');
+        for (int i = 0; i < plen; i++)
+            snp_emit(ctx, prefix[i]);
+        if (left_align && pad > 0)
+            snp_pad(ctx, pad, ' ');
+        return;
+    }
+
     int nlen = fmt_uint(tmp, sizeof(tmp), uval, base, upper);
-    int total = plen + nlen;
+
+    /* If precision demands more digits than we have, prepend zeros */
+    int prec_zeros = 0;
+    if (precision > nlen)
+        prec_zeros = precision - nlen;
+
+    int total = plen + prec_zeros + nlen;
     int pad   = width - total;
     char padch = (zero_pad && !left_align) ? '0' : ' ';
 
@@ -101,6 +130,9 @@ static void snp_emit_num(snp_ctx_t *ctx,
         snp_emit(ctx, prefix[i]);
     if (!left_align && pad > 0 && padch == '0')
         snp_pad(ctx, pad, '0');
+    /* precision zero-fill */
+    if (prec_zeros > 0)
+        snp_pad(ctx, prec_zeros, '0');
     /* digits */
     for (int i = 0; i < nlen; i++)
         snp_emit(ctx, tmp[i]);
@@ -807,13 +839,17 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
         /* Length modifier -- ENH: added 'L' for long double (treated as double) */
         int is_long = 0, is_longlong = 0, is_short = 0, is_size = 0;
         int is_longdouble = 0;
+        /* BF: Added is_char flag to distinguish 'hh' (signed/unsigned char,
+         * 8-bit) from 'h' (short, 16-bit).  Previously 'hh' was parsed but
+         * treated identically to 'h', producing incorrect truncation. */
+        int is_char = 0;
         if (*fmt == 'l') {
             fmt++;
             if (*fmt == 'l') { is_longlong = 1; fmt++; }
             else               is_long = 1;
         } else if (*fmt == 'h') {
             is_short = 1; fmt++;
-            if (*fmt == 'h') fmt++; /* hh */
+            if (*fmt == 'h') { is_char = 1; is_short = 0; fmt++; } /* hh = char */
         } else if (*fmt == 'z') {
             is_size = 1; fmt++;
         } else if (*fmt == 'L') {
@@ -837,6 +873,8 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
                 if (is_longlong)     sv = (long long)va_arg(ap, long long);
                 else if (is_long)    sv = (long long)va_arg(ap, long);
                 else if (is_size)    sv = (long long)va_arg(ap, ssize_t);
+                /* BF: 'hh' truncates to signed char (8-bit), not short */
+                else if (is_char)    sv = (long long)(signed char)va_arg(ap, int);
                 else if (is_short)   sv = (long long)(short)va_arg(ap, int);
                 else                 sv = (long long)va_arg(ap, int);
             }
@@ -848,7 +886,7 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
                 uv = (unsigned long long)sv;
             }
             snp_emit_num(ctx, uv, neg, 10, 0, width, zero_pad, left_align, 0,
-                         sign_plus, sign_space);
+                         sign_plus, sign_space, prec);
             break;
         }
         case 'u': {
@@ -862,9 +900,11 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
                 if (is_longlong)   uv = va_arg(ap, unsigned long long);
                 else if (is_long)  uv = va_arg(ap, unsigned long);
                 else if (is_size)  uv = va_arg(ap, size_t);
+                /* BF: 'hh' truncates to unsigned char (8-bit) */
+                else if (is_char)  uv = (unsigned long long)(unsigned char)va_arg(ap, unsigned int);
                 else               uv = (unsigned long long)va_arg(ap, unsigned int);
             }
-            snp_emit_num(ctx, uv, 0, 10, 0, width, zero_pad, left_align, 0, 0, 0);
+            snp_emit_num(ctx, uv, 0, 10, 0, width, zero_pad, left_align, 0, 0, 0, prec);
             break;
         }
         case 'x': case 'X': {
@@ -877,10 +917,12 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
             } else {
                 if (is_longlong)   uv = va_arg(ap, unsigned long long);
                 else if (is_long)  uv = va_arg(ap, unsigned long);
+                /* BF: 'hh' truncates to unsigned char (8-bit) for hex */
+                else if (is_char)  uv = (unsigned long long)(unsigned char)va_arg(ap, unsigned int);
                 else               uv = (unsigned long long)va_arg(ap, unsigned int);
             }
             snp_emit_num(ctx, uv, 0, 16, (*fmt == 'X'),
-                         width, zero_pad, left_align, alt, 0, 0);
+                         width, zero_pad, left_align, alt, 0, 0, prec);
             break;
         }
         case 'o': {
@@ -891,9 +933,11 @@ static void do_vsnprintf(snp_ctx_t *ctx, const char *fmt, va_list ap) {
                 else uv = (unsigned long long)pos_args[pos_idx - 1].u;
             } else {
                 if (is_long)  uv = va_arg(ap, unsigned long);
+                /* BF: 'hh' truncates to unsigned char (8-bit) for octal */
+                else if (is_char) uv = (unsigned long long)(unsigned char)va_arg(ap, unsigned int);
                 else          uv = (unsigned long long)va_arg(ap, unsigned int);
             }
-            snp_emit_num(ctx, uv, 0, 8, 0, width, zero_pad, left_align, 0, 0, 0);
+            snp_emit_num(ctx, uv, 0, 8, 0, width, zero_pad, left_align, 0, 0, 0, prec);
             break;
         }
         case 'p': {

@@ -181,15 +181,20 @@ static inline int atomic_dec_return(atomic_t *a) {
   return --a->counter;
 }
 
-/* Simple spinlock operations (no-ops for uniprocessor) */
+/* Spinlock operations for uniprocessor kernel.
+ * BF: Kept as lightweight no-ops.  This kernel is cooperative single-hart
+ * with no preemptive scheduling; timer interrupts only set a flag and
+ * never touch anon_vma/page data structures.  Real interrupt masking
+ * was attempted (push_off/pop_off) but caused livelock in the swap
+ * eviction path because the interrupt disable/restore changed timing
+ * assumptions throughout the memory subsystem.  If SMP or preemptive
+ * scheduling is added, revisit with full interrupt-safe locking. */
 static inline void spin_lock_init(spinlock_t *lock, const char *name) {
   lock->locked = 0;
   lock->name = name;
 }
 
 static inline void spin_lock(spinlock_t *lock) {
-  // In uniprocessor kernel, just disable interrupts would be proper,
-  // but for simplicity we'll leave this as no-op for now
   (void)lock;
 }
 
@@ -280,12 +285,13 @@ void anon_vma_get(struct anon_vma *anon_vma);
 void anon_vma_put(struct anon_vma *anon_vma);
 int anon_vma_fork(struct vm_area *vma, struct vm_area *parent_vma);
 int anon_vma_link(struct vm_area *vma);
+int anon_vma_link_prealloc(struct vm_area *vma, struct anon_vma_chain *avc);
 void anon_vma_unlink(struct vm_area *vma);
 
 /* Reverse mapping operations */
 int page_add_anon_rmap(struct page *page, struct vm_area *vma, uint64_t address);
 void page_remove_rmap(struct page *page, struct vm_area *vma);
-int try_to_unmap(struct page *page);
+int try_to_unmap(struct page *page, int swap_slot);
 int page_mapped_in_vma_count(struct page *page);
 
 /* Enhanced page access tracking */

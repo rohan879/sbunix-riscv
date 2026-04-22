@@ -172,11 +172,25 @@ int swap_evict_pages(int n) {
     if (!(*pte & PTE_U))
       goto advance;
 
+    /* BF: Do not evict COW or MAP_SHARED pages until reverse-map/page
+     * ownership metadata is authoritative for every sharing case. */
+    if (*pte & PTE_COW)
+      goto advance;
+
+    {
+      struct vm_area *ev_vma = vma_find(p, clock_va);
+      if (ev_vma && (ev_vma->flags & MAP_SHARED))
+        goto advance;
+    }
+
     {
       uint64_t pa = PTE2PA(*pte);
 
       /* Skip kernel pages (below _kernel_end) */
       if (pa < (uint64_t)_kernel_end)
+        goto advance;
+
+      if (page_ref_get(pa) > 1)
         goto advance;
 
       /* Enhanced victim selection using page descriptors */
@@ -187,13 +201,25 @@ int swap_evict_pages(int n) {
         if (mapcount > 0) {
           goto advance;
         }
+
+        if (PageAnon(page)) {
+          struct vm_area *ev_vma = vma_find(p, clock_va);
+          /* BF: Anonymous eviction depends on rmap being complete.
+           * If a page has no anon_vma, a mismatched owner, or more than
+           * one candidate VMA, leave it resident instead of losing an
+           * address-space mapping during swapout. */
+          if (!ev_vma || !page->anon_vma ||
+              ev_vma->anon_vma != page->anon_vma ||
+              page_mapped_in_vma_count(page) != 1)
+            goto advance;
+        }
         
         /* Enhanced aging: use age_score instead of simple accessed bit */
-        if (*pte & (1L << 6)) {
+        if (*pte & PTE_A) {
           /* Page was accessed - update our tracking */
           mark_page_accessed(page);
-          *pte &= ~(1L << 6);
-          asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+          pte_update(p->pagetable, clock_va, pte, *pte & ~PTE_A,
+                     0, PTE_UPDATE_CLEAR_ACCESSED, PTE_SFENCE_VA);
         }
         
         /* Multi-level aging decision */
@@ -221,9 +247,9 @@ int swap_evict_pages(int n) {
           goto advance;
           
         /* Fallback to simple accessed bit check */
-        if (*pte & (1L << 6)) {
-          *pte &= ~(1L << 6);
-          asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+        if (*pte & PTE_A) {
+          pte_update(p->pagetable, clock_va, pte, *pte & ~PTE_A,
+                     0, PTE_UPDATE_CLEAR_ACCESSED, PTE_SFENCE_VA);
           goto advance;
         }
       }
@@ -236,18 +262,29 @@ int swap_evict_pages(int n) {
       /* Try to unmap from all VMAs using anon_vma reverse mapping */
       int unmapped_count = 0;
       if (page && PageAnon(page)) {
-        unmapped_count = try_to_unmap(page);
+        /* BF: pass swap slot so try_to_unmap can encode swap entries
+         * in remote PTEs instead of silently zeroing them */
+        unmapped_count = try_to_unmap(page, slot);
         if (unmapped_count == 0) {
           /* Could not unmap - manually unmap from current process */
-          *pte = PTE_SWAP_ENCODE(slot, PTE_FLAGS(*pte));
-          asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+          pte_update(p->pagetable, clock_va, pte,
+                     PTE_SWAP_ENCODE(slot, PTE_FLAGS(*pte)),
+                     0, PTE_UPDATE_SWAPOUT, PTE_SFENCE_VA);
         }
-        /* Page should now be unmapped from all processes */
+        /* BF: After try_to_unmap, the clock-scanning PTE (current process)
+         * may still be valid if it was not in the anon_vma chain.  Encode
+         * it too so the page can be freed safely. */
+        if (unmapped_count > 0 && (*pte & PTE_V)) {
+          pte_update(p->pagetable, clock_va, pte,
+                     PTE_SWAP_ENCODE(slot, PTE_FLAGS(*pte)),
+                     0, PTE_UPDATE_SWAPOUT, PTE_SFENCE_VA);
+        }
       } else {
         /* Non-anonymous page or no page descriptor - use old method */
         int orig_flags = PTE_FLAGS(*pte);
-        *pte = PTE_SWAP_ENCODE(slot, orig_flags);
-        asm volatile("sfence.vma %0, zero" : : "r"(clock_va));
+        pte_update(p->pagetable, clock_va, pte,
+                   PTE_SWAP_ENCODE(slot, orig_flags),
+                   0, PTE_UPDATE_SWAPOUT, PTE_SFENCE_VA);
       }
 
       /* Write to swap */
@@ -262,6 +299,10 @@ int swap_evict_pages(int n) {
                page_to_pfn(page), unmapped_count);
       }
       
+      /* BF: Clear page descriptor metadata before freeing the physical
+       * page to prevent stale anon_vma pointers from being followed
+       * after the page is reallocated for a different purpose. */
+      if (page) { ClearPageAnon(page); page->anon_vma = NULL; }
       kfree((void *)pa);
       evicted++;
     }
