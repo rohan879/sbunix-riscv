@@ -140,6 +140,11 @@ endif
 # local tests/* binaries and intentionally skips Sortix/open-posix payloads.
 CORE_TEST_TARGETS := $(patsubst tests/%,build/testfs-core/bin/%,$(TEST_SRC_DIRS))
 
+# BF: Any staged rootfs or vendored workload change must invalidate the
+# prepared rootfs so build/kernel.elf never reuses a stale tarfs image.
+ROOTFS_STAGE_INPUTS := $(shell find rootfs -mindepth 1 \( -type f -o -type d \) -print 2>/dev/null)
+THIRDPARTY_STAGE_INPUTS := $(shell find thirdparty -mindepth 1 \( -type f -o -type d \) -print 2>/dev/null)
+
 build/testfs-core/.dirs:
 	@mkdir -p build/testfs-core/bin
 	@touch $@
@@ -152,7 +157,7 @@ build/testfs-core/.prepared: build/testfs-core/.dirs $(CORE_TEST_TARGETS)
 	@touch $@
 
 # Prepare base rootfs before building os-tests
-build/rootfs/.prepared: $(USER_BIN) tools/stage-thirdparty.sh
+build/rootfs/.prepared: $(USER_BIN) tools/stage-thirdparty.sh $(ROOTFS_STAGE_INPUTS) $(THIRDPARTY_STAGE_INPUTS)
 	mkdir -p build/rootfs
 	rm -rf build/rootfs/bin/os-test build/rootfs/os-test-manifest \
 		build/rootfs/os-test-expect build/rootfs/var/log/os-test \
