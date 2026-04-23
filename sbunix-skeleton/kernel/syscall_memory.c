@@ -713,12 +713,20 @@ long sys_mremap_handler(struct trapframe *tf) {
           for (uint64_t off = 0; off < copied_up_to; off += PAGE_SIZE) {
             pte_t *rpte = walk(current_proc->pagetable, new_va + off, 0);
             if (rpte && (*rpte & PTE_V)) {
+              uint64_t pa = PTE2PA(*rpte);
+              int freed_via_rmap = 0;
               struct vm_area *rv = vma_find(current_proc, new_va + off);
               if (rv) {
-                struct page *pd = virt_to_page((void *)PTE2PA(*rpte));
-                if (pd) page_remove_rmap(pd, rv);
+                struct page *pd = virt_to_page((void *)pa);
+                if (pd) {
+                  /* page_remove_rmap() may drop the last mapping and free
+                   * the page through mm_free_page(); avoid a second kfree(). */
+                  page_remove_rmap(pd, rv);
+                  freed_via_rmap = 1;
+                }
               }
-              kfree((void *)PTE2PA(*rpte));
+              if (!freed_via_rmap)
+                kfree((void *)pa);
               *rpte = 0;
             } else if (rpte && PTE_IS_SWAPPED(*rpte)) {
               *rpte = 0;
@@ -735,12 +743,19 @@ long sys_mremap_handler(struct trapframe *tf) {
           if (!old_pte || *old_pte == 0) continue;
           if (*old_pte & PTE_V) {
             uint64_t pa = PTE2PA(*old_pte);
+            int freed_via_rmap = 0;
             struct vm_area *ov = vma_find(current_proc, old_addr + off);
             if (ov) {
               struct page *opd = virt_to_page((void *)pa);
-              if (opd) page_remove_rmap(opd, ov);
+              if (opd) {
+                /* page_remove_rmap() owns the final free when this was
+                 * the last mapping of the old page. */
+                page_remove_rmap(opd, ov);
+                freed_via_rmap = 1;
+              }
             }
-            kfree((void *)pa);
+            if (!freed_via_rmap)
+              kfree((void *)pa);
           }
           *old_pte = 0;
         }
