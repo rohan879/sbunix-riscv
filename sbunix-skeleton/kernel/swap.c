@@ -147,13 +147,9 @@ int swap_evict_pages(int n) {
       continue;
     }
 
-    /* Skip the currently running process (optimization) */
-    if (p == current_proc) {
-      clock_proc_idx = (clock_proc_idx + 1) % NPROC;
-      clock_va = 0;
-      continue;
-    }
-
+    /* Reclaim must be allowed to scan current_proc too: the 100MB fork
+     * pressure case needs to evict the allocating process's older pages,
+     * not just pages owned by other processes. */
     pte_t *pte = walk(p->pagetable, clock_va, 0);
 
     if (!pte || !(*pte & PTE_V))
@@ -259,8 +255,17 @@ int swap_evict_pages(int n) {
       if (slot < 0)
         break; /* swap full, stop evicting */
         
+      /* Hold the page alive across try_to_unmap() so reverse-map teardown
+       * cannot free it before swap_write() copies the contents out. */
+      int pinned_page = 0;
+      if (page) {
+        page_get(page);
+        pinned_page = 1;
+      }
+
       /* Try to unmap from all VMAs using anon_vma reverse mapping */
       int unmapped_count = 0;
+      int freed_via_rmap = 0;
       if (page && PageAnon(page)) {
         /* BF: pass swap slot so try_to_unmap can encode swap entries
          * in remote PTEs instead of silently zeroing them */
@@ -292,18 +297,24 @@ int swap_evict_pages(int n) {
       
       /* Update statistics */
       mm_stats.clock_evictions++;
-      if (page) {
+      if (page)
         /* Mark page as reclaimed in our tracking */
         SetPageReclaim(page);
-        printk("swap: evicted page pfn=%lu, unmapped from %d VMAs\n", 
-               page_to_pfn(page), unmapped_count);
+
+      if (pinned_page) {
+        /* BF: If the page is fully unmapped now, dropping the temporary
+         * pin will free it exactly once via mm_free_page(). */
+        if (atomic_read(&page->mapcount) == -1)
+          freed_via_rmap = 1;
+        page_put(page);
       }
       
-      /* BF: Clear page descriptor metadata before freeing the physical
-       * page to prevent stale anon_vma pointers from being followed
-       * after the page is reallocated for a different purpose. */
-      if (page) { ClearPageAnon(page); page->anon_vma = NULL; }
-      kfree((void *)pa);
+      /* BF: When reverse-map teardown already freed the page, avoid a
+       * second kfree(). Otherwise clear stale metadata and free here. */
+      if (!freed_via_rmap) {
+        if (page) { ClearPageAnon(page); page->anon_vma = NULL; }
+        kfree((void *)pa);
+      }
       evicted++;
     }
 

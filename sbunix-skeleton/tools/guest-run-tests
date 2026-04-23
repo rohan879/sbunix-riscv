@@ -81,6 +81,7 @@ echo "=== Running sigaltstack_protnone ===" && /test/bin/sigaltstack_protnone
 echo "=== Running trapretstress ===" && /test/bin/trapretstress
 echo "=== Running virtiostress ===" && /test/bin/virtiostress
 echo "=== Running membugstest ===" && /test/bin/membugstest
+echo "=== Running forkmemdiag ===" && /test/bin/forkmemdiag
 echo "=== Running posix_mem_test ===" && /test/bin/posix_mem_test
 echo === C Binary Tests Done ===
 
