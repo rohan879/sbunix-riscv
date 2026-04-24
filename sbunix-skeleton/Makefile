@@ -47,17 +47,11 @@ else ifeq ($(KLANG),zig)
   KERN_ALL := $(KERN_ASM) $(KERN_LIB)
 endif
 
-# Main guest disk mounted as /mnt. The kernel reserves SWAP_NSECTORS at the
-# tail of this image for swap, so DISK_SIZE must leave room for both the ext2
-# filesystem and the reserved swap region. 32MB is the working size for the
-# 16MB swap backing used by the 100MB post-fork memory-pressure test.
-DISK_SIZE ?= 32
+DISK_SIZE ?= 16
 DISK_IMG  := build/disk.img
-# Separate test disk used when BUILD_TESTS=1; this carries /test binaries,
-# manifests, and logs rather than the main /mnt filesystem.
+# MODIFIED: added
 TEST_DISK_SIZE ?= 128
 TEST_DISK_IMG  := build/test-disk.img
-# Smaller dedicated test disk used by qemu-core-tests.
 CORE_TEST_DISK_SIZE ?= 32
 CORE_TEST_DISK_IMG  := build/test-disk-core.img
 

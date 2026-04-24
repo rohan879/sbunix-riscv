@@ -7,11 +7,9 @@
 /* ------------------------------------------------------------------ */
 /* Swap space constants                                                */
 /* ------------------------------------------------------------------ */
-/* Increased from 1024 so the post-fork 100MB pressure case can reclaim
- * enough anonymous pages instead of exhausting swap backing mid-run. */
-#define SWAP_NSLOTS       4096              /* 4096 pages = 16 MB of swap */
+#define SWAP_NSLOTS       1024              /* 1024 pages = 4 MB of swap */
 #define SECTORS_PER_PAGE  (PAGE_SIZE / 512) /* 8 sectors per 4 KB page   */
-#define SWAP_NSECTORS     (SWAP_NSLOTS * SECTORS_PER_PAGE) /* 32768 sectors */
+#define SWAP_NSECTORS     (SWAP_NSLOTS * SECTORS_PER_PAGE) /* 8192 sectors */
 
 /* Eviction thresholds */
 #define SWAP_LOW_WATERMARK  32  /* trigger eviction when free pages below this */
