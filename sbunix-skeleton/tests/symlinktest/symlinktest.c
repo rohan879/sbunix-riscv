@@ -72,6 +72,10 @@ static void cleanup_all(void) {
     unlink("/mnt/sl_rla_dir/child_target");
     rmdir("/mnt/sl_rla_dir");
     unlink("/mnt/sl_rla_dirlink");
+    unlink("/mnt/sl_sat_parent_link/child");
+    rmdir("/mnt/sl_sat_parent_link");
+    rmdir("/mnt/sl_sat_parent_real");
+    unlink("/mnt/sl_sat_parent_sym");
 }
 
 /* -----------------------------------------------------------------------
@@ -386,6 +390,37 @@ static void test_readlink_intermediate_dir_symlink(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 13. symlinkat_parent_symlink -- create link through symlinked dirname
+ * ---------------------------------------------------------------------- */
+
+static void test_symlinkat_parent_symlink(void) {
+    unlink("/mnt/sl_sat_parent_link/child");
+    rmdir("/mnt/sl_sat_parent_link");
+    rmdir("/mnt/sl_sat_parent_real");
+    unlink("/mnt/sl_sat_parent_sym");
+
+    mkdir("/mnt/sl_sat_parent_real", 0755);
+    symlink("/mnt/sl_sat_parent_real", "/mnt/sl_sat_parent_sym");
+
+    int r = symlink("target", "/mnt/sl_sat_parent_sym/child");
+    CHECK("symlink: symlinkat_parent_symlink create through parent link", r == 0);
+
+    char buf[128];
+    memset(buf, 0, sizeof(buf));
+    int n = readlink("/mnt/sl_sat_parent_real/child", buf, sizeof(buf) - 1);
+    CHECK("symlink: symlinkat_parent_symlink appears in real dir", n > 0);
+    if (n > 0) {
+        buf[n] = '\0';
+        CHECK("symlink: symlinkat_parent_symlink target matches",
+              strcmp(buf, "target") == 0);
+    }
+
+    unlink("/mnt/sl_sat_parent_real/child");
+    rmdir("/mnt/sl_sat_parent_real");
+    unlink("/mnt/sl_sat_parent_sym");
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -407,6 +442,7 @@ int main(void) {
     test_symlink_unlink();
     test_symlink_dangling();
     test_readlink_intermediate_dir_symlink();
+    test_symlinkat_parent_symlink();
 
     printf("=== symlinktest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

@@ -18,11 +18,19 @@
 
 static volatile sig_atomic_t handler_ran = 0;
 static volatile sig_atomic_t handler_signum = 0;
+static volatile sig_atomic_t sigkill_blocked_during_handler = -1;
 
 /* Simple SIGUSR1 handler that records invocation */
 static void sigusr1_handler(int sig) {
+  sigset_t cur;
   handler_ran = 1;
   handler_signum = sig;
+  if (sigprocmask(SIG_SETMASK, NULL, &cur) == 0) {
+    if (cur & (1UL << (SIGKILL - 1)))
+      sigkill_blocked_during_handler = 1;
+    else
+      sigkill_blocked_during_handler = 0;
+  }
 }
 
 int main(void) {
@@ -70,6 +78,7 @@ int main(void) {
   /* suspend_set is empty, so SIGUSR1 is NOT blocked during suspend */
 
   handler_ran = 0;
+  sigkill_blocked_during_handler = -1;
   (void)sigsuspend(&suspend_set);
   /* sigsuspend always returns -1 with errno == EINTR */
 
@@ -81,6 +90,14 @@ int main(void) {
   if (handler_signum != SIGUSR1) {
     printf("[FAIL] sigsuspend_mask_restore (wrong signal: %d)\n",
            handler_signum);
+    pass = 0;
+  }
+
+  /* POSIX: SIGKILL/SIGSTOP must never be blocked, including while
+   * sigsuspend's temporary mask is active during handler execution. */
+  if (sigkill_blocked_during_handler != 0) {
+    printf("[FAIL] sigsuspend_mask_restore "
+           "(SIGKILL was blocked during handler)\n");
     pass = 0;
   }
 
