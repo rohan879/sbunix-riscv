@@ -1151,9 +1151,14 @@ long sys_faccessat_handler(struct trapframe *tf) {
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
       if (rr < 0) return (long)rr; }
-    /* BF: Propagate all negative errors from resolve_symlinks_in_path */
-    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
-      if (sr < 0) return (long)sr; }
+    /* BF: Propagate all negative errors from resolve_symlinks_in_path,
+     * respecting AT_SYMLINK_NOFOLLOW in flags. */
+    {
+      int flags = (int)tf->a3;
+      int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
+      int sr = resolve_symlinks_in_path(resolved, 6, !nofollow);
+      if (sr < 0) return (long)sr;
+    }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1344,6 +1349,11 @@ long sys_mknodat_handler(struct trapframe *tf) {
         /* BF: Propagate dirfd resolution errors before VFS dispatch. */
         { int rr = resolve_path_at(dirfd, kpath, resolved);
           if (rr < 0) return (long)rr; }
+
+        /* BF: mknodat must resolve intermediate symlinked directories. */
+        { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+          if (sr < 0) return (long)sr; }
+
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
         struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -1412,6 +1422,13 @@ long sys_symlinkat_handler(struct trapframe *tf) {
     { int rr = resolve_path_at((int)tf->a1, klinkpath, resolved);
       if (rr < 0) return (long)rr; }
 
+    /* BF: symlinkat must resolve intermediate symlinked directories while
+     * preserving the final component (the new link path itself).  Without
+     * this, creating a link under a symlinked parent directory stores the
+     * entry at the literal path instead of the resolved target directory. */
+    { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+      if (sr < 0) return (long)sr; }
+
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -1451,6 +1468,15 @@ long sys_fchmodat_handler(struct trapframe *tf) {
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
       if (rr < 0) return (long)rr; }
+
+    /* BF: Propagate all negative errors from resolve_symlinks_in_path,
+     * respecting AT_SYMLINK_NOFOLLOW in flags. */
+    {
+      int flags = (int)tf->a3;
+      int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
+      int sr = resolve_symlinks_in_path(resolved, 6, !nofollow);
+      if (sr < 0) return (long)sr;
+    }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);

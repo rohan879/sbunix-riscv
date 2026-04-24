@@ -323,6 +323,9 @@ long sys_rt_sigsuspend_handler(struct trapframe *tf) {
     uint64_t mask;
     if (copyin(current_proc->pagetable, &mask, tf->a0, sizeof(uint64_t)) < 0)
         return -EFAULT; // EFAULT
+    /* POSIX: SIGKILL and SIGSTOP are never blockable, even in temporary
+     * sigsuspend masks. */
+    mask &= ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
     uint64_t old_mask = current_proc->sigmask;
     current_proc->sigmask = mask;
     /* Suspend until a signal is deliverable.  Check under both the

@@ -294,6 +294,12 @@ long sys_mount_handler(struct trapframe *tf) {
     if (resolve_path(current_proc->cwd, ktgt, target_resolved) < 0)
         return (long)-36; /* -ENAMETOOLONG */
 
+    /* BF: mount must resolve symlinks for both source and target */
+    { int sr = resolve_symlinks_in_path(source_resolved, 6, 1);
+      if (sr < 0) return (long)sr; }
+    { int sr = resolve_symlinks_in_path(target_resolved, 6, 1);
+      if (sr < 0) return (long)sr; }
+
     /* Only ext2 supported */
     if (strcmp(kfstype, "ext2") != 0)
         return (long)-19; /* ENODEV */
@@ -324,6 +330,11 @@ long sys_umount2_handler(struct trapframe *tf) {
     /* BF: Propagate ENAMETOOLONG from resolve_path */
     if (resolve_path(current_proc->cwd, ktgt, resolved) < 0)
         return (long)-36; /* -ENAMETOOLONG */
+
+    /* BF: umount2 must resolve symlinks in the target path */
+    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
+      if (sr < 0) return (long)sr; }
+
     return (long)vfs_unregister_mount(resolved);
 }
 
@@ -408,6 +419,15 @@ long sys_utimensat_handler(struct trapframe *tf) {
     { int rr = resolve_path_at(dirfd, kpath, resolved);
       if (rr < 0) return (long)rr; }
 
+    /* BF: Propagate all negative errors from resolve_symlinks_in_path,
+     * respecting AT_SYMLINK_NOFOLLOW in flags. */
+    {
+      int flags = (int)tf->a3;
+      int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
+      int sr = resolve_symlinks_in_path(resolved, 6, !nofollow);
+      if (sr < 0) return (long)sr;
+    }
+
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -455,6 +475,10 @@ long sys_statfs_handler(struct trapframe *tf) {
     /* BF: Propagate ENAMETOOLONG from resolve_path */
     if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
         return (long)-36; /* -ENAMETOOLONG */
+
+    /* BF: statfs must resolve symlinks in the target path */
+    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
+      if (sr < 0) return (long)sr; }
 
     /* Fill in basic statfs structure */
     uint8_t kbuf[120];
@@ -529,6 +553,15 @@ long sys_fchownat_handler(struct trapframe *tf) {
     char resolved[128];
     { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
       if (rr < 0) return (long)rr; }
+
+    /* BF: Propagate all negative errors from resolve_symlinks_in_path,
+     * respecting AT_SYMLINK_NOFOLLOW in flags. */
+    {
+      int flags = (int)tf->a4;
+      int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
+      int sr = resolve_symlinks_in_path(resolved, 6, !nofollow);
+      if (sr < 0) return (long)sr;
+    }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);

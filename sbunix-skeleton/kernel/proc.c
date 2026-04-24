@@ -135,6 +135,11 @@ found:
   p->pgid = p->pid;
   p->sid = p->pid;
   p->state = SLEEPING;
+  p->waiting_for_uart = 0;
+  p->sleep_until = 0;
+  p->exit_status = 0;
+  p->uid = 0;
+  p->gid = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -169,6 +174,13 @@ found:
   // Initialize open file table
   for (int i = 0; i < NOFILE; i++)
     p->ofile[i] = NULL;
+
+  memset(p->name, 0, sizeof(p->name));
+  p->cwd[0] = '/';
+  p->cwd[1] = '\0';
+  p->exe_path[0] = '\0';
+  p->cmdline[0] = '\0';
+  p->cmdline_len = 0;
 
   // Initialize VMA list and mmap base
   p->vma_list = NULL;
@@ -243,6 +255,8 @@ void userinit(void) {
   // We'll set the name for debugging.
   const char *name = "init";
   for(int i=0; i<5; i++) p->name[i] = name[i];
+  memcpy(p->cmdline, "init", 5);
+  p->cmdline_len = 5;
 }
 
 // Wake any process sleeping on UART input (waiting_for_uart==1 only).

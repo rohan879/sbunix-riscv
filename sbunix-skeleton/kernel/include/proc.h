@@ -171,6 +171,8 @@ struct proc {
   int killed_by_signal;        // signal number if killed by signal, 0 otherwise
   char cwd[256];               // current working directory
   char exe_path[256];          // path of executable (set by exec)
+  char cmdline[256];           // NUL-separated argv image for /proc/<pid>/cmdline
+  uint16_t cmdline_len;        // valid bytes in cmdline[]
   unsigned int umask_val;       // file creation mask
   struct open_file *ofile[NOFILE]; // open file descriptors (VFS)
   uint8_t fd_flags[NOFILE]; /* Per-fd flags: FD_CLOEXEC=1, FD_CLOFORK=2 */
