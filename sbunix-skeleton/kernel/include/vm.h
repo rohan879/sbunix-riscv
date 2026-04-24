@@ -112,6 +112,7 @@ void  kvmmap_super(uint64_t va, uint64_t pa, uint64_t sz, int perm);
 pagetable_t uvmcreate(void);
 uint64_t uvmalloc(pagetable_t pagetable, uint64_t start_va, uint64_t end_va, int perm);
 int uvmmap(pagetable_t pagetable, uint64_t va, uint64_t pa, uint64_t sz, int perm);
+void uvmunmap_proc(struct proc *p, pagetable_t pagetable, uint64_t va, uint64_t len);
 void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len);
 void proc_freepagetable(pagetable_t pagetable);
 int uvmmap_kernel(pagetable_t pt);

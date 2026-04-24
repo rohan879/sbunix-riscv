@@ -30,7 +30,8 @@ long sys_brk_handler(struct trapframe *tf) {
         uint64_t new_rounded = PGROUNDUP(new_brk);
         uint64_t old_rounded = PGROUNDUP(cur_sz);
         if (new_rounded < old_rounded) {
-            uvmunmap(current_proc->pagetable, new_rounded, old_rounded - new_rounded);
+            uvmunmap_proc(current_proc, current_proc->pagetable,
+                         new_rounded, old_rounded - new_rounded);
             vma_remove(current_proc, new_rounded, old_rounded);
             sfence_vma();
         }
@@ -202,7 +203,7 @@ long sys_mmap_handler(struct trapframe *tf) {
          * in the target range [va, va+len).  Without this, old PTEs and
          * VMA entries persist, causing incorrect data reads. */
         mmap_writeback_shared(current_proc, va, va + len);
-        uvmunmap(current_proc->pagetable, va, len);
+        uvmunmap_proc(current_proc, current_proc->pagetable, va, len);
         sfence_vma();
         vma_remove(current_proc, va, va + len);
     } else {
@@ -325,7 +326,7 @@ long sys_munmap_handler(struct trapframe *tf) {
      * anon_vma must still be alive.  If we did vma_remove first,
      * anon_vma_unlink could free the anon_vma, leaving page_remove_rmap
      * with a dangling pointer (use-after-free crash in swaptest). */
-    uvmunmap(current_proc->pagetable, addr, len);
+    uvmunmap_proc(current_proc, current_proc->pagetable, addr, len);
     sfence_vma();
 
     /* Remove VMA tracking (handles splits automatically).
@@ -593,7 +594,8 @@ long sys_mremap_handler(struct trapframe *tf) {
          * then use vma_remove() to properly trim/split VMAs instead of
          * the old v->end assignment which breaks after K5-style splits. */
         mmap_writeback_shared(current_proc, old_addr + new_size, old_addr + old_size);
-        uvmunmap(current_proc->pagetable, old_addr + new_size, old_size - new_size);
+        uvmunmap_proc(current_proc, current_proc->pagetable,
+                     old_addr + new_size, old_size - new_size);
         sfence_vma();
         vma_remove(current_proc, old_addr + new_size, old_addr + old_size);
         return (long)old_addr;
@@ -713,12 +715,20 @@ long sys_mremap_handler(struct trapframe *tf) {
           for (uint64_t off = 0; off < copied_up_to; off += PAGE_SIZE) {
             pte_t *rpte = walk(current_proc->pagetable, new_va + off, 0);
             if (rpte && (*rpte & PTE_V)) {
+              uint64_t pa = PTE2PA(*rpte);
+              int freed_via_rmap = 0;
               struct vm_area *rv = vma_find(current_proc, new_va + off);
               if (rv) {
-                struct page *pd = virt_to_page((void *)PTE2PA(*rpte));
-                if (pd) page_remove_rmap(pd, rv);
+                struct page *pd = virt_to_page((void *)pa);
+                if (pd) {
+                  /* page_remove_rmap() may drop the last mapping and free
+                   * the page through mm_free_page(); avoid a second kfree(). */
+                  page_remove_rmap(pd, rv);
+                  freed_via_rmap = 1;
+                }
               }
-              kfree((void *)PTE2PA(*rpte));
+              if (!freed_via_rmap)
+                kfree((void *)pa);
               *rpte = 0;
             } else if (rpte && PTE_IS_SWAPPED(*rpte)) {
               *rpte = 0;
@@ -735,12 +745,19 @@ long sys_mremap_handler(struct trapframe *tf) {
           if (!old_pte || *old_pte == 0) continue;
           if (*old_pte & PTE_V) {
             uint64_t pa = PTE2PA(*old_pte);
+            int freed_via_rmap = 0;
             struct vm_area *ov = vma_find(current_proc, old_addr + off);
             if (ov) {
               struct page *opd = virt_to_page((void *)pa);
-              if (opd) page_remove_rmap(opd, ov);
+              if (opd) {
+                /* page_remove_rmap() owns the final free when this was
+                 * the last mapping of the old page. */
+                page_remove_rmap(opd, ov);
+                freed_via_rmap = 1;
+              }
             }
-            kfree((void *)pa);
+            if (!freed_via_rmap)
+              kfree((void *)pa);
           }
           *old_pte = 0;
         }

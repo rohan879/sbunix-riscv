@@ -705,7 +705,11 @@ int uvmmap(pagetable_t pagetable, uint64_t va, uint64_t pa, uint64_t sz, int per
 // Unmap and free physical pages for a user virtual address range [va, va+len).
 // va and len must be page-aligned.  Silently skips pages that are not mapped.
 // Handles both 4KB pages and 2MB super pages.
-void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len) {
+//
+// When the owning proc is provided, 4KB anonymous pages use reverse-map
+// teardown first so the page-descriptor path owns the final free.  Callers
+// without a live proc/VMA context can pass NULL and fall back to raw kfree.
+void uvmunmap_proc(struct proc *p, pagetable_t pagetable, uint64_t va, uint64_t len) {
     uint64_t a = va;
     uint64_t end = va + len;
 
@@ -730,14 +734,19 @@ void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len) {
                 *pte = 0;
                 a += SUPERPAGE_SIZE;
             } else {
-                /* Regular 4KB page.
-                 * BF: B7 (page_remove_rmap) intentionally omitted.
-                 * Without a matching page_add_mapping in copy_pagetable_cow
-                 * (reverted due to exit-path mapcount leak), calling
-                 * page_remove_rmap here would drive mapcount below -1.
-                 * Stale page descriptor state is cleaned up in kalloc()
-                 * when the page is next allocated. */
-                kfree((void *)pa);
+                int freed_via_rmap = 0;
+                if (p) {
+                    struct vm_area *v = vma_find(p, a);
+                    if (v) {
+                        struct page *pg = virt_to_page((void *)pa);
+                        if (pg) {
+                            page_remove_rmap(pg, v);
+                            freed_via_rmap = 1;
+                        }
+                    }
+                }
+                if (!freed_via_rmap)
+                    kfree((void *)pa);
                 *pte = 0;
                 a += PAGE_SIZE;
             }
@@ -751,6 +760,10 @@ void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len) {
             a += PAGE_SIZE;
         }
     }
+}
+
+void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t len) {
+    uvmunmap_proc(NULL, pagetable, va, len);
 }
 
 // Demote a 2MB super page at va into 512 individual 4KB PTEs.

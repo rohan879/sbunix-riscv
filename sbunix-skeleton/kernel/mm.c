@@ -188,7 +188,6 @@ void mm_free_page(struct page *page) {
   // Update statistics
   mm_stats.free_pages++;
   
-  printk("mm: freed page pfn=%lu pa=%p\n", page_to_pfn(page), pa);
 }
 
 /* Enhanced kalloc integration - implemented in kalloc.c */

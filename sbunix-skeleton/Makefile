@@ -51,7 +51,6 @@ DISK_SIZE ?= 16
 DISK_IMG  := build/disk.img
 # MODIFIED: added
 TEST_DISK_SIZE ?= 128
-# MODIFIED: added
 TEST_DISK_IMG  := build/test-disk.img
 CORE_TEST_DISK_SIZE ?= 32
 CORE_TEST_DISK_IMG  := build/test-disk-core.img
