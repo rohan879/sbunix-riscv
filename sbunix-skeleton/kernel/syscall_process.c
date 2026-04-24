@@ -279,6 +279,9 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
 
     /* ---- Common path (all modes) ---- */
     memcpy(p->cwd, current_proc->cwd, sizeof(p->cwd));
+    memcpy(p->exe_path, current_proc->exe_path, sizeof(p->exe_path));
+    memcpy(p->cmdline, current_proc->cmdline, sizeof(p->cmdline));
+    p->cmdline_len = current_proc->cmdline_len;
     p->umask_val = current_proc->umask_val;
     memcpy(p->name, current_proc->name, sizeof(p->name));
 
@@ -834,6 +837,30 @@ long sys_execve_handler(struct trapframe *tf) {
         if (kenvbuf) kfree(kenvbuf);
         /* Return ENOEXEC if file was found but not executable, else ENOENT */
         return (long)(shebang_file_found ? -8 : -2);
+    }
+
+    /* Snapshot argv image for /proc/<pid>/cmdline (NUL-separated strings). */
+    {
+        int out = 0;
+        if (kargc > 0) {
+            for (int i = 0; i < kargc; i++) {
+                const char *arg = kstrbuf + kstroff_arr[i];
+                int slen = strlen(arg) + 1;
+                if (out + slen > (int)sizeof(current_proc->cmdline))
+                    break;
+                memcpy(current_proc->cmdline + out, arg, slen);
+                out += slen;
+            }
+        }
+        if (out == 0) {
+            int nl = strlen(current_proc->name);
+            if (nl > (int)sizeof(current_proc->cmdline) - 1)
+                nl = (int)sizeof(current_proc->cmdline) - 1;
+            memcpy(current_proc->cmdline, current_proc->name, nl);
+            current_proc->cmdline[nl] = '\0';
+            out = nl + 1;
+        }
+        current_proc->cmdline_len = (uint16_t)out;
     }
 
     /* POSIX: close file descriptors marked with FD_CLOEXEC.

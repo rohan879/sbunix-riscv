@@ -68,6 +68,14 @@ static void cleanup_all(void) {
     unlink("/mnt/sl_unlink_link");
     unlink("/mnt/sl_unlink_target");
     unlink("/mnt/sl_dangle");
+    unlink("/mnt/sl_rla_dir/child");
+    unlink("/mnt/sl_rla_dir/child_target");
+    rmdir("/mnt/sl_rla_dir");
+    unlink("/mnt/sl_rla_dirlink");
+    unlink("/mnt/sl_sat_parent_link/child");
+    rmdir("/mnt/sl_sat_parent_link");
+    rmdir("/mnt/sl_sat_parent_real");
+    unlink("/mnt/sl_sat_parent_sym");
 }
 
 /* -----------------------------------------------------------------------
@@ -348,6 +356,71 @@ static void test_symlink_dangling(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 12. readlink_intermediate_dir_symlink -- follow dirname symlink only
+ * ---------------------------------------------------------------------- */
+
+static void test_readlink_intermediate_dir_symlink(void) {
+    unlink("/mnt/sl_rla_dir/child");
+    unlink("/mnt/sl_rla_dir/child_target");
+    rmdir("/mnt/sl_rla_dir");
+    unlink("/mnt/sl_rla_dirlink");
+
+    mkdir("/mnt/sl_rla_dir", 0755);
+    write_file("/mnt/sl_rla_dir/child_target", "x", 1);
+    symlink("child_target", "/mnt/sl_rla_dir/child");
+    symlink("/mnt/sl_rla_dir", "/mnt/sl_rla_dirlink");
+
+    char buf[256];
+    memset(buf, 0, sizeof(buf));
+    errno = 0;
+    int n = readlink("/mnt/sl_rla_dirlink/child", buf, sizeof(buf) - 1);
+    CHECK("symlink: readlink_intermediate_dir_symlink returns data", n > 0);
+    if (n > 0) {
+        buf[n] = '\0';
+        CHECK("symlink: readlink_intermediate_dir_symlink target matches",
+              strcmp(buf, "child_target") == 0);
+    } else {
+        CHECK("symlink: readlink_intermediate_dir_symlink errno clear", errno == 0);
+    }
+
+    unlink("/mnt/sl_rla_dir/child");
+    unlink("/mnt/sl_rla_dir/child_target");
+    rmdir("/mnt/sl_rla_dir");
+    unlink("/mnt/sl_rla_dirlink");
+}
+
+/* -----------------------------------------------------------------------
+ * 13. symlinkat_parent_symlink -- create link through symlinked dirname
+ * ---------------------------------------------------------------------- */
+
+static void test_symlinkat_parent_symlink(void) {
+    unlink("/mnt/sl_sat_parent_link/child");
+    rmdir("/mnt/sl_sat_parent_link");
+    rmdir("/mnt/sl_sat_parent_real");
+    unlink("/mnt/sl_sat_parent_sym");
+
+    mkdir("/mnt/sl_sat_parent_real", 0755);
+    symlink("/mnt/sl_sat_parent_real", "/mnt/sl_sat_parent_sym");
+
+    int r = symlink("target", "/mnt/sl_sat_parent_sym/child");
+    CHECK("symlink: symlinkat_parent_symlink create through parent link", r == 0);
+
+    char buf[128];
+    memset(buf, 0, sizeof(buf));
+    int n = readlink("/mnt/sl_sat_parent_real/child", buf, sizeof(buf) - 1);
+    CHECK("symlink: symlinkat_parent_symlink appears in real dir", n > 0);
+    if (n > 0) {
+        buf[n] = '\0';
+        CHECK("symlink: symlinkat_parent_symlink target matches",
+              strcmp(buf, "target") == 0);
+    }
+
+    unlink("/mnt/sl_sat_parent_real/child");
+    rmdir("/mnt/sl_sat_parent_real");
+    unlink("/mnt/sl_sat_parent_sym");
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -368,6 +441,8 @@ int main(void) {
     test_symlink_relative_target();
     test_symlink_unlink();
     test_symlink_dangling();
+    test_readlink_intermediate_dir_symlink();
+    test_symlinkat_parent_symlink();
 
     printf("=== symlinktest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

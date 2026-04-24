@@ -516,3 +516,20 @@ open-posix build:
 - **Build summary update**:
   - os-test compiled tests increased to **1507 / 5304** (~28%) in the current build output.
   - open-posix compiled tests remain **423 / 2044** (~21%).
+
+#### 28. `readlinkat` Intermediate-Symlink Fix + Validation Notes (Current Session)
+- **`readlinkat` path resolution fix** (`kernel/syscall_io.c`):
+  - `sys_readlinkat_handler` now calls `resolve_symlinks_in_path(resolved, 6, 0)` after `resolve_path_at(...)`.
+  - This resolves intermediate directory symlinks while still leaving the final component untouched, which is the required `readlink`/`readlinkat` behavior.
+  - Reproducer added in `tests/symlinktest/symlinktest.c`:
+    - `readlink("/mnt/sl_rla_dirlink/child")` where `sl_rla_dirlink` is a symlink to a directory and `child` is the final symlink inside that directory.
+    - **Before fix**: `symlinktest` reported `24 passed, 2 failed`.
+    - **After fix**: `symlinktest` reported `26 passed, 0 failed`.
+- **Focused validation results after fix**:
+  - `sigtest`: `23 passed, 0 failed`
+  - `sighandtest`: `20 passed, 0 failed`
+  - `procfstest`: `22 passed, 0 failed`
+  - `symlinktest`: `26 passed, 0 failed`
+- **Potential follow-up issues identified by inspection (not fixed in this session)**:
+  - `/proc/<pid>/cmdline` in `kernel/procfs.c` still renders `p->name` rather than the full NUL-separated argv image expected by Linux-style `/proc` consumers.
+  - `sys_rt_sigsuspend_handler` in `kernel/syscall_signal.c` installs the temporary mask verbatim instead of stripping `SIGKILL`/`SIGSTOP`; delivery still succeeds because trap-return logic force-unblocks them, but the stored temporary mask is not fully POSIX-clean.

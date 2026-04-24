@@ -441,11 +441,18 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
       priv->len = procfs_render_status(priv->buf, PROCFS_BUF, target);
     } else if (strcmp(rest, "cmdline") == 0) {
       priv->type = PROCFS_CMDLINE;
-      int nl = strlen(target->name);
-      if (nl >= PROCFS_BUF) nl = PROCFS_BUF - 1;
-      memcpy(priv->buf, target->name, nl);
-      priv->buf[nl] = '\0';
-      priv->len = nl;
+      int n = (int)target->cmdline_len;
+      if (n <= 0) {
+        int nl = strlen(target->name);
+        if (nl >= PROCFS_BUF) nl = PROCFS_BUF - 1;
+        memcpy(priv->buf, target->name, nl);
+        priv->buf[nl] = '\0';
+        priv->len = nl + 1;
+      } else {
+        if (n > PROCFS_BUF) n = PROCFS_BUF;
+        memcpy(priv->buf, target->cmdline, n);
+        priv->len = n;
+      }
     } else if (strcmp(rest, "maps") == 0) {
       priv->type = PROCFS_MAPS;
       priv->len = procfs_render_maps(priv->buf, PROCFS_BUF, target);
@@ -499,11 +506,18 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
 
   if (strcmp(rest, "cmdline") == 0) {
     priv->type = PROCFS_CMDLINE;
-    int nl = strlen(target->name);
-    if (nl >= PROCFS_BUF) nl = PROCFS_BUF - 1;
-    memcpy(priv->buf, target->name, nl);
-    priv->buf[nl] = '\0';
-    priv->len = nl;
+    int n = (int)target->cmdline_len;
+    if (n <= 0) {
+      int nl = strlen(target->name);
+      if (nl >= PROCFS_BUF) nl = PROCFS_BUF - 1;
+      memcpy(priv->buf, target->name, nl);
+      priv->buf[nl] = '\0';
+      priv->len = nl + 1;
+    } else {
+      if (n > PROCFS_BUF) n = PROCFS_BUF;
+      memcpy(priv->buf, target->cmdline, n);
+      priv->len = n;
+    }
     *private = priv;
     return 0;
   }

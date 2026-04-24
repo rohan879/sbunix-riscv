@@ -38,6 +38,20 @@ static int read_file(const char *path, char *buf, int bufsz) {
     return total;
 }
 
+/* Read raw bytes from file (no NUL termination assumptions). */
+static int read_file_raw(const char *path, char *buf, int bufsz) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    int total = 0;
+    while (total < bufsz) {
+        int n = read(fd, buf + total, bufsz - total);
+        if (n <= 0) break;
+        total += n;
+    }
+    close(fd);
+    return total;
+}
+
 /* Simple decimal integer parser from string */
 static int simple_atoi(const char *s) {
     int val = 0;
@@ -265,6 +279,95 @@ static void test_proc_nonexistent(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 13. proc_cmdline_has_args -- /proc/<pid>/cmdline is NUL-separated argv
+ * ---------------------------------------------------------------------- */
+
+static void test_proc_cmdline_has_args(void) {
+    pid_t child = fork();
+    if (child == 0) {
+        char *argv[] = {"/bin/sleep", "9", NULL};
+        execve("/bin/sleep", argv, NULL);
+        _exit(127);
+    }
+
+    if (child < 0) {
+        CHECK("procfs: proc_cmdline_has_args fork", 0);
+        return;
+    }
+
+    usleep(50000);
+
+    char path[64];
+    char *pid_str = itoa_simple((int)child);
+    snprintf(path, sizeof(path), "/proc/%s/cmdline", pid_str);
+
+    char buf[256];
+    memset(buf, 0, sizeof(buf));
+    int n = read_file_raw(path, buf, sizeof(buf));
+    CHECK("procfs: proc_cmdline_has_args readable", n > 0);
+    if (n > 0) {
+        int has_prog = 0;
+        int has_arg = 0;
+        for (int i = 0; i < n; ) {
+            int j = i;
+            while (j < n && buf[j] != '\0') j++;
+            if (j > i) {
+                if (strcmp(buf + i, "/bin/sleep") == 0)
+                    has_prog = 1;
+                if (strcmp(buf + i, "9") == 0)
+                    has_arg = 1;
+            }
+            i = j + 1;
+        }
+        CHECK("procfs: proc_cmdline_has_args has argv0", has_prog);
+        CHECK("procfs: proc_cmdline_has_args has argv1", has_arg);
+    }
+
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+}
+
+/* -----------------------------------------------------------------------
+ * 14. proc_child_exe_link -- /proc/<pid>/exe resolves for forked child
+ * ---------------------------------------------------------------------- */
+
+static void test_proc_child_exe_link(void) {
+    int pfd[2];
+    if (pipe(pfd) != 0) {
+        CHECK("procfs: proc_child_exe_link pipe", 0);
+        return;
+    }
+
+    pid_t child = fork();
+    if (child == 0) {
+        close(pfd[1]);
+        char c;
+        read(pfd[0], &c, 1);
+        close(pfd[0]);
+        _exit(0);
+    }
+
+    close(pfd[0]);
+
+    char path[64];
+    char *pid_str = itoa_simple((int)child);
+    snprintf(path, sizeof(path), "/proc/%s/exe", pid_str);
+
+    char exe[256];
+    int n = readlink(path, exe, sizeof(exe) - 1);
+    CHECK("procfs: proc_child_exe_link readlink returns data", n > 0);
+    if (n > 0) {
+        exe[n] = '\0';
+        CHECK("procfs: proc_child_exe_link contains procfstest",
+              strstr(exe, "procfstest") != NULL);
+    }
+
+    write(pfd[1], "x", 1);
+    close(pfd[1]);
+    waitpid(child, NULL, 0);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -283,6 +386,8 @@ int main(void) {
     test_proc_uptime();
     test_proc_version();
     test_proc_nonexistent();
+    test_proc_cmdline_has_args();
+    test_proc_child_exe_link();
 
     printf("=== procfstest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
