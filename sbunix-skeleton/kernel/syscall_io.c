@@ -1377,6 +1377,11 @@ long sys_readlinkat_handler(struct trapframe *tf) {
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
       if (rr < 0) return (long)rr; }
+    /* BF: readlinkat must resolve intermediate symlinks but leave the final
+     * path component untouched.  Without this, readlink("dirlink/child")
+     * fails when dirlink is itself a symlink to a directory. */
+    { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+      if (sr < 0) return (long)sr; }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
