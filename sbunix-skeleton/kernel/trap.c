@@ -1171,8 +1171,8 @@ void trap_handler(struct trapframe *tf) {
                             int rref = page_ref_get(rpa);
                             if (rref > 1 && (cause == SCAUSE_STORE_PAGE_FAULT)) {
                                 /* Page is shared (ref > 1) but lost its
-                                 * PTE_COW flag (e.g., after swap round-trip).
-                                 * Must COW-copy before granting write. */
+                                 * PTE_COW flag. Must COW-copy before
+                                 * granting write. */
                                 char *cowpg = kalloc();
                                 if (!cowpg)
                                     goto pagefault_kill;

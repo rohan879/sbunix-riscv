@@ -251,9 +251,8 @@ void *kalloc(void) {
          * Without this, recycled pages retain stale rmap metadata
          * (PageAnon, mapcount, anon_vma) from prior use because
          * kfree/uvmunmap do not call page_remove_rmap.  The stale
-         * mapcount accumulates across reuse cycles, causing the
-         * swap eviction clock to skip these pages (mapcount > 0)
-         * and eventually exhausting evictable candidates. */
+         * mapcount accumulates across reuse cycles and can confuse later
+         * page-lifecycle checks that rely on a clean descriptor state. */
         struct page *pg = virt_to_page((void *)r);
         if (pg) {
             pg->flags = 0;

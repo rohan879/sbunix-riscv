@@ -55,7 +55,6 @@ void mm_init_page_descriptors(void) {
   mm_stats.free_pages = max_pfn;  // Will be adjusted as pages are allocated
   mm_stats.anon_pages = 0;
   mm_stats.file_pages = 0;
-  mm_stats.swap_pages = 0;
   mm_stats.shared_pages = 0;
   mm_stats.clock_scans = 0;
   mm_stats.clock_evictions = 0;
@@ -219,7 +218,6 @@ void mm_print_stats(void) {
   printk("Anonymous pages: %lu\n", mm_stats.anon_pages);
   printk("File pages:      %lu\n", mm_stats.file_pages);
   printk("Shared pages:    %lu\n", mm_stats.shared_pages);
-  printk("Swap pages:      %lu\n", mm_stats.swap_pages);
   
   printk("\n=== Enhanced Clock Statistics ===\n");
   printk("Clock scans:     %lu\n", mm_stats.clock_scans);
@@ -275,8 +273,8 @@ void mm_age_pages(void) {
   static unsigned long last_age_tick = 0;
   unsigned long current_ticks = get_ticks();
   
-  /* BF: Keep aging frequent enough that reclaim/swap tests do not run with
-   * stale page age data for long stretches. */
+  /* BF: Keep aging frequent enough that memory-pressure tests do not run
+   * with stale page age data for long stretches. */
   if (current_ticks - last_age_tick < 10) {
     return;
   }

@@ -1345,8 +1345,8 @@ int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
   return 0;
 }
 
-/* BF: Resolve a user page that may be lazily unmapped, swapped out, or
- * COW-shared.  Called from copyin/copyout/copyinstr when the initial
+/* BF: Resolve a user page that may be lazily unmapped or COW-shared.
+ * Called from copyin/copyout/copyinstr when the initial
  * walk finds no valid PTE.
  *
  * Returns the physical address of the resolved page, or 0 on failure.
@@ -1449,8 +1449,8 @@ static int copyout_impl(struct proc *p, pagetable_t pagetable, uint64_t dstva,
     pte_t *pte = walk_super(pagetable, dstva, &level);
 
     /* BF: If the page is not mapped, try demand-fault resolution.
-     * This handles lazy brk pages and swapped-out pages that haven't
-     * been faulted in yet (e.g., write() to freshly brk'd memory). */
+     * This handles lazy brk pages that have not been faulted in yet
+     * (e.g., write() to freshly brk'd memory). */
     if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
       uint64_t pa = vm_resolve_user_page(p, pagetable, dstva, 1);
       if (pa == 0)
@@ -1465,8 +1465,8 @@ static int copyout_impl(struct proc *p, pagetable_t pagetable, uint64_t dstva,
 
     /* BF: Resolve COW page before writing via cow_break() which also
      * registers the new private page in anon rmap.  Also handle the case
-     * where PTE_COW was lost (e.g., after a swap round-trip) but the page
-     * is still shared (ref > 1): must copy before writing. */
+     * where PTE_COW was lost but the page is still shared (ref > 1):
+     * must copy before writing. */
     if (level == 0) {
       uint64_t old_pa = PTE2PA(*pte);
       int ref = page_ref_get(old_pa);
@@ -1613,7 +1613,7 @@ int copyinstr_proc(struct proc *p, char *dst, uint64_t srcva, uint64_t max) {
   return copyinstr_impl(p, p->pagetable, dst, srcva, max);
 }
 
-// Legacy wrappers may only resolve lazy/swap/COW faults for current_proc.
+// Legacy wrappers may only resolve lazy-allocation and COW faults for current_proc.
 int copyout(pagetable_t pagetable, uint64_t dstva, const void *src, uint64_t len) {
   struct proc *owner =
       (current_proc && pagetable == current_proc->pagetable) ? current_proc : NULL;

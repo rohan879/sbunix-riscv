@@ -103,9 +103,9 @@ int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
          * copy_pagetable_cow runs for ALL pages (anon + non-anon), but
          * freewalk_level in the exit path does kfree without a matching
          * page_remove_mapping.  This causes mapcount to stay elevated
-         * after the child exits, making pages permanently unevictable
-         * by swap_evict_pages (which skips mapcount > 0).  The VMA-level
-         * rmap from anon_vma_fork is sufficient for swap/reclaim. */
+         * after the child exits, making pages permanently look shared to
+         * later memory-management code.  The VMA-level rmap from
+         * anon_vma_fork is sufficient for current teardown paths. */
         va += PAGE_SIZE;
     }
     /* Flush TLB since we modified parent PTEs */
@@ -389,9 +389,8 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
 
 bad:
     /* Clean up partially-built child pagetable.  proc_freepagetable
-     * walks the user address space, freeing COW-shared pages (via
-     * kfree/refcount) AND any duplicated swap slots, preventing both
-     * memory leaks and swap-slot double-frees. */
+     * walks the user address space and frees any partially duplicated
+     * COW-shared pages through the normal refcounted teardown path. */
     vma_free_all(p);
     if (new_pt)
         proc_freepagetable(new_pt);
