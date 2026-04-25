@@ -51,23 +51,31 @@ void copy_ofile(struct proc *dst, struct proc *src) {
    * per POSIX O_CLOFORK semantics.  Non-skipped fds inherit fd_flags. */
   #define FD_CLOFORK 2
   for (int i = 0; i < NOFILE; i++) {
+    struct open_file *f = srctab[i];
     if (src->fd_flags[i] & FD_CLOFORK) {
       /* ENH: Skip O_CLOFORK file descriptors during fork */
       dst->ofile[i] = 0;
       dst->fd_flags[i] = 0;
       continue;
     }
-    dst->ofile[i] = srctab[i];
+    if (f && !vfs_file_valid(f)) {
+      srctab[i] = 0;
+      src->fd_flags[i] = 0;
+      dst->ofile[i] = 0;
+      dst->fd_flags[i] = 0;
+      continue;
+    }
+    dst->ofile[i] = f;
     /* Copy fd_flags for non-skipped fds */
     dst->fd_flags[i] = src->fd_flags[i];
-    if (srctab[i]) {
-      srctab[i]->refcount++;
+    if (f) {
+      f->refcount++;
       /* bump pipe refcounts too */
-      if (srctab[i]->is_pipe) {
-        int pid = srctab[i]->pipe_id;
-        if (srctab[i]->pipe_read && pid >= 0)
+      if (f->is_pipe) {
+        int pid = f->pipe_id;
+        if (f->pipe_read && pid >= 0)
           pipes[pid].read_open++;
-        if (srctab[i]->pipe_write && pid >= 0)
+        if (f->pipe_write && pid >= 0)
           pipes[pid].write_open++;
       }
     }
@@ -90,6 +98,8 @@ void close_ofile(struct proc *p, int fd) {
   struct open_file *f = ftable[fd];
   if (!f) return;
   ftable[fd] = NULL;
+  if (!vfs_file_valid(f))
+    return;
 
   if (f->is_pipe) {
     int pid = f->pipe_id;
@@ -1072,10 +1082,14 @@ void trap_handler(struct trapframe *tf) {
                 while (current_proc->stack_bottom > va) {
                     current_proc->stack_bottom -= PAGE_SIZE;
                     char *pg = kalloc();
-                    if (!pg) break;
+                    if (!pg)
+                        break;
                     memset(pg, 0, PAGE_SIZE);
-                    mappages(current_proc->pagetable, current_proc->stack_bottom,
-                             PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U);
+                    if (mappages(current_proc->pagetable, current_proc->stack_bottom,
+                                 PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U) < 0) {
+                        kfree(pg);
+                        break;
+                    }
                     /* BF: Register stack page in anon rmap so reclaim can
                      * track and evict stack pages under memory pressure. */
                     {

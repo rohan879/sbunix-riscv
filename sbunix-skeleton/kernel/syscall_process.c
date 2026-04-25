@@ -871,8 +871,14 @@ long sys_execve_handler(struct trapframe *tf) {
         #define KERN_O_CLOEXEC 02000000 /* matches libc O_CLOEXEC */
         struct open_file **oft = proc_ofile(current_proc);
         for (int fd = 0; fd < NOFILE; fd++) {
-            if (oft[fd] && ((oft[fd]->flags & KERN_O_CLOEXEC) ||
-                            (current_proc->fd_flags[fd] & 1))) {
+            struct open_file *f = oft[fd];
+            if (f && !vfs_file_valid(f)) {
+                oft[fd] = NULL;
+                current_proc->fd_flags[fd] = 0;
+                continue;
+            }
+            if (f && ((f->flags & KERN_O_CLOEXEC) ||
+                      (current_proc->fd_flags[fd] & 1))) {
                 close_ofile(current_proc, fd);
                 current_proc->fd_flags[fd] = 0;
             }

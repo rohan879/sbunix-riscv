@@ -36,8 +36,8 @@ static uint64_t ext2_usable_sectors(struct ext2_fs *fs) {
   uint64_t cap = virtio_blk_capacity_on_dev(fs->device_index);
   if (cap == 0)
     return 0;
-  /* Device 0 shares media with swap: reserve swap tail sectors. */
-  if (fs->device_index == 0 && cap > SWAP_NSECTORS)
+  /* Reserve the swap tail only when swap is actually enabled. */
+  if (fs->device_index == 0 && swap_enabled() && cap > SWAP_NSECTORS)
     return cap - SWAP_NSECTORS;
   return cap;
 }

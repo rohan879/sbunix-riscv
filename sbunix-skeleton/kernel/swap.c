@@ -29,27 +29,11 @@ static uint64_t clock_va;
 void swap_init(void) {
   swap_is_enabled = 0;
   swap_used_count = 0;
+  swap_start_sector = 0;
   clock_proc_idx = 0;
   clock_va = 0;
   memset(swap_bitmap, 0, sizeof(swap_bitmap));
-
-  uint64_t cap = virtio_blk_capacity();
-  if (cap == 0) {
-    printk("swap: no disk available, swap disabled\n");
-    return;
-  }
-
-  if (cap < SWAP_NSECTORS + 128) {
-    /* Disk too small: need at least swap region + some fs space */
-    printk("swap: disk too small (%ld sectors), swap disabled\n", (long)cap);
-    return;
-  }
-
-  swap_start_sector = cap - SWAP_NSECTORS;
-  swap_is_enabled = 1;
-
-  printk("swap: initialized %d slots (%d KB) at sector %ld\n",
-         SWAP_NSLOTS, SWAP_NSLOTS * 4, (long)swap_start_sector);
+  printk("swap: disabled\n");
 }
 
 int swap_enabled(void) {
@@ -105,12 +89,18 @@ void swap_free(int slot) {
 
 /* Write a 4 KB page to swap slot. */
 void swap_write(int slot, void *page) {
+  if (!swap_is_enabled)
+    return;
   uint64_t sector = swap_start_sector + (uint64_t)slot * SECTORS_PER_PAGE;
   virtio_blk_rw(sector, page, 1);
 }
 
 /* Read a 4 KB page from swap slot. */
 void swap_read(int slot, void *page) {
+  if (!swap_is_enabled) {
+    memset(page, 0, PAGE_SIZE);
+    return;
+  }
   uint64_t sector = swap_start_sector + (uint64_t)slot * SECTORS_PER_PAGE;
   virtio_blk_rw(sector, page, 0);
 }

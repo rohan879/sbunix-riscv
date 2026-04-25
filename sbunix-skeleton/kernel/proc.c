@@ -174,6 +174,7 @@ found:
   // Initialize open file table
   for (int i = 0; i < NOFILE; i++)
     p->ofile[i] = NULL;
+  memset(p->fd_flags, 0, sizeof(p->fd_flags));
 
   memset(p->name, 0, sizeof(p->name));
   p->cwd[0] = '/';
@@ -185,6 +186,8 @@ found:
   // Initialize VMA list and mmap base
   p->vma_list = NULL;
   p->mmap_base = 0; /* lazily set on first mmap call */
+  p->stack_top = 0;
+  p->stack_bottom = 0;
 
   // Initialize signal handling fields
   memset(p->sigactions, 0, sizeof(p->sigactions));
