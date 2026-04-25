@@ -5,7 +5,6 @@
 #include <string.h>
 #include <vm.h>
 #include <proc.h>
-#include <swap.h>
 #include <mm.h>  /* BF: needed for anon_vma_get/link/unlink in vma_remove splits */
 #include <errno.h>  /* BF: EFAULT for copyinstr page fault distinction */
 #include <dtb.h>
@@ -78,8 +77,6 @@ int kernel_va_executable(uint64_t va) {
 }
 
 enum pte_kind pte_classify(pte_t pte, int level) {
-  if (PTE_IS_SWAPPED(pte))
-    return PTE_KIND_SWAPPED;
   if (!(pte & PTE_V))
     return PTE_KIND_EMPTY;
   if ((pte & PTE_W) && !(pte & PTE_R))
@@ -103,7 +100,6 @@ const char *pte_kind_name(enum pte_kind kind) {
   case PTE_KIND_NONLEAF: return "nonleaf";
   case PTE_KIND_LEAF: return "leaf";
   case PTE_KIND_COW_LEAF: return "cow-leaf";
-  case PTE_KIND_SWAPPED: return "swapped";
   case PTE_KIND_PROT_NONE: return "prot-none";
   case PTE_KIND_RESERVED: return "reserved";
   default: return "unknown";
@@ -120,8 +116,6 @@ const char *pte_update_reason_name(enum pte_update_reason reason) {
   case PTE_UPDATE_KERNEL_REPAIR: return "kernel-repair";
   case PTE_UPDATE_UNMAP: return "unmap";
   case PTE_UPDATE_COW: return "cow";
-  case PTE_UPDATE_SWAPOUT: return "swapout";
-  case PTE_UPDATE_SWAPIN: return "swapin";
   case PTE_UPDATE_MPROTECT: return "mprotect";
   case PTE_UPDATE_MREMAP: return "mremap";
   case PTE_UPDATE_EXEC_PERM: return "exec-perm";
@@ -202,11 +196,7 @@ int pte_update(pagetable_t root, uint64_t va, pte_t *slot, pte_t newpte,
     return pte_update_fail(root, va, oldpte, newpte, level, reason,
                            "Sv39 reserved PTE encoding");
 
-  if (newkind == PTE_KIND_SWAPPED) {
-    if (level != 0)
-      return pte_update_fail(root, va, oldpte, newpte, level, reason,
-                             "swap PTE outside level 0");
-  } else if (newkind == PTE_KIND_NONLEAF) {
+  if (newkind == PTE_KIND_NONLEAF) {
     uint64_t child_pa = PTE2PA(newpte);
     if (level == 0)
       return pte_update_fail(root, va, oldpte, newpte, level, reason,
@@ -750,11 +740,6 @@ void uvmunmap_proc(struct proc *p, pagetable_t pagetable, uint64_t va, uint64_t 
                 *pte = 0;
                 a += PAGE_SIZE;
             }
-        } else if (PTE_IS_SWAPPED(*pte)) {
-            /* Swapped-out page: free the swap slot */
-            swap_free(PTE_SWAP_SLOT(*pte));
-            *pte = 0;
-            a += PAGE_SIZE;
         } else {
             /* Completely unmapped */
             a += PAGE_SIZE;
@@ -1183,10 +1168,7 @@ static void freewalk_level(pagetable_t pt, int level) {
     enum pte_kind kind = pte_classify(pte, level);
     if (kind == PTE_KIND_EMPTY)
       continue;
-    if (kind == PTE_KIND_SWAPPED) {
-      swap_free(PTE_SWAP_SLOT(pte));
-      pt[i] = 0;
-    } else if (kind == PTE_KIND_LEAF ||
+    if (kind == PTE_KIND_LEAF ||
                kind == PTE_KIND_COW_LEAF ||
                kind == PTE_KIND_PROT_NONE) {
       if (!(pte & PTE_U)) {
@@ -1275,9 +1257,6 @@ void proc_freepagetable(pagetable_t pagetable) {
       enum pte_kind kind = pte_classify(pte, 1);
       if (kind == PTE_KIND_EMPTY) {
         continue;
-      } else if (kind == PTE_KIND_SWAPPED) {
-        swap_free(PTE_SWAP_SLOT(pte));
-        user_L1[j] = 0;
       } else if (kind == PTE_KIND_LEAF ||
                  kind == PTE_KIND_COW_LEAF ||
                  kind == PTE_KIND_PROT_NONE) {
@@ -1406,29 +1385,6 @@ static uint64_t vm_resolve_user_page(struct proc *p, pagetable_t pagetable,
 
   pte_t *pte = walk(pagetable, page_va, 0);
 
-  /* Handle swap-in: PTE exists but is swapped out */
-  if (pte && PTE_IS_SWAPPED(*pte)) {
-    int slot = PTE_SWAP_SLOT(*pte);
-    int sflags = PTE_SWAP_FLAGS(*pte);
-    char *newpage = kalloc();
-    if (!newpage) goto out;
-    swap_read(slot, newpage);
-    if (pte_update(pagetable, page_va, pte,
-                   PA2PTE((uint64_t)newpage) | sflags | PTE_V,
-                   0, PTE_UPDATE_SWAPIN, PTE_SFENCE_NONE) < 0) {
-      kfree(newpage);
-      goto out;
-    }
-    swap_free(slot);
-    asm volatile("sfence.vma %0, zero" : : "r"(page_va));
-    /* Register in rmap if anonymous */
-    if (vma->anon_vma) {
-      struct page *pg = virt_to_page(newpage);
-      if (pg) page_add_anon_rmap(pg, vma, page_va);
-    }
-  }
-
-  /* Re-walk after potential swap-in */
   pte = walk(pagetable, page_va, 0);
 
   if (!pte || !(*pte & PTE_V)) {

@@ -16,7 +16,6 @@
 #include <riscv.h>
 #include <string.h>
 #include <printk.h>
-#include <swap.h>
 #include <tar.h>
 #include <kmalloc.h>
 #include <errno.h>
@@ -60,37 +59,6 @@ int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
          * the child's kernel mapping. */
         if ((*pte & PTE_V) && PTE_IS_LEAF(*pte) && !(*pte & PTE_U)) {
             va = (va & ~(SUPERPAGE_SIZE - 1)) + SUPERPAGE_SIZE;
-            continue;
-        }
-
-        /* Handle swapped-out pages: duplicate the swap slot */
-        if (PTE_IS_SWAPPED(*pte)) {
-            int old_slot = PTE_SWAP_SLOT(*pte);
-            int new_slot = swap_alloc();
-            if (new_slot < 0) return -1; /* swap full */
-
-            char *tmp = kalloc();
-            if (!tmp) {
-                swap_free(new_slot);
-                return -1;
-            }
-            swap_read(old_slot, tmp);
-            swap_write(new_slot, tmp);
-            kfree(tmp);
-
-            /* Child gets new slot with same flags */
-            pte_t child_pte = PTE_SWAP_ENCODE(new_slot, PTE_SWAP_FLAGS(*pte));
-            pte_t *cpte = walk(dst, va, 1);
-            if (!cpte) {
-                swap_free(new_slot);
-                return -1;
-            }
-            if (pte_update(dst, va, cpte, child_pte, 0,
-                           PTE_UPDATE_SWAPOUT, PTE_SFENCE_NONE) < 0) {
-                swap_free(new_slot);
-                return -1;
-            }
-            va += PAGE_SIZE;
             continue;
         }
 

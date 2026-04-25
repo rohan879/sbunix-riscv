@@ -5,7 +5,6 @@
 #include "include/string.h"
 #include "include/printk.h"
 #include "include/vm.h"
-#include "include/swap.h"  /* BF: needed for PTE_SWAP_ENCODE in try_to_unmap */
 
 static spinlock_t anon_vma_lock;  // Global anon_vma allocation lock
 
@@ -256,84 +255,6 @@ void page_remove_rmap(struct page *page, struct vm_area *vma) {
     }
     spin_unlock(&vma->anon_vma->lock);
   }
-}
-
-/* Try to unmap page from all VMAs that map it.
- * BF: Changed signature to accept swap_slot so PTE can encode a swap entry
- * instead of being silently zeroed. When swap_slot >= 0 the PTE is set to
- * the swap encoding; when swap_slot < 0 the PTE is simply cleared.
- * BF: Walks the process table to find the owning pagetable instead of
- * blindly using current_proc->pagetable, which is wrong after fork. */
-int try_to_unmap(struct page *page, int swap_slot) {
-  struct anon_vma *anon_vma;
-  int unmapped = 0;
-
-  if (!PageAnon(page) || !page->anon_vma) {
-    return 0;  /* Not anonymous or no reverse mapping */
-  }
-
-  anon_vma = page->anon_vma;
-  spin_lock(&anon_vma->lock);
-
-  extern pte_t *walk(pagetable_t pagetable, uint64_t va, int alloc);
-  extern struct proc proc[];
-
-  /* Walk all VMAs that could map this page */
-  for (struct list_head *pos = anon_vma->head.next;
-       pos != &anon_vma->head;
-       pos = pos->next) {
-    struct anon_vma_chain *avc = list_entry(pos, struct anon_vma_chain, anon_vma_node);
-    struct vm_area *vma = avc->vma;
-    uint64_t address;
-
-    /* Search for the page in this VMA's address space */
-    for (address = vma->start; address < vma->end; address += PAGE_SIZE) {
-      /* BF: Find the process whose vma_list contains this VMA, then walk
-       * that process's pagetable.  The old code used current_proc which
-       * is wrong when the VMA belongs to a forked child. */
-      pagetable_t owner_pt = 0;
-      for (int pi = 0; pi < NPROC; pi++) {
-        if (proc[pi].state == UNUSED || proc[pi].pagetable == 0) continue;
-        struct vm_area *vp = proc[pi].vma_list;
-        while (vp) {
-          if (vp == vma) { owner_pt = proc[pi].pagetable; break; }
-          vp = vp->next;
-        }
-        if (owner_pt) break;
-      }
-      if (!owner_pt) continue;
-
-      pte_t *pte = walk(owner_pt, address, 0);
-      if (pte && (*pte & PTE_V)) {
-        uint64_t pa = PTE2PA(*pte);
-        /* BF: PA comparison works because page->virtual holds the identity-
-         * mapped kernel virtual address which equals the physical address
-         * in our identity-mapping scheme. */
-        if (pa == (uint64_t)page->virtual) {
-          /* Found mapping — encode swap entry or zero the PTE */
-          if (swap_slot >= 0) {
-            /* BF: Encode swap entry so the page can be faulted back in */
-            pte_update(owner_pt, address, pte,
-                       PTE_SWAP_ENCODE(swap_slot, PTE_FLAGS(*pte)),
-                       0, PTE_UPDATE_SWAPOUT, PTE_SFENCE_NONE);
-          } else {
-            *pte = 0;
-          }
-          asm volatile("sfence.vma %0, zero" : : "r"(address));
-          /* BF: Direct page_remove_rmap call is safe here because spinlocks
-           * are no-ops on this uniprocessor kernel — no recursive lock
-           * acquisition deadlock.  If real locks are added, this must be
-           * deferred outside the anon_vma->lock critical section. */
-          page_remove_rmap(page, vma);
-          unmapped++;
-          break;  /* Only one mapping per VMA for a given page */
-        }
-      }
-    }
-  }
-
-  spin_unlock(&anon_vma->lock);
-  return unmapped;
 }
 
 /* Find all VMAs that map a given page (for debugging) */
