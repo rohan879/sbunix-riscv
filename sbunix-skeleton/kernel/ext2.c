@@ -3,7 +3,6 @@
 #include <virtio_blk.h>
 #include <kalloc.h>
 #include <kmalloc.h>
-#include <swap.h>
 #include <string.h>
 #include <printk.h>
 #include <errno.h>  /* RF: Use symbolic errno constants instead of hardcoded values */
@@ -36,9 +35,6 @@ static uint64_t ext2_usable_sectors(struct ext2_fs *fs) {
   uint64_t cap = virtio_blk_capacity_on_dev(fs->device_index);
   if (cap == 0)
     return 0;
-  /* Reserve the swap tail only when swap is actually enabled. */
-  if (fs->device_index == 0 && swap_enabled() && cap > SWAP_NSECTORS)
-    return cap - SWAP_NSECTORS;
   return cap;
 }
 
@@ -2133,8 +2129,6 @@ int ext2_init(void) {
     uint64_t cap = virtio_blk_capacity_on_dev(fs->device_index);
     if (cap == 0) cap = 131072; /* 64 MB fallback */
     uint64_t usable_sectors = cap;
-    if (fs->device_index == 0 && cap > SWAP_NSECTORS)
-      usable_sectors = cap - SWAP_NSECTORS;
     uint32_t usable_blocks = (uint32_t)(usable_sectors / EXT2_SECTORS_PER_BLOCK);
 
     int need_format = 0;
@@ -2149,12 +2143,9 @@ int ext2_init(void) {
         printk("ext2[%d]: no valid filesystem (magic=0x%x, expected 0x%x)\n",
                fs->device_index, disk_sb->magic, EXT2_MAGIC);
       } else {
-        printk("ext2[%d]: filesystem overlaps swap reservation; reformatting\n",
+        printk("ext2[%d]: filesystem geometry changed; reformatting\n",
                fs->device_index);
       }
-      if (fs->device_index == 0)
-        printk("ext2[%d]: reserving %d sectors for swap\n",
-               fs->device_index, SWAP_NSECTORS);
       printk("ext2[%d]: formatting disk...\n", fs->device_index);
 
       {

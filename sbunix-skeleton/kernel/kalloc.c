@@ -4,7 +4,6 @@
 #include <printk.h>
 #include <riscv.h>
 #include <string.h>
-#include <swap.h>
 
 extern char _kernel_end[]; // Symbol from linker script
 
@@ -228,9 +227,6 @@ void kinit(void) {
 // Returns NULL if the memory cannot be allocated.
 void *kalloc(void) {
     struct run *r;
-
-    if (free_page_count < SWAP_LOW_WATERMARK && swap_enabled())
-        swap_evict_pages(SWAP_EVICT_BATCH);
 
     unsigned long old = r_sstatus();
     w_sstatus(old & ~SSTATUS_SIE);

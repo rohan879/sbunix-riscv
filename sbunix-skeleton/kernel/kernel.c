@@ -14,7 +14,6 @@
 #include <virtio_blk.h>
 #include <ext2.h>
 #include <tty.h>
-#include <swap.h>
 
 // Declare symbols for the embedded tarfs
 extern char _tarfs_start[];
@@ -44,7 +43,6 @@ void boot(uint64_t hartid, void *dtb) {
 
   if (virtio_blk_init() == 0) {
     ext2_init();
-    swap_init();
   }
 
   procinit();

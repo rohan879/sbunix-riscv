@@ -5,25 +5,16 @@
 #include <kalloc.h>
 
 /* ------------------------------------------------------------------ */
-/* Swap space constants                                                */
-/* ------------------------------------------------------------------ */
-#define SWAP_NSLOTS       1024              /* 1024 pages = 4 MB of swap */
-#define SECTORS_PER_PAGE  (PAGE_SIZE / 512) /* 8 sectors per 4 KB page   */
-#define SWAP_NSECTORS     (SWAP_NSLOTS * SECTORS_PER_PAGE) /* 8192 sectors */
-
-/* Eviction thresholds */
-#define SWAP_LOW_WATERMARK  32  /* trigger eviction when free pages below this */
-#define SWAP_EVICT_BATCH     8  /* evict this many pages per trigger */
-
-/* ------------------------------------------------------------------ */
 /* PTE encoding for swapped-out pages                                  */
 /*                                                                      */
-/* When PTE_V=0, hardware ignores all other bits.  We repurpose them:  */
+/* Swap is disabled, but older VM paths still use this encoding to      */
+/* recognize or clear swapped-out PTEs if they ever appear.             */
+/* When PTE_V=0, hardware ignores all other bits.  We repurpose them:   */
 /*   Bit  0:     0         (PTE_V cleared -- triggers page fault)      */
 /*   Bit  8:     1         (PTE_SWAP marker)                           */
 /*   Bit  9:     1 if page was COW-marked (PTE_COW) before eviction   */
 /*   Bits 1-7:   original permission flags (R,W,X,U,G,A,D) preserved  */
-/*   Bits 10-53: swap slot index (44 bits, only 10 needed for 1024)    */
+/*   Bits 10-53: swap slot index placeholder                           */
 /*                                                                      */
 /* PTE_SWAP uses bit 8 as the swap-present marker.  Bit 9 (RSW bit 1) */
 /* preserves the PTE_COW flag so that swap-in can restore COW          */
@@ -53,15 +44,9 @@
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
-void swap_init(void);
 int  swap_alloc(void);
 void swap_free(int slot);
 void swap_write(int slot, void *page);
 void swap_read(int slot, void *page);
-int  swap_evict_pages(int n);
-void swap_stats(void);
-
-/* Returns 1 if swap subsystem is enabled (disk present and large enough) */
-int  swap_enabled(void);
 
 #endif
