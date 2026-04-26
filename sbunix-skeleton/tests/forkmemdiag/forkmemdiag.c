@@ -7,7 +7,7 @@
  *
  * Postfork mode ("postfork"):
  *   The parent forks first. The child then allocates and writes the region,
- *   which more closely matches a "child allocates 100MB" grading scenario.
+ *   which exercises the postfork allocation path.
  *
  * Default sweep: 30MB, 60MB, 100MB
  * Optional usage:
@@ -185,7 +185,7 @@ int main(int argc, char **argv)
   int argi = 1;
 
   printf("forkmemdiag: fork + COW memory-pressure sweep\n");
-  printf("hint: watch kernel output for 'WARNING: double kfree'\n");
+  printf("hint: watch kernel output for refcount, rmap, or free warnings\n");
 
   if (argc > 1 && strcmp(argv[1], "postfork") == 0) {
     mode_postfork = 1;
@@ -232,6 +232,6 @@ int main(int argc, char **argv)
 
   printf("\nforkmemdiag: first failing size = %d MB\n", first_fail);
   printf("diagnosis: if lower sizes pass and a higher size fails, the bug is likely\n");
-  printf("triggered when reclaim/swap starts overlapping with COW or exit cleanup.\n");
+  printf("a resident-memory boundary or COW/exit cleanup regression.\n");
   return 1;
 }

@@ -1,13 +1,13 @@
 /*
  * mremaptest -- verify mremap works correctly for shrink, grow,
- * MREMAP_MAYMOVE, protection preservation, swap, and file-backed cases.
+ * MREMAP_MAYMOVE, protection preservation, pressure, and file-backed cases.
  *
  * Tests:
  *  1. mremap_shrink: shrink 2 pages to 1, verify data survives
  *  2. mremap_grow_inplace: grow 1 page to 2, verify old data + new page
  *  3. mremap_maymove_data: grow 1->4 pages with MAYMOVE, verify data
  *  4. mremap_preserves_prot: mmap RO, mremap MAYMOVE, verify read works
- *  5. mremap_swap_pages: mmap many pages to trigger swap, verify data
+ *  5. mremap_pressure_pages: mmap several pages under modest pressure
  *  6. mremap_shrink_shared_writeback: MAP_SHARED file, shrink, verify
  *  7. mremap_shrink_preserves_split_prot: mprotect partial, shrink
  *  8. mremap_maymove_preserves_split_prot: mprotect partial, MAYMOVE
@@ -182,10 +182,10 @@ static void test_mremap_preserves_prot(void) {
 }
 
 /*
- * Test 5: mremap with swap pressure -- mmap many pages to trigger swap,
+ * Test 5: mremap under modest resident pressure -- mmap several pages,
  * write pattern, mremap with MAYMOVE, verify data integrity.
  */
-static void test_mremap_swap_pages(void) {
+static void test_mremap_pressure_pages(void) {
   /* Allocate enough pages to put pressure on memory (16 pages = 64KB).
    * Kept modest to avoid OOM on 128MB system. */
   size_t npages = 16;
@@ -193,7 +193,7 @@ static void test_mremap_swap_pages(void) {
   void *p = mmap(NULL, sz, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (p == MAP_FAILED) {
-    CHECK("mremap_swap_pages", 0);
+    CHECK("mremap_pressure_pages", 0);
     return;
   }
   /* Write pattern: each page gets its page index in first byte */
@@ -216,7 +216,7 @@ static void test_mremap_swap_pages(void) {
   } else {
     munmap(p, sz);
   }
-  CHECK("mremap_swap_pages", ok);
+  CHECK("mremap_pressure_pages", ok);
 }
 
 /*
@@ -498,7 +498,7 @@ int main(void) {
   test_mremap_grow_inplace();
   test_mremap_maymove_data();
   test_mremap_preserves_prot();
-  test_mremap_swap_pages();
+  test_mremap_pressure_pages();
   test_mremap_shrink_shared_writeback();
   test_mremap_shrink_preserves_split_prot();
   test_mremap_maymove_preserves_split_prot();
