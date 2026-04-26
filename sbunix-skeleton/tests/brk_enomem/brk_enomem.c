@@ -1,23 +1,185 @@
-/* brk_enomem — test that brk returns error under memory pressure.
+/* brk_enomem -- verify rejected brk growth leaves the break unchanged.
  *
- * Validates that sys_brk correctly checks vma_add return value and
- * returns an error (unchanged brk) when the VMA cannot be allocated,
- * rather than advancing sz past a region with no VMA coverage. */
+ * BF: Large or colliding brk requests must not partially update process
+ * size or VMA metadata.  The raw SYS_brk convention asserted here is:
+ * success returns the requested break, rejection returns the current break. */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <syscall.h>
+
+#define PAGE_SIZE_BYTES 4096UL
+#define ONE_GIB (1024UL * 1024UL * 1024UL)
+#define USER_TOP_ADDR 0x40000000UL
+#define SIGTRAMP_ADDR 0x3F000000UL
+#define KERNEL_ADDR 0x80000000UL
+
+static uintptr_t current_break(void)
+{
+  return (uintptr_t)sbrk(0);
+}
+
+static int expect_raw_reject(uintptr_t target, const char *label)
+{
+  uintptr_t before = current_break();
+  long raw;
+  uintptr_t after;
+
+  if (before == (uintptr_t)-1) {
+    printf("[FAIL] brk_enomem (%s: sbrk(0) failed before check)\n", label);
+    return 1;
+  }
+
+  raw = syscall(SYS_brk, target);
+  after = current_break();
+
+  if ((uintptr_t)raw != before || after != before) {
+    syscall(SYS_brk, before);
+    printf("[FAIL] brk_enomem (%s: raw=0x%lx before=0x%lx after=0x%lx)\n",
+           label, (unsigned long)raw, (unsigned long)before,
+           (unsigned long)after);
+    return 1;
+  }
+
+  return 0;
+}
+
+static int expect_sbrk_reject(long increment, const char *label)
+{
+  uintptr_t before = current_break();
+  void *ret;
+  uintptr_t after;
+
+  if (before == (uintptr_t)-1) {
+    printf("[FAIL] brk_enomem (%s: sbrk(0) failed before check)\n", label);
+    return 1;
+  }
+
+  errno = 0;
+  ret = sbrk(increment);
+  after = current_break();
+
+  if (ret != (void *)-1 || after != before) {
+    syscall(SYS_brk, before);
+    printf("[FAIL] brk_enomem (%s: ret=%p before=0x%lx after=0x%lx)\n",
+           label, ret, (unsigned long)before, (unsigned long)after);
+    return 1;
+  }
+
+  return 0;
+}
+
+static int child_status_ok(pid_t pid, int status, const char *label)
+{
+  if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+    return 0;
+  if (WIFEXITED(status)) {
+    printf("[FAIL] brk_enomem (%s: child exit %d)\n",
+           label, WEXITSTATUS(status));
+    return 1;
+  }
+  if (WIFSIGNALED(status)) {
+    printf("[FAIL] brk_enomem (%s: child signal %d)\n",
+           label, WTERMSIG(status));
+    return 1;
+  }
+  printf("[FAIL] brk_enomem (%s: child status 0x%x pid %d)\n",
+         label, status, pid);
+  return 1;
+}
+
+static int run_raw_child(uintptr_t target, const char *label)
+{
+  int status = 0;
+  pid_t pid = fork();
+  if (pid < 0) {
+    printf("[FAIL] brk_enomem (%s: fork failed)\n", label);
+    return 1;
+  }
+  if (pid == 0)
+    _exit(expect_raw_reject(target, label) == 0 ? 0 : 1);
+  if (waitpid(pid, &status, 0) != pid) {
+    printf("[FAIL] brk_enomem (%s: waitpid failed)\n", label);
+    return 1;
+  }
+  return child_status_ok(pid, status, label);
+}
+
+static int run_sbrk_child(long increment, const char *label)
+{
+  int status = 0;
+  pid_t pid = fork();
+  if (pid < 0) {
+    printf("[FAIL] brk_enomem (%s: fork failed)\n", label);
+    return 1;
+  }
+  if (pid == 0)
+    _exit(expect_sbrk_reject(increment, label) == 0 ? 0 : 1);
+  if (waitpid(pid, &status, 0) != pid) {
+    printf("[FAIL] brk_enomem (%s: waitpid failed)\n", label);
+    return 1;
+  }
+  return child_status_ok(pid, status, label);
+}
+
+static int run_mmap_collision_child(const char *label)
+{
+  int status = 0;
+  pid_t pid = fork();
+  if (pid < 0) {
+    printf("[FAIL] brk_enomem (%s: fork failed)\n", label);
+    return 1;
+  }
+  if (pid == 0) {
+    void *mapped = mmap(NULL, PAGE_SIZE_BYTES, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapped == MAP_FAILED)
+      _exit(2);
+    int rc = expect_raw_reject((uintptr_t)mapped + PAGE_SIZE_BYTES, label);
+    munmap(mapped, PAGE_SIZE_BYTES);
+    _exit(rc == 0 ? 0 : 1);
+  }
+  if (waitpid(pid, &status, 0) != pid) {
+    printf("[FAIL] brk_enomem (%s: waitpid failed)\n", label);
+    return 1;
+  }
+  return child_status_ok(pid, status, label);
+}
+
+static int run_repeated_raw_child(uintptr_t target, const char *label)
+{
+  int status = 0;
+  pid_t pid = fork();
+  if (pid < 0) {
+    printf("[FAIL] brk_enomem (%s: fork failed)\n", label);
+    return 1;
+  }
+  if (pid == 0) {
+    for (int i = 0; i < 3; i++) {
+      if (expect_raw_reject(target, label) != 0)
+        _exit(1);
+    }
+    _exit(0);
+  }
+  if (waitpid(pid, &status, 0) != pid) {
+    printf("[FAIL] brk_enomem (%s: waitpid failed)\n", label);
+    return 1;
+  }
+  return child_status_ok(pid, status, label);
+}
 
 int main(void) {
-  /* Get current brk */
   uintptr_t cur = (uintptr_t)sbrk(0);
   if (cur == (uintptr_t)-1) {
     printf("[FAIL] brk_enomem (sbrk(0) failed)\n");
     return 1;
   }
 
-  /* Try a reasonable brk increase — should succeed */
   uintptr_t small = cur + 4096;
   void *ret = sbrk(4096);
   if (ret == (void *)-1) {
@@ -25,36 +187,33 @@ int main(void) {
     return 1;
   }
 
-  /* Verify brk moved forward */
   uintptr_t after = (uintptr_t)sbrk(0);
   if (after < small) {
     printf("[FAIL] brk_enomem (brk did not advance after small sbrk)\n");
     return 1;
   }
 
-  /* Try an absurdly large brk — should fail gracefully.
-   * Request ~1GB which should exceed available memory. */
-  void *big = sbrk(1024 * 1024 * 1024);
-
-  /* If the huge sbrk succeeds, verify we can still get the current brk
-   * without crashing — the key invariant is that the kernel doesn't
-   * corrupt its state regardless of whether it accepts or rejects. */
-  uintptr_t final = (uintptr_t)sbrk(0);
-  if (final == (uintptr_t)-1) {
-    printf("[FAIL] brk_enomem (sbrk(0) failed after large request)\n");
+  if (run_raw_child(after + ONE_GIB, "raw 1GiB growth") != 0)
     return 1;
-  }
 
-  /* Either the large sbrk failed (big == -1) which is the expected
-   * behavior with the vma_add check, or it succeeded because there
-   * was enough memory.  Both are acceptable — the test mainly verifies
-   * no crash or state corruption. */
-  if (big == (void *)-1) {
-    /* Expected: large allocation was properly rejected */
-    printf("[PASS] brk_enomem\n");
-  } else {
-    /* Acceptable: system had enough memory */
-    printf("[PASS] brk_enomem\n");
-  }
+  if (run_sbrk_child((long)ONE_GIB, "sbrk 1GiB growth") != 0)
+    return 1;
+
+  if (run_raw_child(USER_TOP_ADDR, "user top collision") != 0)
+    return 1;
+  if (run_raw_child(SIGTRAMP_ADDR, "signal trampoline collision") != 0)
+    return 1;
+  if (run_raw_child(KERNEL_ADDR, "kernel address") != 0)
+    return 1;
+  if (run_raw_child(UINTPTR_MAX - 2048UL, "rounding overflow") != 0)
+    return 1;
+
+  if (run_mmap_collision_child("mmap collision") != 0)
+    return 1;
+
+  if (run_repeated_raw_child(after + ONE_GIB, "repeated rejected growth") != 0)
+    return 1;
+
+  printf("[PASS] brk_enomem\n");
   return 0;
 }
