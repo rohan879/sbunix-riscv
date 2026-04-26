@@ -1326,7 +1326,6 @@ int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
     char *newpage = kalloc();
     if (!newpage) return -1;
     memcpy(newpage, (void *)pa, PAGE_SIZE);
-    page_ref_dec(pa);
     if (pte_update(pagetable, va, pte,
                    PA2PTE((uint64_t)newpage) |
                    ((flags & ~PTE_COW) | PTE_W),
@@ -1334,12 +1333,12 @@ int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
       kfree(newpage);
       return -1;
     }
-    /* Register new page in anon rmap unconditionally so the eviction
-     * scanner can find and unmap it from all sharing processes. */
+    /* Register the replacement before dropping the old page reference. */
     if (vma && vma->anon_vma) {
       struct page *pg = virt_to_page(newpage);
       if (pg) page_add_anon_rmap(pg, vma, va);
     }
+    page_ref_dec(pa);
   }
   asm volatile("sfence.vma %0, zero" : : "r"(va));
   return 0;

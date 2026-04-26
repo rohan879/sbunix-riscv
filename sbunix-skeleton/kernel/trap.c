@@ -1177,7 +1177,6 @@ void trap_handler(struct trapframe *tf) {
                                 if (!cowpg)
                                     goto pagefault_kill;
                                 memcpy(cowpg, (void *)rpa, PAGE_SIZE);
-                                page_ref_dec(rpa);
                                 int perm = PTE_U | prot_to_pte_flags(fvma->prot);
                                 if (pte_update(current_proc->pagetable, va, pte,
                                                PA2PTE((uint64_t)cowpg) | perm | PTE_V,
@@ -1186,6 +1185,12 @@ void trap_handler(struct trapframe *tf) {
                                     kfree(cowpg);
                                     goto pagefault_kill;
                                 }
+                                if (fvma->anon_vma) {
+                                    struct page *cow_page = virt_to_page(cowpg);
+                                    if (cow_page)
+                                        page_add_anon_rmap(cow_page, fvma, va);
+                                }
+                                page_ref_dec(rpa);
                             } else {
                                 int perm = PTE_U | prot_to_pte_flags(fvma->prot);
                                 if (pte_update(current_proc->pagetable, va, pte,
