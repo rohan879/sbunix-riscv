@@ -49,6 +49,8 @@ echo "=== Running cowtest ==="
 /test/bin/cowtest
 echo "=== Running lazytest ==="
 /test/bin/lazytest
+echo "=== Running alloc1gb ===" && /test/bin/alloc1gb
+echo "=== Running brk_enomem ===" && /test/bin/brk_enomem
 echo "=== Running pgrptest ==="
 /test/bin/pgrptest
 echo "=== Running symlinktest ==="

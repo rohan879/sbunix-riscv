@@ -18,16 +18,84 @@
 #include <syscall.h>
 #include <errno.h>
 
+static int mmap_reserved_range(struct proc *p, uint64_t start, uint64_t len,
+                               uint64_t *next_va);
+
+static int brk_round_up(uint64_t value, uint64_t *rounded) {
+    if (value > (uint64_t)-1 - (PAGE_SIZE - 1))
+        return -1;
+    *rounded = PGROUNDUP(value);
+    if (*rounded < value)
+        return -1;
+    return 0;
+}
+
+static int ranges_overlap(uint64_t a_start, uint64_t a_end,
+                          uint64_t b_start, uint64_t b_end) {
+    return a_start < b_end && b_start < a_end;
+}
+
+static int brk_stack_guard_overlap(struct proc *p, uint64_t start,
+                                   uint64_t end, uint64_t target) {
+    if (!p || p->stack_top == 0 || p->stack_bottom == 0)
+        return 0;
+
+    uint64_t guard_bytes = 256 * PAGE_SIZE;
+    uint64_t guard_start = p->stack_bottom > guard_bytes
+                         ? p->stack_bottom - guard_bytes
+                         : 0;
+    uint64_t guard_end = p->stack_top ? p->stack_top : USER_STACK_TOP;
+
+    return ranges_overlap(start, end, guard_start, guard_end) ||
+           target >= guard_start;
+}
+
+static int brk_vma_overlap(struct proc *p, uint64_t start, uint64_t end) {
+    struct vm_area *v = p->vma_list;
+
+    while (v) {
+        if (v->end <= start) {
+            v = v->next;
+            continue;
+        }
+        if (v->start >= end)
+            break;
+        return 1;
+    }
+
+    return 0;
+}
+
+static int brk_reserved_overlap(struct proc *p, uint64_t start, uint64_t end,
+                                uint64_t target) {
+    if (target >= SIGTRAMP_VA ||
+        ranges_overlap(start, end, SIGTRAMP_VA, SIGTRAMP_VA + PAGE_SIZE))
+        return 1;
+    if (brk_stack_guard_overlap(p, start, end, target))
+        return 1;
+    if (brk_vma_overlap(p, start, end))
+        return 1;
+    if (mmap_reserved_range(p, start, end - start, 0))
+        return 1;
+    return 0;
+}
+
 long sys_brk_handler(struct trapframe *tf) {
     uint64_t new_brk = tf->a0;
     uint64_t cur_sz  = current_proc->sz;
+    uint64_t new_rounded;
+    uint64_t old_rounded;
 
     if (new_brk == 0) {
         return (long)cur_sz;
     } else if (new_brk < cur_sz) {
-        /* Shrink: unmap pages and remove VMA coverage */
-        uint64_t new_rounded = PGROUNDUP(new_brk);
-        uint64_t old_rounded = PGROUNDUP(cur_sz);
+        if (!user_addr_ok(new_brk) ||
+            brk_round_up(new_brk, &new_rounded) < 0 ||
+            brk_round_up(cur_sz, &old_rounded) < 0)
+            return (long)cur_sz;
+
+        /* BF: Keep raw brk failure Linux-like: reject invalid shrink targets
+         * by returning the unchanged break instead of a negative errno. */
         if (new_rounded < old_rounded) {
             uvmunmap_proc(current_proc, current_proc->pagetable,
                          new_rounded, old_rounded - new_rounded);
@@ -37,16 +105,22 @@ long sys_brk_handler(struct trapframe *tf) {
         current_proc->sz = new_brk;
         return (long)new_brk;
     } else {
-        /* Grow: lazy allocation -- just add a VMA, pages allocated on fault */
-        uint64_t heap_start = PGROUNDUP(cur_sz);
-        uint64_t rounded    = PGROUNDUP(new_brk);
-        if (heap_start < rounded) {
-            /* BF: Check vma_add return value — don't update sz if VMA
-             * allocation failed, otherwise the process state (sz) would
-             * advance past a region with no VMA coverage. */
-            if (vma_add(current_proc, heap_start, rounded,
+        if (!user_addr_ok(new_brk) ||
+            brk_round_up(cur_sz, &old_rounded) < 0 ||
+            brk_round_up(new_brk, &new_rounded) < 0 ||
+            !user_range_ok(old_rounded, new_rounded - old_rounded))
+            return (long)cur_sz;
+
+        /* Grow lazily, but first reject reserved holes and existing VMAs.
+         * BF: vma_add() does not enforce non-overlap, so brk must preflight
+         * the full heap extension before publishing a larger process size. */
+        if (old_rounded < new_rounded) {
+            if (brk_reserved_overlap(current_proc, old_rounded, new_rounded,
+                                     new_brk))
+                return (long)cur_sz;
+            if (vma_add(current_proc, old_rounded, new_rounded,
                         PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON) < 0)
-                return (long)-12; /* -ENOMEM */
+                return (long)cur_sz;
         }
         current_proc->sz = new_brk;
         return (long)new_brk;
