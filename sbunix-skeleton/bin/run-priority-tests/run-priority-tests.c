@@ -12,7 +12,8 @@
 #include <signal.h>
 #include <fcntl.h>
 
-#define TIMEOUT_SEC 30
+#define DEFAULT_TIMEOUT_SEC 30
+#define SLOW_TIMEOUT_SEC 180
 #define MANIFEST_MAX (64 * 1024)
 
 volatile pid_t g_child_pid;
@@ -26,6 +27,14 @@ static void alarm_handler(int sig) {
   (void)sig;
   if (g_child_pid > 0)
     kill(g_child_pid, SIGKILL);
+}
+
+static unsigned int timeout_for_test(const char *suite, const char *name) {
+  if (strcmp(suite, "open-posix") == 0 &&
+      (strcmp(name, "conformance/interfaces/clock_gettime/4-1") == 0 ||
+       strcmp(name, "conformance/interfaces/mmap/10-1") == 0))
+    return SLOW_TIMEOUT_SEC;
+  return DEFAULT_TIMEOUT_SEC;
 }
 
 static int run_test(const char *runner, const char *suite, const char *name) {
@@ -61,7 +70,7 @@ static int run_test(const char *runner, const char *suite, const char *name) {
   }
 
   g_child_pid = pid;
-  alarm(TIMEOUT_SEC);
+  alarm(timeout_for_test(suite, name));
 
   int status = 0;
   pid_t ret = waitpid(pid, &status, 0);

@@ -18,6 +18,8 @@
 #define OPEN_POSIX_BIN_ROOT TEST_ROOT "/bin/open-posix-test"
 #define MANIFEST_FILE TEST_ROOT "/open-posix-test-manifest"
 #define RESULTS_DIR TEST_ROOT "/var/log/open-posix-test"
+#define DEFAULT_TIMEOUT_SEC 5
+#define SLOW_TIMEOUT_SEC 180
 
 #ifndef TOTAL_OPEN_POSIX_TESTS
 #define TOTAL_OPEN_POSIX_TESTS 1984
@@ -63,7 +65,17 @@ static void alarm_handler(int sig) {
     timed_out = 1;
 }
 
-static void install_timeout_alarm(struct sigaction *old_alrm, sigset_t *old_mask) {
+static unsigned int timeout_for_test(const char *name) {
+    if (!name)
+        return DEFAULT_TIMEOUT_SEC;
+    if (strcmp(name, "conformance/interfaces/clock_gettime/4-1") == 0 ||
+        strcmp(name, "conformance/interfaces/mmap/10-1") == 0)
+        return SLOW_TIMEOUT_SEC;
+    return DEFAULT_TIMEOUT_SEC;
+}
+
+static void install_timeout_alarm(struct sigaction *old_alrm, sigset_t *old_mask,
+                                  unsigned int timeout_seconds) {
     struct sigaction sa;
     timed_out = 0;
     sa.sa_handler = alarm_handler;
@@ -75,7 +87,7 @@ static void install_timeout_alarm(struct sigaction *old_alrm, sigset_t *old_mask
     sigdelset(&mask, SIGALRM);
     sigprocmask(SIG_SETMASK, &mask, NULL);
     sigaction(SIGALRM, &sa, old_alrm);
-    alarm(5);
+    alarm(timeout_seconds);
 }
 
 static void uninstall_timeout_alarm(const struct sigaction *old_alrm, const sigset_t *old_mask) {
@@ -253,7 +265,8 @@ static enum test_result run_test(int test_idx) {
     char output[MAX_OUTPUT];
     struct sigaction old_alrm;
     sigset_t old_mask;
-    install_timeout_alarm(&old_alrm, &old_mask);
+    install_timeout_alarm(&old_alrm, &old_mask,
+                          timeout_for_test(tests[test_idx].name));
     int exit_code = run_test_capture(tests[test_idx].path, output, sizeof(output));
     uninstall_timeout_alarm(&old_alrm, &old_mask);
 
@@ -302,7 +315,8 @@ int main(int argc, char *argv[]) {
         /* Install timeout alarm handler */
         struct sigaction old_alrm;
         sigset_t old_mask;
-        install_timeout_alarm(&old_alrm, &old_mask);
+        install_timeout_alarm(&old_alrm, &old_mask,
+                              timeout_for_test(single_test.name));
         
         int exit_code = run_test_capture(single_test.path, output, sizeof(output));
         

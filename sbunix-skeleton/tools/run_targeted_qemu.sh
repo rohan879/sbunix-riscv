@@ -8,6 +8,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$PROJECT_DIR")"
 TIMEOUT=${TIMEOUT:-180}
 QEMU_MEM=${QEMU_MEM:-256M}
+TEST_DISK_IMG=${TEST_DISK_IMG:-build/test-disk-core.img}
+TEST_DISK_TARGET=${TEST_DISK_TARGET:-$TEST_DISK_IMG}
 ARTIFACT_DIR=${SBUNIX_TARGETED_ARTIFACT_DIR:-/home/adebayo/test-findings/test-findings-23-artifacts/targeted}
 RAW_LOG="$ARTIFACT_DIR/targeted-qemu.raw.log"
 SUMMARY_LOG="$ARTIFACT_DIR/targeted-qemu-summary.txt"
@@ -156,6 +158,7 @@ source tools/sourceme.sh
 
 IMPLEMENTATION_SHA="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
 echo "implementation_sha=$IMPLEMENTATION_SHA" | tee -a "$SUMMARY_LOG"
+echo "test_disk_img=$TEST_DISK_IMG" | tee -a "$SUMMARY_LOG"
 if [ "${ALLOW_DIRTY_VALIDATION:-0}" != "1" ] &&
    [ -n "$(git -C "$REPO_DIR" status --porcelain -- sbunix-skeleton 2>/dev/null)" ]; then
     echo "FATAL: sbunix-skeleton has uncommitted changes; set ALLOW_DIRTY_VALIDATION=1 for development runs." | tee -a "$SUMMARY_LOG"
@@ -168,7 +171,7 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
     if [ "${SKIP_CLEAN:-0}" != "1" ]; then
         MAKEFLAGS= make clean
     fi
-    MAKEFLAGS= make -j1 build/kernel.elf build/disk.img build/test-disk-core.img
+    MAKEFLAGS= make -j1 build/kernel.elf build/disk.img "$TEST_DISK_TARGET"
 fi
 
 QEMU_FIFO_DIR="$(mktemp -d /tmp/sbunix-targeted-stdin.XXXXXX)"
@@ -179,7 +182,7 @@ exec {QEMU_STDIN_FD}<>"$QEMU_FIFO"
 qemu-system-riscv64 -machine virt -m "$QEMU_MEM" -bios default -kernel build/kernel.elf \
     -drive file=build/disk.img,format=raw,if=none,id=hd0 \
     -device virtio-blk-pci-non-transitional,drive=hd0 \
-    -drive file=build/test-disk-core.img,format=raw,if=none,id=hd1 \
+    -drive file="$TEST_DISK_IMG",format=raw,if=none,id=hd1 \
     -device virtio-blk-pci-non-transitional,drive=hd1 \
     -device virtio-gpu-pci \
     -device virtio-net-pci-non-transitional,netdev=net0 \
