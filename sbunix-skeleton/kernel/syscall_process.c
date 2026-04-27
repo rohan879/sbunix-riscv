@@ -16,7 +16,6 @@
 #include <riscv.h>
 #include <string.h>
 #include <printk.h>
-#include <swap.h>
 #include <tar.h>
 #include <kmalloc.h>
 #include <errno.h>
@@ -63,37 +62,6 @@ int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
             continue;
         }
 
-        /* Handle swapped-out pages: duplicate the swap slot */
-        if (PTE_IS_SWAPPED(*pte)) {
-            int old_slot = PTE_SWAP_SLOT(*pte);
-            int new_slot = swap_alloc();
-            if (new_slot < 0) return -1; /* swap full */
-
-            char *tmp = kalloc();
-            if (!tmp) {
-                swap_free(new_slot);
-                return -1;
-            }
-            swap_read(old_slot, tmp);
-            swap_write(new_slot, tmp);
-            kfree(tmp);
-
-            /* Child gets new slot with same flags */
-            pte_t child_pte = PTE_SWAP_ENCODE(new_slot, PTE_SWAP_FLAGS(*pte));
-            pte_t *cpte = walk(dst, va, 1);
-            if (!cpte) {
-                swap_free(new_slot);
-                return -1;
-            }
-            if (pte_update(dst, va, cpte, child_pte, 0,
-                           PTE_UPDATE_SWAPOUT, PTE_SFENCE_NONE) < 0) {
-                swap_free(new_slot);
-                return -1;
-            }
-            va += PAGE_SIZE;
-            continue;
-        }
-
         if (!(*pte & PTE_V)) {
             va += PAGE_SIZE;
             continue;
@@ -135,9 +103,9 @@ int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
          * copy_pagetable_cow runs for ALL pages (anon + non-anon), but
          * freewalk_level in the exit path does kfree without a matching
          * page_remove_mapping.  This causes mapcount to stay elevated
-         * after the child exits, making pages permanently unevictable
-         * by swap_evict_pages (which skips mapcount > 0).  The VMA-level
-         * rmap from anon_vma_fork is sufficient for swap/reclaim. */
+         * after the child exits, making pages permanently look shared to
+         * later memory-management code.  The VMA-level rmap from
+         * anon_vma_fork is sufficient for current teardown paths. */
         va += PAGE_SIZE;
     }
     /* Flush TLB since we modified parent PTEs */
@@ -421,9 +389,8 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
 
 bad:
     /* Clean up partially-built child pagetable.  proc_freepagetable
-     * walks the user address space, freeing COW-shared pages (via
-     * kfree/refcount) AND any duplicated swap slots, preventing both
-     * memory leaks and swap-slot double-frees. */
+     * walks the user address space and frees any partially duplicated
+     * COW-shared pages through the normal refcounted teardown path. */
     vma_free_all(p);
     if (new_pt)
         proc_freepagetable(new_pt);
@@ -871,8 +838,14 @@ long sys_execve_handler(struct trapframe *tf) {
         #define KERN_O_CLOEXEC 02000000 /* matches libc O_CLOEXEC */
         struct open_file **oft = proc_ofile(current_proc);
         for (int fd = 0; fd < NOFILE; fd++) {
-            if (oft[fd] && ((oft[fd]->flags & KERN_O_CLOEXEC) ||
-                            (current_proc->fd_flags[fd] & 1))) {
+            struct open_file *f = oft[fd];
+            if (f && !vfs_file_valid(f)) {
+                oft[fd] = NULL;
+                current_proc->fd_flags[fd] = 0;
+                continue;
+            }
+            if (f && ((f->flags & KERN_O_CLOEXEC) ||
+                      (current_proc->fd_flags[fd] & 1))) {
                 close_ofile(current_proc, fd);
                 current_proc->fd_flags[fd] = 0;
             }

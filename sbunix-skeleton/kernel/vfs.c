@@ -106,6 +106,10 @@ static int vfs_file_ptr_valid(struct open_file *f) {
   return 1;
 }
 
+int vfs_file_valid(struct open_file *f) {
+  return vfs_file_ptr_valid(f);
+}
+
 struct open_file *vfs_alloc_file(void) {
   for (int i = 0; i < NFILE; i++) {
     if (file_table[i].refcount == 0) {

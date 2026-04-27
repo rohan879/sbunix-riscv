@@ -4,7 +4,6 @@
 #include <printk.h>
 #include <riscv.h>
 #include <string.h>
-#include <swap.h>
 
 extern char _kernel_end[]; // Symbol from linker script
 
@@ -229,9 +228,6 @@ void kinit(void) {
 void *kalloc(void) {
     struct run *r;
 
-    if (free_page_count < SWAP_LOW_WATERMARK && swap_enabled())
-        swap_evict_pages(SWAP_EVICT_BATCH);
-
     unsigned long old = r_sstatus();
     w_sstatus(old & ~SSTATUS_SIE);
 
@@ -255,9 +251,8 @@ void *kalloc(void) {
          * Without this, recycled pages retain stale rmap metadata
          * (PageAnon, mapcount, anon_vma) from prior use because
          * kfree/uvmunmap do not call page_remove_rmap.  The stale
-         * mapcount accumulates across reuse cycles, causing the
-         * swap eviction clock to skip these pages (mapcount > 0)
-         * and eventually exhausting evictable candidates. */
+         * mapcount accumulates across reuse cycles and can confuse later
+         * page-lifecycle checks that rely on a clean descriptor state. */
         struct page *pg = virt_to_page((void *)r);
         if (pg) {
             pg->flags = 0;

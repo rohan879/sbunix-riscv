@@ -11,7 +11,6 @@
 #include <string.h>
 #include <vm.h>
 #include <tty.h>
-#include <swap.h>
 #include <mm.h>
 #include <rtc.h>
 /* RF: New headers for trap.c modular decomposition */
@@ -51,23 +50,31 @@ void copy_ofile(struct proc *dst, struct proc *src) {
    * per POSIX O_CLOFORK semantics.  Non-skipped fds inherit fd_flags. */
   #define FD_CLOFORK 2
   for (int i = 0; i < NOFILE; i++) {
+    struct open_file *f = srctab[i];
     if (src->fd_flags[i] & FD_CLOFORK) {
       /* ENH: Skip O_CLOFORK file descriptors during fork */
       dst->ofile[i] = 0;
       dst->fd_flags[i] = 0;
       continue;
     }
-    dst->ofile[i] = srctab[i];
+    if (f && !vfs_file_valid(f)) {
+      srctab[i] = 0;
+      src->fd_flags[i] = 0;
+      dst->ofile[i] = 0;
+      dst->fd_flags[i] = 0;
+      continue;
+    }
+    dst->ofile[i] = f;
     /* Copy fd_flags for non-skipped fds */
     dst->fd_flags[i] = src->fd_flags[i];
-    if (srctab[i]) {
-      srctab[i]->refcount++;
+    if (f) {
+      f->refcount++;
       /* bump pipe refcounts too */
-      if (srctab[i]->is_pipe) {
-        int pid = srctab[i]->pipe_id;
-        if (srctab[i]->pipe_read && pid >= 0)
+      if (f->is_pipe) {
+        int pid = f->pipe_id;
+        if (f->pipe_read && pid >= 0)
           pipes[pid].read_open++;
-        if (srctab[i]->pipe_write && pid >= 0)
+        if (f->pipe_write && pid >= 0)
           pipes[pid].write_open++;
       }
     }
@@ -90,6 +97,8 @@ void close_ofile(struct proc *p, int fd) {
   struct open_file *f = ftable[fd];
   if (!f) return;
   ftable[fd] = NULL;
+  if (!vfs_file_valid(f))
+    return;
 
   if (f->is_pipe) {
     int pid = f->pipe_id;
@@ -1021,48 +1030,6 @@ void trap_handler(struct trapframe *tf) {
                 }
             }
 
-            /* --- Swap-in: PTE_V=0 with PTE_SWAP marker --- */
-            if (from_user && current_proc) {
-                uint64_t sva = PGROUNDDOWN(stval);
-                pte_t *spte = walk(current_proc->pagetable, sva, 0);
-                if (spte && PTE_IS_SWAPPED(*spte)) {
-                    int slot = PTE_SWAP_SLOT(*spte);
-                    int sflags = PTE_SWAP_FLAGS(*spte);
-
-                    char *newpage = kalloc();
-                    if (!newpage)
-                        goto pagefault_kill;
-
-                    swap_read(slot, newpage);
-
-                    /* Restore PTE with original permissions + PTE_V
-                     * BEFORE freeing the slot, so the PTE is never
-                     * left with a stale swap marker that freewalk_level
-                     * could double-free. */
-                    if (pte_update(current_proc->pagetable, sva, spte,
-                                   PA2PTE((uint64_t)newpage) | sflags | PTE_V,
-                                   0, PTE_UPDATE_SWAPIN,
-                                   PTE_SFENCE_NONE) < 0) {
-                        kfree(newpage);
-                        goto pagefault_kill;
-                    }
-                    swap_free(slot);
-                    asm volatile("sfence.vma %0, zero" : : "r"(sva));
-                    if ((sflags & PTE_X) || cause == SCAUSE_INST_PAGE_FAULT)
-                        asm volatile("fence.i");
-                    /* BF: Register swapped-in page in anon rmap so the
-                     * reclaim subsystem can find and evict it again. */
-                    {
-                      struct vm_area *swap_vma = vma_find(current_proc, sva);
-                      if (swap_vma && swap_vma->anon_vma) {
-                        struct page *sp = virt_to_page(newpage);
-                        if (sp) page_add_anon_rmap(sp, swap_vma, sva);
-                      }
-                    }
-                    return; /* resume faulting instruction */
-                }
-            }
-
             /* --- Stack auto-grow (any page fault near current stack) --- */
             if (from_user && current_proc && current_proc->stack_top > 0 &&
                 stval >= current_proc->stack_bottom - 256 * PAGE_SIZE &&
@@ -1072,10 +1039,14 @@ void trap_handler(struct trapframe *tf) {
                 while (current_proc->stack_bottom > va) {
                     current_proc->stack_bottom -= PAGE_SIZE;
                     char *pg = kalloc();
-                    if (!pg) break;
+                    if (!pg)
+                        break;
                     memset(pg, 0, PAGE_SIZE);
-                    mappages(current_proc->pagetable, current_proc->stack_bottom,
-                             PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U);
+                    if (mappages(current_proc->pagetable, current_proc->stack_bottom,
+                                 PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U) < 0) {
+                        kfree(pg);
+                        break;
+                    }
                     /* BF: Register stack page in anon rmap so reclaim can
                      * track and evict stack pages under memory pressure. */
                     {
@@ -1200,8 +1171,8 @@ void trap_handler(struct trapframe *tf) {
                             int rref = page_ref_get(rpa);
                             if (rref > 1 && (cause == SCAUSE_STORE_PAGE_FAULT)) {
                                 /* Page is shared (ref > 1) but lost its
-                                 * PTE_COW flag (e.g., after swap round-trip).
-                                 * Must COW-copy before granting write. */
+                                 * PTE_COW flag. Must COW-copy before
+                                 * granting write. */
                                 char *cowpg = kalloc();
                                 if (!cowpg)
                                     goto pagefault_kill;

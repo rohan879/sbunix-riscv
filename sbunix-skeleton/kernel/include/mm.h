@@ -101,9 +101,7 @@ struct page {
   /* Reverse mapping (Phase 2) */
   struct anon_vma *anon_vma;      // Anonymous VMA this page belongs to
   
-  /* Swap backing */
   union {
-    uint32_t swap_entry;          // Swap slot if page is swapped out
     void *freelist_next;          // Next in free page list
   };
 };
@@ -113,10 +111,9 @@ struct page {
 #define PG_dirty      1    // Page contains modified data
 #define PG_accessed   2    // Page has been accessed recently
 #define PG_anon       3    // Page contains anonymous memory
-#define PG_swapcache  4    // Page is in swap cache
-#define PG_reclaim    5    // Page is being reclaimed
-#define PG_active     6    // Page is in active set (for future LRU migration)
-#define PG_reserved   7    // Page is reserved (kernel, etc.)
+#define PG_reclaim    4    // Page is being reclaimed
+#define PG_active     5    // Page is in active set (for future LRU migration)
+#define PG_reserved   6    // Page is reserved (kernel, etc.)
 
 /* Page flag manipulation - simple bit operations for uniprocessor */
 static inline int test_bit(int bit, uint64_t *flags) {
@@ -185,7 +182,7 @@ static inline int atomic_dec_return(atomic_t *a) {
  * BF: Kept as lightweight no-ops.  This kernel is cooperative single-hart
  * with no preemptive scheduling; timer interrupts only set a flag and
  * never touch anon_vma/page data structures.  Real interrupt masking
- * was attempted (push_off/pop_off) but caused livelock in the swap
+ * was attempted (push_off/pop_off) but caused livelock in the old
  * eviction path because the interrupt disable/restore changed timing
  * assumptions throughout the memory subsystem.  If SMP or preemptive
  * scheduling is added, revisit with full interrupt-safe locking. */
@@ -208,7 +205,6 @@ struct mm_stat {
   uint64_t free_pages;          // Currently free pages
   uint64_t anon_pages;          // Anonymous pages in use
   uint64_t file_pages;          // File-backed pages in use
-  uint64_t swap_pages;          // Pages in swap
   uint64_t shared_pages;        // Shared pages (mapcount > 0)
   
   /* Enhanced clock algorithm statistics */
@@ -291,7 +287,6 @@ void anon_vma_unlink(struct vm_area *vma);
 /* Reverse mapping operations */
 int page_add_anon_rmap(struct page *page, struct vm_area *vma, uint64_t address);
 void page_remove_rmap(struct page *page, struct vm_area *vma);
-int try_to_unmap(struct page *page, int swap_slot);
 int page_mapped_in_vma_count(struct page *page);
 
 /* Enhanced page access tracking */

@@ -13,7 +13,6 @@
 #include <riscv.h>
 #include <string.h>
 #include <printk.h>
-#include <swap.h>
 #include <pipe.h>
 #include <kmalloc.h>
 #include <syscall.h>
@@ -697,14 +696,6 @@ long sys_mremap_handler(struct trapframe *tf) {
               struct page *pdesc = virt_to_page(newpg);
               if (pdesc) page_add_anon_rmap(pdesc, page_vma, new_va + off);
             }
-          } else if (PTE_IS_SWAPPED(*old_pte)) {
-            pte_t *new_pte = walk(current_proc->pagetable, new_va + off, 1);
-            if (!new_pte) { copy_failed = 1; copied_up_to = off; break; }
-            if (pte_update(current_proc->pagetable, new_va + off,
-                           new_pte, *old_pte, 0,
-                           PTE_UPDATE_MREMAP, PTE_SFENCE_NONE) < 0) {
-              copy_failed = 1; copied_up_to = off; break;
-            }
           }
         }
         if (!copy_failed) goto mremap_phase2;
@@ -729,8 +720,6 @@ long sys_mremap_handler(struct trapframe *tf) {
               }
               if (!freed_via_rmap)
                 kfree((void *)pa);
-              *rpte = 0;
-            } else if (rpte && PTE_IS_SWAPPED(*rpte)) {
               *rpte = 0;
             }
           }

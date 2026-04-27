@@ -55,7 +55,6 @@ void mm_init_page_descriptors(void) {
   mm_stats.free_pages = max_pfn;  // Will be adjusted as pages are allocated
   mm_stats.anon_pages = 0;
   mm_stats.file_pages = 0;
-  mm_stats.swap_pages = 0;
   mm_stats.shared_pages = 0;
   mm_stats.clock_scans = 0;
   mm_stats.clock_evictions = 0;
@@ -219,7 +218,6 @@ void mm_print_stats(void) {
   printk("Anonymous pages: %lu\n", mm_stats.anon_pages);
   printk("File pages:      %lu\n", mm_stats.file_pages);
   printk("Shared pages:    %lu\n", mm_stats.shared_pages);
-  printk("Swap pages:      %lu\n", mm_stats.swap_pages);
   
   printk("\n=== Enhanced Clock Statistics ===\n");
   printk("Clock scans:     %lu\n", mm_stats.clock_scans);
@@ -275,8 +273,8 @@ void mm_age_pages(void) {
   static unsigned long last_age_tick = 0;
   unsigned long current_ticks = get_ticks();
   
-  /* BF: Keep aging frequent enough that reclaim/swap tests do not run with
-   * stale page age data for long stretches. */
+  /* BF: Keep aging frequent enough that memory-pressure tests do not run
+   * with stale page age data for long stretches. */
   if (current_ticks - last_age_tick < 10) {
     return;
   }
@@ -369,51 +367,15 @@ void mm_trigger_reclaim(int pages_needed) {
 
 /* Direct reclaim - immediately try to free pages */
 int mm_direct_reclaim(int pages_needed) {
-  extern int swap_evict_pages(int count);  // From swap.c
-  
   mm_stats.direct_reclaims++;
-  
-  // Try to reclaim at least the requested pages plus some buffer
-  int target_pages = pages_needed + 8;
-  int reclaimed = swap_evict_pages(target_pages);
-  
-  if (reclaimed < pages_needed) {
-    mm_stats.reclaim_failures++;
-    printk("mm: direct reclaim failed - requested %d, got %d pages\n",
-           pages_needed, reclaimed);
-    return -1;  // Reclaim failed
-  }
-  
-  printk("mm: direct reclaim succeeded - freed %d pages\n", reclaimed);
-  return 0;
+  mm_stats.reclaim_failures++;
+  (void)pages_needed;
+  return -1;
 }
 
 /* Background reclaim - gentle page reclaim */
 void mm_background_reclaim(void) {
-  extern int swap_evict_pages(int count);  // From swap.c
-  
   mm_stats.background_reclaims++;
   mm_stats.kswapd_wakeups++;
-  
-  // Try to reclaim pages until we reach high watermark
-  uint64_t current_free = mm_stats.free_pages;
-  if (current_free >= mm_watermarks.high_free) {
-    return;  // Already above high watermark
-  }
-  
-  uint64_t target_free = mm_watermarks.high_free;
-  uint64_t pages_to_reclaim = target_free - current_free;
-  
-  // Reclaim in smaller chunks to avoid freezing the system
-  if (pages_to_reclaim > 32) {
-    pages_to_reclaim = 32;
-  }
-  
-  int reclaimed = swap_evict_pages(pages_to_reclaim);
-  if (reclaimed > 0) {
-    printk("mm: background reclaim freed %d pages (target was %lu)\n", 
-           reclaimed, pages_to_reclaim);
-  } else {
-    mm_stats.reclaim_failures++;
-  }
+  mm_stats.reclaim_failures++;
 }
