@@ -7,7 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$PROJECT_DIR")"
 TIMEOUT=${TIMEOUT:-180}
-QEMU_MEM=${QEMU_MEM:-256M}
+# BF: Match the kernel PHYSTOP default; higher QEMU_MEM can be set explicitly.
+QEMU_MEM=${QEMU_MEM:-128M}
 TEST_DISK_IMG=${TEST_DISK_IMG:-build/test-disk-core.img}
 TEST_DISK_TARGET=${TEST_DISK_TARGET:-$TEST_DISK_IMG}
 ARTIFACT_DIR=${SBUNIX_TARGETED_ARTIFACT_DIR:-/home/adebayo/test-findings/test-findings-23-artifacts/targeted}

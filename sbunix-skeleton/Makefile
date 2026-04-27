@@ -33,7 +33,9 @@ ifdef BUILD_TESTS
 endif
 
 TIMEOUT ?= 1800
-QEMU_MEM ?= 256M
+# BF: Default QEMU RAM to the kernel's fixed PHYSTOP so boot does not
+# put allocator freelist entries beyond the available physical memory.
+QEMU_MEM ?= 128M
 # MODIFIED: END added
 
 # Language-specific kernel object/library
