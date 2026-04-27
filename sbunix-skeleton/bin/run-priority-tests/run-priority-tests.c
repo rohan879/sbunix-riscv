@@ -16,6 +16,7 @@
 #define MANIFEST_MAX (64 * 1024)
 
 volatile pid_t g_child_pid;
+static int g_failures;
 
 static void emit(const char *s) {
   write(STDOUT_FILENO, s, strlen(s));
@@ -35,6 +36,7 @@ static int run_test(const char *runner, const char *suite, const char *name) {
     emit("/");
     emit(name);
     emit(" (fork failed)\n");
+    g_failures++;
     return -1;
   }
   if (pid == 0) {
@@ -69,6 +71,9 @@ static int run_test(const char *runner, const char *suite, const char *name) {
   if (ret >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
     emit("[PASS] ");
   } else {
+    /* BF: Propagate priority-suite failures to guest-run-tests instead of
+     * producing only parseable [FAIL] text with an overall zero status. */
+    g_failures++;
     emit("[FAIL] ");
   }
   emit(suite);
@@ -134,5 +139,5 @@ int main(void) {
                "/bin/run-os-test", "os-test");
   run_manifest("/test/priority-open-posix-manifest",
                "/bin/run-open-posix-test", "open-posix");
-  return 0;
+  return g_failures == 0 ? 0 : 1;
 }

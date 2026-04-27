@@ -33,6 +33,7 @@ ifdef BUILD_TESTS
 endif
 
 TIMEOUT ?= 1800
+QEMU_MEM ?= 256M
 # MODIFIED: END added
 
 # Language-specific kernel object/library
@@ -130,7 +131,9 @@ build/testfs/.dirs:
 	@touch $@
 
 ifdef BUILD_TESTS
-$(TEST_TARGETS): build/testfs/bin/%: build/libc/crt.S.o build/libc.a | build/testfs/.dirs
+# BF: Track each test source as a real prerequisite so rebuilt validation
+# disks cannot silently reuse stale test binaries after a test edit.
+$(TEST_TARGETS): build/testfs/bin/%: $$(wildcard tests/$$*/*.c) build/libc/crt.S.o build/libc.a | build/testfs/.dirs
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 endif
@@ -148,7 +151,9 @@ build/testfs-core/.dirs:
 	@mkdir -p build/testfs-core/bin
 	@touch $@
 
-$(CORE_TEST_TARGETS): build/testfs-core/bin/%: build/libc/crt.S.o build/libc.a | build/testfs-core/.dirs
+# BF: Core validation disk uses the same source prerequisite tracking as
+# full BUILD_TESTS so targeted QEMU gates exercise current test code.
+$(CORE_TEST_TARGETS): build/testfs-core/bin/%: $$(wildcard tests/$$*/*.c) build/libc/crt.S.o build/libc.a | build/testfs-core/.dirs
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 
@@ -156,7 +161,9 @@ build/testfs-core/.prepared: build/testfs-core/.dirs $(CORE_TEST_TARGETS)
 	@touch $@
 
 # Prepare base rootfs before building os-tests
-build/rootfs/.prepared: $(USER_BIN) tools/stage-thirdparty.sh $(ROOTFS_STAGE_INPUTS) $(THIRDPARTY_STAGE_INPUTS)
+# BF: guest-run-tests is embedded in tarfs, so runner edits must rebuild
+# build/rootfs/.prepared and the kernel image that carries it.
+build/rootfs/.prepared: $(USER_BIN) tools/guest-run-tests tools/stage-thirdparty.sh $(ROOTFS_STAGE_INPUTS) $(THIRDPARTY_STAGE_INPUTS)
 	mkdir -p build/rootfs
 	rm -rf build/rootfs/bin/os-test build/rootfs/os-test-manifest \
 		build/rootfs/os-test-expect build/rootfs/var/log/os-test \
@@ -298,7 +305,7 @@ endif
 
 # MODIFIED: added " $(if $(BUILD_TESTS),$(TEST_DISK_IMG))", "$(QEMU_TEST_DRIVE_ARGS) \"
 qemu: build/kernel.elf $(DISK_IMG) $(if $(BUILD_TESTS),$(TEST_DISK_IMG))
-	qemu-system-riscv64 -machine virt -bios default -kernel $< \
+	qemu-system-riscv64 -machine virt -m $(QEMU_MEM) -bios default -kernel $< \
 		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-pci-non-transitional,drive=hd0 \
 		$(QEMU_TEST_DRIVE_ARGS) \
@@ -308,7 +315,7 @@ qemu: build/kernel.elf $(DISK_IMG) $(if $(BUILD_TESTS),$(TEST_DISK_IMG))
 		-nographic
 
 qemu-core-tests: build/kernel.elf $(DISK_IMG) $(CORE_TEST_DISK_IMG)
-	qemu-system-riscv64 -machine virt -bios default -kernel $< \
+	qemu-system-riscv64 -machine virt -m $(QEMU_MEM) -bios default -kernel $< \
 		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-pci-non-transitional,drive=hd0 \
 		-drive file=$(CORE_TEST_DISK_IMG),format=raw,if=none,id=hd1 \
@@ -322,7 +329,7 @@ qemu-core-tests: build/kernel.elf $(DISK_IMG) $(CORE_TEST_DISK_IMG)
 # Connect with: riscv64-unknown-elf-gdb build/kernel.elf -ex "target remote :1234"
 # Useful for PTE_X watchpoints, signal delivery tracing, crash backtraces.
 qemu-gdb: build/kernel.elf $(DISK_IMG) $(if $(BUILD_TESTS),$(TEST_DISK_IMG))
-	qemu-system-riscv64 -machine virt -bios default -kernel $< \
+	qemu-system-riscv64 -machine virt -m $(QEMU_MEM) -bios default -kernel $< \
 		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-pci-non-transitional,drive=hd0 \
 		$(QEMU_TEST_DRIVE_ARGS) \

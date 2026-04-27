@@ -8,9 +8,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_DIR="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$PROJECT_DIR")"
 TIMEOUT=${TIMEOUT:-900}
+QEMU_MEM=${QEMU_MEM:-256M}
 OUTPUT_FILE="$(mktemp /tmp/sbunix-test-output.XXXXXX)"
 QEMU_PID=""
+BOOT_FAILED=0
 
 cleanup() {
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -25,6 +28,16 @@ cd "$PROJECT_DIR"
 
 # Set up cross-compiler PATH
 source tools/sourceme.sh
+
+IMPLEMENTATION_SHA="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+echo "==> Validation implementation SHA: $IMPLEMENTATION_SHA"
+if [ "${ALLOW_DIRTY_VALIDATION:-0}" != "1" ] &&
+   [ -n "$(git -C "$REPO_DIR" status --porcelain -- sbunix-skeleton 2>/dev/null)" ]; then
+    # BF: Validation must be tied to a committed implementation tree, not
+    # whichever uncommitted edits happen to be present during a run.
+    echo "FATAL: sbunix-skeleton has uncommitted changes; set ALLOW_DIRTY_VALIDATION=1 for development runs."
+    exit 1
+fi
 
 # Build the kernel
 echo "==> Building kernel..."
@@ -57,7 +70,7 @@ run_qemu_boot() {
     start_size=$(wc -c < "$OUTPUT_FILE" 2>/dev/null || echo 0)
 
     echo "==> Launching QEMU ($label, timeout: ${TIMEOUT}s)..."
-    qemu-system-riscv64 -machine virt -bios default -kernel build/kernel.elf \
+    qemu-system-riscv64 -machine virt -m "$QEMU_MEM" -bios default -kernel build/kernel.elf \
         -drive file=build/disk.img,format=raw,if=none,id=hd0 \
         -device virtio-blk-pci-non-transitional,drive=hd0 \
         -drive file=build/test-disk.img,format=raw,if=none,id=hd1 \
@@ -85,7 +98,8 @@ run_qemu_boot() {
             fi
         fi
         if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-            echo "==> $label: timeout reached (${TIMEOUT}s), stopping QEMU..."
+            echo "==> $label: timeout reached (${TIMEOUT}s), stopping QEMU..." | tee -a "$OUTPUT_FILE"
+            BOOT_FAILED=1
             kill "$QEMU_PID" 2>/dev/null || true
             wait "$QEMU_PID" 2>/dev/null || true
             QEMU_PID=""
@@ -131,6 +145,22 @@ done < "$OUTPUT_FILE"
 
 total=$((pass_count + fail_count))
 
+require_output() {
+    local pattern="$1"
+    local label="$2"
+
+    if ! grep -q "$pattern" "$OUTPUT_FILE"; then
+        # BF: A boot can time out after partial PASS output.  Require
+        # end-of-phase markers so truncated logs cannot validate cleanly.
+        echo "FATAL: missing required output marker: $label"
+        BOOT_FAILED=1
+    fi
+}
+
+require_output "=== Summary ===" "guest-run-tests summary"
+require_output "persist: write phase complete" "persistence write completion"
+require_output "persist: verify phase complete" "persistence verify completion"
+
 # Print summary
 echo "==============================="
 echo "  SBUnix Test Results"
@@ -146,6 +176,13 @@ if [ "$fail_count" -gt 0 ]; then
     for name in "${failed_tests[@]}"; do
         echo "  - $name"
     done
+    echo ""
+    exit 1
+fi
+
+if [ "$BOOT_FAILED" -ne 0 ]; then
+    echo ""
+    echo "FATAL: one or more boot phases did not complete cleanly."
     echo ""
     exit 1
 fi

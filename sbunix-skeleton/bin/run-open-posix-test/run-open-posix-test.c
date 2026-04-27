@@ -394,5 +394,7 @@ int main(int argc, char *argv[]) {
     printf("\n");
     show_usage();
 
-    return (failed > 0) ? 1 : 0;
+    /* BF: Treat runtime errors as status failures even if no FAIL token
+     * appears, preserving suite provenance for host-side validation. */
+    return (failed > 0 || errors > 0) ? 1 : 0;
 }
