@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$PROJECT_DIR")"
-TIMEOUT=${TIMEOUT:-7200}
+TIMEOUT=${TIMEOUT:-28800}
 QEMU_MEM=${QEMU_MEM:-256M}
 ARTIFACT_DIR=${SBUNIX_RUN_TESTS_CAPTURE_DIR:-/home/adebayo/test-findings/code-review-08-artifacts/final}
 BOOT1_LOG="$ARTIFACT_DIR/qemu-boot1.raw.log"
