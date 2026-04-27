@@ -6,7 +6,8 @@
 
 /* Global page descriptor table */
 // Static page descriptor table to avoid bootstrap problems
-#define MAX_STATIC_PAGES ((128 * 1024 * 1024) / PAGE_SIZE)
+/* BF: Size descriptors from PHYSTOP so rmap metadata covers all RAM. */
+#define MAX_STATIC_PAGES (PHYSMEM_SIZE / PAGE_SIZE)
 static struct page static_page_table[MAX_STATIC_PAGES];
 struct page *page_table;              // Points to static_page_table
 static uint64_t max_pfn;                     // Highest valid page frame number
@@ -19,7 +20,7 @@ struct mm_stat mm_stats;
 void mm_init_page_descriptors(void) {
   
   // Calculate number of physical pages in system
-  // Physical memory starts at 0x80000000 and is 128MB (PHYSTOP = 0x88000000)
+  // Physical memory starts at KERNBASE and ends at PHYSTOP.
   uint64_t phys_start = 0x80000000UL;
   max_pfn = (PHYSTOP - phys_start) >> 12;  // PAGE_SIZE = 4096, so shift by 12
   

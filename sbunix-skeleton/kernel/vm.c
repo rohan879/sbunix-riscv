@@ -727,11 +727,16 @@ void uvmunmap_proc(struct proc *p, pagetable_t pagetable, uint64_t va, uint64_t 
                 int freed_via_rmap = 0;
                 if (p) {
                     struct vm_area *v = vma_find(p, a);
-                    if (v) {
+                    if (v && (v->flags & MAP_ANON)) {
                         struct page *pg = virt_to_page((void *)pa);
-                        if (pg) {
+                        if (pg && PageAnon(pg)) {
+                            int last_mapping = page_mapcount(pg) == 0;
                             page_remove_rmap(pg, v);
-                            freed_via_rmap = 1;
+                            /* BF: rmap frees only the final anonymous
+                             * mapping.  Shared COW pages still need kfree()
+                             * below to drop this PTE's kalloc ref. */
+                            if (last_mapping)
+                                freed_via_rmap = 1;
                         }
                     }
                 }
@@ -788,7 +793,8 @@ void superpage_split(pagetable_t pagetable, uint64_t va) {
 static int vma_can_merge(struct vm_area *a, struct vm_area *b) {
   if (!a || !b)
     return 0;
-  if (a->end < b->start || a->prot != b->prot || a->flags != b->flags)
+  if (a->end < b->start || a->prot != b->prot ||
+      a->max_prot != b->max_prot || a->flags != b->flags)
     return 0;
   if (a->file || b->file)
     return 0;
@@ -818,6 +824,12 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   vma->start = start;
   vma->end   = end;
   vma->prot  = prot;
+  /* BF: Anonymous/staged VMAs may later reduce and restore permissions
+   * with mprotect(), so default the maximum to the creation protection.
+   * mmap() overwrites this for file mappings after fd access is known. */
+  vma->max_prot = (flags & MAP_ANON)
+                ? (PROT_READ | PROT_WRITE | PROT_EXEC)
+                : prot;
   vma->flags = flags;
   vma->next  = NULL;
   vma->file  = NULL;
@@ -922,6 +934,7 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
       tail->start = end;
       tail->end   = v->end;
       tail->prot  = v->prot;
+      tail->max_prot = v->max_prot;
       tail->flags = v->flags;
       tail->next  = v->next;
       tail->file = v->file;
@@ -991,6 +1004,7 @@ int vma_dup(struct proc *src, struct proc *dst) {
     nv->start = sv->start;
     nv->end   = sv->end;
     nv->prot  = sv->prot;
+    nv->max_prot = sv->max_prot;
     nv->flags = sv->flags;
     nv->file = sv->file;
     nv->file_offset = sv->file_offset;
@@ -1384,16 +1398,41 @@ static uint64_t vm_resolve_user_page(struct proc *p, pagetable_t pagetable,
 
   pte_t *pte = walk(pagetable, page_va, 0);
 
-  pte = walk(pagetable, page_va, 0);
-
   if (!pte || !(*pte & PTE_V)) {
-    /* Page not present — demand-allocate for anonymous VMAs only.
-     * File-backed VMAs are skipped to avoid VFS re-entry deadlock. */
-    if (vma->file)
-      goto out;
+    /* Page not present — demand-allocate it.  BF: syscall buffers may live
+     * in lazy file-backed mappings, so copyin/copyout must fault those in
+     * just like the trap path instead of returning a false EFAULT. */
     char *pg = kalloc();
     if (!pg) goto out;
     memset(pg, 0, PAGE_SIZE);
+    if (vma->file) {
+      if (!(vma->file->ops && vma->file->ops->read)) {
+        kfree(pg);
+        goto out;
+      }
+      if (vma->file->ops->fstat) {
+        uint8_t stbuf[128];
+        memset(stbuf, 0, sizeof(stbuf));
+        if (vma->file->ops->fstat(vma->file->fs_data,
+                                  vma->file->private, stbuf) == 0) {
+          int64_t file_sz = *(int64_t *)(stbuf + 48);
+          uint64_t file_end_page = ((uint64_t)file_sz + PAGE_SIZE - 1) &
+                                   ~(uint64_t)(PAGE_SIZE - 1);
+          uint64_t page_file_off = vma->file_offset + (page_va - vma->start);
+          /* BF: Match the trap fault path for file-backed lazy pages so
+           * syscall buffers beyond EOF fail instead of becoming anonymous
+           * zero-fill pages. */
+          if (file_sz < 0 || page_file_off >= file_end_page) {
+            kfree(pg);
+            goto out;
+          }
+        }
+      }
+      uint64_t file_off = vma->file_offset + (page_va - vma->start);
+      int64_t foff = (int64_t)file_off;
+      vma->file->ops->read(vma->file->fs_data, vma->file->private,
+                           pg, PAGE_SIZE, &foff);
+    }
     int perm = PTE_U | prot_to_pte_flags(vma->prot);
     if (mappages(pagetable, page_va, PAGE_SIZE, (uint64_t)pg, perm) != 0) {
       kfree(pg);

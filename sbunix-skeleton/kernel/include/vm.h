@@ -32,6 +32,7 @@ struct vm_area {
   uint64_t start;       /* page-aligned start address */
   uint64_t end;         /* page-aligned end address (exclusive) */
   int prot;             /* PROT_READ | PROT_WRITE | PROT_EXEC */
+  int max_prot;         /* Maximum permissions allowed by original mapping */
   int flags;            /* MAP_PRIVATE | MAP_ANONYMOUS */
   struct vm_area *next; /* sorted linked list by start addr */
   
