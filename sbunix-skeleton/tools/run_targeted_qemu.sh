@@ -103,7 +103,7 @@ run_guest_command() {
     local status
 
     start_size=$(wc -c < "$RAW_LOG" 2>/dev/null || echo 0)
-    printf 'echo __BEGIN:%s\n%s\necho __STATUS:%s:$?\necho __END:%s\n' \
+    printf '\necho __BEGIN:%s\n%s\necho __STATUS:%s:$?\necho __END:%s\n' \
         "$id" "$cmd" "$id" "$id" >&"$QEMU_STDIN_FD"
 
     if ! wait_for_status_since "$start_size" "$id"; then
@@ -125,6 +125,12 @@ run_guest_command() {
 
     if [ "$status" != "0" ]; then
         echo "[FAIL] $cmd (status $status)" | tee -a "$SUMMARY_LOG"
+        FAILURES=$((FAILURES + 1))
+        return
+    fi
+
+    if ! wait_for_pattern_since "$start_size" 'sbush$'; then
+        echo "[FAIL] $cmd (prompt not returned)" | tee -a "$SUMMARY_LOG"
         FAILURES=$((FAILURES + 1))
         return
     fi

@@ -29,6 +29,19 @@ run_test() {
     fi
 }
 
+run_test_expect_status() {
+    echo "=== Running $1 ==="
+    /test/bin/$1
+    set rc $?
+    if test "$rc" = "$2"; then
+        echo "[PASS] $1 exited with expected status $2"
+        set PASS $(($PASS + 1))
+    else
+        echo "[FAIL] $1 exited with status $rc  (want: $2)"
+        set FAIL $(($FAIL + 1))
+    fi
+}
+
 run_forkmemdiag_cow30() {
     echo "=== Running forkmemdiag cow 30 ==="
     /test/bin/forkmemdiag cow 30
@@ -49,7 +62,7 @@ run_test fstest
 run_test swaptest
 run_test libc-test
 run_test alarmtest
-run_test segvtest
+run_test_expect_status segvtest 42
 run_test fdiotest
 run_test sigtest
 run_test sighandtest
@@ -577,12 +590,6 @@ echo "Failed: $FAIL"
 echo ""
 echo "To run Sortix os-test POSIX compliance suite: run-os-test"
 echo "To run Open POSIX test suite: run-open-posix-test"
-
-# --- Persistence test: MUST be last (calls poweroff after write phase) ---
-# BF: persisttest is compiled with BUILD_TESTS=1 and placed on the test
-# disk at /test/bin/persisttest, not in the main rootfs at /bin.
-echo "=== Running persisttest ==="
-/test/bin/persisttest
 
 if test $FAIL -gt 0; then
     exit 1

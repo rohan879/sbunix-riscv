@@ -13,12 +13,22 @@ TIMEOUT=${TIMEOUT:-900}
 QEMU_MEM=${QEMU_MEM:-256M}
 OUTPUT_FILE="$(mktemp /tmp/sbunix-test-output.XXXXXX)"
 QEMU_PID=""
+QEMU_FIFO_DIR=""
+QEMU_FIFO=""
+QEMU_STDIN_FD=3
 BOOT_FAILED=0
 
 cleanup() {
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
         kill "$QEMU_PID" 2>/dev/null || true
         wait "$QEMU_PID" 2>/dev/null || true
+    fi
+    if [ -n "$QEMU_FIFO" ]; then
+        exec {QEMU_STDIN_FD}>&- 2>/dev/null || true
+        rm -f "$QEMU_FIFO"
+    fi
+    if [ -n "$QEMU_FIFO_DIR" ]; then
+        rmdir "$QEMU_FIFO_DIR" 2>/dev/null || true
     fi
     rm -f "$OUTPUT_FILE"
 }
@@ -62,11 +72,17 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+QEMU_FIFO_DIR="$(mktemp -d /tmp/sbunix-qemu-stdin.XXXXXX)"
+QEMU_FIFO="$QEMU_FIFO_DIR/stdin.fifo"
+mkfifo "$QEMU_FIFO"
+exec {QEMU_STDIN_FD}<>"$QEMU_FIFO"
+
 # --- Helper: run one QEMU boot, appending output to OUTPUT_FILE ---
 run_qemu_boot() {
     local label="$1"
     local check_prompt="$2"  # "yes" or "no"
     local start_size
+    local persist_sent=0
     start_size=$(wc -c < "$OUTPUT_FILE" 2>/dev/null || echo 0)
 
     echo "==> Launching QEMU ($label, timeout: ${TIMEOUT}s)..."
@@ -79,6 +95,7 @@ run_qemu_boot() {
         -device virtio-net-pci-non-transitional,netdev=net0 \
         -netdev user,id=net0 \
         -nographic \
+        <&"$QEMU_STDIN_FD" \
         >> "$OUTPUT_FILE" 2>&1 &
     QEMU_PID=$!
 
@@ -88,13 +105,11 @@ run_qemu_boot() {
         ELAPSED=$((ELAPSED + 5))
         if [ "$check_prompt" = "yes" ]; then
             # Only check NEW output for the shell prompt (avoid matching Boot 1 output)
-            if tail -c +"$((start_size + 1))" "$OUTPUT_FILE" 2>/dev/null | grep -q 'sbush\$'; then
-                sleep 5
-                echo "==> $label: tests completed, stopping QEMU..."
-                kill "$QEMU_PID" 2>/dev/null || true
-                wait "$QEMU_PID" 2>/dev/null || true
-                QEMU_PID=""
-                break
+            if [ "$persist_sent" -eq 0 ] &&
+               tail -c +"$((start_size + 1))" "$OUTPUT_FILE" 2>/dev/null | grep -q 'sbush\$'; then
+                echo "==> $label: tests completed, running persist write..."
+                printf '\n/test/bin/persisttest\n' >&"$QEMU_STDIN_FD"
+                persist_sent=1
             fi
         fi
         if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
@@ -106,6 +121,10 @@ run_qemu_boot() {
             break
         fi
     done
+    if [ "$check_prompt" = "yes" ] && [ "$persist_sent" -eq 0 ]; then
+        echo "==> $label: shell prompt was not reached before QEMU exited." | tee -a "$OUTPUT_FILE"
+        BOOT_FAILED=1
+    fi
     # QEMU may have exited on its own (poweroff)
     wait "$QEMU_PID" 2>/dev/null || true
     QEMU_PID=""

@@ -171,10 +171,14 @@ run_qemu_boot() {
             tr -d '\r' |
             sed -n 's/.*__STATUS:sortix:\([0-9][0-9]*\).*/==> Sortix suite exited with status \1/p' |
             tail -n 1
+        if ! wait_for_pattern_since "$start_size" 'sbush$'; then
+            cat "$boot_log" >> "$COMBINED_LOG"
+            return 1
+        fi
 
         start_size=$(wc -c < "$boot_log" 2>/dev/null || echo 0)
         echo "==> $label: running Open POSIX suite..."
-        printf 'run-open-posix-test; echo __STATUS:open-posix:$?\n' >&"$QEMU_STDIN_FD"
+        printf '\n/bin/run-open-posix-test; echo __STATUS:open-posix:$?\n' >&"$QEMU_STDIN_FD"
         if ! wait_for_pattern_since "$start_size" "__STATUS:open-posix:"; then
             cat "$boot_log" >> "$COMBINED_LOG"
             return 1
@@ -183,9 +187,13 @@ run_qemu_boot() {
             tr -d '\r' |
             sed -n 's/.*__STATUS:open-posix:\([0-9][0-9]*\).*/==> Open POSIX suite exited with status \1/p' |
             tail -n 1
+        if ! wait_for_pattern_since "$start_size" 'sbush$'; then
+            cat "$boot_log" >> "$COMBINED_LOG"
+            return 1
+        fi
 
         echo "==> $label: running persist write phase..."
-        printf '/test/bin/persisttest\n' >&"$QEMU_STDIN_FD"
+        printf '\n/test/bin/persisttest\n' >&"$QEMU_STDIN_FD"
         while kill -0 "$QEMU_PID" 2>/dev/null; do
             sleep 5
             if [ "$SECONDS" -ge "$BOOT_DEADLINE" ]; then
