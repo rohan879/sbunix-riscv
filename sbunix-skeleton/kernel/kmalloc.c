@@ -7,7 +7,8 @@
 /* bucket sizes: 16, 32, 64, 128, 256, 512, 1024, 2048 */
 static int bucket_size[NBUCKETS] = {16, 32, 64, 128, 256, 512, 1024, 2048};
 
-#define MAX_PAGES ((128 * 1024 * 1024) / PAGE_SIZE)
+/* BF: Keep slab ownership metadata aligned with the allocator's RAM size. */
+#define MAX_PAGES (PHYSMEM_SIZE / PAGE_SIZE)
 #define KM_PAGE_NONE 0
 #define KM_PAGE_LARGE 0xFE
 

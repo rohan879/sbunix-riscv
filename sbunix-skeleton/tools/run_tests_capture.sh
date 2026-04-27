@@ -6,7 +6,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TIMEOUT=${TIMEOUT:-7200}
+REPO_DIR="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$PROJECT_DIR")"
+TIMEOUT=${TIMEOUT:-28800}
+QEMU_MEM=${QEMU_MEM:-256M}
 ARTIFACT_DIR=${SBUNIX_RUN_TESTS_CAPTURE_DIR:-/home/adebayo/test-findings/code-review-08-artifacts/final}
 BOOT1_LOG="$ARTIFACT_DIR/qemu-boot1.raw.log"
 BOOT2_LOG="$ARTIFACT_DIR/qemu-boot2.raw.log"
@@ -17,6 +19,7 @@ QEMU_FIFO_DIR=""
 QEMU_FIFO=""
 QEMU_STDIN_FD=3
 BOOT_DEADLINE=0
+PHASE_FAILED=0
 
 cleanup() {
     status=$?
@@ -36,6 +39,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+mark_phase_failed() {
+    local message="$1"
+    echo "FATAL: $message"
+    PHASE_FAILED=1
+}
+
 mkdir -p "$ARTIFACT_DIR"
 : > "$BOOT1_LOG"
 : > "$BOOT2_LOG"
@@ -51,6 +60,16 @@ cd "$PROJECT_DIR"
 
 # Set up cross-compiler PATH.
 source tools/sourceme.sh
+
+IMPLEMENTATION_SHA="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+echo "==> Validation implementation SHA: $IMPLEMENTATION_SHA"
+if [ "${ALLOW_DIRTY_VALIDATION:-0}" != "1" ] &&
+   [ -n "$(git -C "$REPO_DIR" status --porcelain -- sbunix-skeleton 2>/dev/null)" ]; then
+    # BF: Capture logs only from a committed implementation unless a
+    # development run explicitly opts into dirty-tree validation.
+    echo "FATAL: sbunix-skeleton has uncommitted changes; set ALLOW_DIRTY_VALIDATION=1 for development runs."
+    exit 1
+fi
 
 echo "==> Building kernel..."
 MAKEFLAGS= make clean && mkdir -p build/kernel build/libc build/rootfs/bin && MAKEFLAGS= make -j1 BUILD_TESTS=1
@@ -81,7 +100,7 @@ run_qemu_boot() {
     : > "$boot_log"
 
     echo "==> Launching QEMU ($label, timeout: ${TIMEOUT}s)..."
-    qemu-system-riscv64 -machine virt -bios default -kernel build/kernel.elf \
+    qemu-system-riscv64 -machine virt -m "$QEMU_MEM" -bios default -kernel build/kernel.elf \
         -drive file=build/disk.img,format=raw,if=none,id=hd0 \
         -device virtio-blk-pci-non-transitional,drive=hd0 \
         -drive file=build/test-disk.img,format=raw,if=none,id=hd1 \
@@ -113,33 +132,68 @@ run_qemu_boot() {
         return 1
     }
 
+    wait_for_pattern_since() {
+        local start_size="$1"
+        local pattern="$2"
+        while kill -0 "$QEMU_PID" 2>/dev/null; do
+            sleep 5
+            if tail -c +"$((start_size + 1))" "$boot_log" 2>/dev/null | grep -F -q "$pattern"; then
+                return 0
+            fi
+            if [ "$SECONDS" -ge "$BOOT_DEADLINE" ]; then
+                echo "==> $label: timeout reached (${TIMEOUT}s), stopping QEMU..."
+                kill "$QEMU_PID" 2>/dev/null || true
+                wait "$QEMU_PID" 2>/dev/null || true
+                QEMU_PID=""
+                return 1
+            fi
+        done
+        return 1
+    }
+
     if [ "$inject_full_suite" = "yes" ]; then
         local start_size=0
         if ! wait_for_prompt_since "$start_size"; then
             cat "$boot_log" >> "$COMBINED_LOG"
-            return
+            return 1
         fi
 
         echo "==> $label: initial prompt reached"
 
         start_size=$(wc -c < "$boot_log" 2>/dev/null || echo 0)
         echo "==> $label: running Sortix suite..."
-        printf 'run-os-test\n' >&"$QEMU_STDIN_FD"
-        if ! wait_for_prompt_since "$start_size"; then
+        printf 'run-os-test; echo __STATUS:sortix:$?\n' >&"$QEMU_STDIN_FD"
+        if ! wait_for_pattern_since "$start_size" "__STATUS:sortix:"; then
             cat "$boot_log" >> "$COMBINED_LOG"
-            return
+            return 1
+        fi
+        tail -c +"$((start_size + 1))" "$boot_log" 2>/dev/null |
+            tr -d '\r' |
+            sed -n 's/.*__STATUS:sortix:\([0-9][0-9]*\).*/==> Sortix suite exited with status \1/p' |
+            tail -n 1
+        if ! wait_for_pattern_since "$start_size" 'sbush$'; then
+            cat "$boot_log" >> "$COMBINED_LOG"
+            return 1
         fi
 
         start_size=$(wc -c < "$boot_log" 2>/dev/null || echo 0)
         echo "==> $label: running Open POSIX suite..."
-        printf 'run-open-posix-test\n' >&"$QEMU_STDIN_FD"
-        if ! wait_for_prompt_since "$start_size"; then
+        printf '\n/bin/run-open-posix-test; echo __STATUS:open-posix:$?\n' >&"$QEMU_STDIN_FD"
+        if ! wait_for_pattern_since "$start_size" "__STATUS:open-posix:"; then
             cat "$boot_log" >> "$COMBINED_LOG"
-            return
+            return 1
+        fi
+        tail -c +"$((start_size + 1))" "$boot_log" 2>/dev/null |
+            tr -d '\r' |
+            sed -n 's/.*__STATUS:open-posix:\([0-9][0-9]*\).*/==> Open POSIX suite exited with status \1/p' |
+            tail -n 1
+        if ! wait_for_pattern_since "$start_size" 'sbush$'; then
+            cat "$boot_log" >> "$COMBINED_LOG"
+            return 1
         fi
 
         echo "==> $label: running persist write phase..."
-        printf '/test/bin/persisttest\n' >&"$QEMU_STDIN_FD"
+        printf '\n/test/bin/persisttest\n' >&"$QEMU_STDIN_FD"
         while kill -0 "$QEMU_PID" 2>/dev/null; do
             sleep 5
             if [ "$SECONDS" -ge "$BOOT_DEADLINE" ]; then
@@ -147,7 +201,8 @@ run_qemu_boot() {
                 kill "$QEMU_PID" 2>/dev/null || true
                 wait "$QEMU_PID" 2>/dev/null || true
                 QEMU_PID=""
-                break
+                cat "$boot_log" >> "$COMBINED_LOG"
+                return 1
             fi
         done
     else
@@ -158,7 +213,8 @@ run_qemu_boot() {
                 kill "$QEMU_PID" 2>/dev/null || true
                 wait "$QEMU_PID" 2>/dev/null || true
                 QEMU_PID=""
-                break
+                cat "$boot_log" >> "$COMBINED_LOG"
+                return 1
             fi
         done
     fi
@@ -166,14 +222,19 @@ run_qemu_boot() {
     wait "$QEMU_PID" 2>/dev/null || true
     QEMU_PID=""
     cat "$boot_log" >> "$COMBINED_LOG"
+    return 0
 }
 
 # Boot 1: rc runs the in-tree suite, then the wrapper drives the full Sortix
 # and open-posix suites plus the persist write phase from the interactive shell.
-run_qemu_boot "Boot 1: tests + persist write" "yes" "$BOOT1_LOG"
+if ! run_qemu_boot "Boot 1: tests + persist write" "yes" "$BOOT1_LOG"; then
+    mark_phase_failed "Boot 1 did not complete all required phases"
+fi
 
 # Boot 2: persist verify only (rc detects sentinel, runs persisttest, poweroffs).
-run_qemu_boot "Boot 2: persist verify" "no" "$BOOT2_LOG"
+if ! run_qemu_boot "Boot 2: persist verify" "no" "$BOOT2_LOG"; then
+    mark_phase_failed "Boot 2 did not complete the persistence verify phase"
+fi
 
 echo "==> QEMU exited, parsing results..."
 echo ""
@@ -199,6 +260,29 @@ done < "$COMBINED_LOG"
 
 total=$((pass_count + fail_count))
 
+require_log_marker() {
+    local file="$1"
+    local pattern="$2"
+    local label="$3"
+
+    if ! grep -q "$pattern" "$file"; then
+        mark_phase_failed "missing required output marker: $label"
+    fi
+}
+
+require_log_marker "$BOOT1_LOG" "=== Summary ===" "guest-run-tests summary"
+require_log_marker "$BOOT1_LOG" "=== Sortix os-test Suite ===" "Sortix suite header"
+require_log_marker "$BOOT1_LOG" "=== Open POSIX Test Suite ===" "Open POSIX suite header"
+require_log_marker "$BOOT1_LOG" "persist: write phase complete" "persistence write completion"
+require_log_marker "$BOOT2_LOG" "persist: verify phase complete" "persistence verify completion"
+
+final_results_count=$(grep -c "=== Final Results ===" "$BOOT1_LOG" 2>/dev/null || true)
+if [ "$final_results_count" -lt 2 ]; then
+    # BF: A status marker alone is not enough; the full suites must reach
+    # final summaries before their nonzero statuses are interpretable.
+    mark_phase_failed "expected both Sortix and Open POSIX final summaries"
+fi
+
 echo "==============================="
 echo "  SBUnix Test Results"
 echo "==============================="
@@ -213,6 +297,13 @@ if [ "$fail_count" -gt 0 ]; then
     for name in "${failed_tests[@]}"; do
         echo "  - $name"
     done
+    echo ""
+    exit 1
+fi
+
+if [ "$PHASE_FAILED" -ne 0 ]; then
+    echo ""
+    echo "FATAL: validation phases were incomplete or missing required markers."
     echo ""
     exit 1
 fi

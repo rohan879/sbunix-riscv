@@ -18,7 +18,9 @@ struct {
 static int free_page_count;
 
 /* Reference counts for physical pages */
-#define MAX_PAGES ((128 * 1024 * 1024) / PAGE_SIZE) /* 128MB / 4KB = 32768 */
+/* BF: Derive metadata size from PHYSTOP so QEMU RAM changes do not leave
+ * allocator bookkeeping capped at the old memory size. */
+#define MAX_PAGES (PHYSMEM_SIZE / PAGE_SIZE)
 static int page_refcount[MAX_PAGES];
 static uint64_t page_last_free_ra[MAX_PAGES];
 static int kfree_debug_warn_count;
@@ -358,8 +360,7 @@ void kfree_contiguous(void *pa, int npages) {
 // for a 2MB-aligned run of 512 consecutive free pages.
 void *kalloc_super(void) {
     /* Build a bitmap of which pages are on the free list.
-     * MAX_PAGES = 32768, so bitmap = 4096 bytes = 1 page.
-     * Static to avoid putting 4096 bytes on the 16KB kernel stack. */
+     * Static to avoid putting the bitmap on the kernel stack. */
     static uint8_t free_bitmap[MAX_PAGES / 8];
 
     unsigned long old = r_sstatus();

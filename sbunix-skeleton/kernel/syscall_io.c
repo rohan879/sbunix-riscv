@@ -205,6 +205,10 @@ long sys_write_handler(struct trapframe *tf) {
             }
             int avail = KPIPE_BUF - pipe_avail(pid);
             if (avail <= 0) {
+                /* BF: Nonblocking pipe writes must report EAGAIN instead of
+                 * sleeping when no buffer space is available. */
+                if (f->flags & 04000)
+                    return (written > 0) ? (long)written : (long)-EAGAIN;
                 current_proc->state = SLEEPING;
                 swtch(&current_proc->context, &scheduler_context);
                 continue;
@@ -282,6 +286,10 @@ long sys_read_handler(struct trapframe *tf) {
         /* Block until at least one byte is available (or EOF) */
         while (pipe_avail(pid) == 0) {
             if (pipes[pid].write_open == 0) goto pipe_eof;
+            /* BF: Nonblocking pipe reads must return EAGAIN while writers
+             * remain open and no bytes are ready. */
+            if (f->flags & 04000)
+                return (long)-EAGAIN;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
             /* Check for pending signals after waking up:
@@ -584,13 +592,14 @@ long sys_lseek_handler(struct trapframe *tf) {
     return (long)new_off;
 }
 
-long sys_fstat_handler(struct trapframe *tf) {
-    int fd = (int)tf->a0;
+/* BF: Share fd-backed stat construction between fstat() and
+ * fstatat(fd, "", ..., AT_EMPTY_PATH). */
+static long copy_fstat_to_user(int fd, uint64_t stat_uaddr) {
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
     if (!f) {
         return (long)-9; /* EBADF */
     }
-    if (!tf->a1) {
+    if (!stat_uaddr) {
         return (long)-EFAULT; /* EFAULT */
     }
     if (f->is_pipe) {
@@ -604,7 +613,7 @@ long sys_fstat_handler(struct trapframe *tf) {
         memcpy(kstat + 16, &mode, 4);
         memcpy(kstat + 20, &nlink, 4);
         memcpy(kstat + 56, &blksz, 4);
-        if (copyout(current_proc->pagetable, tf->a1, kstat, 128) < 0) {
+        if (copyout(current_proc->pagetable, stat_uaddr, kstat, 128) < 0) {
             return (long)-EFAULT;
         }
         return (long)0;
@@ -612,7 +621,7 @@ long sys_fstat_handler(struct trapframe *tf) {
         uint8_t kstat[128];
         int ret = f->ops->fstat(f->fs_data, f->private, kstat);
         if (ret == 0) {
-            if (copyout(current_proc->pagetable, tf->a1, kstat, 128) < 0) {
+            if (copyout(current_proc->pagetable, stat_uaddr, kstat, 128) < 0) {
                 return (long)-EFAULT;
             }
         }
@@ -638,11 +647,15 @@ long sys_fstat_handler(struct trapframe *tf) {
         memcpy(kstat + 96, &nsec, 8);
         memcpy(kstat + 104, &sec, 8);
         memcpy(kstat + 112, &nsec, 8);
-        if (copyout(current_proc->pagetable, tf->a1, kstat, 128) < 0) {
+        if (copyout(current_proc->pagetable, stat_uaddr, kstat, 128) < 0) {
             return (long)-EFAULT;
         }
         return (long)0;
     }
+}
+
+long sys_fstat_handler(struct trapframe *tf) {
+    return copy_fstat_to_user((int)tf->a0, tf->a1);
 }
 
 long sys_newfstatat_handler(struct trapframe *tf) {
@@ -653,13 +666,18 @@ long sys_newfstatat_handler(struct trapframe *tf) {
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-EFAULT;
     }
+    int at_flags = (int)tf->a3;
+    /* BF: AT_EMPTY_PATH stats the dirfd argument directly when the supplied
+     * path is a valid empty string. */
+    if ((at_flags & 0x1000) && kpath[0] == '\0') {
+        return copy_fstat_to_user((int)tf->a0, tf->a2);
+    }
     char resolved[128];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
       if (rr < 0) return (long)rr; }
 
     /* Resolve symlinks: intermediate always, final unless AT_SYMLINK_NOFOLLOW */
-    int at_flags = (int)tf->a3;
     {
         int nofollow = (at_flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
         int symret = resolve_symlinks_in_path(resolved, 6, !nofollow);

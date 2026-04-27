@@ -269,6 +269,9 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     p->uid = current_proc->uid;
     p->gid = current_proc->gid;
     p->clone_flags = clone_flags;
+    /* BF: fork inherits the signal mask but not pending signals.  allocproc
+     * already clears sigpending, so copy only the active mask here. */
+    p->sigmask = current_proc->sigmask;
 
     /* BF: POSIX requires fork to inherit the parent's alternate signal
      * stack settings.  Without this, allocproc's default SS_DISABLE

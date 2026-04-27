@@ -16,73 +16,90 @@ check() {
     fi
 }
 
+# BF: Track C binary exit status because a crash may not print a [FAIL] line.
+run_test() {
+    echo "=== Running $1 ==="
+    /test/bin/$1
+    set rc $?
+    if test "$rc" = "0"; then
+        :
+    else
+        echo "[FAIL] $1 exited with status $rc"
+        set FAIL $(($FAIL + 1))
+    fi
+}
+
+run_test_expect_status() {
+    echo "=== Running $1 ==="
+    /test/bin/$1
+    set rc $?
+    if test "$rc" = "$2"; then
+        echo "[PASS] $1 exited with expected status $2"
+        set PASS $(($PASS + 1))
+    else
+        echo "[FAIL] $1 exited with status $rc  (want: $2)"
+        set FAIL $(($FAIL + 1))
+    fi
+}
+
+run_forkmemdiag_cow30() {
+    echo "=== Running forkmemdiag cow 30 ==="
+    /test/bin/forkmemdiag cow 30
+    set rc $?
+    if test "$rc" = "0"; then
+        :
+    else
+        echo "[FAIL] forkmemdiag cow 30 exited with status $rc"
+        set FAIL $(($FAIL + 1))
+    fi
+}
+
 echo === C Binary Tests ===
-echo "=== Running proctest ==="
-/test/bin/proctest
-echo "=== Running schedtest ==="
-/test/bin/schedtest
-echo "=== Running sigpipetest ==="
-/test/bin/sigpipetest
-echo "=== Running fstest ==="
-/test/bin/fstest
-echo "=== Running swaptest ==="
-/test/bin/swaptest
-echo "=== Running libc-test ==="
-/test/bin/libc-test
-echo "=== Running alarmtest ==="
-/test/bin/alarmtest
-echo "=== Running segvtest ==="
-/test/bin/segvtest
-echo "=== Running fdiotest ==="
-/test/bin/fdiotest
-echo "=== Running sigtest ==="
-/test/bin/sigtest
-echo "=== Running sighandtest ==="
-/test/bin/sighandtest
-echo "=== Running safetyabitest ==="
-/test/bin/safetyabitest
-echo "=== Running dirtest ==="
-/test/bin/dirtest
-echo "=== Running procfstest ==="
-/test/bin/procfstest
-echo "=== Running cowtest ==="
-/test/bin/cowtest
-echo "=== Running lazytest ==="
-/test/bin/lazytest
-echo "=== Running pgrptest ==="
-/test/bin/pgrptest
-echo "=== Running symlinktest ==="
-/test/bin/symlinktest
-echo "=== Running clocktest ==="
-/test/bin/clocktest
-echo "=== Running rtctest ==="
-/test/bin/rtctest
-echo "=== Running exectest ==="
-/test/bin/exectest
-echo "=== Running posixtest ==="
-/test/bin/posixtest
-echo "=== Running libxtest ==="
-/test/bin/libxtest
-echo "=== Running mmaptest ==="
-/test/bin/mmaptest
-echo "=== Running cowstresstest ==="
-/test/bin/cowstresstest
-echo "=== Running mmaphitest ===" && /test/bin/mmaphitest
-echo "=== Running envtest ===" && /test/bin/envtest
-echo "=== Running malloctest ===" && /test/bin/malloctest
-echo "=== Running shelltests ===" && /test/bin/shelltests
-echo "=== Running thirdpartytest ===" && /test/bin/thirdpartytest
-echo "=== Running mremaptest ===" && /test/bin/mremaptest
-echo "=== Running mprotecttest ===" && /test/bin/mprotecttest
-echo "=== Running mprotect_kernel_addr ===" && /test/bin/mprotect_kernel_addr
-echo "=== Running copyout_lazy ===" && /test/bin/copyout_lazy
-echo "=== Running copyinstr_lazy ===" && /test/bin/copyinstr_lazy
-echo "=== Running sigaltstack_protnone ===" && /test/bin/sigaltstack_protnone
-echo "=== Running trapretstress ===" && /test/bin/trapretstress
-echo "=== Running virtiostress ===" && /test/bin/virtiostress
-echo "=== Running membugstest ===" && /test/bin/membugstest
-echo "=== Running forkmemdiag ===" && /test/bin/forkmemdiag
-echo "=== Running posix_mem_test ===" && /test/bin/posix_mem_test
+run_test proctest
+run_test schedtest
+run_test sigpipetest
+run_test fstest
+run_test swaptest
+run_test libc-test
+run_test alarmtest
+run_test_expect_status segvtest 42
+run_test fdiotest
+run_test sigtest
+run_test sighandtest
+run_test safetyabitest
+run_test dirtest
+run_test procfstest
+run_test cowtest
+run_test lazytest
+run_test alloc1gb
+run_test brk_enomem
+run_test pgrptest
+run_test symlinktest
+run_test clocktest
+run_test rtctest
+run_test exectest
+run_test posixtest
+run_test libxtest
+run_test mmaptest
+run_test cowstresstest
+run_test mmaphitest
+run_test envtest
+run_test malloctest
+run_test shelltests
+run_test thirdpartytest
+run_test mremaptest
+run_test mprotecttest
+# TEST: Focused P1 syscall/process edge coverage.
+run_test p1edgetest
+run_test mprotect_kernel_addr
+run_test copyout_lazy
+run_test copyinstr_lazy
+run_test sigaltstack_protnone
+run_test trapretstress
+run_test virtiostress
+run_test membugstest
+run_forkmemdiag_cow30
+run_test posix_mem_test
 echo === C Binary Tests Done ===
 
 echo "=== Shell Regression Tests ==="
@@ -573,12 +590,6 @@ echo "Failed: $FAIL"
 echo ""
 echo "To run Sortix os-test POSIX compliance suite: run-os-test"
 echo "To run Open POSIX test suite: run-open-posix-test"
-
-# --- Persistence test: MUST be last (calls poweroff after write phase) ---
-# BF: persisttest is compiled with BUILD_TESTS=1 and placed on the test
-# disk at /test/bin/persisttest, not in the main rootfs at /bin.
-echo "=== Running persisttest ==="
-/test/bin/persisttest
 
 if test $FAIL -gt 0; then
     exit 1

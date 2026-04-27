@@ -45,6 +45,8 @@
 #define AT_REMOVEDIR 0x200
 #define AT_SYMLINK_FOLLOW 0x400
 #define AT_EACCESS 0x200
+/* ENH: fstatat(fd, "", ..., AT_EMPTY_PATH) stats the fd itself. */
+#define AT_EMPTY_PATH 0x1000
 
 /* fcntl() commands */
 #define F_DUPFD     0

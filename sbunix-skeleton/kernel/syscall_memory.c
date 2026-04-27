@@ -18,16 +18,84 @@
 #include <syscall.h>
 #include <errno.h>
 
+static int mmap_reserved_range(struct proc *p, uint64_t start, uint64_t len,
+                               uint64_t *next_va);
+
+static int brk_round_up(uint64_t value, uint64_t *rounded) {
+    if (value > (uint64_t)-1 - (PAGE_SIZE - 1))
+        return -1;
+    *rounded = PGROUNDUP(value);
+    if (*rounded < value)
+        return -1;
+    return 0;
+}
+
+static int ranges_overlap(uint64_t a_start, uint64_t a_end,
+                          uint64_t b_start, uint64_t b_end) {
+    return a_start < b_end && b_start < a_end;
+}
+
+static int brk_stack_guard_overlap(struct proc *p, uint64_t start,
+                                   uint64_t end, uint64_t target) {
+    if (!p || p->stack_top == 0 || p->stack_bottom == 0)
+        return 0;
+
+    uint64_t guard_bytes = 256 * PAGE_SIZE;
+    uint64_t guard_start = p->stack_bottom > guard_bytes
+                         ? p->stack_bottom - guard_bytes
+                         : 0;
+    uint64_t guard_end = p->stack_top ? p->stack_top : USER_STACK_TOP;
+
+    return ranges_overlap(start, end, guard_start, guard_end) ||
+           target >= guard_start;
+}
+
+static int brk_vma_overlap(struct proc *p, uint64_t start, uint64_t end) {
+    struct vm_area *v = p->vma_list;
+
+    while (v) {
+        if (v->end <= start) {
+            v = v->next;
+            continue;
+        }
+        if (v->start >= end)
+            break;
+        return 1;
+    }
+
+    return 0;
+}
+
+static int brk_reserved_overlap(struct proc *p, uint64_t start, uint64_t end,
+                                uint64_t target) {
+    if (target >= SIGTRAMP_VA ||
+        ranges_overlap(start, end, SIGTRAMP_VA, SIGTRAMP_VA + PAGE_SIZE))
+        return 1;
+    if (brk_stack_guard_overlap(p, start, end, target))
+        return 1;
+    if (brk_vma_overlap(p, start, end))
+        return 1;
+    if (mmap_reserved_range(p, start, end - start, 0))
+        return 1;
+    return 0;
+}
+
 long sys_brk_handler(struct trapframe *tf) {
     uint64_t new_brk = tf->a0;
     uint64_t cur_sz  = current_proc->sz;
+    uint64_t new_rounded;
+    uint64_t old_rounded;
 
     if (new_brk == 0) {
         return (long)cur_sz;
     } else if (new_brk < cur_sz) {
-        /* Shrink: unmap pages and remove VMA coverage */
-        uint64_t new_rounded = PGROUNDUP(new_brk);
-        uint64_t old_rounded = PGROUNDUP(cur_sz);
+        if (!user_addr_ok(new_brk) ||
+            brk_round_up(new_brk, &new_rounded) < 0 ||
+            brk_round_up(cur_sz, &old_rounded) < 0)
+            return (long)cur_sz;
+
+        /* BF: Keep raw brk failure Linux-like: reject invalid shrink targets
+         * by returning the unchanged break instead of a negative errno. */
         if (new_rounded < old_rounded) {
             uvmunmap_proc(current_proc, current_proc->pagetable,
                          new_rounded, old_rounded - new_rounded);
@@ -37,16 +105,22 @@ long sys_brk_handler(struct trapframe *tf) {
         current_proc->sz = new_brk;
         return (long)new_brk;
     } else {
-        /* Grow: lazy allocation -- just add a VMA, pages allocated on fault */
-        uint64_t heap_start = PGROUNDUP(cur_sz);
-        uint64_t rounded    = PGROUNDUP(new_brk);
-        if (heap_start < rounded) {
-            /* BF: Check vma_add return value — don't update sz if VMA
-             * allocation failed, otherwise the process state (sz) would
-             * advance past a region with no VMA coverage. */
-            if (vma_add(current_proc, heap_start, rounded,
+        if (!user_addr_ok(new_brk) ||
+            brk_round_up(cur_sz, &old_rounded) < 0 ||
+            brk_round_up(new_brk, &new_rounded) < 0 ||
+            !user_range_ok(old_rounded, new_rounded - old_rounded))
+            return (long)cur_sz;
+
+        /* Grow lazily, but first reject reserved holes and existing VMAs.
+         * BF: vma_add() does not enforce non-overlap, so brk must preflight
+         * the full heap extension before publishing a larger process size. */
+        if (old_rounded < new_rounded) {
+            if (brk_reserved_overlap(current_proc, old_rounded, new_rounded,
+                                     new_brk))
+                return (long)cur_sz;
+            if (vma_add(current_proc, old_rounded, new_rounded,
                         PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON) < 0)
-                return (long)-12; /* -ENOMEM */
+                return (long)cur_sz;
         }
         current_proc->sz = new_brk;
         return (long)new_brk;
@@ -121,6 +195,23 @@ static uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
   }
 }
 
+static int mmap_file_max_prot(struct open_file *of, int flags) {
+    int accmode = of ? (of->flags & 3) : 0;
+    int max_prot = 0;
+
+    /* BF: File-backed mappings always need read access for demand paging.
+     * MAP_SHARED writes additionally require a writable fd. */
+    if (accmode == 1) /* O_WRONLY */
+        return 0;
+
+    max_prot |= PROT_READ | PROT_EXEC;
+    if (flags & MAP_PRIVATE)
+        max_prot |= PROT_WRITE;
+    if ((flags & 0x01) && accmode != 0)
+        max_prot |= PROT_WRITE;
+    return max_prot;
+}
+
 long sys_mmap_handler(struct trapframe *tf) {
     uint64_t addr  = tf->a0;
     uint64_t len   = tf->a1;
@@ -160,17 +251,11 @@ long sys_mmap_handler(struct trapframe *tf) {
         /* BF: Check file permission vs requested prot.
          * MAP_SHARED + PROT_WRITE needs a writable fd.
          * PROT_READ needs a readable fd. */
-        int accmode = ftab[fd]->flags & 3; /* O_ACCMODE mask */
-        if ((flags & 0x01 /* MAP_SHARED */) && (prot & PROT_WRITE)) {
-            /* accmode 0 = O_RDONLY — not writable */
-            if (accmode == 0)
-                return (long)-13; /* EACCES */
-        }
-        if (prot & PROT_READ) {
-            /* accmode 1 = O_WRONLY — not readable */
-            if (accmode == 1)
-                return (long)-13; /* EACCES */
-        }
+        int max_prot = mmap_file_max_prot(ftab[fd], flags);
+        if (max_prot == 0)
+            return (long)-13; /* EACCES */
+        if ((prot & ~max_prot) != 0)
+            return (long)-13; /* EACCES */
     }
 
     /* BF: Check for overflow before rounding len up to page boundary.
@@ -232,6 +317,9 @@ long sys_mmap_handler(struct trapframe *tf) {
         if (vma) {
             vma->file = ftab[fd];
             vma->file_offset = offset;
+            /* BF: Preserve the fd-derived maximum permission so later
+             * mprotect() cannot upgrade a mapping beyond original access. */
+            vma->max_prot = mmap_file_max_prot(ftab[fd], flags);
             ftab[fd]->refcount++; /* keep file open even if userspace closes fd */
         }
     }
@@ -362,8 +450,11 @@ long sys_mprotect_handler(struct trapframe *tf) {
         return -EINVAL;
 
     for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
-        if (!vma_find(current_proc, va))
+        struct vm_area *v = vma_find(current_proc, va);
+        if (!v)
             return -EINVAL;
+        if ((prot & ~v->max_prot) != 0)
+            return -EACCES;
     }
 
     /* Build new PTE permission bits */
@@ -483,6 +574,7 @@ long sys_mprotect_handler(struct trapframe *tf) {
           suffix->start = range_start;
           suffix->end   = v->end;
           suffix->prot  = v->prot;
+          suffix->max_prot = v->max_prot;
           suffix->flags = v->flags;
           suffix->file  = v->file;
           suffix->file_offset = v->file_offset + (range_start - v->start);
@@ -521,6 +613,7 @@ long sys_mprotect_handler(struct trapframe *tf) {
           tail->start = range_end;
           tail->end   = v->end;
           tail->prot  = v->prot;
+          tail->max_prot = v->max_prot;
           tail->flags = v->flags;
           tail->file  = v->file;
           tail->file_offset = v->file_offset + (range_end - v->start);
@@ -609,7 +702,18 @@ long sys_mremap_handler(struct trapframe *tf) {
     }
     if (can_expand) {
         struct vm_area *v = vma_find(current_proc, old_addr);
-        if (v) v->end = old_addr + new_size;
+        if (v && v->file && (v->flags & MAP_PRIVATE) &&
+            old_addr + old_size == v->end) {
+            /* BF: Growing a private file mapping past the original range
+             * must not make the tail file-backed beyond EOF.  Keep the
+             * existing VMA file-backed and publish an anonymous tail. */
+            if (vma_add(current_proc, old_addr + old_size,
+                        old_addr + new_size, v->prot,
+                        MAP_PRIVATE | MAP_ANON) < 0)
+                return (long)-12; /* ENOMEM */
+        } else if (v) {
+            v->end = old_addr + new_size;
+        }
         return (long)old_addr;
     }
     /* Cannot expand in place; if MREMAP_MAYMOVE, allocate new region + copy */
@@ -648,6 +752,7 @@ long sys_mremap_handler(struct trapframe *tf) {
               dv->file = sv->file;
               dv->file->refcount++;
               dv->file_offset = sv->file_offset + (seg_start - sv->start);
+              dv->max_prot = sv->max_prot;
             }
             sv = sv->next;
           }
@@ -709,15 +814,17 @@ long sys_mremap_handler(struct trapframe *tf) {
               uint64_t pa = PTE2PA(*rpte);
               int freed_via_rmap = 0;
               struct vm_area *rv = vma_find(current_proc, new_va + off);
-              if (rv) {
+              if (rv && (rv->flags & MAP_ANON)) {
                 struct page *pd = virt_to_page((void *)pa);
-                if (pd) {
-                  /* page_remove_rmap() may drop the last mapping and free
-                   * the page through mm_free_page(); avoid a second kfree(). */
+                if (pd && PageAnon(pd)) {
+                  int last_mapping = page_mapcount(pd) == 0;
                   page_remove_rmap(pd, rv);
-                  freed_via_rmap = 1;
+                  if (last_mapping)
+                    freed_via_rmap = 1;
                 }
               }
+              /* BF: rmap owns the final anon free; non-final COW refs still
+               * need kfree() to drop this mapping's physical-page ref. */
               if (!freed_via_rmap)
                 kfree((void *)pa);
               *rpte = 0;
@@ -736,15 +843,17 @@ long sys_mremap_handler(struct trapframe *tf) {
             uint64_t pa = PTE2PA(*old_pte);
             int freed_via_rmap = 0;
             struct vm_area *ov = vma_find(current_proc, old_addr + off);
-            if (ov) {
+            if (ov && (ov->flags & MAP_ANON)) {
               struct page *opd = virt_to_page((void *)pa);
-              if (opd) {
-                /* page_remove_rmap() owns the final free when this was
-                 * the last mapping of the old page. */
+              if (opd && PageAnon(opd)) {
+                int last_mapping = page_mapcount(opd) == 0;
                 page_remove_rmap(opd, ov);
-                freed_via_rmap = 1;
+                if (last_mapping)
+                  freed_via_rmap = 1;
               }
             }
+            /* BF: Match uvmunmap_proc ownership: rmap frees only the last
+             * anonymous mapping; otherwise kfree drops this mapping's ref. */
             if (!freed_via_rmap)
               kfree((void *)pa);
           }

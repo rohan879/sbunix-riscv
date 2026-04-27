@@ -569,5 +569,8 @@ int main(int argc, char *argv[]) {
     printf("\n");
     show_usage();
 
-    return (failed > 0) ? 1 : 0;
+    /* BF: Errors are required status failures even when they do not emit
+     * FAIL lines, so host validation cannot mistake an incomplete run for
+     * a clean suite completion. */
+    return (failed > 0 || errors > 0) ? 1 : 0;
 }

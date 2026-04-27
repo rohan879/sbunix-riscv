@@ -7,6 +7,8 @@
  *  2. mprotect_partial_vma: mprotect middle of large anon mapping
  *  3. mprotect_anon_metadata: anon mmap, write, RO then RW, verify data
  *  4. mprotect_syscall_usercopy: syscalls cannot bypass PROT_NONE
+ *  5. mprotect_file_max_prot: mprotect cannot exceed fd-derived access
+ *  6. filebacked_lazy_syscall_buffers: copy helpers fault file pages in
  */
 
 #include <stdio.h>
@@ -209,6 +211,159 @@ static void test_mprotect_syscall_usercopy(void) {
   CHECK("mprotect_syscall_usercopy", ok);
 }
 
+/*
+ * Test 5: mprotect_file_max_prot -- a MAP_SHARED mapping from an O_RDONLY
+ * fd must not become writable through mprotect().
+ */
+static void test_mprotect_file_max_prot(void) {
+  const char *path = "/mnt/mprotect_test_maxprot";
+  char buf[PAGE];
+  memset(buf, 0x5A, PAGE);
+
+  int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+  if (fd < 0) {
+    CHECK("mprotect_file_max_prot", 0);
+    return;
+  }
+  if (write(fd, buf, PAGE) != PAGE) {
+    close(fd);
+    unlink(path);
+    CHECK("mprotect_file_max_prot", 0);
+    return;
+  }
+  close(fd);
+
+  fd = open(path, O_RDONLY, 0);
+  if (fd < 0) {
+    unlink(path);
+    CHECK("mprotect_file_max_prot", 0);
+    return;
+  }
+  char *p = mmap(NULL, PAGE, PROT_READ, MAP_SHARED, fd, 0);
+  close(fd);
+  if (p == MAP_FAILED) {
+    unlink(path);
+    CHECK("mprotect_file_max_prot", 0);
+    return;
+  }
+
+  errno = 0;
+  int r = mprotect(p, PAGE, PROT_READ | PROT_WRITE);
+  int ok = (r < 0 && errno == EACCES);
+  if (ok)
+    ok = ((unsigned char *)p)[0] == 0x5A;
+
+  munmap(p, PAGE);
+  unlink(path);
+  CHECK("mprotect_file_max_prot", ok);
+}
+
+static int write_file(const char *path, const void *data, int len) {
+  int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+  if (fd < 0)
+    return -1;
+  int ok = (write(fd, data, len) == len);
+  fsync(fd);
+  close(fd);
+  return ok ? 0 : -1;
+}
+
+/*
+ * Test 6: filebacked_lazy_syscall_buffers -- syscall copyin/copyout and
+ * copyinstr must demand-fault file-backed private mappings, not just
+ * anonymous lazy pages.
+ */
+static void test_filebacked_lazy_syscall_buffers(void) {
+  const char *data_path = "/mnt/mprotect_lazy_data";
+  const char *path_path = "/mnt/mprotect_lazy_path";
+  const char *payload_path = "/mnt/mprotect_lazy_payload";
+  const char msg[] = "lazy-file-backed-buffer";
+  char page[PAGE];
+  int pfd[2] = {-1, -1};
+  int ok = 1;
+
+  memset(page, 0, sizeof(page));
+  memcpy(page, msg, sizeof(msg));
+  if (write_file(data_path, page, PAGE) < 0)
+    ok = 0;
+  if (write_file(payload_path, "payload", 7) < 0)
+    ok = 0;
+  if (write_file(path_path, payload_path, (int)strlen(payload_path) + 1) < 0)
+    ok = 0;
+
+  int fd = ok ? open(data_path, O_RDONLY, 0) : -1;
+  char *src = MAP_FAILED;
+  if (fd >= 0) {
+    src = mmap(NULL, PAGE, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+  }
+  if (src == MAP_FAILED)
+    ok = 0;
+
+  if (ok && pipe(pfd) < 0)
+    ok = 0;
+  if (ok) {
+    ssize_t nw = write(pfd[1], src, sizeof(msg));
+    char verify[64];
+    memset(verify, 0, sizeof(verify));
+    ssize_t nr = read(pfd[0], verify, sizeof(msg));
+    ok = (nw == (ssize_t)sizeof(msg) &&
+          nr == (ssize_t)sizeof(msg) &&
+          memcmp(verify, msg, sizeof(msg)) == 0);
+  }
+  if (pfd[0] >= 0) close(pfd[0]);
+  if (pfd[1] >= 0) close(pfd[1]);
+  pfd[0] = pfd[1] = -1;
+  if (src != MAP_FAILED)
+    munmap(src, PAGE);
+
+  fd = ok ? open(data_path, O_RDONLY, 0) : -1;
+  char *dst = MAP_FAILED;
+  if (fd >= 0) {
+    dst = mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    close(fd);
+  }
+  if (dst == MAP_FAILED)
+    ok = 0;
+
+  if (ok && pipe(pfd) < 0)
+    ok = 0;
+  if (ok) {
+    ssize_t nw = write(pfd[1], msg, sizeof(msg));
+    ssize_t nr = read(pfd[0], dst, sizeof(msg));
+    ok = (nw == (ssize_t)sizeof(msg) &&
+          nr == (ssize_t)sizeof(msg) &&
+          memcmp(dst, msg, sizeof(msg)) == 0);
+  }
+  if (pfd[0] >= 0) close(pfd[0]);
+  if (pfd[1] >= 0) close(pfd[1]);
+  pfd[0] = pfd[1] = -1;
+  if (dst != MAP_FAILED)
+    munmap(dst, PAGE);
+
+  fd = ok ? open(path_path, O_RDONLY, 0) : -1;
+  char *lazy_path = MAP_FAILED;
+  if (fd >= 0) {
+    lazy_path = mmap(NULL, PAGE, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+  }
+  if (lazy_path == MAP_FAILED)
+    ok = 0;
+  if (ok) {
+    int payload_fd = open(lazy_path, O_RDONLY, 0);
+    ok = (payload_fd >= 0);
+    if (payload_fd >= 0)
+      close(payload_fd);
+  }
+  if (lazy_path != MAP_FAILED)
+    munmap(lazy_path, PAGE);
+
+  unlink(data_path);
+  unlink(path_path);
+  unlink(payload_path);
+  CHECK("filebacked_lazy_syscall_buffers", ok);
+}
+
 int main(void) {
   printf("=== mprotecttest: mprotect test suite ===\n");
 
@@ -216,6 +371,8 @@ int main(void) {
   test_mprotect_partial_vma();
   test_mprotect_anon_metadata();
   test_mprotect_syscall_usercopy();
+  test_mprotect_file_max_prot();
+  test_filebacked_lazy_syscall_buffers();
 
   printf("\n=== mprotecttest: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;

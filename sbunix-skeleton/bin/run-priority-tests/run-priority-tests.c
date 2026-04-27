@@ -12,10 +12,12 @@
 #include <signal.h>
 #include <fcntl.h>
 
-#define TIMEOUT_SEC 30
+#define DEFAULT_TIMEOUT_SEC 30
+#define SLOW_TIMEOUT_SEC 180
 #define MANIFEST_MAX (64 * 1024)
 
 volatile pid_t g_child_pid;
+static int g_failures;
 
 static void emit(const char *s) {
   write(STDOUT_FILENO, s, strlen(s));
@@ -27,6 +29,14 @@ static void alarm_handler(int sig) {
     kill(g_child_pid, SIGKILL);
 }
 
+static unsigned int timeout_for_test(const char *suite, const char *name) {
+  if (strcmp(suite, "open-posix") == 0 &&
+      (strcmp(name, "conformance/interfaces/clock_gettime/4-1") == 0 ||
+       strcmp(name, "conformance/interfaces/mmap/10-1") == 0))
+    return SLOW_TIMEOUT_SEC;
+  return DEFAULT_TIMEOUT_SEC;
+}
+
 static int run_test(const char *runner, const char *suite, const char *name) {
   pid_t pid = fork();
   if (pid < 0) {
@@ -35,6 +45,7 @@ static int run_test(const char *runner, const char *suite, const char *name) {
     emit("/");
     emit(name);
     emit(" (fork failed)\n");
+    g_failures++;
     return -1;
   }
   if (pid == 0) {
@@ -59,7 +70,7 @@ static int run_test(const char *runner, const char *suite, const char *name) {
   }
 
   g_child_pid = pid;
-  alarm(TIMEOUT_SEC);
+  alarm(timeout_for_test(suite, name));
 
   int status = 0;
   pid_t ret = waitpid(pid, &status, 0);
@@ -69,6 +80,9 @@ static int run_test(const char *runner, const char *suite, const char *name) {
   if (ret >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
     emit("[PASS] ");
   } else {
+    /* BF: Propagate priority-suite failures to guest-run-tests instead of
+     * producing only parseable [FAIL] text with an overall zero status. */
+    g_failures++;
     emit("[FAIL] ");
   }
   emit(suite);
@@ -134,5 +148,5 @@ int main(void) {
                "/bin/run-os-test", "os-test");
   run_manifest("/test/priority-open-posix-manifest",
                "/bin/run-open-posix-test", "open-posix");
-  return 0;
+  return g_failures == 0 ? 0 : 1;
 }

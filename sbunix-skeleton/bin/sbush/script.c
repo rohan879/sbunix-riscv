@@ -7,38 +7,43 @@ int run_script(const char *path) {
         return 1;
     }
 
-    char file_buf[65536];
-    int total = 0;
+    int first_line = 1;
+    char line[MAX_LINE];
+    int i = 0;
+    char ch;
     ssize_t n;
-    while ((n = read(fd, file_buf + total, sizeof(file_buf) - total - 1)) > 0)
-        total += n;
-    close(fd);
-    file_buf[total] = '\0';
 
-    /* skip shebang line */
-    char *p = file_buf;
-    if (p[0] == '#' && p[1] == '!') {
-        while (*p && *p != '\n')
-            p++;
-        if (*p == '\n')
-            p++;
-    }
-
-    /* execute each line */
-    while (*p) {
-        char line[MAX_LINE];
-        int i = 0;
-        while (*p && *p != '\n' && i < MAX_LINE - 1)
-            line[i++] = *p++;
+    while ((n = read(fd, &ch, 1)) > 0) {
+        if (ch != '\n' && i < MAX_LINE - 1) {
+            line[i++] = ch;
+            continue;
+        }
         line[i] = '\0';
-        if (*p == '\n')
-            p++;
+
+        if (first_line) {
+            first_line = 0;
+            if (line[0] == '#' && line[1] == '!') {
+                i = 0;
+                continue;
+            }
+        }
+
         /* BF: Always call execute_line when heredoc, control flow, or function
          * definition is active — blank lines are meaningful content in those
          * contexts (e.g. blank line inside a heredoc body). */
         if (i > 0 || cf_active() || heredoc_active() || func_def_active())
             execute_line(line);
+        i = 0;
     }
+
+    if (i > 0) {
+        line[i] = '\0';
+        if (!(first_line && line[0] == '#' && line[1] == '!') &&
+            (i > 0 || cf_active() || heredoc_active() || func_def_active()))
+            execute_line(line);
+    }
+
+    close(fd);
 
     return last_exit_status;
 }
