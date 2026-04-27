@@ -104,7 +104,9 @@ long sys_pipe2_handler(struct trapframe *tf) {
             rf->pipe_write = 0;
             rf->pipe_id = pipeid;
             rf->ops = NULL;
-            rf->flags = (pipe_flags & 02000000) ? 02000000 : 0; /* O_CLOEXEC */
+            /* BF: Preserve pipe status flags so read/write can honor
+             * O_NONBLOCK in addition to descriptor flags. */
+            rf->flags = pipe_flags & (02000000 | 04000); /* O_CLOEXEC | O_NONBLOCK */
             ftab[rfd] = rf;
             if (wf) wfd = alloc_fd();
         }
@@ -124,7 +126,8 @@ long sys_pipe2_handler(struct trapframe *tf) {
             wf->pipe_write = 1;
             wf->pipe_id = pipeid;
             wf->ops = NULL;
-            wf->flags = (pipe_flags & 02000000) ? (1 | 02000000) : 1; /* O_WRONLY + O_CLOEXEC */
+            /* BF: Keep O_NONBLOCK on the open-file object, not only fd_flags. */
+            wf->flags = 1 | (pipe_flags & (02000000 | 04000)); /* O_WRONLY + flags */
             ftab[wfd] = wf;
             /* ENH: Set per-fd flags for pipe fds based on pipe_flags.
              * O_CLOEXEC and O_CLOFORK propagate to fd_flags. */

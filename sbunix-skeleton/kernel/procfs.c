@@ -316,8 +316,8 @@ static int procfs_render_uptime(char *buf, int bufsz) {
 /* Render /proc/meminfo */
 static int procfs_render_meminfo(char *buf, int bufsz) {
   int pos = 0;
-  /* 128MB total physical memory (PHYSTOP - 0x80000000) */
-  long total_kb = (long)(128 * 1024);
+  /* BF: Report the configured RAM size rather than the old fixed value. */
+  long total_kb = (long)((PHYSTOP - KERNBASE) / 1024);
   long free_pages = (long)get_free_page_count();
   long free_kb = free_pages * (long)(PAGE_SIZE / 1024);
   long used_kb = total_kb - free_kb;
@@ -946,6 +946,37 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
   struct proc *target = self_path && current_proc ? current_proc
                                                   : find_proc(target_pid);
   if (!target) return -2; /* ENOENT */
+
+  /* BF: /proc/<pid>/fd/<n> directory entries are symlinks; readlink should
+   * expose the same stored file path used for dirfd-relative resolution. */
+  if (strncmp(rest, "fd/", 3) == 0) {
+    int fd = parse_pid(rest + 3);
+    if (fd < 0 || fd >= NOFILE)
+      return -2;
+    struct open_file **ftable = proc_ofile(target);
+    struct open_file *f = ftable[fd];
+    if (!f)
+      return -2;
+
+    char tmp[128];
+    int len = 0;
+    if (f->path[0] != '\0') {
+      len = strlen(f->path);
+      if (len > (int)sizeof(tmp)) len = (int)sizeof(tmp);
+      memcpy(tmp, f->path, len);
+    } else if (f->is_pipe) {
+      len = append_str(tmp, sizeof(tmp), len, "pipe:[");
+      len = append_int(tmp, sizeof(tmp), len, f->pipe_id);
+      if (len < (int)sizeof(tmp)) tmp[len++] = ']';
+    } else {
+      len = append_str(tmp, sizeof(tmp), len, "anon:[");
+      len = append_int(tmp, sizeof(tmp), len, fd);
+      if (len < (int)sizeof(tmp)) tmp[len++] = ']';
+    }
+    if (len > bufsiz) len = bufsiz;
+    memcpy(buf, tmp, len);
+    return len;
+  }
 
   /* /proc/<pid>/exe -> exe_path */
   if (strcmp(rest, "exe") == 0) {

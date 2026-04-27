@@ -52,6 +52,8 @@ struct vfs_ops;
 #define EXT2_O_WRONLY     1
 #define EXT2_O_RDWR       2
 #define EXT2_O_CREAT      0100
+/* BF: ext2 open must see O_EXCL for create-existing rejection. */
+#define EXT2_O_EXCL       0200
 #define EXT2_O_TRUNC      01000
 
 /* ------------------------------------------------------------------ */

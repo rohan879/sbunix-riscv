@@ -997,6 +997,13 @@ static int ext2_open(void *fs_data, const char *path, int flags,
 
   struct ext2_inode_mem *ip = ext2_namei(fs, path);
 
+  /* BF: O_EXCL only has meaning with O_CREAT and must fail when the final
+   * path already exists. */
+  if (ip && (flags & EXT2_O_CREAT) && (flags & EXT2_O_EXCL)) {
+    icache_release(ip);
+    return -EEXIST;
+  }
+
   if (!ip && (flags & EXT2_O_CREAT)) {
     /* Create a new file */
     /* Find parent directory */
@@ -1041,6 +1048,13 @@ static int ext2_open(void *fs_data, const char *path, int flags,
 
   if (!ip)
     return -ENOENT;
+
+  /* BF: Path resolution leaves the final component unresolved for
+   * O_NOFOLLOW; ext2 must reject opening that raw symlink inode. */
+  if (ip->type == EXT2_TYPE_SYMLINK) {
+    icache_release(ip);
+    return -ELOOP;
+  }
 
   /* Handle O_TRUNC */
   if ((flags & EXT2_O_TRUNC) && ip->type == EXT2_TYPE_FILE) {
