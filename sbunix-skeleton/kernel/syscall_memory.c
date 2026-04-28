@@ -21,6 +21,11 @@
 static int mmap_reserved_range(struct proc *p, uint64_t start, uint64_t len,
                                uint64_t *next_va);
 
+static int shared_vfork_child(void) {
+    return current_proc && current_proc->shared_pt &&
+           (current_proc->clone_flags & CLONE_VFORK);
+}
+
 static int brk_round_up(uint64_t value, uint64_t *rounded) {
     if (value > (uint64_t)-1 - (PAGE_SIZE - 1))
         return -1;
@@ -85,6 +90,12 @@ long sys_brk_handler(struct trapframe *tf) {
     uint64_t cur_sz  = current_proc->sz;
     uint64_t new_rounded;
     uint64_t old_rounded;
+
+    /* BF: A vfork child shares the parent's pagetable until exec/exit.
+     * Reject VMA mutations in that window so the copied VMA list cannot
+     * diverge from the shared physical mappings. */
+    if (shared_vfork_child())
+        return (long)cur_sz;
 
     if (new_brk == 0) {
         return (long)cur_sz;
@@ -220,6 +231,9 @@ long sys_mmap_handler(struct trapframe *tf) {
     int      fd    = (int)tf->a4;
     uint64_t offset = tf->a5;
 
+    if (shared_vfork_child())
+        return (long)-22; /* EINVAL */
+
     /* BF: POSIX requires offset to be page-aligned for mmap. */
     if (offset % PAGE_SIZE != 0)
         return (long)-22; /* EINVAL */
@@ -328,9 +342,11 @@ long sys_mmap_handler(struct trapframe *tf) {
 }
 
 /* Write back dirty MAP_SHARED pages to the backing file before unmapping.
- * RF: Made non-static for access from cleanup_proc_resources (exit path). */
-void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) {
-    struct vm_area *v = p->vma_list;
+ * BF: Accept an explicit pagetable and VMA list so exit/exec can flush the
+ * old address space before its VMA metadata is torn down. */
+void mmap_writeback_shared_from(pagetable_t pagetable, struct vm_area *vmas,
+                                uint64_t start, uint64_t end) {
+    struct vm_area *v = vmas;
     while (v) {
         if (v->file && (v->flags & 0x01) /* MAP_SHARED */ &&
             v->start < end && v->end > start) {
@@ -354,7 +370,7 @@ void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) {
             uint64_t wb_start = (start > v->start) ? start : v->start;
             uint64_t wb_end = (end < v->end) ? end : v->end;
             for (uint64_t va = wb_start; va < wb_end; va += PAGE_SIZE) {
-                pte_t *pte = walk(p->pagetable, va, 0);
+                pte_t *pte = walk(pagetable, va, 0);
                 if (pte && (*pte & PTE_V) && (*pte & PTE_U)) {
                     uint64_t pa = PTE2PA(*pte);
                     uint64_t file_off = v->file_offset + (va - v->start);
@@ -380,9 +396,19 @@ void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) {
     }
 }
 
+/* RF: Process-scoped wrapper kept for mmap/munmap/msync callers. */
+void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end) {
+    if (!p)
+        return;
+    mmap_writeback_shared_from(p->pagetable, p->vma_list, start, end);
+}
+
 long sys_munmap_handler(struct trapframe *tf) {
     uint64_t addr = tf->a0;
     uint64_t len  = tf->a1;
+
+    if (shared_vfork_child())
+        return -22; /* -EINVAL */
 
     /* BF: POSIX requires EINVAL when len is 0.  Previously len=0 was
      * rounded up to 0 and silently accepted as a no-op. */
@@ -408,11 +434,8 @@ long sys_munmap_handler(struct trapframe *tf) {
     /* Write back MAP_SHARED pages before unmapping */
     mmap_writeback_shared(current_proc, addr, addr + len);
 
-    /* BF: Unmap pages BEFORE removing VMA tracking.  uvmunmap calls
-     * page_remove_rmap (B7) which accesses page->anon_vma — the
-     * anon_vma must still be alive.  If we did vma_remove first,
-     * anon_vma_unlink could free the anon_vma, leaving page_remove_rmap
-     * with a dangling pointer (use-after-free crash in swaptest). */
+    /* BF: Unmap pages BEFORE removing VMA tracking.  PTE teardown owns the
+     * kfree() call, but it still uses VMA/rmap metadata for advisory cleanup. */
     uvmunmap_proc(current_proc, current_proc->pagetable, addr, len);
     sfence_vma();
 
@@ -433,6 +456,9 @@ long sys_mprotect_handler(struct trapframe *tf) {
     uint64_t addr = tf->a0;
     uint64_t len  = tf->a1;
     int prot      = (int)tf->a2;
+
+    if (shared_vfork_child())
+        return -EINVAL;
 
     /* Validate alignment */
     if (addr & (PAGE_SIZE - 1))
@@ -678,6 +704,9 @@ long sys_mremap_handler(struct trapframe *tf) {
     uint64_t old_size = tf->a1;
     uint64_t new_size = tf->a2;
     int flags = (int)tf->a3;
+
+    if (shared_vfork_child())
+        return (long)-EINVAL;
     old_size = PGROUNDUP(old_size);
     new_size = PGROUNDUP(new_size);
     if (new_size == old_size) return (long)old_addr;
@@ -812,21 +841,15 @@ long sys_mremap_handler(struct trapframe *tf) {
             pte_t *rpte = walk(current_proc->pagetable, new_va + off, 0);
             if (rpte && (*rpte & PTE_V)) {
               uint64_t pa = PTE2PA(*rpte);
-              int freed_via_rmap = 0;
               struct vm_area *rv = vma_find(current_proc, new_va + off);
               if (rv && (rv->flags & MAP_ANON)) {
                 struct page *pd = virt_to_page((void *)pa);
-                if (pd && PageAnon(pd)) {
-                  int last_mapping = page_mapcount(pd) == 0;
+                if (pd && PageAnon(pd))
                   page_remove_rmap(pd, rv);
-                  if (last_mapping)
-                    freed_via_rmap = 1;
-                }
               }
-              /* BF: rmap owns the final anon free; non-final COW refs still
-               * need kfree() to drop this mapping's physical-page ref. */
-              if (!freed_via_rmap)
-                kfree((void *)pa);
+              /* BF: Rmap is metadata-only; every removed PTE drops exactly
+               * one allocator ref through kfree(). */
+              kfree((void *)pa);
               *rpte = 0;
             }
           }
@@ -841,21 +864,15 @@ long sys_mremap_handler(struct trapframe *tf) {
           if (!old_pte || *old_pte == 0) continue;
           if (*old_pte & PTE_V) {
             uint64_t pa = PTE2PA(*old_pte);
-            int freed_via_rmap = 0;
             struct vm_area *ov = vma_find(current_proc, old_addr + off);
             if (ov && (ov->flags & MAP_ANON)) {
               struct page *opd = virt_to_page((void *)pa);
-              if (opd && PageAnon(opd)) {
-                int last_mapping = page_mapcount(opd) == 0;
+              if (opd && PageAnon(opd))
                 page_remove_rmap(opd, ov);
-                if (last_mapping)
-                  freed_via_rmap = 1;
-              }
             }
-            /* BF: Match uvmunmap_proc ownership: rmap frees only the last
-             * anonymous mapping; otherwise kfree drops this mapping's ref. */
-            if (!freed_via_rmap)
-              kfree((void *)pa);
+            /* BF: PTE teardown owns physical release; rmap only updates
+             * advisory metadata while the source VMA still exists. */
+            kfree((void *)pa);
           }
           *old_pte = 0;
         }

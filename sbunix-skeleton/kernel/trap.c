@@ -1075,12 +1075,20 @@ void trap_handler(struct trapframe *tf) {
             /* --- Demand paging for VMA regions --- */
             if (from_user && current_proc && user_addr_ok(stval)) {
                 struct vm_area *fvma = vma_find(current_proc, stval);
-                if (fvma) {
+                    if (fvma) {
                     /* BF: Enforce VMA protection flags -- deliver SIGSEGV if the fault
                      * type doesn't match the VMA's prot bits.  POSIX requires SIGSEGV
                      * for writes to PROT_READ-only, and any access to PROT_NONE. */
                     if (fvma->prot == 0 /* PROT_NONE */) {
                         /* PROT_NONE: no access allowed at all */
+                        goto pagefault_kill;
+                    }
+                    if (cause == SCAUSE_INST_PAGE_FAULT && !(fvma->prot & PROT_EXEC)) {
+                        /* Execute fault on non-executable mapping */
+                        goto pagefault_kill;
+                    }
+                    if (cause == SCAUSE_LOAD_PAGE_FAULT && !(fvma->prot & PROT_READ)) {
+                        /* Read fault on non-readable mapping */
                         goto pagefault_kill;
                     }
                     if (cause == SCAUSE_STORE_PAGE_FAULT && !(fvma->prot & PROT_WRITE)) {
@@ -1138,8 +1146,15 @@ void trap_handler(struct trapframe *tf) {
                             }
 
                             int perm = PTE_U | prot_to_pte_flags(fvma->prot);
-                            mappages(current_proc->pagetable, va, PAGE_SIZE,
-                                     (uint64_t)pg, perm);
+                            if (mappages(current_proc->pagetable, va, PAGE_SIZE,
+                                         (uint64_t)pg, perm) != 0) {
+                                /* BF: A failed PTE install leaves the new
+                                 * frame unattached; free it before killing
+                                 * the process to avoid retry leaks under
+                                 * allocation pressure. */
+                                kfree(pg);
+                                goto pagefault_kill;
+                            }
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
                             if ((perm & PTE_X) || cause == SCAUSE_INST_PAGE_FAULT)
                                 asm volatile("fence.i");
@@ -1320,7 +1335,6 @@ pagefault_kill:
     tf->epc += 4;
 
     long sysnum = (long)tf->a7;
-
     /* Save original syscall arguments for SA_RESTART */
     if (current_proc) {
         current_proc->saved_a0 = tf->a0;

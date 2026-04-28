@@ -46,8 +46,6 @@ extern char _kernel_rw_start[];
 
 static int pa_is_valid_page(uint64_t pa);
 static int pa_is_valid_superpage(uint64_t pa);
-static int pa_is_live_page(uint64_t pa);
-static int pa_is_live_superpage(uint64_t pa);
 static int pa_is_live_ptpage(uint64_t pa);
 static int vm_check_pagetable_level(pagetable_t pt, int level,
                                     const char *label, int *printed);
@@ -692,13 +690,37 @@ int uvmmap(pagetable_t pagetable, uint64_t va, uint64_t pa, uint64_t sz, int per
     return mappages(pagetable, va, sz, pa, perm | PTE_U);
 }
 
+static uint64_t pte_level_span(int level) {
+    return level == 1 ? SUPERPAGE_SIZE : PAGE_SIZE;
+}
+
+static void unmap_user_leaf(pagetable_t pagetable, uint64_t va, pte_t *pte,
+                            int level, struct vm_area *vma) {
+    (void)pagetable;
+    if (!pte || !(*pte & PTE_V) || !(*pte & PTE_U))
+        return;
+
+    uint64_t pa = PTE2PA(*pte);
+
+    /* BF: rmap/page-descriptor state is advisory.  Drop it before clearing
+     * the VMA list, but keep physical lifetime owned by the PTE refcount
+     * path below.  Superpage rmap is not populated in this tree. */
+    if (level == 0 && vma && (vma->flags & MAP_ANON)) {
+        struct page *pg = virt_to_page((void *)pa);
+        if (pg && PageAnon(pg))
+            page_remove_rmap(pg, vma);
+    }
+
+    *pte = 0;
+    if (level == 1)
+        kfree_super((void *)pa);
+    else
+        kfree((void *)pa);
+}
+
 // Unmap and free physical pages for a user virtual address range [va, va+len).
 // va and len must be page-aligned.  Silently skips pages that are not mapped.
-// Handles both 4KB pages and 2MB super pages.
-//
-// When the owning proc is provided, 4KB anonymous pages use reverse-map
-// teardown first so the page-descriptor path owns the final free.  Callers
-// without a live proc/VMA context can pass NULL and fall back to raw kfree.
+// Handles both 4KB pages, PROT_NONE leaves, and 2MB super pages.
 void uvmunmap_proc(struct proc *p, pagetable_t pagetable, uint64_t va, uint64_t len) {
     uint64_t a = va;
     uint64_t end = va + len;
@@ -714,37 +736,12 @@ void uvmunmap_proc(struct proc *p, pagetable_t pagetable, uint64_t va, uint64_t 
             /* BF: Skip kernel-only PTEs (shared MMIO via uvmmap_kernel) —
              * must not free kernel pages from user unmap paths. */
             if (!(*pte & PTE_U)) {
-                a += (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
+                a += pte_level_span(level);
                 continue;
             }
-            uint64_t pa = PTE2PA(*pte);
-            if (level == 1) {
-                /* Super page: free the 2MB block */
-                kfree_super((void *)pa);
-                *pte = 0;
-                a += SUPERPAGE_SIZE;
-            } else {
-                int freed_via_rmap = 0;
-                if (p) {
-                    struct vm_area *v = vma_find(p, a);
-                    if (v && (v->flags & MAP_ANON)) {
-                        struct page *pg = virt_to_page((void *)pa);
-                        if (pg && PageAnon(pg)) {
-                            int last_mapping = page_mapcount(pg) == 0;
-                            page_remove_rmap(pg, v);
-                            /* BF: rmap frees only the final anonymous
-                             * mapping.  Shared COW pages still need kfree()
-                             * below to drop this PTE's kalloc ref. */
-                            if (last_mapping)
-                                freed_via_rmap = 1;
-                        }
-                    }
-                }
-                if (!freed_via_rmap)
-                    kfree((void *)pa);
-                *pte = 0;
-                a += PAGE_SIZE;
-            }
+            struct vm_area *v = p ? vma_find(p, a) : NULL;
+            unmap_user_leaf(pagetable, a, pte, level, v);
+            a += pte_level_span(level);
         } else {
             /* Completely unmapped */
             a += PAGE_SIZE;
@@ -897,14 +894,20 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
 }
 
 /* Find the VMA containing addr (start <= addr < end), or NULL. */
-struct vm_area *vma_find(struct proc *p, uint64_t addr) {
-  struct vm_area *v = p->vma_list;
+struct vm_area *vma_find_in_list(struct vm_area *vmas, uint64_t addr) {
+  struct vm_area *v = vmas;
   while (v) {
     if (addr >= v->start && addr < v->end)
       return v;
     v = v->next;
   }
   return NULL;
+}
+
+struct vm_area *vma_find(struct proc *p, uint64_t addr) {
+  if (!p)
+    return NULL;
+  return vma_find_in_list(p->vma_list, addr);
 }
 
 /* Remove VMAs overlapping [start, end). Handle partial overlaps by
@@ -1088,21 +1091,6 @@ static int pa_is_valid_superpage(uint64_t pa) {
          pa + SUPERPAGE_SIZE <= PHYSTOP;
 }
 
-static int pa_is_live_page(uint64_t pa) {
-  if (!pa_is_valid_page(pa))
-    return 0;
-  /* Only consider it a live page if it has non-zero refcount.
-   * This prevents double-freeing pages that were already freed. */
-  return page_ref_get(pa) > 0;
-}
-
-static int pa_is_live_superpage(uint64_t pa) {
-  if (!pa_is_valid_superpage(pa))
-    return 0;
-  /* Only consider it live if base page has non-zero refcount */
-  return page_ref_get(pa) > 0;
-}
-
 static int pa_is_live_ptpage(uint64_t pa) {
   if (!pa_is_valid_page(pa))
     return 0;
@@ -1173,12 +1161,16 @@ int vm_check_pagetable(pagetable_t pagetable, const char *label) {
 }
 
 /* Recursively free page-table pages and user leaf pages in a sub-tree.
- * Kernel-only leaf entries (no PTE_U) are skipped so MMIO and kernel
- * RAM are never kfree'd.  Page-table pages themselves are always freed.
- * Leaf pages are freed via kfree (which decrements refcount for COW). */
-static void freewalk_level(pagetable_t pt, int level) {
+ * BF: User leaves are released while VMA metadata is still available, so
+ * advisory rmap state can be detached before the physical page refcount is
+ * dropped.  Kernel-only leaves are detached, never freed. */
+static void release_level(pagetable_t pt, int level, uint64_t base_va,
+                          struct vm_area *vmas) {
+  uint64_t span = (level == 2) ? (1UL << 30) :
+                  (level == 1) ? SUPERPAGE_SIZE : PAGE_SIZE;
   for (int i = 0; i < 512; i++) {
     pte_t pte = pt[i];
+    uint64_t va = base_va + (uint64_t)i * span;
     enum pte_kind kind = pte_classify(pte, level);
     if (kind == PTE_KIND_EMPTY)
       continue;
@@ -1187,21 +1179,18 @@ static void freewalk_level(pagetable_t pt, int level) {
                kind == PTE_KIND_PROT_NONE) {
       if (!(pte & PTE_U)) {
         /* Kernel-only leaf entries point to MMIO/kernel RAM. */
+        pt[i] = 0;
         continue;
       }
       /* User leaf PTEs can legally have no R/W/X bits (for example after
        * mprotect(PROT_NONE)). Treat them as leaves before the non-leaf case. */
-      uint64_t pa = PTE2PA(pte);
       if (level == 1) {
-        if (pa_is_live_superpage(pa)) {
-          vm_trace_freewalk("leaf-super", pt, level, i, pte, pa);
-          kfree_super((void *)pa);
-        }
-      } else if (pa_is_live_page(pa)) {
-        vm_trace_freewalk("leaf-page", pt, level, i, pte, pa);
-        kfree((void *)pa);
+        vm_trace_freewalk("leaf-super", pt, level, i, pte, PTE2PA(pte));
+      } else {
+        vm_trace_freewalk("leaf-page", pt, level, i, pte, PTE2PA(pte));
       }
-      pt[i] = 0;
+      struct vm_area *v = vma_find_in_list(vmas, va);
+      unmap_user_leaf(pt, va, &pt[i], level, v);
     } else if (kind == PTE_KIND_NONLEAF) {
       if (level == 0) {
         pt[i] = 0;
@@ -1224,7 +1213,7 @@ static void freewalk_level(pagetable_t pt, int level) {
        * table page once even if the tree structure is corrupted. */
       pt[i] = 0;
       if (level > 0)
-        freewalk_level(child, level - 1);
+        release_level(child, level - 1, va, vmas);
       vm_trace_freewalk("pt-child", pt, level, i, pte, (uint64_t)child);
       kfree((void *)child);
     } else if (kind == PTE_KIND_RESERVED) {
@@ -1233,87 +1222,63 @@ static void freewalk_level(pagetable_t pt, int level) {
   }
 }
 
-void proc_freepagetable(pagetable_t pagetable) {
+void release_user_address_space(pagetable_t pagetable, struct vm_area *vmas,
+                                int do_writeback, int free_vmas) {
   if (!pagetable || pagetable == kernel_pagetable)
     return;
+
+  if (do_writeback && vmas)
+    mmap_writeback_shared_from(pagetable, vmas, 0, MAXVA);
 
   /* VPN[2]=1..511: shared kernel entries — detach without freeing */
   for (int i = 1; i < 512; i++)
     pagetable[i] = 0;
 
-  /* VPN[2]=0: user owns this level-1 table, but some entries are
-   * shared kernel MMIO.  Compare against kernel's level-1 to identify. */
-  pte_t kpte0 = kernel_pagetable[0];
+  /* VPN[2]=0: user owns this level-1 table; individual kernel MMIO leaves
+   * copied into it are supervisor-only and release_level only detaches them. */
   pte_t upte0 = pagetable[0];
-  if ((upte0 & PTE_V) && !(upte0 & (PTE_R | PTE_W | PTE_X))) {
+  enum pte_kind root0_kind = pte_classify(upte0, 2);
+  if (root0_kind == PTE_KIND_NONLEAF) {
     pagetable_t user_L1 = (pagetable_t)PTE2PA(upte0);
-    pagetable_t kernel_L1 = (kpte0 & PTE_V) ? (pagetable_t)PTE2PA(kpte0) : 0;
-    /* BF: Limit shared MMIO detach to same range as uvmmap_kernel() share limit.
-     * Entries above share_limit were never shared, so no need to compare. */
+    pte_t kpte0 = kernel_pagetable[0];
+    pagetable_t kernel_L1 =
+      (kpte0 & PTE_V) && pte_classify(kpte0, 2) == PTE_KIND_NONLEAF
+        ? (pagetable_t)PTE2PA(kpte0)
+        : 0;
     int share_limit = USER_MMAP_FLOOR / SUPERPAGE_SIZE;
-    for (int j = 0; j < 512; j++) {
-      if (j < share_limit && kernel_L1 && user_L1[j] == kernel_L1[j]) {
-        user_L1[j] = 0; /* shared MMIO — detach */
-      }
-    }
-
-    int printed = 0;
-    int errors = vm_check_pagetable_level(user_L1, 1,
-                                          "proc_freepagetable-user",
-                                          &printed);
-    if (errors) {
-      printk("pte-check[proc_freepagetable-user]: %d invariant violation(s)\n",
-             errors);
-    }
-
-    for (int j = 0; j < 512; j++) {
-      pte_t pte = user_L1[j];
-      enum pte_kind kind = pte_classify(pte, 1);
-      if (kind == PTE_KIND_EMPTY) {
-        continue;
-      } else if (kind == PTE_KIND_LEAF ||
-                 kind == PTE_KIND_COW_LEAF ||
-                 kind == PTE_KIND_PROT_NONE) {
-        /* User-owned entry — free recursively. A user leaf may have no R/W/X
-         * bits after mprotect(PROT_NONE), so classify before non-leaf. */
-        if (pte & PTE_U) {
-          uint64_t pa = PTE2PA(pte);
-          if (pa_is_live_superpage(pa)) {
-            vm_trace_freewalk("l1-super", user_L1, 1, j, pte, pa);
-            kfree_super((void *)pa);
-          }
-          user_L1[j] = 0;
-        }
-      } else if (kind == PTE_KIND_NONLEAF) {
-          /* Non-leaf: recurse into level-0 table */
-          pagetable_t child = (pagetable_t)PTE2PA(pte);
-#if VM_FREEWALK_TRACE
-          pte_t saved_pte = pte;  /* save for trace after clearing */
-#endif
-          if (pa_is_live_ptpage((uint64_t)child)) {
-            /* Clear PTE before recursion to prevent double-free */
-            user_L1[j] = 0;
-            freewalk_level(child, 0);
-#if VM_FREEWALK_TRACE
-            vm_trace_freewalk("l1-child", user_L1, 1, j, saved_pte, (uint64_t)child);
-#endif
-            kfree((void *)child);
-          } else {
-            /* Corrupted/reused L0 page — silently detach */
-            user_L1[j] = 0;
-          }
-      } else if (kind == PTE_KIND_RESERVED) {
+    for (int j = 0; j < share_limit && kernel_L1; j++) {
+      if (user_L1[j] == kernel_L1[j])
         user_L1[j] = 0;
-      }
     }
+    if (pa_is_live_ptpage((uint64_t)user_L1))
+      release_level(user_L1, 1, 0, vmas);
     vm_trace_freewalk("user-l1-root", pagetable, 2, 0, upte0, (uint64_t)user_L1);
-    kfree((void *)user_L1);
+    if (pa_is_live_ptpage((uint64_t)user_L1))
+      kfree((void *)user_L1);
+    pagetable[0] = 0;
+  } else if (root0_kind == PTE_KIND_LEAF ||
+             root0_kind == PTE_KIND_COW_LEAF ||
+             root0_kind == PTE_KIND_PROT_NONE) {
+    if (upte0 & PTE_U) {
+      struct vm_area *v = vma_find_in_list(vmas, 0);
+      unmap_user_leaf(pagetable, 0, &pagetable[0], 2, v);
+    } else {
+      pagetable[0] = 0;
+    }
+  } else if (root0_kind == PTE_KIND_RESERVED) {
     pagetable[0] = 0;
   }
 
   /* Free the root page table page itself */
   vm_trace_freewalk("pt-root", pagetable, 2, -1, 0, (uint64_t)pagetable);
   kfree((void *)pagetable);
+
+  if (free_vmas)
+    vma_free_chain(vmas);
+}
+
+void proc_freepagetable(pagetable_t pagetable) {
+  release_user_address_space(pagetable, NULL, 0, 0);
 }
 
 /* BF: Centralized COW break helper — handles ref count, page copy,
@@ -1329,9 +1294,8 @@ int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
 
   if (ref <= 1) {
     /* Sole reference: flip PTE flags in place.  Skip rmap registration.
-     * uvmunmap does NOT call page_remove_rmap, so the page's original
-     * rmap entry (if any) survives parent exit.  Adding rmap again
-     * here would double-count. */
+     * The page already has any original rmap metadata it needs; adding
+     * rmap again here would double-count advisory map state. */
     if (pte_update(pagetable, va, pte,
                    PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W),
                    0, PTE_UPDATE_COW, PTE_SFENCE_NONE) < 0)

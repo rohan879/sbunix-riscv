@@ -56,13 +56,9 @@ static uint64_t exec_mmap_base(uint64_t sz) {
  * This allows exec to roll back without corrupting the original
  * process state. */
 static void staged_exec_cleanup(pagetable_t pt, struct vm_area *staged_vmas) {
-  struct vm_area *v = staged_vmas;
-  while (v) {
-    uvmunmap(pt, v->start, v->end - v->start);
-    v = v->next;
-  }
-  proc_freepagetable(pt);
-  vma_free_chain(staged_vmas);
+  /* BF: Keep staged VMA metadata alive while releasing staged PTEs so
+   * partially-loaded anonymous mappings detach rmap metadata consistently. */
+  release_user_address_space(pt, staged_vmas, 0, 1);
 }
 
 int exec(char *path) {
@@ -220,10 +216,6 @@ int exec(char *path) {
         current_proc->sigactions[si].restorer = 0;
     }
 
-    /* BF: Free old VMAs now that we're past the point of no return.
-     * The staging list (current_proc->vma_list) becomes the new live list. */
-    vma_free_chain(old_vma_list);
-
     // 6. Update process state
     /* BF: Linux loaders expose a page-aligned initial program break.
      * Third-party musl allocators immediately place a MAP_FIXED guard page
@@ -264,18 +256,23 @@ int exec(char *path) {
         current_proc->exe_path[ei] = '\0';
     }
 
-    /* Switch to new page table before freeing old one */
+    /* BF: Reclaim the old address space while its saved VMA list still
+     * exists.  The old pagetable must not be active while its PTEs are
+     * cleared; use the kernel pagetable during teardown, then install the
+     * new user pagetable. */
+    w_satp(MAKE_SATP(kernel_pagetable));
+    sfence_vma();
+    if (old_pagetable != kernel_pagetable && !old_pt_still_shared)
+        release_user_address_space(old_pagetable, old_vma_list, 1, 1);
+    else
+        vma_free_chain(old_vma_list);
+
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
     asm volatile("fence.i");
 
     /* Re-enable SIE now that all state is consistent */
     w_sstatus(old_sstatus);
-
-    // Reclaim old user pages + page table pages.
-    // Kernel stays on kernel_pagetable (user PT has no kernel mappings).
-    if (old_pagetable != kernel_pagetable && !old_pt_still_shared)
-        proc_freepagetable(old_pagetable);
 
     // 7. Initialize trapframe
     memset(tf, 0, sizeof(*tf));
@@ -516,9 +513,6 @@ int exec_vfs(const char *resolved_path) {
         current_proc->sigactions[si].restorer = 0;
     }
 
-    /* BF: Free old VMAs now that load succeeded. */
-    vma_free_chain(old_vma_list);
-
     /* 7. Update process */
     /* BF: Match Linux's page-aligned initial brk so external allocators can
      * reserve a guard page at brk(0) with MAP_FIXED during startup. */
@@ -548,15 +542,21 @@ int exec_vfs(const char *resolved_path) {
         current_proc->exe_path[ei] = '\0';
     }
 
+    /* BF: Reclaim old mappings before freeing old VMAs, and never tear down
+     * a pagetable that another vfork participant still shares. */
+    w_satp(MAKE_SATP(kernel_pagetable));
+    sfence_vma();
+    if (old_pagetable != kernel_pagetable && !old_pt_still_shared)
+        release_user_address_space(old_pagetable, old_vma_list, 1, 1);
+    else
+        vma_free_chain(old_vma_list);
+
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
     asm volatile("fence.i");
 
     /* Re-enable SIE now that all state is consistent */
     w_sstatus(old_sstatus);
-
-    if (old_pagetable != kernel_pagetable && !old_pt_still_shared)
-        proc_freepagetable(old_pagetable);
 
     /* 8. Initialize trapframe */
     memset(tf, 0, sizeof(*tf));

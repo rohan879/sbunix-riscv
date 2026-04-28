@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$PROJECT_DIR")"
 TIMEOUT=${TIMEOUT:-28800}
-# BF: Match the kernel PHYSTOP default; higher QEMU_MEM can be set explicitly.
+# QEMU_MEM must remain 128M for remote OS/build checks.
 QEMU_MEM=${QEMU_MEM:-128M}
 ARTIFACT_DIR=${SBUNIX_RUN_TESTS_CAPTURE_DIR:-/home/adebayo/test-findings/code-review-08-artifacts/final}
 BOOT1_LOG="$ARTIFACT_DIR/qemu-boot1.raw.log"
@@ -276,6 +276,26 @@ require_log_marker "$BOOT1_LOG" "=== Sortix os-test Suite ===" "Sortix suite hea
 require_log_marker "$BOOT1_LOG" "=== Open POSIX Test Suite ===" "Open POSIX suite header"
 require_log_marker "$BOOT1_LOG" "persist: write phase complete" "persistence write completion"
 require_log_marker "$BOOT2_LOG" "persist: verify phase complete" "persistence verify completion"
+
+extract_status_marker() {
+    local marker="$1"
+    tr -d '\r' < "$BOOT1_LOG" |
+        sed -n "s/.*__STATUS:${marker}:\([0-9][0-9]*\).*/\1/p" |
+        tail -n 1
+}
+
+sortix_status="$(extract_status_marker sortix)"
+open_posix_status="$(extract_status_marker open-posix)"
+if [ -z "$sortix_status" ]; then
+    mark_phase_failed "missing Sortix exit status marker"
+elif [ "$sortix_status" -ne 0 ]; then
+    mark_phase_failed "Sortix suite exited with status $sortix_status"
+fi
+if [ -z "$open_posix_status" ]; then
+    mark_phase_failed "missing Open POSIX exit status marker"
+elif [ "$open_posix_status" -ne 0 ]; then
+    mark_phase_failed "Open POSIX suite exited with status $open_posix_status"
+fi
 
 final_results_count=$(grep -c "=== Final Results ===" "$BOOT1_LOG" 2>/dev/null || true)
 if [ "$final_results_count" -lt 2 ]; then
