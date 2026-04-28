@@ -191,6 +191,21 @@ void kfree(void *pa) {
         page_refcount[idx] = 0;
         page_last_free_ra[idx] = caller_ra;
         page_type[idx] = PAGE_FREE;
+        /* BF: When the real allocator refcount reaches zero, clear the
+         * advisory page descriptor too.  This prevents recycled frames from
+         * carrying stale rmap/reclaim metadata into a later mapping. */
+        if (page_table) {
+            struct page *pg = virt_to_page(pa);
+            if (pg) {
+                atomic_set(&pg->refcount, 0);
+                atomic_set(&pg->mapcount, -1);
+                pg->flags = 0;
+                pg->age_score = 0;
+                pg->access_count = 0;
+                pg->last_access = 0;
+                pg->anon_vma = NULL;
+            }
+        }
     }
 
     r = (struct run*)pa;
@@ -249,12 +264,9 @@ void *kalloc(void) {
      * catches the exec_vfs stale-page cascade bug. */
     if (r) {
         memset((void *)r, 0, PAGE_SIZE);
-        /* BF: Reset page descriptor to clean state on allocation.
-         * Without this, recycled pages retain stale rmap metadata
-         * (PageAnon, mapcount, anon_vma) from prior use because
-         * kfree/uvmunmap do not call page_remove_rmap.  The stale
-         * mapcount accumulates across reuse cycles and can confuse later
-         * page-lifecycle checks that rely on a clean descriptor state. */
+        /* BF: Reset page descriptor to clean state on allocation.  This is
+         * defense in depth for frames recycled from paths that could not
+         * fully detach advisory rmap/reclaim metadata. */
         struct page *pg = virt_to_page((void *)r);
         if (pg) {
             pg->flags = 0;
@@ -462,6 +474,18 @@ void kfree_super(void *pa) {
             }
             page_refcount[idx] = 0;
             page_type[idx] = PAGE_FREE;
+            if (page_table) {
+                struct page *pg = virt_to_page((void *)sub_pa);
+                if (pg) {
+                    atomic_set(&pg->refcount, 0);
+                    atomic_set(&pg->mapcount, -1);
+                    pg->flags = 0;
+                    pg->age_score = 0;
+                    pg->access_count = 0;
+                    pg->last_access = 0;
+                    pg->anon_vma = NULL;
+                }
+            }
             struct run *r = (struct run *)sub_pa;
             r->next = kmem.freelist;
             kmem.freelist = r;

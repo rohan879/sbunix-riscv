@@ -35,7 +35,7 @@ endif
 TIMEOUT ?= 1800
 # BF: Default QEMU RAM to the kernel's fixed PHYSTOP so boot does not
 # put allocator freelist entries beyond the available physical memory.
-QEMU_MEM ?= 128M
+QEMU_MEM ?= 256M
 # MODIFIED: END added
 
 # Language-specific kernel object/library
@@ -195,10 +195,13 @@ $(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/
 		cp build/os-test-out/sbunix/test-manifest.txt build/testfs/os-test-manifest; \
 	fi
 	@mkdir -p build/testfs/os-test-expect
-	@cp -a tests/thirdparty/sortix/os-test/*.expect build/testfs/os-test-expect/
+	@if ls tests/thirdparty/sortix/os-test/*.expect >/dev/null 2>&1; then \
+		cp -a tests/thirdparty/sortix/os-test/*.expect build/testfs/os-test-expect/; \
+	fi
 	@# BF: Add POSIX expect file for sigaction-exec-flags so correct "0"
 	@# output gets RESULT_PASS.  Also remove conflicting .unknown.1 which
 	@# contains "0" and could match first due to readdir ordering.
+	@mkdir -p build/testfs/os-test-expect/signal.expect
 	@printf '0' > build/testfs/os-test-expect/signal.expect/sigaction-exec-flags.posix
 	@rm -f build/testfs/os-test-expect/signal.expect/sigaction-exec-flags.unknown.1
 	# Seed testfs with compile-time .out files for skipped tests

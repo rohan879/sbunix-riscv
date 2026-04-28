@@ -40,11 +40,9 @@ void anon_vma_free(struct anon_vma *anon_vma) {
     printk("WARNING: anon_vma_free: anon_vma still has chains\n");
   }
   
-  /* BF: num_pages > 0 at free time is expected because uvmunmap()
-   * frees physical pages via kfree() without calling page_remove_rmap()
-   * to decrement num_pages.  The stale page descriptor state is cleaned
-   * up in kalloc() when the page is next allocated.  Only warn about
-   * num_vmas > 0 which indicates a genuine leak. */
+  /* BF: num_pages is advisory rmap accounting and can be conservative after
+   * COW/fork failure cleanup.  Physical lifetime is owned by kfree(), so only
+   * num_vmas > 0 indicates a real VMA-chain leak here. */
   if (anon_vma->num_vmas > 0) {
     printk("WARNING: anon_vma_free: anon_vma still has %lu VMAs\n",
            anon_vma->num_vmas);
@@ -82,7 +80,15 @@ int anon_vma_fork(struct vm_area *vma, struct vm_area *parent_vma) {
     anon_vma = anon_vma_alloc();
     if (!anon_vma) return -1;
     vma->anon_vma = anon_vma;
-    return anon_vma_link(vma);
+    if (anon_vma_link(vma) < 0) {
+      /* BF: anon_vma_link failed before ownership transferred to a chain.
+       * Drop the VMA's own reference and leave no dangling pointer for the
+       * fork failure cleanup path. */
+      anon_vma_put(anon_vma);
+      vma->anon_vma = NULL;
+      return -1;
+    }
+    return 0;
   }
   
   // Create child anon_vma inheriting from parent
@@ -99,14 +105,16 @@ int anon_vma_fork(struct vm_area *vma, struct vm_area *parent_vma) {
   // Link to both child and parent anon_vma chains
   if (anon_vma_link(vma) < 0) {
     anon_vma_put(anon_vma);
+    vma->anon_vma = NULL;
     return -1;
   }
   
   // Also link to parent's anon_vma for shared COW pages
   avc = (struct anon_vma_chain *)kmalloc(sizeof(struct anon_vma_chain));
   if (!avc) {
+    /* BF: anon_vma_unlink consumes both the chain reference and the VMA's
+     * own anon_vma reference.  Do not put anon_vma again after unlink. */
     anon_vma_unlink(vma);
-    anon_vma_put(anon_vma);
     return -1;
   }
   
@@ -226,7 +234,8 @@ int page_add_anon_rmap(struct page *page, struct vm_area *vma, uint64_t address)
 void page_remove_rmap(struct page *page, struct vm_area *vma) {
   if (!page || !PageAnon(page) || !page->anon_vma) return;
 
-  // Update mapping count
+  /* BF: Update advisory mapping metadata only.  PTE teardown still calls
+   * kfree() once and remains the sole owner of physical lifetime. */
   page_remove_mapping(page);
 
   // If this was the last mapping, clear anon_vma association
