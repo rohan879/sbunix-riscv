@@ -1075,6 +1075,120 @@ long sys_wait4_handler(struct trapframe *tf) {
     return (long)sys_wait4(wpid, tf->a1, options);
 }
 
+long sys_waitid_handler(struct trapframe *tf) {
+    int idtype = (int)tf->a0;
+    pid_t id = (pid_t)(int)tf->a1;
+    uint64_t info_uaddr = tf->a2;
+    int options = (int)tf->a3;
+    int32_t zero = 0;
+
+    if (idtype < 0 || idtype > 2)
+        return (long)-22; /* -EINVAL */
+
+    if ((options & (4 | 16)) == 0)
+        options |= 4; /* WEXITED by default for existing tests/libc callers */
+
+    for (;;) {
+        int found_child = 0;
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+            uint8_t kinfo[K_SIGINFO_SIZE];
+            int report_exit = 0;
+            int report_stop = 0;
+
+            if (p->state == UNUSED || p->parent != current_proc)
+                continue;
+
+            if (idtype == 1 && p->pid != id)
+                continue;
+            if (idtype == 2 && p->pgid != id)
+                continue;
+
+            found_child = 1;
+            report_exit = (options & 4) && p->state == ZOMBIE;
+            report_stop = (options & (2 | 16)) && p->stopped_signal;
+            if (!report_exit && !report_stop)
+                continue;
+
+            memset(kinfo, 0, sizeof(kinfo));
+            *(int32_t *)(kinfo + 0) = SIGCHLD;
+            if (report_exit) {
+                *(int32_t *)(kinfo + 8) = p->killed_by_signal ? K_CLD_KILLED
+                                                              : K_CLD_EXITED;
+                *(int32_t *)(kinfo + 12) = (int32_t)p->pid;
+                *(int32_t *)(kinfo + 20) = p->killed_by_signal
+                                               ? (p->killed_by_signal & 0x7f)
+                                               : (p->exit_status & 0xff);
+            } else {
+                *(int32_t *)(kinfo + 8) = K_CLD_STOPPED;
+                *(int32_t *)(kinfo + 12) = (int32_t)p->pid;
+                *(int32_t *)(kinfo + 20) = p->stopped_signal;
+            }
+
+            if (info_uaddr &&
+                copyout(current_proc->pagetable, info_uaddr, kinfo, sizeof(kinfo)) < 0)
+                return (long)-EFAULT;
+
+            if (report_exit && !(options & 0x01000000)) { /* WNOWAIT */
+                if (p->kstack) {
+                    kfree_contiguous(p->kstack, p->kstack_npages);
+                    p->kstack = NULL;
+                }
+                if (p->trapframe) {
+                    kfree(p->trapframe);
+                    p->trapframe = NULL;
+                }
+                p->state = UNUSED;
+                p->pid = 0;
+                p->parent = NULL;
+                p->in_copy_fault = 0;
+            } else if (report_stop) {
+                p->stopped_signal = 0;
+            }
+            return 0;
+        }
+
+        if (!found_child)
+            return (long)-10; /* -ECHILD */
+
+        if (options & 1) { /* WNOHANG */
+            if (info_uaddr &&
+                copyout(current_proc->pagetable, info_uaddr, &zero, sizeof(zero)) < 0)
+                return (long)-EFAULT;
+            return 0;
+        }
+
+        if (current_proc) {
+            current_proc->waiting_for_uart = 0;
+            current_proc->waiting_for_child = 1;
+            current_proc->state = SLEEPING;
+            swtch(&current_proc->context, &scheduler_context);
+            current_proc->waiting_for_child = 0;
+            {
+                uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                struct kern_sigaction *ksa = proc_sigactions(current_proc);
+                for (int s = 1; s < 32 && deliverable; s++) {
+                    if (!(deliverable & signal_bit(s)))
+                        continue;
+                    if (ksa[s].handler > 1) {
+                        if (s == SIGCHLD)
+                            continue;
+                        return -4; /* -EINTR */
+                    }
+                    if (ksa[s].handler == 0) {
+                        if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
+                            continue;
+                        if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
+                            continue;
+                        if (s == SIGCONT)
+                            continue;
+                        return -4; /* -EINTR */
+                    }
+                }
+            }
+        }
+    }
+}
+
 long sys_getpid_handler(struct trapframe *tf) {
     (void)tf;
     return current_proc ? (long)current_proc->pid : 0;

@@ -390,43 +390,7 @@ pid_t wait(int *status) {
 }
 
 int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options) {
-    pid_t ret;
-    int status = 0;
-
-    (void)options;
-
-    switch (idtype) {
-        case P_PID:
-            ret = waitpid((pid_t)id, &status, 0);
-            break;
-        case P_PGID:
-            ret = waitpid(-(pid_t)id, &status, 0);
-            break;
-        case P_ALL:
-            ret = waitpid(-1, &status, 0);
-            break;
-        default:
-            errno = EINVAL;
-            return -1;
-    }
-
-    if (ret < 0)
-        return -1;
-
-    if (infop) {
-        memset(infop, 0, sizeof(*infop));
-        infop->si_signo = SIGCHLD;
-        infop->si_pid = ret;
-        infop->si_status = status;
-        if (WIFEXITED(status))
-            infop->si_code = CLD_EXITED;
-        else if (WIFSIGNALED(status))
-            infop->si_code = CLD_KILLED;
-        else if (WIFSTOPPED(status))
-            infop->si_code = CLD_STOPPED;
-    }
-
-    return 0;
+    return (int)__syscall_ret(syscall(SYS_waitid, idtype, id, infop, options));
 }
 
 unsigned int alarm(unsigned int seconds) {

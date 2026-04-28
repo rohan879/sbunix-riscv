@@ -416,10 +416,14 @@ int devfs_tty_ioctl(void *private, unsigned long request, void *argp) {
       memcpy(&priv->pty->termios, argp, sizeof(struct termios));
       return 0;
     case TIOCGSID:
+      if (!current_proc || priv->pty->sid == 0 || current_proc->sid != priv->pty->sid)
+        return -ENOTTY;
       if (argp)
         *(int *)argp = priv->pty->sid;
       return priv->pty->sid;
     case TIOCGPGRP:
+      if (!current_proc || priv->pty->sid == 0 || current_proc->sid != priv->pty->sid)
+        return -ENOTTY;
       if (argp)
         *(int *)argp = priv->pty->fg_pgid;
       return priv->pty->fg_pgid;
@@ -427,9 +431,41 @@ int devfs_tty_ioctl(void *private, unsigned long request, void *argp) {
       pid_t pgid;
       if (!argp)
         return -EINVAL;
+      if (!current_proc || priv->pty->sid == 0 || current_proc->sid != priv->pty->sid)
+        return -ENOTTY;
       pgid = *(int *)argp;
       if (pgid <= 0)
         return -EINVAL;
+
+      if (current_proc->pgid != priv->pty->fg_pgid &&
+          process_group_is_orphaned(current_proc->sid, current_proc->pgid))
+        return -EIO;
+
+      {
+        int found_any = 0;
+        int found_session = 0;
+        int found_zombie_session = 0;
+        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+          if (p->state == UNUSED)
+            continue;
+          if (p->pgid != pgid)
+            continue;
+          found_any = 1;
+          if (p->sid == current_proc->sid) {
+            if (p->state == ZOMBIE) {
+              found_zombie_session = 1;
+              continue;
+            }
+            found_session = 1;
+            break;
+          }
+        }
+        if (!found_any)
+          return -EINVAL;
+        if (!found_session && !found_zombie_session)
+          return -EPERM;
+      }
+
       priv->pty->fg_pgid = pgid;
       return 0;
     }

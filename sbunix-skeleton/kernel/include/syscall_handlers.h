@@ -49,6 +49,7 @@ long sys_clone_handler(struct trapframe *tf);
 long sys_execve_handler(struct trapframe *tf);
 long sys_fexecve_handler(struct trapframe *tf);
 long sys_wait4_handler(struct trapframe *tf);
+long sys_waitid_handler(struct trapframe *tf);
 long sys_exit_handler(struct trapframe *tf);
 long sys_getpid_handler(struct trapframe *tf);
 long sys_getppid_handler(struct trapframe *tf);

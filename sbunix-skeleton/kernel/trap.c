@@ -881,6 +881,7 @@ void syscall_init(void) {
     syscall_table[SYS_execve]          = sys_execve_handler;
     syscall_table[SYS_fexecve]         = sys_fexecve_handler;
     syscall_table[SYS_wait4]           = sys_wait4_handler;
+    syscall_table[SYS_waitid]          = sys_waitid_handler;
     syscall_table[SYS_getpid]          = sys_getpid_handler;
     syscall_table[SYS_getppid]         = sys_getppid_handler;
     syscall_table[SYS_getuid]          = sys_getuid_handler;
