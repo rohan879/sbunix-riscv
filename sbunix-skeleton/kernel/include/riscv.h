@@ -18,8 +18,7 @@ typedef int            pid_t;
 
 // For qemu virt machine, physical memory starts at 0x80000000.
 #define KERNBASE 0x80000000UL
-/* BF: Keep PHYSTOP within the smallest supported QEMU RAM size so kinit
- * never frees pages beyond the memory region firmware exposed to S-mode. */
+/* QEMU_MEM must remain 128M, and PHYSTOP must match that physical RAM cap. */
 #define PHYSMEM_SIZE (128UL * 1024 * 1024)
 #define PHYSTOP (KERNBASE + PHYSMEM_SIZE)
 

@@ -107,14 +107,12 @@ void page_get(struct page *page) {
 
 void page_put(struct page *page) {
   if (!page) return;
-  
-  if (atomic_dec_and_test(&page->refcount)) {
-    // Page refcount hit zero - eligible for freeing
-    if (atomic_read(&page->mapcount) == -1) {
-      // Also not mapped anywhere - safe to free
-      mm_free_page(page);
-    }
-  }
+
+  /* BF: struct page refcount is reclaim metadata only.  Physical page
+   * lifetime is owned by kalloc.c's page_refcount[] and kfree(), so this
+   * path must not free a page behind a live PTE. */
+  if (atomic_read(&page->refcount) > 0)
+    atomic_dec(&page->refcount);
 }
 
 /* Mapping reference counting */
@@ -137,23 +135,24 @@ void page_add_mapping(struct page *page) {
 
 void page_remove_mapping(struct page *page) {
   if (!page) return;
-  
-  int old_mapcount = atomic_dec_return(&page->mapcount);
-  if (old_mapcount == -1) {
+
+  /* BF: Metadata-only.  Rmap teardown may run with incomplete mapcount
+   * coverage after COW fork, so clamp at -1 and never free physical memory
+   * from this advisory counter. */
+  if (atomic_read(&page->mapcount) <= -1)
+    return;
+
+  int new_mapcount = atomic_dec_return(&page->mapcount);
+  if (new_mapcount == -1) {
     // Last mapping removed (mapcount was 0, now -1)
     if (PageAnon(page)) {
       if (mm_stats.anon_pages > 0) mm_stats.anon_pages--;
     } else {
       if (mm_stats.file_pages > 0) mm_stats.file_pages--;
     }
-  } else if (old_mapcount == 0) {
+  } else if (new_mapcount == 0) {
     // No longer shared (mapcount was 1, now 0)
     if (mm_stats.shared_pages > 0) mm_stats.shared_pages--;
-  }
-  
-  // If both refcount and mapcount are zero/negative, free the page
-  if (old_mapcount == -1 && atomic_read(&page->refcount) == 0) {
-    mm_free_page(page);
   }
 }
 

@@ -124,42 +124,39 @@ void cleanup_proc_resources(struct proc *p) {
      * OFD locks are released separately when the open_file refcount hits 0. */
     file_locks_release_pid(p->pid);
 
-    /* BF: Write back MAP_SHARED pages before freeing VMAs on exit.
-     * Must run while p->pagetable is still valid because
-     * mmap_writeback_shared calls walk() (software PT walk, identity-mapped).
-     * Skip for CLONE_VM threads when siblings still share the address
-     * space (refcount > 1) to avoid racing with sibling modifications.
-     * Only the last thread exiting performs the writeback. */
-    if (!p->shared_pt || p->shared_pt->refcount <= 1)
-        mmap_writeback_shared(p, 0, MAXVA);
-
     /* ---- Pagetable / VMAs ---- */
     /* Switch to kernel_pagetable before freeing the process's page table.
      * The kernel runs on the process's page table (shared kernel mapping),
      * so we must switch away before freeing it. */
     if (p->shared_pt) {
+        pagetable_t old_pt = p->pagetable;
+        struct vm_area *old_vmas = p->vma_list;
+        p->vma_list = NULL;
         p->shared_pt->refcount--;
         if (p->shared_pt->refcount == 0) {
-            pagetable_t old_pt = p->pagetable;
             p->pagetable = kernel_pagetable;
             w_satp(MAKE_SATP(kernel_pagetable));
             sfence_vma();
-            vma_free_all(p);
-            proc_freepagetable(old_pt);
+            /* BF: Release PTEs while the saved VMA list is still live so
+             * MAP_SHARED writeback and anon rmap cleanup have context. */
+            release_user_address_space(old_pt, old_vmas, 1, 1);
             kmfree(p->shared_pt, sizeof(struct shared_pagetable));
         } else {
-            vma_free_all(p);
+            /* Shared-vfork child has only a copied VMA list; the parent
+             * still owns the shared pagetable mappings. */
+            vma_free_chain(old_vmas);
         }
         p->shared_pt = NULL;
         if (p->pagetable != kernel_pagetable)
             p->pagetable = kernel_pagetable;
     } else {
         pagetable_t old_pt = p->pagetable;
+        struct vm_area *old_vmas = p->vma_list;
+        p->vma_list = NULL;
         p->pagetable = kernel_pagetable;
         w_satp(MAKE_SATP(kernel_pagetable));
         sfence_vma();
-        vma_free_all(p);
-        proc_freepagetable(old_pt);
+        release_user_address_space(old_pt, old_vmas, 1, 1);
     }
 
     /* ---- File descriptors ---- */
@@ -394,9 +391,13 @@ bad:
     /* Clean up partially-built child pagetable.  proc_freepagetable
      * walks the user address space and frees any partially duplicated
      * COW-shared pages through the normal refcounted teardown path. */
-    vma_free_all(p);
-    if (new_pt)
-        proc_freepagetable(new_pt);
+    if (new_pt) {
+        struct vm_area *failed_vmas = p->vma_list;
+        p->vma_list = NULL;
+        release_user_address_space(new_pt, failed_vmas, 0, 1);
+    } else {
+        vma_free_all(p);
+    }
     if (p->shared_ft) {
         p->shared_ft->refcount--;
         p->shared_ft = NULL;

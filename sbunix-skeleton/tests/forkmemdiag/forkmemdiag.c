@@ -9,7 +9,9 @@
  *   The parent forks first. The child then allocates and writes the region,
  *   which exercises the postfork allocation path.
  *
- * Default sweep: 30MB, 60MB, 100MB
+ * Default sweep: 30MB, 60MB
+ * QEMU_MEM must remain 128M, so the default postfork sweep stays below the
+ * available guest free memory after kernel and test image overhead.
  * Optional usage:
  *   forkmemdiag [cow] <mb> [<mb> ...]
  *   forkmemdiag postfork <mb> [<mb> ...]
@@ -24,7 +26,7 @@
 #include <sys/wait.h>
 
 #define PAGE_SIZE_BYTES 4096UL
-#define DEFAULT_CASES 3
+#define DEFAULT_CASES 2
 
 static int run_case_mb(size_t mb)
 {
@@ -178,7 +180,7 @@ static int run_postfork_case_mb(size_t mb)
 
 int main(int argc, char **argv)
 {
-  size_t defaults[DEFAULT_CASES] = {30, 60, 100};
+  size_t defaults[DEFAULT_CASES] = {30, 60};
   int failures = 0;
   int first_fail = -1;
   int mode_postfork = 0;

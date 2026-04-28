@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$PROJECT_DIR")"
 TIMEOUT=${TIMEOUT:-900}
-# BF: Match the kernel PHYSTOP default; higher QEMU_MEM can be set explicitly.
+# QEMU_MEM must remain 128M for remote OS/build checks.
 QEMU_MEM=${QEMU_MEM:-128M}
 OUTPUT_FILE="$(mktemp /tmp/sbunix-test-output.XXXXXX)"
 QEMU_PID=""

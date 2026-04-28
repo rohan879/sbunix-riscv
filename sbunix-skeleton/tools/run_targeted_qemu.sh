@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$PROJECT_DIR")"
 TIMEOUT=${TIMEOUT:-180}
-# BF: Match the kernel PHYSTOP default; higher QEMU_MEM can be set explicitly.
+# QEMU_MEM must remain 128M for remote OS/build checks.
 QEMU_MEM=${QEMU_MEM:-128M}
 TEST_DISK_IMG=${TEST_DISK_IMG:-build/test-disk-core.img}
 TEST_DISK_TARGET=${TEST_DISK_TARGET:-$TEST_DISK_IMG}
@@ -21,7 +21,12 @@ QEMU_STDIN_FD=3
 FAILURES=0
 
 DEFAULT_COMMANDS=(
-    "/test/bin/forkmemdiag cow 30 60 100"
+    # QEMU_MEM must remain 128M; keep post-fork dirty allocation pressure
+    # within the available guest RAM after kernel and test image overhead.
+    "/test/bin/forkmemdiag postfork 30 60"
+    "/test/bin/forkmemdiag cow 30"
+    "/test/bin/forkreuse"
+    "/test/bin/lazyreserve"
     "/test/bin/mremaptest"
     "/test/bin/mprotecttest"
     "/test/bin/lazytest"
