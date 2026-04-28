@@ -86,6 +86,7 @@ void ramfs_init(void);
 
 /* devfs helpers */
 int devfs_is_tty(void *private);
+int devfs_tty_ioctl(void *private, unsigned long request, void *argp);
 
 /* File lock entry -- used for both POSIX (per-PID) and OFD (per-open_file)
  * record locks.  Lock matching uses path string comparison because

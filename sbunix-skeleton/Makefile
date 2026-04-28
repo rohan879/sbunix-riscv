@@ -57,6 +57,10 @@ TEST_DISK_SIZE ?= 128
 TEST_DISK_IMG  := build/test-disk.img
 CORE_TEST_DISK_SIZE ?= 32
 CORE_TEST_DISK_IMG  := build/test-disk-core.img
+# MODIFIED: Optional build-time knob to skip only the boot-time priority
+# os-test/open-posix-test pass while keeping the normal SBUnix boot tests.
+# Example: BUILD_TESTS=1 SKIP_BOOT_PRIORITY_TESTS=1 make qemu -j$(nproc)
+SKIP_BOOT_PRIORITY_TESTS ?= 0
 
 -include Makefile.local
 
@@ -179,6 +183,11 @@ build/rootfs/.prepared: $(USER_BIN) tools/guest-run-tests tools/stage-thirdparty
 	# ENH: Stage vendored third-party payloads into the normal guest image so
 	# workload validation does not depend on manual post-build copying.
 	tools/stage-thirdparty.sh build/rootfs rootfs
+ifeq ($(SKIP_BOOT_PRIORITY_TESTS),1)
+	@touch build/rootfs/etc/.skip_boot_priority_tests
+else
+	@rm -f build/rootfs/etc/.skip_boot_priority_tests
+endif
 ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests # MODIFIED: added
 	# run-os-test is now built as C binary via $(C_BIN) pattern

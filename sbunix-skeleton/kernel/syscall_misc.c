@@ -25,55 +25,64 @@ long sys_ioctl_handler(struct trapframe *tf) {
 
     if (!f) return (long)-9; /* -EBADF */
 
-    if (request == 0x5413) { /* TIOCGWINSZ */
+    {
         int is_tty = 0;
         if (f->ops == &devfs_ops && f->private)
-          is_tty = devfs_is_tty(f->private);
-        if (is_tty) {
-            if (argp) {
-                struct { uint16_t row, col, xpix, ypix; } ws = {24, 80, 0, 0};
-                if (copyout(current_proc->pagetable, argp, &ws, sizeof(ws)) < 0) {
-                    return (long)-EFAULT;
+            is_tty = devfs_is_tty(f->private);
+
+        if (request == 0x5413) { /* TIOCGWINSZ */
+            if (is_tty) {
+                if (argp) {
+                    struct { uint16_t row, col, xpix, ypix; } ws = {24, 80, 0, 0};
+                    if (copyout(current_proc->pagetable, argp, &ws, sizeof(ws)) < 0) {
+                        return (long)-EFAULT;
+                    }
                 }
+                return (long)0;
+            } else {
+                return (long)-25;
             }
-            return (long)0;
+        } else if (request == 0x540F || request == 0x5410 || request == TIOCGSID) {
+            int kval = 0;
+            if ((request == 0x5410 || request == TIOCGSID) && argp) {
+                if (request == 0x5410 &&
+                    copyin(current_proc->pagetable, &kval, argp, sizeof(kval)) < 0)
+                    return (long)-EFAULT;
+            }
+            if (!is_tty)
+                return (long)-ENOTTY;
+            {
+                long result = (long)devfs_tty_ioctl(f->private, request, (void *)&kval);
+                if ((request == 0x540F || request == TIOCGSID) && argp && result >= 0) {
+                    if (copyout(current_proc->pagetable, argp, &kval, sizeof(kval)) < 0)
+                        return (long)-EFAULT;
+                }
+                return result;
+            }
+        } else if (request >= TCGETS && request <= TCSETSF) {
+            if (is_tty) {
+                char ktermios[128];
+                memset(ktermios, 0, sizeof(ktermios));
+                if (request != TCGETS && argp) {
+                    if (copyin(current_proc->pagetable, ktermios, argp, 60) < 0) {
+                        return (long)-EFAULT;
+                    }
+                }
+                {
+                    long result = (long)devfs_tty_ioctl(f->private, request, (void *)ktermios);
+                    if (request == TCGETS && argp) {
+                        if (copyout(current_proc->pagetable, argp, ktermios, 60) < 0) {
+                            return (long)-EFAULT;
+                        }
+                    }
+                    return result;
+                }
+            } else {
+                return (long)-25;
+            }
         } else {
             return (long)-25;
         }
-    } else if (request == 0x540F || request == 0x5410) {
-        /* TIOCGPGRP / TIOCSPGRP — delegate to tty_ioctl */
-        int kpgid = 0;
-        if (request == 0x5410 && argp) {
-            if (copyin(current_proc->pagetable, &kpgid, argp, sizeof(kpgid)) < 0)
-                return (long)-EFAULT;
-        }
-        long result = (long)tty_ioctl(request, (void *)&kpgid);
-        if (request == 0x540F && argp) {
-            if (copyout(current_proc->pagetable, argp, &kpgid, sizeof(kpgid)) < 0)
-                return (long)-EFAULT;
-        }
-        return result;
-    } else if (request >= TCGETS && request <= TCSETSF) {
-        if (fd >= 0 && fd <= 2) {
-            char ktermios[128];
-            memset(ktermios, 0, sizeof(ktermios));
-            if (request != TCGETS && argp) {
-                if (copyin(current_proc->pagetable, ktermios, argp, 60) < 0) {
-                    return (long)-EFAULT;
-                }
-            }
-            long result = (long)tty_ioctl(request, (void *)ktermios);
-            if (request == TCGETS && argp) {
-                if (copyout(current_proc->pagetable, argp, ktermios, 60) < 0) {
-                    return (long)-EFAULT;
-                }
-            }
-            return result;
-        } else {
-            return (long)-25;
-        }
-    } else {
-        return (long)-25;
     }
 }
 

@@ -76,6 +76,7 @@ static void cleanup_all(void) {
     rmdir("/mnt/sl_sat_parent_link");
     rmdir("/mnt/sl_sat_parent_real");
     unlink("/mnt/sl_sat_parent_sym");
+    unlink("/mnt/sl_long_target_link");
 }
 
 /* -----------------------------------------------------------------------
@@ -421,6 +422,47 @@ static void test_symlinkat_parent_symlink(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 14. symlink_long_target -- long target strings survive symlink/readlink
+ * ---------------------------------------------------------------------- */
+
+static void test_symlink_long_target(void) {
+    char target[220];
+    char buf[256];
+    int pos = 0;
+
+    unlink("/mnt/sl_long_target_link");
+
+    memset(target, 0, sizeof(target));
+    for (int i = 0; i < 20; i++) {
+        target[pos++] = '/';
+        target[pos++] = 'd';
+        target[pos++] = 'i';
+        target[pos++] = 'r';
+        target[pos++] = '0' + (i % 10);
+        target[pos++] = 'x';
+        target[pos++] = 'y';
+        target[pos++] = 'z';
+    }
+    target[pos] = '\0';
+
+    CHECK("symlink: symlink_long_target create",
+          symlink(target, "/mnt/sl_long_target_link") == 0);
+
+    memset(buf, 0, sizeof(buf));
+    errno = 0;
+    int n = readlink("/mnt/sl_long_target_link", buf, sizeof(buf) - 1);
+    CHECK("symlink: symlink_long_target readlink returns full target",
+          n == pos);
+    if (n > 0) {
+        buf[n] = '\0';
+        CHECK("symlink: symlink_long_target target matches",
+              strcmp(buf, target) == 0);
+    }
+
+    unlink("/mnt/sl_long_target_link");
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -443,6 +485,7 @@ int main(void) {
     test_symlink_dangling();
     test_readlink_intermediate_dir_symlink();
     test_symlinkat_parent_symlink();
+    test_symlink_long_target();
 
     printf("=== symlinktest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

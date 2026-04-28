@@ -33,6 +33,11 @@ static volatile sig_atomic_t nested_usr2 = 0;
 static volatile sig_atomic_t resethand_count = 0;
 static volatile sig_atomic_t nodefer_reentrant = 0;
 static volatile sig_atomic_t restart_handler_ran = 0;
+static volatile sig_atomic_t siginfo_ran = 0;
+static volatile sig_atomic_t siginfo_signo = 0;
+static volatile sig_atomic_t siginfo_code = 0;
+static volatile sig_atomic_t siginfo_pid = 0;
+static volatile sig_atomic_t siginfo_value = 0;
 
 /* -----------------------------------------------------------------------
  * 1. sigaction_basic — install handler via sigaction, send signal
@@ -420,6 +425,47 @@ static void test_sigaction_sigstop_fails(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 12. sa_siginfo_sigqueue — SA_SIGINFO handler gets sigqueue payload
+ * ---------------------------------------------------------------------- */
+
+static void siginfo_handler(int sig, siginfo_t *info, void *uctx) {
+    (void)uctx;
+    siginfo_ran = 1;
+    if (!info)
+        return;
+    siginfo_signo = info->si_signo;
+    siginfo_code = info->si_code;
+    siginfo_pid = info->si_pid;
+    siginfo_value = info->si_value.sival_int;
+}
+
+static void test_sa_siginfo_sigqueue(void) {
+    struct sigaction sa;
+    union sigval value;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = siginfo_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGUSR1, &sa, NULL);
+
+    siginfo_ran = 0;
+    siginfo_signo = 0;
+    siginfo_code = 0;
+    siginfo_pid = 0;
+    siginfo_value = 0;
+    value.sival_int = 0x1234;
+
+    CHECK("sa_siginfo_sigqueue: sigqueue returns 0",
+          sigqueue(getpid(), SIGUSR1, value) == 0);
+    CHECK("sa_siginfo_sigqueue: handler ran", siginfo_ran == 1);
+    CHECK("sa_siginfo_sigqueue: signo matches", siginfo_signo == SIGUSR1);
+    CHECK("sa_siginfo_sigqueue: si_code == SI_QUEUE", siginfo_code == SI_QUEUE);
+    CHECK("sa_siginfo_sigqueue: si_pid == self", siginfo_pid == getpid());
+    CHECK("sa_siginfo_sigqueue: si_value propagated", siginfo_value == value.sival_int);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -437,6 +483,7 @@ int main(void) {
     test_handler_gets_signum();
     test_sigaction_sigkill_fails();
     test_sigaction_sigstop_fails();
+    test_sa_siginfo_sigqueue();
 
     printf("=== sighandtest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

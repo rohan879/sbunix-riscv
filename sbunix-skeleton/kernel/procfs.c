@@ -23,8 +23,11 @@ enum procfs_type {
   PROCFS_STATUS,    /* /proc/<pid>/status */
   PROCFS_CMDLINE,   /* /proc/<pid>/cmdline */
   PROCFS_FDDIR,     /* /proc/<pid>/fd directory */
+  PROCFS_FDLINK,    /* /proc/<pid>/fd/<n> symlink */
   PROCFS_MAPS,      /* /proc/<pid>/maps */
   PROCFS_STAT_FILE, /* /proc/<pid>/stat (single-line format) */
+  PROCFS_EXE_LINK,  /* /proc/<pid>/exe symlink */
+  PROCFS_CWD_LINK,  /* /proc/<pid>/cwd symlink */
   PROCFS_DMESG,     /* /proc/dmesg */
   PROCFS_MOUNTS,    /* /proc/mounts */
   PROCFS_CPUINFO,   /* /proc/cpuinfo */
@@ -39,6 +42,7 @@ enum procfs_type {
 struct procfs_private {
   enum procfs_type type;
   pid_t pid;
+  int fd;
   char buf[PROCFS_BUF];  /* pre-rendered content */
   int len;               /* length of content in buf */
 };
@@ -85,6 +89,15 @@ static int parse_pid(const char *s) {
     s++;
   }
   return val;
+}
+
+static int parse_procfs_fd_leaf(const char *rest) {
+  if (strncmp(rest, "fd/", 3) != 0)
+    return -1;
+  rest += 3;
+  if (*rest == '\0')
+    return -1;
+  return parse_pid(rest);
 }
 
 /* Helper: find a process by PID */
@@ -351,8 +364,8 @@ static int procfs_render_meminfo(char *buf, int bufsz) {
 /* ------------------------------------------------------------------ */
 static int procfs_open(void *fs_data, const char *path, int flags, void **private) {
   (void)fs_data;
-  (void)flags;
   const char *p = path;
+  int nofollow = (flags & 0400000); /* O_NOFOLLOW */
   while (*p == '/') p++;
 
   struct procfs_private *priv = (struct procfs_private *)kmalloc(sizeof(struct procfs_private));
@@ -420,6 +433,10 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
   /* /proc/self — resolve to current process's PID */
   pid_t self_pid = current_proc ? current_proc->pid : 1;
   if (strcmp(p, "self") == 0) {
+    if (nofollow) {
+      kmfree(priv, sizeof(*priv));
+      return -40; /* -ELOOP */
+    }
     priv->type = PROCFS_PIDDIR;
     priv->pid = self_pid;
     *private = priv;
@@ -461,13 +478,39 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
       priv->len = procfs_render_stat_file(priv->buf, PROCFS_BUF, target);
     } else if (strcmp(rest, "fd") == 0) {
       priv->type = PROCFS_FDDIR;
-    } else if (strcmp(rest, "exe") == 0 || strcmp(rest, "cwd") == 0) {
-      /* exe and cwd are symlinks; open as empty file (readlink handles them) */
-      priv->type = PROCFS_PIDDIR; /* placeholder; reads return 0 */
+    } else if (strcmp(rest, "exe") == 0) {
+      if (nofollow) {
+        kmfree(priv, sizeof(*priv));
+        return -40;
+      }
+      priv->type = PROCFS_EXE_LINK;
+      priv->len = 0;
+    } else if (strcmp(rest, "cwd") == 0) {
+      if (nofollow) {
+        kmfree(priv, sizeof(*priv));
+        return -40;
+      }
+      priv->type = PROCFS_CWD_LINK;
       priv->len = 0;
     } else {
-      kmfree(priv, sizeof(*priv));
-      return -2;
+      int fd = parse_procfs_fd_leaf(rest);
+      struct open_file **ftable;
+      if (fd < 0) {
+        kmfree(priv, sizeof(*priv));
+        return -2;
+      }
+      ftable = proc_ofile(target);
+      if (fd >= NOFILE || !ftable[fd]) {
+        kmfree(priv, sizeof(*priv));
+        return -2;
+      }
+      if (nofollow) {
+        kmfree(priv, sizeof(*priv));
+        return -40;
+      }
+      priv->type = PROCFS_FDLINK;
+      priv->fd = fd;
+      priv->len = 0;
     }
     *private = priv;
     return 0;
@@ -543,12 +586,47 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
     return 0;
   }
 
-  if (strcmp(rest, "exe") == 0 || strcmp(rest, "cwd") == 0) {
-    /* exe and cwd are symlinks; open as placeholder (readlink handles them) */
-    priv->type = PROCFS_PIDDIR; /* placeholder; reads return 0 */
+  if (strcmp(rest, "exe") == 0) {
+    if (nofollow) {
+      kmfree(priv, sizeof(*priv));
+      return -40;
+    }
+    priv->type = PROCFS_EXE_LINK;
     priv->len = 0;
     *private = priv;
     return 0;
+  }
+
+  if (strcmp(rest, "cwd") == 0) {
+    if (nofollow) {
+      kmfree(priv, sizeof(*priv));
+      return -40;
+    }
+    priv->type = PROCFS_CWD_LINK;
+    priv->len = 0;
+    *private = priv;
+    return 0;
+  }
+
+  {
+    int fd = parse_procfs_fd_leaf(rest);
+    struct open_file **ftable;
+    if (fd >= 0) {
+      ftable = proc_ofile(target);
+      if (fd >= NOFILE || !ftable[fd]) {
+        kmfree(priv, sizeof(*priv));
+        return -2;
+      }
+      if (nofollow) {
+        kmfree(priv, sizeof(*priv));
+        return -40;
+      }
+      priv->type = PROCFS_FDLINK;
+      priv->fd = fd;
+      priv->len = 0;
+      *private = priv;
+      return 0;
+    }
   }
 
   kmfree(priv, sizeof(*priv));
@@ -581,7 +659,8 @@ static int64_t procfs_read(void *fs_data, void *private, char *buf,
 
   /* All other buffer-backed types */
   if (priv->type == PROCFS_ROOT || priv->type == PROCFS_PIDDIR ||
-      priv->type == PROCFS_FDDIR)
+      priv->type == PROCFS_FDDIR || priv->type == PROCFS_FDLINK ||
+      priv->type == PROCFS_EXE_LINK || priv->type == PROCFS_CWD_LINK)
     return 0; /* directories return nothing on read */
 
   int64_t off = *offset;
@@ -690,6 +769,12 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
       STAT_LNK((uint64_t)(2000 + self_pid * 10 + 2));
     }
     if (strcmp(p, "fd") == 0) { STAT_DIR((uint64_t)(400 + self_pid)); }
+    {
+      int fd = parse_procfs_fd_leaf(p);
+      if (fd >= 0 && fd < NOFILE && proc_ofile(target)[fd]) {
+        STAT_LNK((uint64_t)(5000 + self_pid * 16 + fd));
+      }
+    }
     return -2;
   }
 
@@ -731,6 +816,13 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
     STAT_LNK((uint64_t)(2000 + pid * 10 + 2));
   }
 
+  {
+    int fd = parse_procfs_fd_leaf(rest);
+    if (fd >= 0 && fd < NOFILE && proc_ofile(target)[fd]) {
+      STAT_LNK((uint64_t)(5000 + pid * 16 + fd));
+    }
+  }
+
   #undef STAT_DIR
   #undef STAT_FILE
   #undef STAT_LNK
@@ -754,6 +846,7 @@ static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
 
   uint32_t dir_mode = (uint32_t)(0x4000 | 0555);
   uint32_t reg_mode = (uint32_t)(0x8000 | 0444);
+  uint32_t lnk_mode = (uint32_t)(0xA000 | 0777);
 
   switch (priv->type) {
   case PROCFS_ROOT:
@@ -774,10 +867,24 @@ static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
     { uint64_t ino=(uint64_t)(300+priv->pid); memcpy(st+8,&ino,8); memcpy(st+16,&dir_mode,4); break; }
   case PROCFS_FDDIR:
     { uint64_t ino=(uint64_t)(400+priv->pid); memcpy(st+8,&ino,8); memcpy(st+16,&dir_mode,4); break; }
-  default: /* STATUS, CMDLINE, MAPS */
-    { uint64_t ino=(uint64_t)(1000+priv->pid*10+(priv->type==PROCFS_STATUS?1:priv->type==PROCFS_CMDLINE?2:3));
+  case PROCFS_FDLINK:
+    { uint64_t ino=(uint64_t)(5000 + priv->pid * 16 + priv->fd); memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); break; }
+  case PROCFS_EXE_LINK:
+    { uint64_t ino=(uint64_t)(2000 + priv->pid * 10 + 1); memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); break; }
+  case PROCFS_CWD_LINK:
+    { uint64_t ino=(uint64_t)(2000 + priv->pid * 10 + 2); memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); break; }
+  case PROCFS_STATUS:
+  case PROCFS_CMDLINE:
+  case PROCFS_MAPS:
+  case PROCFS_STAT_FILE:
+    { uint64_t sub = (priv->type == PROCFS_STATUS) ? 1 :
+                     (priv->type == PROCFS_CMDLINE) ? 2 :
+                     (priv->type == PROCFS_MAPS) ? 3 : 5;
+      uint64_t ino=(uint64_t)(1000+priv->pid*10+sub);
       uint64_t sz=(uint64_t)priv->len;
       memcpy(st+8,&ino,8); memcpy(st+16,&reg_mode,4); memcpy(st+48,&sz,8); break; }
+  default:
+    return -2;
   }
   return 0;
 }

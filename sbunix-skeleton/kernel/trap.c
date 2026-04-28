@@ -492,13 +492,12 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     }
     
     uint64_t handler = sa[signum].handler;
+    uint64_t handler_mask = sa[signum].mask;
+    int handler_flags = sa[signum].flags;
 
     if (handler >= 2 && (handler < 0x1000 || !user_addr_ok(handler))) {
         handler = 0;
     }
-
-    /* Clear from pending only after the disposition is known. */
-    p->sigpending &= ~signal_bit(signum);
 
     /* BF: Helper macro — consume deferred sigsuspend mask on any path
      * that does NOT build a user signal frame (where sigreturn would
@@ -515,12 +514,14 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     if (handler == 0) {
         /* Ignore-class signals */
         if (signum == SIGCHLD || signum == SIGURG || signum == SIGWINCH) {
+            p->sigpending &= ~signal_bit(signum);
             CONSUME_DEFERRED_MASK(p);
             return;
         }
 
         /* Continue: resume stopped process (or ignore if running) */
         if (signum == SIGCONT) {
+            p->sigpending &= ~signal_bit(signum);
             p->stopped_signal = 0;
             p->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
                                signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
@@ -544,6 +545,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         /* Stop-class signals: SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU */
         if (signum == SIGSTOP || signum == SIGTSTP ||
             signum == SIGTTIN || signum == SIGTTOU) {
+            p->sigpending &= ~signal_bit(signum);
             p->exit_status = (signum << 8) | 0x7f;
             p->stopped_signal = signum;
             p->state = SLEEPING;
@@ -565,6 +567,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
             return;
         }
 
+        p->sigpending &= ~signal_bit(signum);
         CONSUME_DEFERRED_MASK(p);
         signal_default_terminate(p, signum);
         return;
@@ -572,6 +575,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
 
     /* SIG_IGN (1) -- ignore */
     if (handler == 1) {
+        p->sigpending &= ~signal_bit(signum);
         CONSUME_DEFERRED_MASK(p);
         return;
     }
@@ -580,7 +584,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     uint64_t sp = tf->sp;
 
     /* Use alternate signal stack if SA_ONSTACK and alt stack is configured */
-    if ((sa[signum].flags & 0x08000000) && /* SA_ONSTACK */
+    if ((handler_flags & 0x08000000) && /* SA_ONSTACK */
         !(p->ss_flags & 2) &&              /* not SS_DISABLE */
         p->ss_sp != 0 && p->ss_size != 0) {
         /* Check if already on alt stack */
@@ -594,7 +598,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
      * siginfo first, then the signal frame on top. */
     uint64_t siginfo_uaddr = 0;
     uint64_t ucontext_uaddr = 0;
-    if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
+    if (handler_flags & 0x00000004) { /* SA_SIGINFO */
         /* BF: Populate all required siginfo_t fields at their correct offsets.
          * siginfo_t layout: { int si_signo(0), si_errno(4), si_code(8);
          *   pid_t si_pid(12); uid_t si_uid(16); int si_status(20); ... }
@@ -688,7 +692,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* SA_RESTART: if the process was in a blocking syscall that returned
      * -EINTR, and the handler has SA_RESTART, rewind epc to re-execute
      * the ecall with original args after the handler returns via sigreturn. */
-    if ((sa[signum].flags & 0x10000000) &&  /* SA_RESTART */
+    if ((handler_flags & 0x10000000) &&  /* SA_RESTART */
         p->in_syscall &&
         (int64_t)tf->a0 == -4) {            /* -EINTR */
         frame.saved_tf.epc -= 4;            /* back to ecall instruction */
@@ -715,7 +719,8 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
          * walk() returns NULL if the page is not in the page table. */
         pte_t *pte = walk(p->pagetable, SIGTRAMP_VA, 0);
         if (!pte || !(*pte & PTE_V)) {
-            return; /* can't deliver — drop signal rather than fault */
+            signal_frame_fault(p);
+            return;
         }
         tf->ra = SIGTRAMP_VA;
     } else {
@@ -724,12 +729,14 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
 
     /* Set up trapframe to call handler(signum[, siginfo, ucontext]) */
     if (handler >= 2) {
+        /* The handler frame is ready; consume this signal now. */
+        p->sigpending &= ~signal_bit(signum);
         /* BF: Bump epoch so ppoll/pselect6 can detect that a signal was
          * handled between their mask swap and the blocking sleep. */
         p->signal_handled_epoch++;
         tf->epc = handler;                   /* jump to signal handler */
         tf->a0 = (uint64_t)signum;           /* first arg: signal number */
-        if (sa[signum].flags & 0x00000004) { /* SA_SIGINFO */
+        if (handler_flags & 0x00000004) { /* SA_SIGINFO */
             tf->a1 = siginfo_uaddr;         /* second arg: siginfo_t * */
             tf->a2 = ucontext_uaddr;        /* third arg: ucontext_t * */
         }
@@ -737,16 +744,16 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         /* tf->ra already set above: SIGTRAMP_VA or sa[signum].restorer */
 
         /* Block this signal during handler execution */
-        p->sigmask |= sa[signum].mask;
+        p->sigmask |= handler_mask;
         /* BF: SA_RESETHAND implies SA_NODEFER per POSIX -- when the handler
          * resets to SIG_DFL after one invocation, the signal should not be
          * blocked during that invocation. */
-        if (!(sa[signum].flags & 0x40000000) &&      /* SA_NODEFER */
-            !(sa[signum].flags & (int)0x80000000))    /* SA_RESETHAND */
+        if (!(handler_flags & 0x40000000) &&      /* SA_NODEFER */
+            !(handler_flags & (int)0x80000000))    /* SA_RESETHAND */
             p->sigmask |= signal_bit(signum);
 
         /* SA_RESETHAND: reset handler to SIG_DFL after delivery */
-        if (sa[signum].flags & (int)0x80000000) { /* SA_RESETHAND */
+        if (handler_flags & (int)0x80000000) { /* SA_RESETHAND */
             sa[signum].handler = 0; /* SIG_DFL */
             sa[signum].flags &= ~(int)0x80000000;
         }

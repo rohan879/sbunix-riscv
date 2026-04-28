@@ -16,6 +16,7 @@ struct winsize {
 #define TIOCSWINSZ  0x5414  /* set window size */
 #define TIOCGPGRP   0x540F  /* get foreground process group */
 #define TIOCSPGRP   0x5410  /* set foreground process group */
+#define TIOCGSID    0x5429  /* get controlling session id */
 #define FIONREAD    0x541B  /* bytes available to read */
 
 int ioctl(int fd, unsigned long request, ...);

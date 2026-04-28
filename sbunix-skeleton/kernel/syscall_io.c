@@ -1417,42 +1417,67 @@ long sys_readlinkat_handler(struct trapframe *tf) {
     if (!ops || !ops->readlink)
         return (long)-22; /* EINVAL */
 
-    char kbuf[128];
-    int maxread = bufsiz > (int)sizeof(kbuf) ? (int)sizeof(kbuf) : bufsiz;
+    int maxread = bufsiz > EXT2_BLOCK_SIZE ? EXT2_BLOCK_SIZE : bufsiz;
+    char *kbuf = (char *)kmalloc((uint64_t)maxread);
+    if (!kbuf)
+        return (long)-ENOMEM;
+
     int ret = ops->readlink(mnt->fs_data, relpath, kbuf, maxread);
     if (ret < 0)
-        return (long)(int64_t)ret;
+        goto out;
 
     if (copyout(current_proc->pagetable, tf->a2, kbuf, (uint64_t)ret) < 0)
-        return (long)-EFAULT;
+        ret = -EFAULT;
+
+out:
+    kmfree(kbuf, (uint64_t)maxread);
     return (long)ret;
 }
 
 long sys_symlinkat_handler(struct trapframe *tf) {
-    char ktarget[128], klinkpath[256];
-    if (copyinstr(current_proc->pagetable, ktarget, tf->a0, sizeof(ktarget)) < 0)
+    char *ktarget;
+    char klinkpath[256];
+
+    ktarget = (char *)kmalloc(EXT2_BLOCK_SIZE);
+    if (!ktarget)
+        return (long)-ENOMEM;
+
+    if (copyinstr(current_proc->pagetable, ktarget, tf->a0, EXT2_BLOCK_SIZE) < 0) {
+        kmfree(ktarget, EXT2_BLOCK_SIZE);
         return (long)-EFAULT;
+    }
     if (copyinstr(current_proc->pagetable, klinkpath, tf->a2, sizeof(klinkpath)) < 0)
+    {
+        kmfree(ktarget, EXT2_BLOCK_SIZE);
         return (long)-EFAULT;
+    }
 
     char resolved[128];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at((int)tf->a1, klinkpath, resolved);
-      if (rr < 0) return (long)rr; }
+      if (rr < 0) {
+          kmfree(ktarget, EXT2_BLOCK_SIZE);
+          return (long)rr;
+      } }
 
     /* BF: symlinkat must resolve intermediate symlinked directories while
      * preserving the final component (the new link path itself).  Without
      * this, creating a link under a symlinked parent directory stores the
      * entry at the literal path instead of the resolved target directory. */
     { int sr = resolve_symlinks_in_path(resolved, 6, 0);
-      if (sr < 0) return (long)sr; }
+      if (sr < 0) {
+          kmfree(ktarget, EXT2_BLOCK_SIZE);
+          return (long)sr;
+      } }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
+    int ret = -30; /* EROFS */
     if (ops && ops->symlink)
-        return (long)(int64_t)ops->symlink(mnt->fs_data, ktarget, relpath);
-    return (long)-30; /* EROFS */
+        ret = ops->symlink(mnt->fs_data, ktarget, relpath);
+    kmfree(ktarget, EXT2_BLOCK_SIZE);
+    return (long)(int64_t)ret;
 }
 
 /* BF: Mirror of ramfs inode and private structs from ramfs.c.

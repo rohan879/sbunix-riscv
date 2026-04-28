@@ -57,11 +57,11 @@ void forkret(void) {
     trap_restore(kstack_tf);
 }
 
-/* Open /dev/console via VFS and assign to the next free ofile slot.
+/* Open /dev/tty via VFS and assign to the next free ofile slot.
  * Returns the fd number or -1 on failure. */
 static int kern_open_console(void) {
   const char *relpath;
-  struct mount *mnt = vfs_lookup_mount_entry("/dev/console", &relpath);
+  struct mount *mnt = vfs_lookup_mount_entry("/dev/tty", &relpath);
   struct vfs_ops *ops = mnt ? mnt->ops : NULL;
   if (!ops || !ops->open) return -1;
   void *priv = NULL;

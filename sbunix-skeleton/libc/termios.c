@@ -70,10 +70,10 @@ int tcsendbreak(int fd, int duration) {
 }
 
 pid_t tcgetsid(int fd) {
-    pid_t pgrp = tcgetpgrp(fd);
-    if (pgrp < 0)
+    pid_t sid = 0;
+    if (ioctl(fd, TIOCGSID, &sid) < 0)
         return -1;
-    return getsid(pgrp);
+    return sid;
 }
 
 int tcgetwinsize(int fd, struct winsize *ws) {

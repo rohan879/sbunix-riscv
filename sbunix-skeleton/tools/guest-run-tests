@@ -579,7 +579,9 @@ rm /mnt/dddst
 echo === POSIX Utility Tests Done ===
 
 echo "=== Priority Third-Party Tests ==="
-if test -f /bin/run-priority-tests; then
+if test -f /etc/.skip_boot_priority_tests; then
+    echo "Skipping boot-time priority os-test/open-posix-test pass."
+elif test -f /bin/run-priority-tests; then
     run-priority-tests
 fi
 

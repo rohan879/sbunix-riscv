@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 static int g_pass = 0, g_fail = 0;
@@ -368,6 +369,67 @@ static void test_proc_child_exe_link(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 15. proc_fd_entries -- /proc/self/fd/<n> behaves like a symlink entry
+ * ---------------------------------------------------------------------- */
+
+static void test_proc_fd_entries(void) {
+    const char *path = "/tmp/procfstest-fd";
+    unlink(path);
+
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0) {
+        CHECK("procfs: proc_fd_entries setup", 0);
+        return;
+    }
+
+    write(fd, "fd", 2);
+
+    char procpath[64];
+    snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
+
+    char link[256];
+    int n = readlink(procpath, link, sizeof(link) - 1);
+    CHECK("procfs: proc_fd_entries readlink returns data", n > 0);
+    if (n > 0) {
+        link[n] = '\0';
+        CHECK("procfs: proc_fd_entries readlink matches target",
+              strcmp(link, path) == 0);
+    }
+
+    struct stat st_path;
+    struct stat st_fd;
+    int sr1 = stat(procpath, &st_path);
+    int lfd = open(procpath, O_RDONLY | O_NOFOLLOW);
+    int nofollow_errno = errno;
+    int sr2 = -1;
+    if (lfd >= 0) {
+        sr2 = fstat(lfd, &st_fd);
+        close(lfd);
+    }
+
+    CHECK("procfs: proc_fd_entries stat follows symlink", sr1 == 0 && st_path.st_size == 2);
+    CHECK("procfs: proc_fd_entries O_NOFOLLOW rejects symlink",
+          lfd == -1 && nofollow_errno == ELOOP);
+
+    int rfd = open(procpath, O_RDONLY);
+    char buf[8];
+    int nr = -1;
+    if (rfd >= 0) {
+        memset(buf, 0, sizeof(buf));
+        nr = read(rfd, buf, sizeof(buf));
+        sr2 = fstat(rfd, &st_fd);
+        close(rfd);
+    }
+    CHECK("procfs: proc_fd_entries open follows symlink",
+          rfd >= 0 && nr == 2 && memcmp(buf, "fd", 2) == 0);
+    CHECK("procfs: proc_fd_entries fstat matches followed target",
+          rfd >= 0 && sr1 == 0 && sr2 == 0 && st_fd.st_size == st_path.st_size);
+
+    close(fd);
+    unlink(path);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -388,6 +450,7 @@ int main(void) {
     test_proc_nonexistent();
     test_proc_cmdline_has_args();
     test_proc_child_exe_link();
+    test_proc_fd_entries();
 
     printf("=== procfstest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

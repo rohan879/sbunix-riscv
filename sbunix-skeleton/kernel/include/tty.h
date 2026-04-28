@@ -22,6 +22,7 @@
 #define TCSETSF 0x5404   /* drain output, flush input, then set */
 #define TIOCGPGRP 0x540F
 #define TIOCSPGRP 0x5410
+#define TIOCGSID  0x5429
 
 /* Special control character indices */
 #define VINTR    0   /* ^C  -> SIGINT  */

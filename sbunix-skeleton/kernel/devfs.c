@@ -5,6 +5,9 @@
 #include <kmalloc.h>
 #include <proc.h>
 #include <tty.h>
+#include <errno.h>
+
+#define O_NOCTTY 0400
 
 /* ------------------------------------------------------------------ */
 /* Device table                                                         */
@@ -87,7 +90,60 @@ static int num_devices = 6;
 /* ------------------------------------------------------------------ */
 struct devfs_private {
   struct device *dev;
+  int is_global_tty;
+  struct termios tty_termios;
+  pid_t tty_sid;
+  pid_t tty_fg_pgid;
 };
+
+static void init_devfs_termios(struct termios *t) {
+  memset(t, 0, sizeof(*t));
+  t->c_iflag = ICRNL;
+  t->c_oflag = OPOST | ONLCR;
+  t->c_cflag = 0;
+  t->c_lflag = ICANON | ECHO | ISIG;
+  t->c_cc[VINTR] = 0x03;
+  t->c_cc[VQUIT] = 0x1C;
+  t->c_cc[VERASE] = 0x7F;
+  t->c_cc[VEOF] = 0x04;
+  t->c_cc[VSUSP] = 0x1A;
+  t->c_cc[VMIN] = 1;
+  t->c_cc[VTIME] = 0;
+}
+
+static struct proc *find_proc_by_pid(pid_t pid) {
+  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+    if (p->state != UNUSED && p->pid == pid)
+      return p;
+  }
+  return NULL;
+}
+
+static int process_group_exists_in_session(pid_t sid, pid_t pgid) {
+  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+    if (p->state != UNUSED && p->state != ZOMBIE &&
+        p->sid == sid && p->pgid == pgid)
+      return 1;
+  }
+  return 0;
+}
+
+static int process_group_is_orphaned(pid_t sid, pid_t pgid) {
+  int found = 0;
+  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+    if (p->state == UNUSED || p->state == ZOMBIE ||
+        p->sid != sid || p->pgid != pgid)
+      continue;
+    found = 1;
+    if (p->parent &&
+        p->parent->state != UNUSED &&
+        p->parent->state != ZOMBIE &&
+        p->parent->sid == sid &&
+        p->parent->pgid != pgid)
+      return 0;
+  }
+  return found;
+}
 
 /* ------------------------------------------------------------------ */
 /* devfs_open                                                           */
@@ -106,6 +162,7 @@ static int devfs_open(void *fs_data, const char *path, int flags, void **private
     /* Allocate private with NULL dev to indicate directory */
     struct devfs_private *priv = (struct devfs_private *)kmalloc(sizeof(struct devfs_private));
     if (!priv) return -12; /* -ENOMEM */
+    memset(priv, 0, sizeof(*priv));
     priv->dev = NULL;
     *private = priv;
     return 0;
@@ -115,7 +172,19 @@ static int devfs_open(void *fs_data, const char *path, int flags, void **private
     if (strcmp(devices[i].name, name) == 0) {
       struct devfs_private *priv = (struct devfs_private *)kmalloc(sizeof(struct devfs_private));
       if (!priv) return -12; /* -ENOMEM */
+      memset(priv, 0, sizeof(*priv));
       priv->dev = &devices[i];
+      if (devices[i].is_tty) {
+        init_devfs_termios(&priv->tty_termios);
+        priv->is_global_tty = strcmp(devices[i].name, "tty") == 0;
+        if (!priv->is_global_tty &&
+            !(flags & O_NOCTTY) &&
+            current_proc &&
+            current_proc->pid == current_proc->sid) {
+          priv->tty_sid = current_proc->sid;
+          priv->tty_fg_pgid = current_proc->pgid;
+        }
+      }
       *private = priv;
       return 0;
     }
@@ -199,6 +268,77 @@ static int devfs_fstat(void *fs_data, void *private, uint8_t *st) {
 int devfs_is_tty(void *private) {
   struct devfs_private *priv = (struct devfs_private *)private;
   return (priv && priv->dev && priv->dev->is_tty) ? 1 : 0;
+}
+
+int devfs_tty_ioctl(void *private, unsigned long request, void *argp) {
+  struct devfs_private *priv = (struct devfs_private *)private;
+  if (!priv || !priv->dev || !priv->dev->is_tty)
+    return -ENOTTY;
+
+  if (priv->is_global_tty) {
+    if (request == TIOCGSID) {
+      if (!current_proc)
+        return -ENOTTY;
+      if (argp)
+        *(int *)argp = current_proc->sid;
+      return current_proc->sid;
+    }
+    return tty_ioctl(request, argp);
+  }
+
+  switch (request) {
+  case TCGETS:
+    memcpy(argp, &priv->tty_termios, sizeof(struct termios));
+    return 0;
+  case TCSETS:
+  case TCSETSW:
+  case TCSETSF:
+    memcpy(&priv->tty_termios, argp, sizeof(struct termios));
+    return 0;
+  case TIOCGSID:
+    if (priv->tty_sid == 0 || !current_proc || current_proc->sid != priv->tty_sid)
+      return -ENOTTY;
+    if (argp)
+      *(int *)argp = priv->tty_sid;
+    return priv->tty_sid;
+  case TIOCGPGRP:
+    if (priv->tty_sid == 0 || !current_proc || current_proc->sid != priv->tty_sid)
+      return -ENOTTY;
+    if (argp)
+      *(int *)argp = priv->tty_fg_pgid;
+    return priv->tty_fg_pgid;
+  case TIOCSPGRP: {
+    pid_t pgid;
+    struct proc *p;
+
+    if (priv->tty_sid == 0 || !current_proc || current_proc->sid != priv->tty_sid)
+      return -ENOTTY;
+    if (!argp)
+      return -EINVAL;
+    pgid = *(int *)argp;
+    if (pgid <= 0)
+      return -EINVAL;
+
+    if (current_proc->pgid != priv->tty_fg_pgid &&
+        process_group_is_orphaned(current_proc->sid, current_proc->pgid))
+      return -EIO;
+
+    p = find_proc_by_pid(pgid);
+    if (!p)
+      return -ESRCH;
+    if (p->sid != priv->tty_sid)
+      return -EPERM;
+    if (p->pgid != pgid)
+      return -EPERM;
+    if (!process_group_exists_in_session(priv->tty_sid, pgid))
+      return -EPERM;
+
+    priv->tty_fg_pgid = pgid;
+    return 0;
+  }
+  default:
+    return -ENOTTY;
+  }
 }
 
 /* ------------------------------------------------------------------ */
