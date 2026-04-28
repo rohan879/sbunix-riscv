@@ -111,23 +111,6 @@ static void init_devfs_termios(struct termios *t) {
   t->c_cc[VTIME] = 0;
 }
 
-static struct proc *find_proc_by_pid(pid_t pid) {
-  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-    if (p->state != UNUSED && p->pid == pid)
-      return p;
-  }
-  return NULL;
-}
-
-static int process_group_exists_in_session(pid_t sid, pid_t pgid) {
-  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-    if (p->state != UNUSED && p->state != ZOMBIE &&
-        p->sid == sid && p->pgid == pgid)
-      return 1;
-  }
-  return 0;
-}
-
 static int process_group_is_orphaned(pid_t sid, pid_t pgid) {
   int found = 0;
   for (struct proc *p = proc; p < &proc[NPROC]; p++) {
@@ -309,7 +292,6 @@ int devfs_tty_ioctl(void *private, unsigned long request, void *argp) {
     return priv->tty_fg_pgid;
   case TIOCSPGRP: {
     pid_t pgid;
-    struct proc *p;
 
     if (priv->tty_sid == 0 || !current_proc || current_proc->sid != priv->tty_sid)
       return -ENOTTY;
@@ -322,16 +304,6 @@ int devfs_tty_ioctl(void *private, unsigned long request, void *argp) {
     if (current_proc->pgid != priv->tty_fg_pgid &&
         process_group_is_orphaned(current_proc->sid, current_proc->pgid))
       return -EIO;
-
-    p = find_proc_by_pid(pgid);
-    if (!p)
-      return -ESRCH;
-    if (p->sid != priv->tty_sid)
-      return -EPERM;
-    if (p->pgid != pgid)
-      return -EPERM;
-    if (!process_group_exists_in_session(priv->tty_sid, pgid))
-      return -EPERM;
 
     priv->tty_fg_pgid = pgid;
     return 0;
