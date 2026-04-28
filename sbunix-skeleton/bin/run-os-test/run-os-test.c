@@ -57,7 +57,6 @@ static int skipped = 0;
 static int errors = 0;
 
 static volatile sig_atomic_t timed_out = 0;
-static int warned_cs5_quarantine = 0;
 
 static void alarm_handler(int sig) {
     (void)sig;
@@ -383,23 +382,6 @@ static void write_out_file(const char *name, const char *content) {
  * 4. Classify from .out content
  */
 static enum test_result run_test_single(struct test_info *test) {
-    /*
-     * SBUnix currently maps posix_openpt()/ptsname() to /dev/console.
-     * The Sortix pty/cs5 test writes raw high-bit bytes to that device,
-     * which leaks directly into the interactive console stream here and
-     * causes harness-visible garbage/corruption. Quarantine this one test
-     * as neutral until full PTY master/slave separation exists.
-     */
-    if (strcmp(test->name, "pty/cs5") == 0) {
-        const char *out = "unknown\n";
-        write_out_file(test->name, out);
-        if (!warned_cs5_quarantine) {
-            printf("NOTE: pty/cs5 quarantined as NEUTRAL on SBUnix (console-backed PTY shim).\n");
-            warned_cs5_quarantine = 1;
-        }
-        return RESULT_NEUTRAL;
-    }
-
     char output[MAX_OUTPUT];
     struct sigaction old_alrm;
     struct sigaction sa;

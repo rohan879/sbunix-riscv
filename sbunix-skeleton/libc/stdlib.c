@@ -618,7 +618,7 @@ int mkstemp(char *tmpl) {
 }
 
 int posix_openpt(int oflag) {
-    return open("/dev/console", oflag);
+    return open("/dev/ptmx", oflag);
 }
 
 int grantpt(int fd) {
@@ -632,7 +632,7 @@ int unlockpt(int fd) {
 }
 
 char *ptsname(int fd) {
-    static char name[] = "/dev/console";
+    static char name[] = "/dev/pts/0";
     if (fd < 0) {
         errno = EBADF;
         return (void *)0;
