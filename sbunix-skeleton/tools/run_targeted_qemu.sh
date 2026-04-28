@@ -21,7 +21,9 @@ QEMU_STDIN_FD=3
 FAILURES=0
 
 DEFAULT_COMMANDS=(
-    "/test/bin/forkmemdiag postfork 30 60 100"
+    # QEMU_MEM must remain 128M; keep post-fork dirty allocation pressure
+    # within the available guest RAM after kernel and test image overhead.
+    "/test/bin/forkmemdiag postfork 30 60"
     "/test/bin/forkmemdiag cow 30"
     "/test/bin/forkreuse"
     "/test/bin/lazyreserve"
