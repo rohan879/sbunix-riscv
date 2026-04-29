@@ -2,6 +2,7 @@
 #define _PROC_H
 
 #include <riscv.h>
+#include <string.h>
 #include <vfs.h>
 
 /* BF: Kernel stack is 2 contiguous pages (8KB).  A single 4KB page
@@ -259,7 +260,7 @@ struct proc {
    * Stores the siginfo_t provided by sigqueue so that sigtimedwait can
    * retrieve si_value and si_code.  Without this, queued signal data
    * was discarded and sigtimedwait returned empty siginfo. */
-  #define NSIGQUEUE 16
+  #define NSIGQUEUE 32
   struct {
     int valid;
     int signum;
@@ -296,6 +297,10 @@ static inline int signal_is_valid(int signum) {
   return signum > 0 && signum < 65;
 }
 
+static inline int signal_is_realtime(int signum) {
+  return signum >= 32 && signum < 65;
+}
+
 /* BF: Signal info codes for kernel use (matching Linux ABI values).
  * Libc defines are unavailable in kernel, so use K_ prefixed literals. */
 #define K_SI_USER       0
@@ -322,6 +327,26 @@ static inline void sig_set_pending(struct proc *target, int sig,
                                    int32_t si_pid, int32_t si_uid,
                                    int32_t si_code) {
     if (!signal_is_valid(sig)) return;
+    if (signal_is_realtime(sig)) {
+        int slot = -1;
+        for (int i = 0; i < NSIGQUEUE; i++) {
+            if (!target->sigqueue_buf[i].valid) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot >= 0) {
+            uint8_t *info = target->sigqueue_buf[slot].info;
+            memset(info, 0, 128);
+            memcpy(info + 0, &sig, 4);
+            memcpy(info + 4, &(int32_t){0}, 4);
+            memcpy(info + 8, &si_code, 4);
+            memcpy(info + 12, &si_pid, 4);
+            memcpy(info + 16, &si_uid, 4);
+            target->sigqueue_buf[slot].signum = sig;
+            target->sigqueue_buf[slot].valid = 1;
+        }
+    }
     /* BF: Only store metadata if signal is not already pending —
      * standard signals coalesce per POSIX, first sender's metadata kept. */
     if (!(target->sigpending & signal_bit(sig))) {

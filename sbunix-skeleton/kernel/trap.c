@@ -630,6 +630,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
      * siginfo first, then the signal frame on top. */
     uint64_t siginfo_uaddr = 0;
     uint64_t ucontext_uaddr = 0;
+    int consumed_queued = 0;
     if (handler_flags & 0x00000004) { /* SA_SIGINFO */
         /* BF: Populate all required siginfo_t fields at their correct offsets.
          * siginfo_t layout: { int si_signo(0), si_errno(4), si_code(8);
@@ -643,10 +644,9 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
          * sequence-ordered).  Acceptable for a teaching OS since repeated
          * same-signal queueing is rare. */
         int found_queued = signal_queue_consume_one(p, signum, ksi);
+        consumed_queued = found_queued;
         if (found_queued) {
             p->sig_sender[signum].valid = 0;
-            if (signal_queue_has_more(p, signum))
-                p->sigpending |= signal_bit(signum);
             /* BF: Force si_signo to match delivered signal (POSIX requires this) */
             int32_t si_signo = (int32_t)signum;
             memcpy(ksi + 0, &si_signo, 4);
@@ -757,11 +757,13 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* Set up trapframe to call handler(signum[, siginfo, ucontext]) */
     if (handler >= 2) {
         /* The handler frame is ready; consume this signal now. */
-        p->sigpending &= ~signal_bit(signum);
-        if ((handler_flags & 0x00000004) && signal_queue_has_more(p, signum))
-            p->sigpending |= signal_bit(signum);
         if (!(handler_flags & 0x00000004))
-            signal_queue_purge_all(p, signum);
+            consumed_queued = signal_queue_consume_one(p, signum, NULL);
+        p->sigpending &= ~signal_bit(signum);
+        if (signal_queue_has_more(p, signum))
+            p->sigpending |= signal_bit(signum);
+        if (!consumed_queued)
+            p->sig_sender[signum].valid = 0;
         /* BF: Bump epoch so ppoll/pselect6 can detect that a signal was
          * handled between their mask swap and the blocking sleep. */
         p->signal_handled_epoch++;

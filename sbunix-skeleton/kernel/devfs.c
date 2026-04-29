@@ -6,6 +6,7 @@
 #include <proc.h>
 #include <tty.h>
 #include <errno.h>
+#include <trap_internal.h>
 
 #define O_NOCTTY 0400
 
@@ -183,6 +184,19 @@ static void reset_pty(struct pty_state *pty) {
   init_devfs_termios(&pty->termios);
 }
 
+static void pty_hangup(struct pty_state *pty) {
+  if (!pty || pty->sid == 0 || pty->fg_pgid == 0)
+    return;
+
+  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+    if (p->state == UNUSED || p->state == ZOMBIE)
+      continue;
+    if (p->sid != pty->sid || p->pgid != pty->fg_pgid)
+      continue;
+    kill_deliver(p, SIGHUP);
+  }
+}
+
 static int64_t pty_read(struct devfs_private *priv, char *buf, uint64_t count) {
   struct pty_state *pty = priv->pty;
   int *r;
@@ -348,6 +362,8 @@ static int devfs_close(void *fs_data, void *private) {
   if (private) {
     struct devfs_private *priv = (struct devfs_private *)private;
     if (priv->pty) {
+      if (priv->pty_role == PTY_ROLE_MASTER && priv->pty->master_refs == 1)
+        pty_hangup(priv->pty);
       if (priv->pty_role == PTY_ROLE_MASTER && priv->pty->master_refs > 0)
         priv->pty->master_refs--;
       if (priv->pty_role == PTY_ROLE_SLAVE && priv->pty->slave_refs > 0)

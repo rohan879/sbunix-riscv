@@ -25,6 +25,10 @@ fi
 
 # Run test suite only if test runner is present
 if test -f /bin/run-tests; then
+    if test -f /etc/.skip_boot_tests; then
+        exit 0
+    fi
+
     if test "$SBUNIX_BOOT_RC" = "1"; then
         set BOOTMODE 1
     else

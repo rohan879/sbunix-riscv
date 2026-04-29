@@ -62,6 +62,10 @@ CORE_TEST_DISK_IMG  := build/test-disk-core.img
 # os-test/open-posix-test pass while keeping the normal SBUnix boot tests.
 # Example: BUILD_TESTS=1 SKIP_BOOT_PRIORITY_TESTS=1 make qemu -j$(nproc)
 SKIP_BOOT_PRIORITY_TESTS ?= 0
+# MODIFIED: Optional build-time knob to skip all automatic boot tests and
+# start directly at the interactive shell prompt.
+# Example: BUILD_TESTS=1 SKIP_BOOT_TESTS=1 make qemu -j$(nproc)
+SKIP_BOOT_TESTS ?= 0
 
 -include Makefile.local
 
@@ -188,6 +192,11 @@ ifeq ($(SKIP_BOOT_PRIORITY_TESTS),1)
 	@touch build/rootfs/etc/.skip_boot_priority_tests
 else
 	@rm -f build/rootfs/etc/.skip_boot_priority_tests
+endif
+ifeq ($(SKIP_BOOT_TESTS),1)
+	@touch build/rootfs/etc/.skip_boot_tests
+else
+	@rm -f build/rootfs/etc/.skip_boot_tests
 endif
 ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests # MODIFIED: added

@@ -190,23 +190,35 @@ long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
                 break;
             }
         }
-        if (slot >= 0) {
-            uint8_t kinfo[128];
-            /* BF: Zero kinfo before copyin so bytes past K_SIGINFO_SIZE
-             * are zeros, not uninitialized kernel stack data. */
-            memset(kinfo, 0, sizeof(kinfo));
-            if (copyin(current_proc->pagetable, kinfo, info_uaddr, K_SIGINFO_SIZE) < 0)
-                return (long)-EFAULT;
-            /* BF: Full 128 bytes intentional — kinfo zero-padded past K_SIGINFO_SIZE */
-            memcpy(target->sigqueue_buf[slot].info, kinfo, 128);
-            target->sigqueue_buf[slot].signum = sig;
-            target->sigqueue_buf[slot].valid = 1;
-        }
-        /* If queue is full, signal is still delivered but info is lost
-         * (POSIX allows EAGAIN but we prefer delivery over rejection) */
+        if (slot < 0)
+            return (long)-EAGAIN;
+
+        uint8_t kinfo[128];
+        /* BF: Zero kinfo before copyin so bytes past K_SIGINFO_SIZE
+         * are zeros, not uninitialized kernel stack data. */
+        memset(kinfo, 0, sizeof(kinfo));
+        if (copyin(current_proc->pagetable, kinfo, info_uaddr, K_SIGINFO_SIZE) < 0)
+            return (long)-EFAULT;
+        /* BF: Full 128 bytes intentional — kinfo zero-padded past K_SIGINFO_SIZE */
+        memcpy(target->sigqueue_buf[slot].info, kinfo, 128);
+        target->sigqueue_buf[slot].signum = sig;
+        target->sigqueue_buf[slot].valid = 1;
     }
 
-    kill_deliver(target, sig);
+    if (signal_is_realtime(sig)) {
+        if (!(target->sigpending & signal_bit(sig))) {
+            target->sig_sender[sig].si_pid = current_proc ? (int32_t)current_proc->pid : 0;
+            target->sig_sender[sig].si_uid = 0;
+            target->sig_sender[sig].si_code = K_SI_QUEUE;
+            target->sig_sender[sig].si_status = 0;
+            target->sig_sender[sig].valid = 1;
+        }
+        target->sigpending |= signal_bit(sig);
+        if (target->state == SLEEPING)
+            target->state = RUNNABLE;
+    } else {
+        kill_deliver(target, sig);
+    }
     return 0;
 }
 
@@ -451,12 +463,15 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
                 current_proc->waiting_for_uart = 0;
 
             uint8_t kinfo[128];
+            int had_sender = current_proc->sig_sender[sig].valid;
             int found_queued = signal_queue_consume_one(current_proc, sig,
                                                         info_uaddr ? kinfo : NULL);
             if (found_queued) {
                 current_proc->sig_sender[sig].valid = 0;
                 if (signal_queue_has_more(current_proc, sig))
                     current_proc->sigpending |= signal_bit(sig);
+            } else if (had_sender) {
+                current_proc->sig_sender[sig].valid = 0;
             }
 
             /* Fill siginfo_t if requested */
@@ -470,12 +485,11 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
                     memset(kinfo, 0, sizeof(kinfo));
                     *(int32_t *)(kinfo + 0) = (int32_t)sig; /* si_signo */
                     *(int32_t *)(kinfo + 4) = 0;            /* si_errno */
-                    if (current_proc->sig_sender[sig].valid) {
+                    if (had_sender) {
                         *(int32_t *)(kinfo + 8) = current_proc->sig_sender[sig].si_code;
                         *(int32_t *)(kinfo + 12) = current_proc->sig_sender[sig].si_pid;
                         *(int32_t *)(kinfo + 16) = current_proc->sig_sender[sig].si_uid;
                         *(int32_t *)(kinfo + 20) = current_proc->sig_sender[sig].si_status;
-                        current_proc->sig_sender[sig].valid = 0;
                     }
                 }
                 /* BF: Only copy K_SIGINFO_SIZE (40) bytes to user — the user's

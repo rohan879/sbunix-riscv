@@ -191,6 +191,8 @@ found:
 
   // Initialize signal handling fields
   memset(p->sigactions, 0, sizeof(p->sigactions));
+  memset(p->sig_sender, 0, sizeof(p->sig_sender));
+  memset(p->sigqueue_buf, 0, sizeof(p->sigqueue_buf));
   p->sigmask = 0;
   p->sigpending = 0;
   p->alarm_ticks = 0;

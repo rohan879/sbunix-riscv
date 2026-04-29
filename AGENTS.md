@@ -241,6 +241,28 @@ tmux -S /tmp/tmux-debug kill-session -t qemu
 - QEMU binary: `/home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin/qemu-system-riscv64`
 - Kernel ELF: `build/kernel.elf` (entry point `0x80200000`)
 - Do NOT pipe stdin/stdout to QEMU without a real tty; use tmux
+- `make qemu` is still the best default when you need fresh `build/disk.img` / `build/test-disk.img` artifacts or want the normal build flow to manage dependencies.
+
+**Alternate fast path for guest-only validation**:
+- If `build/kernel.elf`, `build/disk.img`, and `build/test-disk.img` are already up to date, launching QEMU directly from tmux is much faster than rerunning `make qemu`.
+- This is especially useful for repeated targeted guest checks after kernel-only edits or when `make qemu` would otherwise spend time rebuilding the large test disk.
+- Example direct launch:
+```bash
+rm -f /tmp/tmux-debug 2>/dev/null
+tmux -S /tmp/tmux-debug new-session -d -s qemu \
+  "cd /home/steven/College/Graduate_Spring_2026/CSE506/CSE506/sbunix-skeleton && \
+   /home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin/qemu-system-riscv64 \
+   -machine virt -m 128M -bios default -kernel build/kernel.elf \
+   -drive file=build/disk.img,format=raw,if=none,id=hd0 \
+   -device virtio-blk-pci-non-transitional,drive=hd0 \
+   -drive file=build/test-disk.img,format=raw,if=none,id=hd1 \
+   -device virtio-blk-pci-non-transitional,drive=hd1 \
+   -device virtio-gpu-pci \
+   -device virtio-net-pci-non-transitional,netdev=net0 \
+   -netdev user,id=net0 \
+   -nographic 2>&1; bash"
+```
+- Use this only when you know the disk images already contain the binaries you want; otherwise rebuild first.
 
 ### Testing Notes
 
@@ -249,6 +271,10 @@ Boot now includes optional regression testing — `/etc/rc` prints `SBUnix booti
 Boot-test control flags in `make qemu`:
 - `SKIP_BOOT_TESTS=1`: skip all automatic boot tests and start directly at the shell prompt.
 - `SKIP_BOOT_PRIORITY_TESTS=1`: skip only the boot priority-test subset while keeping normal boot flow.
+- These boot-skip flags are build-time tarfs knobs: rebuild `build/kernel.elf` or relaunch through `make qemu` after changing them.
+- `SKIP_BOOT_TESTS=1` currently works by dropping `/etc/.skip_boot_tests` into tarfs during the rootfs-prep step. Rebuilding only `build/disk.img` is not enough; the updated tarfs must be present in `build/kernel.elf`.
+- When driving guest tests through `sbush` from tmux, avoid long chained command lines; truncated paths can produce misleading `exec failed` results.
+- For isolated third-party regressions, prefer one guest command per `tmux send-keys` call and capture after each command rather than batching several long `/test/bin/...` paths together.
 
 To run test suites from the shell prompt:
 ```

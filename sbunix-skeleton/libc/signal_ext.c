@@ -169,11 +169,12 @@ void (*sigset(int sig, void (*disp)(int)))(int) {
   sigset_t set;
 
   if (disp == SIG_HOLD) {
+    sigset_t oldset;
     if (sigemptyset(&set) < 0)
       return SIG_ERR;
     if (sigaddset(&set, sig) < 0)
       return SIG_ERR;
-    if (sigprocmask(SIG_BLOCK, &set, &set) < 0)
+    if (sigprocmask(SIG_BLOCK, &set, &oldset) < 0)
       return SIG_ERR;
     return SIG_HOLD;
   }
