@@ -181,123 +181,18 @@ From `contrib.md`, use these prefixes:
 
 Example: `BF: Fix null pointer in allocproc`
 
-#### 9. `mmap` / `munmap` / `mprotect` Syscalls
-- **`SYS_mmap=222`, `SYS_munmap=215`, `SYS_mprotect=226`** added to `kernel/include/syscall.h`
-- Anonymous `mmap` only (`MAP_ANONYMOUS=0x20`); file-backed mapping not required
-- VA placement: `mmap_base` starts at `0x20000000` (512 MB), grows upward by rounded-up length
-- `struct mmap_region { uint64_t va; uint64_t len; }` with `NMMAP=16` entries added to `struct proc` (`kernel/include/proc.h`)
-- `allocproc()` zeroes `mmap_regions[]` and sets `mmap_base=0` (`kernel/proc.c`)
-- `uvmunmap(pagetable_t, uint64_t va, uint64_t len)` added to `kernel/vm.c` + declared in `kernel/include/vm.h`
-- Handlers implemented in `kernel/trap.c`; `mprotect` is a no-op returning 0
+## Current State
 
-#### 12. Sortix os-test POSIX Test Suite Integration
-- **Moved build system out of submodule**: Created `tools/os-test.mk` (was `tests/thirdparty/sortix/os-test/SBUnix.mk`)
-- **Comprehensive compilation logging**: All 5,301 tests logged individually in `build/os-test-out/sbunix/compile-logs/<suite>/<test>.log`
-- **Success metrics**: 1,103 tests compile (21%), all from `include/` suite (header/symbol availability tests)
-- **Failure analysis**: 2,217 missing headers, 1,372 undeclared symbols, 0 link errors
-- **Analysis tools**: `tools/analyze-os-test-failures` script with summary, header analysis, symbol analysis, per-suite statistics
-- **Boot behavior**: Tests do NOT run automatically on boot (modified `/etc/rc`)
-- **Manual execution**: Use `run-os-test` command inside QEMU shell
-- **Most missing**: `sys/socket.h` (328), `pthread.h` (250), `inttypes.h` (174) - indicates missing networking, threading, extended integer support
+- `run-os-test` and `run-open-posix-test` are integrated and runnable from the shell.
+- `run-os-test` uses a watchdog timeout so full runs complete deterministically.
+- `run-os-test` executes tests from each suite directory to preserve relative-path assumptions.
+- `posix_spawn` applies `POSIX_SPAWN_SETSIGMASK` and `POSIX_SPAWN_SETSIGDEF` before `exec`.
+- Realtime signal handling supports `SIGRTMIN..SIGRTMAX` (`32..64`) for queue/wait paths.
 
-#### 14. Dynamic os-test Infrastructure (Latest Session)
-- **Fixed sbush glob expansion**: Added `expand_glob_words()` to `bin/sbush/parse.c` and modified `for` loop handling in `control.c` to support glob pattern expansion (e.g., `for file in /bin/e*` now works)
-- **Parallel build system**: Restructured `tools/os-test.mk` to use make's pattern rules instead of shell loops, enabling `BUILD_TESTS=1 make -j16` for 16-way parallel compilation
-- **Optimized test runner**: Rewrote `tools/guest-run-os-test` to dynamically discover and run all 1,103 compiled tests using the new shell glob expansion
-- **Fixed build dependencies**: Resolved Makefile dependency issues where os-test binaries were being overwritten during tarfs creation
-- **Restored optional boot testing**: Modified `/etc/rc` to run original SBUnix regression tests on boot with 3-second Ctrl-C timeout (uses `sleep 1 || exit 0` for proper interruption handling)
-- **Performance improvements**: os-test compilation now supports full parallelization, reducing build time from ~10+ minutes to ~2-3 minutes on multi-core systems
+### Known Issues (Active)
 
-#### 15. Open POSIX Test Suite Integration
-- **Build system**: Created `tools/open-posix-test.mk` following the same pattern as os-test.mk
-- **Compiles all test categories**: `conformance/` (definitions, interfaces, behavior), `functional/` (threads, timers, semaphores, mqueues), and `stress/`
-- **Success metrics**: 423 tests compile (21%), 1,621 skipped (mostly missing `pthread.h`)
-- **Test runner**: `bin/run-open-posix-test/run-open-posix-test.c` — C binary using Open POSIX exit codes (0=PASS, 1=FAIL, 2=UNRESOLVED, 4=UNSUPPORTED, 5=UNTESTED)
-- **Analysis tools**: `tools/analyze-open-posix-failures` script with `headers`, `symbols`, `category` subcommands
-- **Main Makefile integration**: `OPEN_POSIX_TEST_MARKER`, `OPEN_POSIX_TOTAL` counter, special build rule for `run-open-posix-test` binary
-- **Total suite size**: 2,044 C source files (excluding `testfrmw.c` framework files)
-- **Top missing headers**: `pthread.h` (614), `mqueue.h` (137), `aio.h` (99)
-
-#### 16. Signal Handling Fixes (`kernel/trap.c`)
-- **`deliver_signal` force_unblock**: Temporarily unblock SIGKILL/SIGBUS/etc for deliverability check, then restore original mask. Previously permanently modified `sigmask`, corrupting running handlers when a different signal (e.g. SIGCHLD) was delivered.
-- **Post-syscall/post-interrupt delivery checks**: Apply the same temporary force_unblock so that SIGKILL blocked by `sa_mask` is detected and delivered (fixes `sigaction/4-12` hang).
-- **`kill_deliver` self-kill `swtch`**: When `kill_deliver` kills `current_proc` (SIGKILL via `kill(getpid(), ...)`), call `swtch()` immediately after setting state=ZOMBIE. Without this, the ZOMBIE process continued executing on its kernel stack, corrupting state.
-- **Handler address bounds check**: Detect corrupted handler addresses (garbage values or kernel addresses) and fall through to existing SIG_DFL handling rather than jumping to invalid addresses. Must NOT bypass SIG_DFL's ignore-class behavior (SIGCHLD, SIGURG, SIGWINCH).
-
-#### 17. `sys_rt_sigsuspend_handler` Fix (`kernel/trap.c`)
-- **Kill/1-2 hang fix**: The while loop only checked deliverability under the temporary mask. When a signal arrived while blocked by that mask, the process woke but went back to sleep forever. Fix: after wakeup, restore old mask to check deliverability, then re-apply temporary mask.
-- **SA_SIGINFO stack layout fix**: The signal frame and siginfo were pushed onto the user stack in the wrong order. The signal frame went first, then siginfo below it. But `sigreturn` reads from `sp`, expecting the signal frame. Fix: push siginfo FIRST (below original sp), then signal frame ON TOP. `sp` always points to the signal frame.
-
-#### 18. Kernel Stack Overflow Prevention
-- **Buffer reductions**: Reduced local stack buffers in kernel path resolution and syscall handlers from 256 to 128 bytes. Deep call chains (exec → resolve_path → resolve_symlinks_in_path → follow_symlinks) overflowed the 4KB kernel stack, corrupting the trapframe and causing non-deterministic page faults at kernel addresses.
-- **`follow_symlinks` recursion**: The function recurses up to 8 levels. Each frame consumed ~1152 bytes (256+256+256+512 = 1280). Reduced to ~640 bytes/frame (128+128+128+256).
-
-#### 19. `sys_wait4` Process Group Filtering
-- **Added `wpid < -1`** (wait for children in process group `-wpid`) and **`wpid == 0`** (wait for children in caller's process group). Previously only `wpid > 0` (specific child) and `wpid == -1` (any child) were handled.
-- Fixes `os-test process/waitpid-pgid` test.
-
-#### 20. `mprotect`/`munmap`/`mmap` Kernel Address Validation (`kernel/trap.c`)
-- **Symptom**: During boot and `run-os-test`, the shell receives SIGSEGV from a page fault at a kernel address (e.g., `0x8020c0d8`). The kernel code PTE loses its PTE_X (execute) permission, causing instruction page faults when the kernel tries to execute code.
-- **Fix**: Added `addr >= 0x80000000UL` checks to:
-  - `sys_mprotect_handler` — reject mprotect on kernel addresses (prevents `superpage_split` from corrupting kernel super pages)
-  - `sys_munmap_handler` — reject munmap on kernel addresses
-  - `sys_mmap_handler` (MAP_FIXED) — reject mmap on kernel addresses
-  - Page fault handler demand paging — skip VMA-based page fault handling for kernel addresses
-- Also removed debug prints (`deliver_signal: invalid handler`).
-- **Known remaining issue**: The kernel code PTE at `0x87ffa008` still loses PTE_X during `virtio_blk_init` through an unknown mechanism. The virtqueue pages don't overlap with the page table page, and the page table page is pinned. Root cause TBD — possibly related to QEMU's A/D bit update or a subtle page table management bug.
-- **Workaround**: Two PTE_X restore points added:
-  1. `kernel/kernel.c` — restores PTE_X after all boot init, before `scheduler()` starts
-  2. `kernel/trap.c` — in the page fault handler: if instruction page fault at kernel address (>= 0x80000000), force PTE_X on the PTE, flush TLB, and retry the instruction. This transparently handles re-corruption during boot tests.
-- Both workarounds ensure the kernel code PTE always has PTE_X, regardless of when the corruption occurs.
-
-#### 21. Blocking Syscall Signal Handling Fix (`kernel/trap.c`)
-- **Symptom**: The `basic/signal/kill` test (and similar tests) hung forever. The test creates a child that blocks in `read()` on a pipe. The parent sends `SIGUSR1` to the child. The child should be killed by the signal (SIG_DFL for SIGUSR1 = terminate), but the pipe read loop ignored SIG_DFL signals and only checked for user handlers.
-- **Root Cause**: Blocking syscalls (pipe read, pipe write, waitpid, futex, readv/writev) had signal checks after `swtch()` that only returned `-EINTR` for signals with custom user handlers (`handler > 1`). Signals with `SIG_DFL` (handler == 0) that should terminate the process were ignored, causing the process to loop back to sleep instead of returning so `deliver_signal` could terminate it.
-- **Signal delivery flow**: `kill_deliver()` sets `sigpending` and wakes the target process. Actual signal delivery happens in `deliver_signal()` which is called when the syscall returns. If the blocking syscall never returns (loops back to sleep), `deliver_signal` never runs.
-- **Terminating vs non-terminating SIG_DFL signals**:
-  - Ignore-class (continue sleeping): SIGCHLD, SIGURG, SIGWINCH
-  - Stop-class (don't terminate): SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU
-  - Resume (don't terminate): SIGCONT
-  - All others with SIG_DFL: TERMINATE (need to break out of sleep loop)
-- **Fixes applied**:
-  1. **Pipe read** (~line 1280) — now checks for SIG_DFL terminating signals and breaks out via `goto pipe_eof`
-  2. **Waitpid** (~line 630) — returns `-EINTR` for SIG_DFL terminating signals
-  3. **Pipe write (writev)** (~line 3118) — returns to let `deliver_signal` kill process
-  4. **Readv pipe read** (~line 3218) — same fix
-  5. **Futex wait** (~line 3460) — same fix
-- **Verification**: `basic/signal/kill` test now passes (exit status 0), `signal/raise` passes, boot tests pass (62/62)
-
-#### 22. `run-os-test` Completion Fix (`bin/run-os-test/run-os-test.c`)
-- **Symptom**: Full `run-os-test` run stalled around `1471/1494`, never reaching final results.
-- **Root cause**: A subset of process/signal tests can block indefinitely in this environment; the harness waited forever on those child tests.
-- **Fix**: Added per-test watchdog timeout in `run-os-test`:
-  - Install temporary `SIGALRM` handler around each test execution.
-  - Use `alarm(5)` per test.
-  - If timed out, kill the child test with `SIGKILL`, reap it, and classify as failure (`exit: 124`).
-- **Result**: Full suite now completes deterministically (`1494/1494`) and prints `=== Final Results ===`.
-
-#### 23. Shell Respawn + Post-Boot Prompt Fix (`bin/init/init.c`, `rootfs/etc/rc`)
-- **Symptoms**:
-  1. Shell respawn messages during `run-os-test` process-group tests.
-  2. After automatic boot tests, system printed "Boot Testing Complete" but no interactive prompt appeared.
-- **Root cause**: `init`'s async `SIGCHLD` reaping interfered with blocking `waitpid()` flow for the rc shell / interactive shell lifecycle.
-- **Fixes**:
-  - Removed `SIGCHLD` handler from `init`; switched to explicit synchronous reaping:
-    - `waitpid(child, &status, 0)` for managed child.
-    - `reap_orphans()` helper (`waitpid(-1, ..., WNOHANG)` loop) after each managed wait.
-  - Added boot-only env marker when launching `/etc/rc`:
-    - `SBUNIX_BOOT_RC=1` passed by `init` for startup rc execution.
-  - Updated `rootfs/etc/rc` to gate countdown/banner output on boot mode while preserving normal behavior.
-- **Result**:
-  - Boot path now reliably returns to interactive `sbush$` after automatic tests.
-  - Full `run-os-test` run completes without shell respawn interruptions.
-
-### Known Issues (Last Verified)
-- **`run-os-test` crashes with SIGILL**: The run-os-test binary can crash with SIGILL (illegal instruction) during specific tests. This kills run-os-test but does NOT cause shell respawning — the shell continues normally after the crash. Root cause TBD (possibly test binary bug or compiler issue).
-- **Shell respawning (RESOLVED)**: The shell respawning during `run-os-test` was caused by two bugs:
-  1. The `exit` builtin's atoi started with `code = last_exit_status` instead of 0, causing `exit 0` to exit with `last_exit_status * 10` (e.g., status 10 when last_status was 1). This caused the boot script to exit with the wrong status.
-  2. The kernel code PTE losing PTE_X, causing page faults that killed the shell.
-  Both are now fixed. Testing shows 0 shell respawns and 0 page faults during `run-os-test`.
+- `run-os-test` can still hit sporadic `SIGILL` in some third-party tests; the shell should remain usable afterward.
+- Kernel code PTE execute-bit corruption can still occur in rare boot/test paths; current trap/boot workarounds keep the system running, but root cause is unresolved.
 
 ### QEMU Testing — Critical Notes
 
@@ -349,6 +244,10 @@ tmux -S /tmp/tmux-debug kill-session -t qemu
 ### Testing Notes
 
 Boot now includes optional regression testing — `/etc/rc` prints `SBUnix booting...`, then gives a 3-second Ctrl-C timeout before running `run-tests` automatically. Users can press Ctrl-C during the countdown to skip automatic tests and go directly to the interactive shell (using `sleep 1 || exit 0` for clean interruption handling).
+
+Boot-test control flags in `make qemu`:
+- `SKIP_BOOT_TESTS=1`: skip all automatic boot tests and start directly at the shell prompt.
+- `SKIP_BOOT_PRIORITY_TESTS=1`: skip only the boot priority-test subset while keeping normal boot flow.
 
 To run test suites from the shell prompt:
 ```
@@ -442,119 +341,3 @@ os-test build:
 
 open-posix build:
 - **Results**: 423 tests compile successfully out of 2,044 total (21% success rate)
-
-#### 24. os-test Process Group + `execlp` Follow-up (Current Session)
-- **`setpgid` errno alignment fixes** (`kernel/trap.c`):
-  - Return `EINVAL` for negative `pid`/`pgid`.
-  - Return `ESRCH` (not `EPERM`) when caller tries `setpgid` on a non-child/non-self target.
-  - Return `EACCES` (not `EINVAL`) when parent tries `setpgid` on a child that already `exec`'d.
-- **`execlp` support added to libc** (`libc/include/unistd.h`, `libc/unistd.c`):
-  - Added declaration and varargs wrapper implementation over existing `execvp`.
-  - `process/fork-exec-setpgid-in-child` and `process/fork-exec-setpgid-in-parent` now compile and run.
-- **`run-os-test` expect matching fixes** (`bin/run-os-test/run-os-test.c`):
-  - Runner now matches suite expect files by leaf test name (e.g., `fork-setpgid-invalid.posix`) instead of requiring the full `suite/test` string.
-  - Normalizes `\r\n`/`\n` in both test output and expect file content before comparison.
-  - This resolves false FAIL classifications for tests that actually printed the expected errno string.
-- **Validation notes**:
-  - Verified with `make clean && BUILD_TESTS=1 make qemu -j$(nproc)`.
-  - Verified both modes: after automatic boot tests and after skipping boot tests via Ctrl-C during 3-second window.
-  - Target tests now pass via `run-os-test` when invoked individually.
-  - Long chained command lines in `sbush` can be truncated and cause spurious `Test not found` output; run target tests individually for reliable validation.
-
-#### 25. `waitpid` Empty-PGID + Harness Capture Fix (Current Session)
-- **`waitpid` return code fix** (`kernel/trap.c`):
-  - `sys_wait4` now returns `-ECHILD` when no matching children exist (instead of generic `-1`).
-  - This aligns with POSIX expectations for `waitpid(-pgid, ...)` when the requested process group becomes empty.
-- **Wake parent on process-group/session changes** (`kernel/trap.c`):
-  - `sys_setpgid_handler` now wakes a sleeping parent waiting in `wait4` when a child changes process group.
-  - `sys_setsid_handler` now wakes a sleeping parent waiting in `wait4` when a child enters a new session.
-  - This avoids hangs where parent remains asleep after child leaves the waited process group.
-- **`alarm` timebase consistency fix** (`kernel/trap.c`):
-  - `sys_alarm_handler` and timer expiry checks now use `r_time()` + `TIMER_FREQ` consistently.
-  - Fixes 1-second alarm behavior used by os-test waitpid timeout paths.
-- **`run-os-test` watchdog/capture fix** (`bin/run-os-test/run-os-test.c`):
-  - Replaced pipe-based output capture with per-test temp file capture.
-  - Prevents parent/child deadlocks on shared pipe reads/writes in signal-heavy tests.
-  - Capture temp files now live in `/tmp` (ramfs) rather than `/test` (ext2) to avoid avoidable I/O slowdown during large runs.
-  - Single-test mode now resolves targets via the manifest (exact path/name, then unique prefix), avoiding false `Test not found` errors for long or truncated names.
-  - Classification logic remains unchanged (expect matching by leaf + CRLF/LF normalization).
-- **Validation**:
-  - Reproduced failures, then verified PASS for:
-    - `process/waitpid-pgid-empty-on-setpgid`
-    - `process/waitpid-pgid-empty-on-setpgid-rejoin`
-    - `process/waitpid-pgid-empty-on-setsid`
-  - Verified both modes: post-boot-tests shell and Ctrl-C boot-skip shell.
-
-#### 26. Boot-Test Skipping Reliability Notes
-- **Best way to skip boot tests**: wait for the line `Starting tests in: 3` and then send Ctrl-C immediately.
-- **Operational tip**: queueing many commands at once in `sbush` can make it harder to land Ctrl-C timing cleanly; send one command at a time when debugging boot behavior.
-- **For scripted host-side control**: poll the tmux pane for `Starting tests in: 3` and inject Ctrl-C once matched. This is more reliable than fixed sleep delays.
-- **Pattern-trigger tmux example**:
-  ```bash
-  # Wait for boot countdown prompt, then send Ctrl-C exactly once
-  for i in $(seq 1 120); do
-    out=$(tmux -S /tmp/tmux-debug capture-pane -t qemu -p | tr -d '\r')
-    case "$out" in
-      *"Starting tests in: 3"*)
-        tmux -S /tmp/tmux-debug send-keys -t qemu C-c
-        break
-        ;;
-    esac
-    sleep 0.2
-  done
-  ```
-
-#### 27. `basic/unistd` Follow-up: Runner CWD + Tempfile Regression Rollback
-- **`run-os-test` execution cwd fix** (`bin/run-os-test/run-os-test.c`):
-  - Tests are now executed from their suite directory (e.g. `/test/bin/os-test/basic`) using `./<leaf>` argv, matching Sortix `misc/run.sh` behavior.
-  - This fixes relative-path tests under `basic/unistd` that expect paths like `unistd/lseek`, `unistd/read`, and relative `exec*` targets.
-- **Regression identified and rolled back**:
-  - A prior experiment that changed tempfile behavior (`TMPDIR=/mnt` injection and `tmpfile()` path/lifetime changes) correlated with `WARNING: double kfree ...` during full `run-os-test` and broader instability.
-  - Those risky tempfile changes were reverted; runner now keeps normal environment and still executes tests from suite cwd.
-- **Observed results (targeted tests)**:
-  - PASS after fixes: `basic/unistd/execlp`, `basic/unistd/execv`, `basic/unistd/execve`, `basic/unistd/execvp`, `basic/unistd/lseek`, `basic/unistd/read`, `basic/unistd/truncate`, `basic/unistd/ftruncate`.
-- **Build summary update**:
-  - os-test compiled tests increased to **1507 / 5304** (~28%) in the current build output.
-  - open-posix compiled tests remain **423 / 2044** (~21%).
-
-#### 28. `readlinkat` Intermediate-Symlink Fix + Validation Notes (Current Session)
-- **`readlinkat` path resolution fix** (`kernel/syscall_io.c`):
-  - `sys_readlinkat_handler` now calls `resolve_symlinks_in_path(resolved, 6, 0)` after `resolve_path_at(...)`.
-  - This resolves intermediate directory symlinks while still leaving the final component untouched, which is the required `readlink`/`readlinkat` behavior.
-  - Reproducer added in `tests/symlinktest/symlinktest.c`:
-    - `readlink("/mnt/sl_rla_dirlink/child")` where `sl_rla_dirlink` is a symlink to a directory and `child` is the final symlink inside that directory.
-    - **Before fix**: `symlinktest` reported `24 passed, 2 failed`.
-    - **After fix**: `symlinktest` reported `26 passed, 0 failed`.
-- **Focused validation results after fix**:
-  - `sigtest`: `23 passed, 0 failed`
-  - `sighandtest`: `20 passed, 0 failed`
-  - `procfstest`: `22 passed, 0 failed`
-  - `symlinktest`: `26 passed, 0 failed`
-- **Potential follow-up issues identified by inspection (not fixed in this session)**:
-  - `/proc/<pid>/cmdline` in `kernel/procfs.c` still renders `p->name` rather than the full NUL-separated argv image expected by Linux-style `/proc` consumers.
-  - `sys_rt_sigsuspend_handler` in `kernel/syscall_signal.c` installs the temporary mask verbatim instead of stripping `SIGKILL`/`SIGSTOP`; delivery still succeeds because trap-return logic force-unblocks them, but the stored temporary mask is not fully POSIX-clean.
-
-#### 29. Spawn Attributes + Realtime Signal Queue Fixes (Current Session)
-- **`posix_spawn` attribute handling fixed** (`libc/spawn.c`):
-  - The child now applies `POSIX_SPAWN_SETSIGMASK` and `POSIX_SPAWN_SETSIGDEF` before `exec`.
-  - This fixes Sortix os-test spawn cases that verify inherited blocked signals and restoring ignored dispositions to `SIG_DFL`.
-- **Realtime signal range expanded in kernel state** (`kernel/include/proc.h`, related kernel loops):
-  - Signal validity and per-process handler/metadata tables now cover signals `1..64` instead of only `1..31`.
-  - This is required because libc exposes `SIGRTMIN=32` through `SIGRTMAX=64`, and Open POSIX signal queue/wait tests use `SIGRTMIN`.
-- **Queued realtime signal bookkeeping fixed** (`kernel/syscall_signal.c`, `kernel/trap.c`):
-  - After consuming one queued instance in `sigtimedwait()` or user-handler delivery, the kernel now reasserts the pending bit when more queued instances of the same signal remain.
-  - This preserves repeated `sigqueue()` deliveries for `sigwaitinfo()` and `SA_SIGINFO` handlers instead of collapsing them to a single pending instance.
-- **`sigaltstack(SS_DISABLE)` semantics corrected** (`kernel/syscall_signal.c`):
-  - Disabling the alt stack now clears the stored stack base/size instead of leaving stale values behind.
-  - This fixes the Open POSIX test that checks `sigaltstack(NULL, &old)` during an `SA_ONSTACK` handler after `SS_DISABLE` was set.
-- **`sigset(SIG_HOLD)` return behavior aligned** (`libc/signal_ext.c`):
-  - `sigset(..., SIG_HOLD)` now returns `SIG_HOLD`, matching the suite’s expected behavior for blocked signals.
-- **Focused validation**:
-  - PASS: `test/bin/os-test/basic/spawn/posix_spawnattr_setsigdefault`
-  - PASS: `test/bin/os-test/basic/spawn/posix_spawnattr_setsigmask`
-  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigaltstack/2-1`
-  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigqueue/8-1`
-  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigset/8-1`
-  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigtimedwait/1-1`
-  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigwaitinfo/7-1`
-  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigwaitinfo/8-1`
