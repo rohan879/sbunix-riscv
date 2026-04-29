@@ -12,6 +12,7 @@ REPO_DIR="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo 
 TIMEOUT=${TIMEOUT:-900}
 # QEMU_MEM must remain 128M for remote OS/build checks.
 QEMU_MEM=${QEMU_MEM:-128M}
+MAKE_JOBS=${MAKE_JOBS:-1}
 OUTPUT_FILE="$(mktemp /tmp/sbunix-test-output.XXXXXX)"
 QEMU_PID=""
 QEMU_FIFO_DIR=""
@@ -52,7 +53,7 @@ fi
 
 # Build the kernel
 echo "==> Building kernel..."
-MAKEFLAGS= make clean && mkdir -p build/kernel build/libc build/rootfs/bin && MAKEFLAGS= make -j1 BUILD_TESTS=1
+MAKEFLAGS= make clean && mkdir -p build/kernel build/libc build/rootfs/bin && MAKEFLAGS= make -j"$MAKE_JOBS" BUILD_TESTS=1
 if [ $? -ne 0 ]; then
     echo "FATAL: Kernel build failed"
     exit 1
@@ -60,14 +61,14 @@ fi
 
 # Build the disk image
 echo "==> Building disk image..."
-make build/disk.img
+make -j"$MAKE_JOBS" build/disk.img
 if [ $? -ne 0 ]; then
     echo "FATAL: Disk image build failed"
     exit 1
 fi
 
 echo "==> Building test disk image..."
-make BUILD_TESTS=1 build/test-disk.img
+make -j"$MAKE_JOBS" BUILD_TESTS=1 build/test-disk.img
 if [ $? -ne 0 ]; then
     echo "FATAL: Test disk image build failed"
     exit 1

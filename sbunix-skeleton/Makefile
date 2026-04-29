@@ -108,9 +108,10 @@ OS_TEST_TOTAL := $(shell find tests/thirdparty/sortix/os-test -name '*.c' 2>/dev
 # Count total open-posix-test source files at build time
 OPEN_POSIX_TOTAL := $(shell find tests/thirdparty/open-posix-test-suite/posixtest -name '*.c' ! -name 'testfrmw*' 2>/dev/null | wc -l)
 
-# BF: Use nproc instead of hardcoded -j16 to avoid oversubscription on
-# machines with fewer cores.  Defaults to 4 if nproc is unavailable.
-SUBMAKE_JOBS ?= $(shell nproc 2>/dev/null || echo 4)
+# BF: Use MAKE_JOBS/SUBMAKE_JOBS instead of hardcoded parallelism so host
+# validation scripts can cap third-party sub-build concurrency.
+HOST_BUILD_JOBS := $(shell nproc 2>/dev/null || echo 4)
+SUBMAKE_JOBS ?= $(if $(MAKE_JOBS),$(MAKE_JOBS),$(HOST_BUILD_JOBS))
 
 # Special rule for run-os-test: pass TOTAL_TESTS_IN_SUITE as build-time define
 build/rootfs/bin/run-os-test: $$(wildcard bin/run-os-test/*.c) build/libc/crt.S.o build/libc.a
