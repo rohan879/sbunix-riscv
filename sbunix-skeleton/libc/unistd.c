@@ -519,7 +519,7 @@ long sysconf(int name) {
     case 33: return 1;             /* _SC_MONOTONIC_CLOCK */
     case 34: return 1;             /* _SC_CPUTIME */
     case 35: return 1;             /* _SC_THREAD_CPUTIME */
-    case 36: return 32;            /* _SC_SIGQUEUE_MAX */
+    case 36: return 64;            /* _SC_SIGQUEUE_MAX */
     case 37: return 32;            /* _SC_DELAYTIMER_MAX */
     default: errno = EINVAL; return -1;
     }
