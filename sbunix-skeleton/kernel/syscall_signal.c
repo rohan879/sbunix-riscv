@@ -24,6 +24,18 @@ static int signal_queue_has_more(struct proc *p, int signum) {
     return 0;
 }
 
+static int signal_queue_consume_one(struct proc *p, int signum, uint8_t *info_out) {
+    for (int i = 0; i < NSIGQUEUE; i++) {
+        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum) {
+            if (info_out)
+                memcpy(info_out, p->sigqueue_buf[i].info, 128);
+            p->sigqueue_buf[i].valid = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int signal_send_allowed(struct proc *target) {
     if (!current_proc || !target)
         return 0;
@@ -438,25 +450,20 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
             if (current_proc->waiting_for_uart == 2)
                 current_proc->waiting_for_uart = 0;
 
+            uint8_t kinfo[128];
+            int found_queued = signal_queue_consume_one(current_proc, sig,
+                                                        info_uaddr ? kinfo : NULL);
+            if (found_queued) {
+                current_proc->sig_sender[sig].valid = 0;
+                if (signal_queue_has_more(current_proc, sig))
+                    current_proc->sigpending |= signal_bit(sig);
+            }
+
             /* Fill siginfo_t if requested */
             if (info_uaddr) {
-                uint8_t kinfo[128];
-                int found_queued = 0;
                 /* BF: Search sigqueue_buf for stored siginfo from sigqueue().
                  * This preserves si_value and si_code that the sender set.
                  * Without this, sigtimedwait always returned empty siginfo. */
-                for (int qi = 0; qi < NSIGQUEUE; qi++) {
-                    if (current_proc->sigqueue_buf[qi].valid &&
-                        current_proc->sigqueue_buf[qi].signum == sig) {
-                        memcpy(kinfo, current_proc->sigqueue_buf[qi].info, 128);
-                        current_proc->sigqueue_buf[qi].valid = 0;
-                        current_proc->sig_sender[sig].valid = 0;
-                        if (signal_queue_has_more(current_proc, sig))
-                            current_proc->sigpending |= signal_bit(sig);
-                        found_queued = 1;
-                        break;
-                    }
-                }
                 if (!found_queued) {
                     /* BF: Consume sig_sender metadata captured at generation
                      * time so sigtimedwait returns correct si_code/si_pid. */
@@ -487,6 +494,16 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
             if (current_proc->waiting_for_uart == 2)
                 current_proc->waiting_for_uart = 0;
             return (long)-EAGAIN;
+        }
+
+        /* BF: The global scheduler tick is 1 second, so sleeping all the way
+         * to a near-term deadline can overshoot by almost a full second.
+         * Once we're within one tick of expiry, poll in-kernel instead of
+         * sleeping so 1-second sigtimedwait() timeouts return on time. */
+        if (has_timeout) {
+            uint64_t now = r_time();
+            if (deadline_ticks > now && deadline_ticks - now <= TIMER_FREQ)
+                continue;
         }
 
         /* Sleep and retry.  Timed waits must join the timer wakeup path;

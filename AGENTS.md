@@ -188,6 +188,7 @@ Example: `BF: Fix null pointer in allocproc`
 - `run-os-test` executes tests from each suite directory to preserve relative-path assumptions.
 - `posix_spawn` applies `POSIX_SPAWN_SETSIGMASK` and `POSIX_SPAWN_SETSIGDEF` before `exec`.
 - Realtime signal handling supports `SIGRTMIN..SIGRTMAX` (`32..64`) for queue/wait paths.
+- Realtime queued signals are consumed differently for plain handlers vs `SA_SIGINFO`; `sigtimedwait()` also avoids 1-second oversleep near deadline.
 
 ### Known Issues (Active)
 

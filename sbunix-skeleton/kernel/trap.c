@@ -462,6 +462,25 @@ static int signal_queue_has_more(struct proc *p, int signum) {
     return 0;
 }
 
+static int signal_queue_consume_one(struct proc *p, int signum, uint8_t *info_out) {
+    for (int i = 0; i < NSIGQUEUE; i++) {
+        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum) {
+            if (info_out)
+                memcpy(info_out, p->sigqueue_buf[i].info, 128);
+            p->sigqueue_buf[i].valid = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void signal_queue_purge_all(struct proc *p, int signum) {
+    for (int i = 0; i < NSIGQUEUE; i++) {
+        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum)
+            p->sigqueue_buf[i].valid = 0;
+    }
+}
+
 /* RF: Made non-static for access by extracted signal syscall module */
 void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* BF: Only SIGKILL and SIGSTOP are truly unblockable per POSIX.
@@ -523,6 +542,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         /* Ignore-class signals */
         if (signum == SIGCHLD || signum == SIGURG || signum == SIGWINCH) {
             p->sigpending &= ~signal_bit(signum);
+            signal_queue_purge_all(p, signum);
             CONSUME_DEFERRED_MASK(p);
             return;
         }
@@ -530,6 +550,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         /* Continue: resume stopped process (or ignore if running) */
         if (signum == SIGCONT) {
             p->sigpending &= ~signal_bit(signum);
+            signal_queue_purge_all(p, signum);
             p->stopped_signal = 0;
             p->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
                                signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
@@ -554,6 +575,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         if (signum == SIGSTOP || signum == SIGTSTP ||
             signum == SIGTTIN || signum == SIGTTOU) {
             p->sigpending &= ~signal_bit(signum);
+            signal_queue_purge_all(p, signum);
             p->exit_status = (signum << 8) | 0x7f;
             p->stopped_signal = signum;
             p->state = SLEEPING;
@@ -576,6 +598,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
         }
 
         p->sigpending &= ~signal_bit(signum);
+        signal_queue_purge_all(p, signum);
         CONSUME_DEFERRED_MASK(p);
         signal_default_terminate(p, signum);
         return;
@@ -584,6 +607,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* SIG_IGN (1) -- ignore */
     if (handler == 1) {
         p->sigpending &= ~signal_bit(signum);
+        signal_queue_purge_all(p, signum);
         CONSUME_DEFERRED_MASK(p);
         return;
     }
@@ -618,21 +642,14 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
          * FIFO ordering is approximate (first-valid-match scan, not
          * sequence-ordered).  Acceptable for a teaching OS since repeated
          * same-signal queueing is rare. */
-        int found_queued = 0;
-        for (int qi = 0; qi < NSIGQUEUE; qi++) {
-            if (p->sigqueue_buf[qi].valid &&
-                p->sigqueue_buf[qi].signum == signum) {
-                memcpy(ksi, p->sigqueue_buf[qi].info, 128);
-                p->sigqueue_buf[qi].valid = 0;
-                p->sig_sender[signum].valid = 0;
-                if (signal_queue_has_more(p, signum))
-                    p->sigpending |= signal_bit(signum);
-                found_queued = 1;
-                /* BF: Force si_signo to match delivered signal (POSIX requires this) */
-                int32_t si_signo = (int32_t)signum;
-                memcpy(ksi + 0, &si_signo, 4);
-                break;
-            }
+        int found_queued = signal_queue_consume_one(p, signum, ksi);
+        if (found_queued) {
+            p->sig_sender[signum].valid = 0;
+            if (signal_queue_has_more(p, signum))
+                p->sigpending |= signal_bit(signum);
+            /* BF: Force si_signo to match delivered signal (POSIX requires this) */
+            int32_t si_signo = (int32_t)signum;
+            memcpy(ksi + 0, &si_signo, 4);
         }
         if (!found_queued) {
             /* BF: Use sig_sender metadata captured at generation time so
@@ -741,8 +758,10 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     if (handler >= 2) {
         /* The handler frame is ready; consume this signal now. */
         p->sigpending &= ~signal_bit(signum);
-        if (signal_queue_has_more(p, signum))
+        if ((handler_flags & 0x00000004) && signal_queue_has_more(p, signum))
             p->sigpending |= signal_bit(signum);
+        if (!(handler_flags & 0x00000004))
+            signal_queue_purge_all(p, signum);
         /* BF: Bump epoch so ppoll/pselect6 can detect that a signal was
          * handled between their mask swap and the blocking sleep. */
         p->signal_handled_epoch++;
