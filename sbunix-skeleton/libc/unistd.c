@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <stdio.h>
 
 ssize_t read(int fd, void *buf, size_t count) {
     return __syscall_ret(syscall(SYS_read, fd, buf, count));
@@ -457,19 +458,52 @@ int fcntl(int fd, int cmd, ...) {
 }
 
 char *ttyname(int fd) {
-    static char buf[32];
-    if (!isatty(fd)) return NULL;
-    /* SBUnix has a single console tty */
-    strcpy(buf, "/dev/console");
+    static char buf[256];
+    int err = ttyname_r(fd, buf, sizeof(buf));
+    if (err) {
+        errno = err;
+        return NULL;
+    }
     return buf;
 }
 
 int ttyname_r(int fd, char *buf, size_t buflen) {
-    if (!isatty(fd)) { errno = ENOTTY; return ENOTTY; }
-    const char *name = "/dev/console";
-    size_t len = strlen(name);
-    if (len + 1 > buflen) { errno = ERANGE; return ERANGE; }
-    strcpy(buf, name);
+    char linkpath[64];
+    char tmp[256];
+    ssize_t len;
+    int n;
+
+    if (!isatty(fd)) {
+        errno = ENOTTY;
+        return ENOTTY;
+    }
+    if (buflen == 0) {
+        errno = ERANGE;
+        return ERANGE;
+    }
+
+    n = snprintf(linkpath, sizeof(linkpath), "/proc/self/fd/%d", fd);
+    if (n < 0 || n >= (int)sizeof(linkpath)) {
+        errno = ERANGE;
+        return ERANGE;
+    }
+
+    len = readlink(linkpath, tmp, sizeof(tmp) - 1);
+    if (len < 0) {
+        if (errno == 0)
+            errno = ENOTTY;
+        return errno;
+    }
+    if (len >= (ssize_t)(sizeof(tmp) - 1)) {
+        errno = ERANGE;
+        return ERANGE;
+    }
+    if ((size_t)len + 1 > buflen) {
+        errno = ERANGE;
+        return ERANGE;
+    }
+    memcpy(buf, tmp, (size_t)len);
+    buf[len] = '\0';
     return 0;
 }
 
