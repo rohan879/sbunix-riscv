@@ -795,9 +795,10 @@ static int vma_can_merge(struct vm_area *a, struct vm_area *b) {
     return 0;
   if (a->file || b->file)
     return 0;
-  /* BF: Anonymous VMAs carry anon_vma chains, page offsets, and resident
-   * counts.  Do not merge them until that metadata can be combined
-   * without losing reverse-map ownership. */
+  /* BF: Generic anonymous VMA merging stays disabled even when reclaim
+   * metadata is compiled out.  mmap/mprotect splits may carry independent
+   * permissions and future rmap ownership, so only the brk-specific helper
+   * may extend heap VMAs under its narrower invariants. */
   if ((a->flags & MAP_ANON) || (b->flags & MAP_ANON))
     return 0;
   if (a->anon_vma || b->anon_vma ||
@@ -838,7 +839,10 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   vma->vm_pgoff = 0;
   vma->resident_pages = 0;
   
-  /* For anonymous mappings, create anon_vma if needed */
+  /* For anonymous mappings, create anon_vma only when reclaim metadata is
+   * enabled.  With resident-page stealing disabled, PTE teardown plus
+   * kfree() owns the real lifetime and the rmap chain would be unused risk. */
+#if ENABLE_RECLAIM_METADATA
   if (flags & MAP_ANON) {
     vma->anon_vma = anon_vma_alloc();
     if (!vma->anon_vma) {
@@ -851,6 +855,7 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
       return -1;
     }
   }
+#endif
 
   /* Insert into sorted list by start address */
   struct vm_area **pp = &p->vma_list;

@@ -3,6 +3,12 @@
 
 #include "riscv.h"
 
+/* BF: Keep reclaim/rmap metadata compiled out of the physical-page
+ * lifetime path.  The course tests require correct lazy allocation and
+ * exit recycling; they do not require resident-page stealing, and stale
+ * reclaim ownership is more dangerous than unused advisory counters here. */
+#define ENABLE_RECLAIM_METADATA 0
+
 /* Page aging constants for enhanced clock algorithm */
 #define MM_AGE_MAX 255
 #define MM_AGE_YOUNG 200

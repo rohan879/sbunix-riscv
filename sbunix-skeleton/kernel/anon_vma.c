@@ -210,6 +210,15 @@ void anon_vma_unlink(struct vm_area *vma) {
 
 /* Add anonymous reverse mapping for page */
 int page_add_anon_rmap(struct page *page, struct vm_area *vma, uint64_t address) {
+#if !ENABLE_RECLAIM_METADATA
+  /* BF: Reclaim metadata is isolated from physical lifetime.  PTE teardown
+   * still frees resident pages through kfree(), while disabled rmap avoids
+   * stale advisory ownership influencing lazy allocation or exit recycling. */
+  (void)page;
+  (void)vma;
+  (void)address;
+  return 0;
+#else
   if (!page || !vma || !vma->anon_vma) return -1;
   
   // Associate page with anon_vma
@@ -228,10 +237,18 @@ int page_add_anon_rmap(struct page *page, struct vm_area *vma, uint64_t address)
   spin_unlock(&vma->anon_vma->lock);
   
   return 0;
+#endif
 }
 
 /* Remove reverse mapping for page */
 void page_remove_rmap(struct page *page, struct vm_area *vma) {
+#if !ENABLE_RECLAIM_METADATA
+  /* BF: Metadata removal is a no-op when rmap is disabled; the caller's
+   * kfree() remains the only path that releases the physical frame. */
+  (void)page;
+  (void)vma;
+  return;
+#else
   if (!page || !PageAnon(page) || !page->anon_vma) return;
 
   /* BF: Update advisory mapping metadata only.  PTE teardown still calls
@@ -264,6 +281,7 @@ void page_remove_rmap(struct page *page, struct vm_area *vma) {
     }
     spin_unlock(&vma->anon_vma->lock);
   }
+#endif
 }
 
 /* Find all VMAs that map a given page (for debugging) */
