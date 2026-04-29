@@ -28,7 +28,7 @@ void proc_exit_current(int status, int terminate_signal);
 void proc_force_terminate_wake(struct proc *target, int sig);
 
 /* VM support for fork (defined in syscall_process.c) */
-int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
+int copy_pagetable_cow(struct proc *src_proc, pagetable_t dst, pagetable_t src,
                        uint64_t start, uint64_t end);
 
 /* Signal (defined in trap.c) */

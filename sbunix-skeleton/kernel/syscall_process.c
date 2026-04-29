@@ -40,7 +40,7 @@ extern char _tarfs_end[];
 /* copy_pagetable_cow: COW-share user pages from src to dst           */
 /* ------------------------------------------------------------------ */
 /* RF: Made non-static for access by extracted process syscall module */
-int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
+int copy_pagetable_cow(struct proc *src_proc, pagetable_t dst, pagetable_t src,
                        uint64_t start, uint64_t end) {
     /* Walk a specific VA range and COW-share PTE_U pages.
      * Super page PTEs (level-1 leaf, detected by PTE_IS_LEAF) are skipped
@@ -74,10 +74,17 @@ int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
 
         uint64_t pa = PTE2PA(*pte);
         int flags = PTE_FLAGS(*pte);
+        struct vm_area *vma = src_proc ? vma_find(src_proc, va) : NULL;
+        /* BF: Writable MAP_SHARED pages must remain a single writable
+         * physical mapping across fork; only private writable pages use COW. */
+        int keep_shared_writable = vma &&
+                                   (vma->flags & MAP_SHARED) &&
+                                   (vma->prot & PROT_WRITE);
 
         int orig_flags = PTE_FLAGS(*pte);  /* BF: save before CoW conversion for rollback */
+        int parent_pte_changed = 0;
 
-        if (flags & PTE_W) {
+        if ((flags & PTE_W) && !keep_shared_writable) {
             /* Writable page: mark read-only + COW in both parent and child */
             if (pte_update(src, va, pte,
                            PA2PTE(pa) |
@@ -85,6 +92,7 @@ int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
                            0, PTE_UPDATE_COW, PTE_SFENCE_NONE) < 0)
                 return -1;
             flags = (flags & ~PTE_W) | PTE_COW;
+            parent_pte_changed = 1;
         }
 
         /* Share the same physical page */
@@ -92,8 +100,10 @@ int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
         if (mappages(dst, va, PAGE_SIZE, pa, flags) < 0) {
             /* BF: Rollback — restore parent PTE and decrement refcount
              * leaked by the failed child mapping attempt. */
-            pte_update(src, va, pte, PA2PTE(pa) | orig_flags,
-                       0, PTE_UPDATE_COW, PTE_SFENCE_NONE);
+            if (parent_pte_changed) {
+                pte_update(src, va, pte, PA2PTE(pa) | orig_flags,
+                           0, PTE_UPDATE_COW, PTE_SFENCE_NONE);
+            }
             page_ref_dec(pa);
             sfence_vma();
             return -1;
@@ -475,7 +485,7 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
         if (!new_pt) goto bad;
 
         /* COW-share user pages first (creates level-1 table for VPN[2]=0) */
-        if (copy_pagetable_cow(new_pt, current_proc->pagetable,
+        if (copy_pagetable_cow(current_proc, new_pt, current_proc->pagetable,
                                0, MAXVA) < 0)
             goto bad;
 
