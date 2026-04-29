@@ -29,6 +29,12 @@ static void usr1_handler(int sig) {
     got_usr1 = 1;
 }
 
+static void wait_for_usr1(sigset_t *oldmask) {
+    while (!got_usr1)
+        sigsuspend(oldmask);
+    sigprocmask(SIG_SETMASK, oldmask, NULL);
+}
+
 /* -----------------------------------------------------------------------
  * 1. getpgid_self: getpgid(0) returns own pgid (initially == pid)
  * ----------------------------------------------------------------------- */
@@ -140,8 +146,16 @@ static void test_setsid_new_pgid(void) {
  *    kill(-pgid, SIGUSR1) reaches both
  * ----------------------------------------------------------------------- */
 static void test_kill_process_group(void) {
+    int ready_pipe[2];
+    if (pipe(ready_pipe) != 0) {
+        CHECK("kill_process_group: ready pipe", 0);
+        return;
+    }
+
     pid_t leader = fork();
     if (leader == 0) {
+        close(ready_pipe[0]);
+
         /* First child: become group leader */
         setpgid(0, 0);
 
@@ -152,19 +166,31 @@ static void test_kill_process_group(void) {
         sigemptyset(&sa.sa_mask);
         sigaction(SIGUSR1, &sa, NULL);
 
+        sigset_t block_set, oldmask;
+        sigemptyset(&block_set);
+        sigaddset(&block_set, SIGUSR1);
+        sigprocmask(SIG_BLOCK, &block_set, &oldmask);
+
         /* Fork a second child in the same group */
         pid_t sibling = fork();
         if (sibling == 0) {
-            /* Second child: inherit group, wait for signal */
+            close(ready_pipe[0]);
+            /* BF: readiness uses a pipe plus sigsuspend so the group
+             * signal cannot race ahead of the child entering its wait. */
             got_usr1 = 0;
-            /* Use pause() to wait for signal */
-            pause();
+            char ready = 's';
+            write(ready_pipe[1], &ready, 1);
+            close(ready_pipe[1]);
+            wait_for_usr1(&oldmask);
             _exit(got_usr1 ? 0 : 1);
         }
 
-        /* First child also waits for signal */
+        /* First child also reports readiness and waits atomically. */
         got_usr1 = 0;
-        pause();
+        char ready = 'l';
+        write(ready_pipe[1], &ready, 1);
+        close(ready_pipe[1]);
+        wait_for_usr1(&oldmask);
 
         /* Reap sibling */
         int sstatus;
@@ -174,11 +200,15 @@ static void test_kill_process_group(void) {
     }
 
     /* Parent: put leader into its own group and send signal to the group */
+    close(ready_pipe[1]);
     setpgid(leader, leader);
 
-    /* Give children time to set up handlers and call pause() */
-    struct timespec ts = { .tv_sec = 0, .tv_nsec = 200000000 }; /* 200ms */
-    nanosleep(&ts, NULL);
+    int ready_count = 0;
+    char ch;
+    while (ready_count < 2 && read(ready_pipe[0], &ch, 1) == 1)
+        ready_count++;
+    close(ready_pipe[0]);
+    CHECK("kill_process_group: children ready", ready_count == 2);
 
     /* Send SIGUSR1 to the entire process group */
     int r = kill(-leader, SIGUSR1);
