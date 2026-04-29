@@ -12,6 +12,7 @@ extern unsigned char last_key;
 
 /* Timer helpers */
 unsigned long get_ticks(void);
+void timer_reschedule(void);
 
 /* MAP_SHARED writeback (defined in syscall_memory.c) */
 void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end);

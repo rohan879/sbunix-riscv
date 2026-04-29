@@ -13,6 +13,7 @@
 #include <tty.h>
 #include <mm.h>
 #include <rtc.h>
+#include <user_clock.h>
 /* RF: New headers for trap.c modular decomposition */
 #include <syscall_handlers.h>
 #include <trap_internal.h>
@@ -20,6 +21,7 @@
 
 /* RF: Made non-static for access by extracted syscall modules via trap_internal.h */
 unsigned long ticks;
+static uint64_t next_heartbeat_ticks;
 
 /* Get current tick count - accessible from other modules */
 unsigned long get_ticks(void) {
@@ -154,7 +156,8 @@ void timer_init(void) {
     }
 
     timekeeping_init(boot_ticks, epoch_ns, realtime_valid);
-    sbi_set_timer(r_time() + TIMER_FREQ);
+    next_heartbeat_ticks = boot_ticks + TIMER_INTERVAL_TICKS;
+    sbi_set_timer(next_heartbeat_ticks);
 }
 
 /* Return seconds elapsed since boot (for /proc/uptime) */
@@ -163,8 +166,54 @@ unsigned long get_uptime_secs(void) {
     return (unsigned long)(elapsed / TIMER_FREQ);
 }
 
+static uint64_t timer_nearest_deadline(uint64_t now) {
+    uint64_t nearest = 0;
+
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
+            p->sleep_until > 0) {
+            if (nearest == 0 || p->sleep_until < nearest)
+                nearest = p->sleep_until;
+        }
+        if (p->state != UNUSED && p->state != ZOMBIE &&
+            p->alarm_ticks > 0) {
+            if (nearest == 0 || p->alarm_ticks < nearest)
+                nearest = p->alarm_ticks;
+        }
+        if (p->state == UNUSED || p->state == ZOMBIE ||
+            p->active_timer_count == 0)
+            continue;
+        for (int i = 0; i < NPTIMER; i++) {
+            uint64_t expiry = p->timers[i].next_expiry_ticks;
+            if (!p->timers[i].used || expiry == 0)
+                continue;
+            if (nearest == 0 || expiry < nearest)
+                nearest = expiry;
+        }
+    }
+
+    if (nearest != 0 && nearest <= now)
+        return now + 1;
+    return nearest;
+}
+
+static void timer_set_next_at(uint64_t now) {
+    uint64_t next = next_heartbeat_ticks;
+    uint64_t nearest = timer_nearest_deadline(now);
+
+    if (next <= now)
+        next = now + 1;
+    if (nearest != 0 && nearest < next)
+        next = nearest;
+    sbi_set_timer(next);
+}
+
 static void timer_set_next(void) {
-    sbi_set_timer(r_time() + TIMER_FREQ);
+    timer_set_next_at(r_time());
+}
+
+void timer_reschedule(void) {
+    timer_set_next();
 }
 
 #ifdef TIMER_DISPLAY
@@ -235,41 +284,53 @@ static void handle_external_interrupt(void) {
 }
 
 static void handle_timer_interrupt(void) {
-    ticks++;
-    #ifdef TIMER_DISPLAY
-    display_time();
-    #endif
-    timer_set_next();
+    uint64_t now = r_time();
+    int heartbeat = 0;
+    int woke_deadline = 0;
+    int catchup = 0;
 
-    /* BF: Track per-process CPU time for CLOCK_PROCESS_CPUTIME_ID.
-     * Each timer tick (~100ms at 10Hz) while a process is running
-     * increments that process's cputime_ticks counter. */
-    if (current_proc)
-        current_proc->cputime_ticks++;
-
-    /* Fast per-tick check of critical kernel code PTE.  The repair path
-     * enforces W^X instead of blindly restoring execute permission. */
-    recursive_check_kcode_pte();
-    /* Full scan every 100 ticks (~10s at 10Hz) */
-    if (ticks % 100 == 50) {
-      int repairs = recursive_check_all_kernel_ptes();
-      if (repairs > 0)
-        printk("timer: repaired %d kernel PTE(s)\n", repairs);
-    }
-    
-    /* BF: Reclaim decisions depend on reasonably fresh page aging data; long
-     * intervals made memory-pressure tests run with stale eviction signals. */
-    if (ticks % 10 == 0) {
-        extern struct page *page_table;
-        if (page_table) {
-            mm_age_pages();
+    while (now >= next_heartbeat_ticks) {
+        ticks++;
+        heartbeat = 1;
+        next_heartbeat_ticks += TIMER_INTERVAL_TICKS;
+        if (++catchup > (int)(TIMER_HZ * 10)) {
+            next_heartbeat_ticks = now + TIMER_INTERVAL_TICKS;
+            break;
         }
     }
-    
-    /* OPT: Read hardware timer once and reuse for all deadline checks
-     * below (timed-sleep, SIGALRM, POSIX timers) to avoid repeated
-     * CSR reads within the same interrupt handler invocation. */
-    uint64_t now = r_time();
+
+    if (current_proc)
+        user_clock_update_running(current_proc, r_time());
+
+    if (heartbeat) {
+        #ifdef TIMER_DISPLAY
+        display_time();
+        #endif
+
+        /* BF: Keep legacy diagnostics in scheduler ticks; the user-visible
+         * CPU clock is charged from rdtime deltas in user_clock. */
+        if (current_proc)
+            current_proc->cputime_ticks++;
+
+        /* Fast per-tick check of critical kernel code PTE.  The repair path
+         * enforces W^X instead of blindly restoring execute permission. */
+        recursive_check_kcode_pte();
+        /* Full scan every 10 seconds at the 100 Hz supervisor heartbeat. */
+        if (ticks % (10 * TIMER_HZ) == (TIMER_HZ / 2)) {
+          int repairs = recursive_check_all_kernel_ptes();
+          if (repairs > 0)
+            printk("timer: repaired %d kernel PTE(s)\n", repairs);
+        }
+
+        /* BF: Page-aging intervals are expressed in TIMER_HZ units so the
+         * 100 Hz heartbeat does not make memory maintenance run 100x faster. */
+        if (ticks % TIMER_HZ == 0) {
+            extern struct page *page_table;
+            if (page_table) {
+                mm_age_pages();
+            }
+        }
+    }
 
     /* Wake processes whose timed sleep has expired */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
@@ -277,6 +338,7 @@ static void handle_timer_interrupt(void) {
             now >= p->sleep_until) {
             p->waiting_for_uart = 0;
             p->state = RUNNABLE;
+            woke_deadline = 1;
         }
     }
     /* Check for expired alarms and deliver SIGALRM */
@@ -286,8 +348,10 @@ static void handle_timer_interrupt(void) {
             p->alarm_ticks = 0;  /* one-shot */
             /* BF: Capture timer metadata for SA_SIGINFO delivery */
             sig_set_pending(p, 14, 0, 0, K_SI_TIMER);
-            if (p->state == SLEEPING)
+            if (p->state == SLEEPING) {
                 p->state = RUNNABLE;
+                woke_deadline = 1;
+            }
         }
     }
     /* Check for expired POSIX timers and deliver their signals */
@@ -306,8 +370,10 @@ static void handle_timer_interrupt(void) {
                 /* Timer expired — deliver signal */
                 /* BF: Capture timer metadata for SA_SIGINFO delivery */
                 sig_set_pending(p, p->timers[i].signo, 0, 0, K_SI_TIMER);
-                if (p->state == SLEEPING)
+                if (p->state == SLEEPING) {
                     p->state = RUNNABLE;
+                    woke_deadline = 1;
+                }
 
                 /* Handle periodic vs one-shot timers */
                 if (p->timers[i].interval_ticks > 0) {
@@ -337,8 +403,9 @@ static void handle_timer_interrupt(void) {
             }
         }
     }
+    timer_set_next_at(now);
     /* Preempt current process on timer tick (round-robin) */
-    if (current_proc && current_proc->state == RUNNING) {
+    if ((heartbeat || woke_deadline) && current_proc && current_proc->state == RUNNING) {
         current_proc->state = RUNNABLE;
         swtch(&current_proc->context, &scheduler_context);
     }

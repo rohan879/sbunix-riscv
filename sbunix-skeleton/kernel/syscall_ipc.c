@@ -609,6 +609,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
         if (has_timeout && sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
             current_proc->waiting_for_uart = 2;
+            timer_reschedule();
         } else if (!has_timeout) {
             current_proc->waiting_for_uart = 1; /* block indefinitely */
         }
@@ -796,6 +797,7 @@ long sys_pselect6_handler(struct trapframe *tf) {
         if (has_timeout && sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
             current_proc->waiting_for_uart = 2;
+            timer_reschedule();
         } else if (!has_timeout) {
             current_proc->waiting_for_uart = 1; /* block indefinitely */
         }

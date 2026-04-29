@@ -3,6 +3,7 @@
 #include "include/string.h"
 #include "include/printk.h"
 #include "include/riscv.h"
+#include "include/timekeeping.h"
 
 /* Global page descriptor table */
 // Static page descriptor table to avoid bootstrap problems
@@ -273,9 +274,9 @@ void mm_age_pages(void) {
   static unsigned long last_age_tick = 0;
   unsigned long current_ticks = get_ticks();
   
-  /* BF: Keep aging frequent enough that memory-pressure tests do not run
-   * with stale page age data for long stretches. */
-  if (current_ticks - last_age_tick < 10) {
+  /* BF: Express aging in heartbeat seconds so the 100 Hz timer does not
+   * accelerate page-aging policy relative to memory-pressure behavior. */
+  if (current_ticks - last_age_tick < TIMER_HZ) {
     return;
   }
   last_age_tick = current_ticks;
@@ -287,13 +288,13 @@ void mm_age_pages(void) {
     }
     
     // Pages that haven't been accessed recently lose age score
-    if (current_ticks - page->last_access > 50) {
+    if (current_ticks - page->last_access > 5 * TIMER_HZ) {
       if (page->age_score > 0) {
         page->age_score--;
       }
       
       // Also decay access count slowly
-      if (page->access_count > 0 && (current_ticks % 10) == 0) {
+      if (page->access_count > 0 && (current_ticks % TIMER_HZ) == 0) {
         page->access_count = (page->access_count * 3) / 4;
       }
     }
