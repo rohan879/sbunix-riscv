@@ -898,6 +898,40 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   return 0;
 }
 
+/* BF: sys_brk is the only caller.  Extending an existing heap VMA is safe
+ * because brk growth is a single contiguous range controlled by proc->sz.
+ * Generic anonymous VMA merging stays disabled: mmap and mprotect splits can
+ * carry independent permissions, file state, or future rmap ownership that
+ * this narrow heap-extension path must not coalesce. */
+int vma_extend_heap(struct proc *p, uint64_t start, uint64_t end,
+                    int prot, int flags) {
+  if (!p || start >= end)
+    return -1;
+
+  struct vm_area *prev = NULL;
+  struct vm_area *v = p->vma_list;
+
+  while (v && v->start < start) {
+    if (v->end == start)
+      prev = v;
+    v = v->next;
+  }
+
+  if (prev &&
+      prev->end == start &&
+      prev->prot == prot &&
+      prev->max_prot == (PROT_READ | PROT_WRITE | PROT_EXEC) &&
+      prev->flags == flags &&
+      (prev->flags & MAP_ANON) &&
+      prev->file == NULL &&
+      (!prev->next || prev->next->start >= end)) {
+    prev->end = end;
+    return 0;
+  }
+
+  return vma_add(p, start, end, prot, flags);
+}
+
 /* Find the VMA containing addr (start <= addr < end), or NULL. */
 struct vm_area *vma_find_in_list(struct vm_area *vmas, uint64_t addr) {
   struct vm_area *v = vmas;
