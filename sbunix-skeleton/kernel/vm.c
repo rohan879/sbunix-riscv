@@ -1063,6 +1063,10 @@ int vma_dup(struct proc *src, struct proc *dst) {
     /* Set up anon_vma inheritance for anonymous mappings */
     if (sv->flags & MAP_ANON && sv->anon_vma) {
       if (anon_vma_fork(nv, sv) < 0) {
+        /* BF: vma_dup failure rollback must drop the file reference taken
+         * before anon_vma inheritance failed. */
+        if (nv->file)
+          vfs_close_file(nv->file);
         kmfree(nv, sizeof(struct vm_area));
         vma_free_all(dst);
         return -1;

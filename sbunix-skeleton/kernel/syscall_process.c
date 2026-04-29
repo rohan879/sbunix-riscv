@@ -378,6 +378,13 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     uint64_t child_sp = caller_tf->a1;
     int clone_flags   = (int)(flags & ~0xFFUL); /* mask out low-byte signal */
     pagetable_t new_pt = 0; /* track COW child PT for cleanup on failure */
+    int parent_clone_flags_before = current_proc->clone_flags;
+    struct shared_pagetable *parent_shared_pt_before = current_proc->shared_pt;
+    struct shared_ftable *parent_shared_ft_before = current_proc->shared_ft;
+    struct shared_sigactions *parent_shared_sa_before = current_proc->shared_sa;
+    int promoted_shared_pt = 0;
+    int promoted_shared_ft = 0;
+    int promoted_shared_sa = 0;
 
     /* CLONE_SIGHAND requires CLONE_VM (Linux semantics) */
     if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
@@ -450,13 +457,16 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
             spt->refcount = 1;
             current_proc->shared_pt = spt;
             current_proc->clone_flags |= CLONE_VM;
+            promoted_shared_pt = 1;
         }
+        p->pagetable = current_proc->shared_pt->pt;
+
+        /* BF: CLONE_VM rollback must treat the copied VMA list as a fallible
+         * child-only allocation and must not leak the promoted parent wrapper. */
+        if (vma_dup(current_proc, p) < 0)
+            goto bad;
         current_proc->shared_pt->refcount++;
         p->shared_pt = current_proc->shared_pt;
-        p->pagetable = p->shared_pt->pt;
-
-        /* Deep copy VMA list (Option A from design doc) */
-        vma_dup(current_proc, p);
     } else {
         /* Traditional COW fork: build independent child page table.
          * NO kernel identity mappings — the trampoline switches satp
@@ -491,6 +501,7 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
             sft->refcount = 1;
             current_proc->shared_ft = sft;
             current_proc->clone_flags |= CLONE_FILES;
+            promoted_shared_ft = 1;
         }
         current_proc->shared_ft->refcount++;
         p->shared_ft = current_proc->shared_ft;
@@ -511,6 +522,7 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
             ssa->refcount = 1;
             current_proc->shared_sa = ssa;
             current_proc->clone_flags |= CLONE_SIGHAND;
+            promoted_shared_sa = 1;
         }
         current_proc->shared_sa->refcount++;
         p->shared_sa = current_proc->shared_sa;
@@ -542,6 +554,32 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     return p->pid;
 
 bad:
+    if (p->shared_pt) {
+        p->shared_pt->refcount--;
+        p->shared_pt = NULL;
+    }
+    if (p->shared_ft) {
+        p->shared_ft->refcount--;
+        p->shared_ft = NULL;
+    }
+    if (p->shared_sa) {
+        p->shared_sa->refcount--;
+        p->shared_sa = NULL;
+    }
+    if (promoted_shared_pt && current_proc->shared_pt != parent_shared_pt_before) {
+        kmfree(current_proc->shared_pt, sizeof(struct shared_pagetable));
+        current_proc->shared_pt = parent_shared_pt_before;
+    }
+    if (promoted_shared_ft && current_proc->shared_ft != parent_shared_ft_before) {
+        kmfree(current_proc->shared_ft, sizeof(struct shared_ftable));
+        current_proc->shared_ft = parent_shared_ft_before;
+    }
+    if (promoted_shared_sa && current_proc->shared_sa != parent_shared_sa_before) {
+        kmfree(current_proc->shared_sa, sizeof(struct shared_sigactions));
+        current_proc->shared_sa = parent_shared_sa_before;
+    }
+    current_proc->clone_flags = parent_clone_flags_before;
+
     /* Clean up partially-built child pagetable.  proc_freepagetable
      * walks the user address space and frees any partially duplicated
      * COW-shared pages through the normal refcounted teardown path. */
