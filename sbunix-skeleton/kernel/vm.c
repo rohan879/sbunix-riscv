@@ -795,9 +795,10 @@ static int vma_can_merge(struct vm_area *a, struct vm_area *b) {
     return 0;
   if (a->file || b->file)
     return 0;
-  /* BF: Anonymous VMAs carry anon_vma chains, page offsets, and resident
-   * counts.  Do not merge them until that metadata can be combined
-   * without losing reverse-map ownership. */
+  /* BF: Generic anonymous VMA merging stays disabled even when reclaim
+   * metadata is compiled out.  mmap/mprotect splits may carry independent
+   * permissions and future rmap ownership, so only the brk-specific helper
+   * may extend heap VMAs under its narrower invariants. */
   if ((a->flags & MAP_ANON) || (b->flags & MAP_ANON))
     return 0;
   if (a->anon_vma || b->anon_vma ||
@@ -838,7 +839,10 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   vma->vm_pgoff = 0;
   vma->resident_pages = 0;
   
-  /* For anonymous mappings, create anon_vma if needed */
+  /* For anonymous mappings, create anon_vma only when reclaim metadata is
+   * enabled.  With resident-page stealing disabled, PTE teardown plus
+   * kfree() owns the real lifetime and the rmap chain would be unused risk. */
+#if ENABLE_RECLAIM_METADATA
   if (flags & MAP_ANON) {
     vma->anon_vma = anon_vma_alloc();
     if (!vma->anon_vma) {
@@ -851,6 +855,7 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
       return -1;
     }
   }
+#endif
 
   /* Insert into sorted list by start address */
   struct vm_area **pp = &p->vma_list;
@@ -891,6 +896,40 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   }
 
   return 0;
+}
+
+/* BF: sys_brk is the only caller.  Extending an existing heap VMA is safe
+ * because brk growth is a single contiguous range controlled by proc->sz.
+ * Generic anonymous VMA merging stays disabled: mmap and mprotect splits can
+ * carry independent permissions, file state, or future rmap ownership that
+ * this narrow heap-extension path must not coalesce. */
+int vma_extend_heap(struct proc *p, uint64_t start, uint64_t end,
+                    int prot, int flags) {
+  if (!p || start >= end)
+    return -1;
+
+  struct vm_area *prev = NULL;
+  struct vm_area *v = p->vma_list;
+
+  while (v && v->start < start) {
+    if (v->end == start)
+      prev = v;
+    v = v->next;
+  }
+
+  if (prev &&
+      prev->end == start &&
+      prev->prot == prot &&
+      prev->max_prot == (PROT_READ | PROT_WRITE | PROT_EXEC) &&
+      prev->flags == flags &&
+      (prev->flags & MAP_ANON) &&
+      prev->file == NULL &&
+      (!prev->next || prev->next->start >= end)) {
+    prev->end = end;
+    return 0;
+  }
+
+  return vma_add(p, start, end, prot, flags);
 }
 
 /* Find the VMA containing addr (start <= addr < end), or NULL. */
@@ -1024,6 +1063,10 @@ int vma_dup(struct proc *src, struct proc *dst) {
     /* Set up anon_vma inheritance for anonymous mappings */
     if (sv->flags & MAP_ANON && sv->anon_vma) {
       if (anon_vma_fork(nv, sv) < 0) {
+        /* BF: vma_dup failure rollback must drop the file reference taken
+         * before anon_vma inheritance failed. */
+        if (nv->file)
+          vfs_close_file(nv->file);
         kmfree(nv, sizeof(struct vm_area));
         vma_free_all(dst);
         return -1;
@@ -1288,6 +1331,11 @@ void proc_freepagetable(pagetable_t pagetable) {
  * to the reverse-map eviction scanner. */
 int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
               struct vm_area *vma) {
+  /* BF: A COW marker only records physical sharing.  The current VMA still
+   * decides whether the faulting access may become writable after mprotect. */
+  if (!vma || !(vma->prot & PROT_WRITE))
+    return -1;
+
   uint64_t pa = PTE2PA(*pte);
   int flags = PTE_FLAGS(*pte);
   int ref = page_ref_get(pa);

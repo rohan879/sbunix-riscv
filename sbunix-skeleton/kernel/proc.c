@@ -138,6 +138,9 @@ found:
   p->waiting_for_uart = 0;
   p->sleep_until = 0;
   p->exit_status = 0;
+  p->resources_released = 0;
+  p->pending_terminate = 0;
+  p->terminate_signal = 0;
   p->uid = 0;
   p->gid = 0;
 

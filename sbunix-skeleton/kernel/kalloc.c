@@ -191,9 +191,10 @@ void kfree(void *pa) {
         page_refcount[idx] = 0;
         page_last_free_ra[idx] = caller_ra;
         page_type[idx] = PAGE_FREE;
-        /* BF: When the real allocator refcount reaches zero, clear the
-         * advisory page descriptor too.  This prevents recycled frames from
-         * carrying stale rmap/reclaim metadata into a later mapping. */
+        /* BF: Physical lifetime is owned by page_refcount[] and the free
+         * list.  Only touch advisory reclaim descriptors when that subsystem
+         * is enabled, so disabled metadata cannot affect page recycling. */
+#if ENABLE_RECLAIM_METADATA
         if (page_table) {
             struct page *pg = virt_to_page(pa);
             if (pg) {
@@ -206,6 +207,7 @@ void kfree(void *pa) {
                 pg->anon_vma = NULL;
             }
         }
+#endif
     }
 
     r = (struct run*)pa;
@@ -264,9 +266,9 @@ void *kalloc(void) {
      * catches the exec_vfs stale-page cascade bug. */
     if (r) {
         memset((void *)r, 0, PAGE_SIZE);
-        /* BF: Reset page descriptor to clean state on allocation.  This is
-         * defense in depth for frames recycled from paths that could not
-         * fully detach advisory rmap/reclaim metadata. */
+        /* BF: Reset advisory descriptors only when reclaim metadata is
+         * enabled.  kalloc/kfree must remain correct even with rmap disabled. */
+#if ENABLE_RECLAIM_METADATA
         struct page *pg = virt_to_page((void *)r);
         if (pg) {
             pg->flags = 0;
@@ -276,6 +278,7 @@ void *kalloc(void) {
             pg->access_count = 0;
             pg->last_access = 0;
         }
+#endif
     }
     return r;
 }
@@ -474,6 +477,9 @@ void kfree_super(void *pa) {
             }
             page_refcount[idx] = 0;
             page_type[idx] = PAGE_FREE;
+            /* BF: Keep superpage free on the allocator refcounts; reclaim
+             * descriptors are advisory and may be compiled out. */
+#if ENABLE_RECLAIM_METADATA
             if (page_table) {
                 struct page *pg = virt_to_page((void *)sub_pa);
                 if (pg) {
@@ -486,6 +492,7 @@ void kfree_super(void *pa) {
                     pg->anon_vma = NULL;
                 }
             }
+#endif
             struct run *r = (struct run *)sub_pa;
             r->next = kmem.freelist;
             kmem.freelist = r;

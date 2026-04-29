@@ -129,8 +129,12 @@ long sys_brk_handler(struct trapframe *tf) {
             if (brk_reserved_overlap(current_proc, old_rounded, new_rounded,
                                      new_brk))
                 return (long)cur_sz;
-            if (vma_add(current_proc, old_rounded, new_rounded,
-                        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON) < 0)
+            /* BF: brk expands a single heap frontier.  Extend the prior heap
+             * VMA when possible to bound lazy-allocation metadata growth,
+             * without enabling generic anonymous VMA merging elsewhere. */
+            if (vma_extend_heap(current_proc, old_rounded, new_rounded,
+                                PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANON) < 0)
                 return (long)cur_sz;
         }
         current_proc->sz = new_brk;

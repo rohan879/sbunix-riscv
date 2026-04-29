@@ -9,6 +9,7 @@ REPO_DIR="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo 
 TIMEOUT=${TIMEOUT:-180}
 # QEMU_MEM must remain 128M for remote OS/build checks.
 QEMU_MEM=${QEMU_MEM:-128M}
+MAKE_JOBS=${MAKE_JOBS:-1}
 TEST_DISK_IMG=${TEST_DISK_IMG:-build/test-disk-core.img}
 TEST_DISK_TARGET=${TEST_DISK_TARGET:-$TEST_DISK_IMG}
 ARTIFACT_DIR=${SBUNIX_TARGETED_ARTIFACT_DIR:-/home/adebayo/test-findings/test-findings-23-artifacts/targeted}
@@ -35,6 +36,9 @@ DEFAULT_COMMANDS=(
     "/test/bin/copyout_lazy"
     "/test/bin/copyinstr_lazy"
     "/test/bin/membugstest"
+    # TEST: Low-memory recovery after normal exit and SIGKILL must remain
+    # in the default smoke set because these paths recycle physical pages.
+    "/test/bin/mempressure_recovery"
 )
 
 cleanup() {
@@ -177,7 +181,7 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
     if [ "${SKIP_CLEAN:-0}" != "1" ]; then
         MAKEFLAGS= make clean
     fi
-    MAKEFLAGS= make -j1 build/kernel.elf build/disk.img "$TEST_DISK_TARGET"
+    MAKEFLAGS= make -j"$MAKE_JOBS" build/kernel.elf build/disk.img "$TEST_DISK_TARGET"
 fi
 
 QEMU_FIFO_DIR="$(mktemp -d /tmp/sbunix-targeted-stdin.XXXXXX)"
