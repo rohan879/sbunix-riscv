@@ -1327,6 +1327,11 @@ void proc_freepagetable(pagetable_t pagetable) {
  * to the reverse-map eviction scanner. */
 int cow_break(pagetable_t pagetable, pte_t *pte, uint64_t va,
               struct vm_area *vma) {
+  /* BF: A COW marker only records physical sharing.  The current VMA still
+   * decides whether the faulting access may become writable after mprotect. */
+  if (!vma || !(vma->prot & PROT_WRITE))
+    return -1;
+
   uint64_t pa = PTE2PA(*pte);
   int flags = PTE_FLAGS(*pte);
   int ref = page_ref_get(pa);
