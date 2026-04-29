@@ -170,6 +170,31 @@ void file_locks_release_ofd(struct open_file *ofd) {
 /* Syscall handlers: file I/O                                          */
 /* ------------------------------------------------------------------ */
 
+static int pending_signal_interrupts_io(void) {
+    uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+    struct kern_sigaction *ksa = proc_sigactions(current_proc);
+
+    for (int s = 1; s < 65 && deliverable; s++) {
+        if (!(deliverable & signal_bit(s)))
+            continue;
+        if (ksa[s].handler > 1)
+            return 1;
+        if (ksa[s].handler == 0) {
+            /* BF: Blocked pipe writers must leave the sleep loop for signals
+             * that will run a handler or terminate on syscall return. */
+            if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
+                continue;
+            if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
+                continue;
+            if (s == SIGCONT)
+                continue;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 long sys_write_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     uint64_t ubuf = tf->a1;
@@ -211,6 +236,8 @@ long sys_write_handler(struct trapframe *tf) {
                     return (written > 0) ? (long)written : (long)-EAGAIN;
                 current_proc->state = SLEEPING;
                 swtch(&current_proc->context, &scheduler_context);
+                if (pending_signal_interrupts_io())
+                    return (written > 0) ? (long)written : (long)-EINTR;
                 continue;
             }
             int n = len - written;
@@ -814,29 +841,9 @@ long sys_writev_handler(struct trapframe *tf) {
                             if (!pipes[pid].read_open) break;
                             current_proc->state = SLEEPING;
                             swtch(&current_proc->context, &scheduler_context);
-                            /* Check for terminating signals after waking */
-                            {
-                                uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
-                                struct kern_sigaction *ksa = proc_sigactions(current_proc);
-                                for (int s = 1; s < 65 && deliverable; s++) {
-                                    if (deliverable & signal_bit(s)) {
-                                        if (ksa[s].handler > 1) { /* user handler */
-                                            if (total == 0) total = -4; /* -EINTR */
-                                            goto writev_out;
-                                        }
-                                        if (ksa[s].handler == 0) { /* SIG_DFL */
-                                            if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                                                continue; /* ignore-class */
-                                            if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                                                continue; /* stop-class */
-                                            if (s == SIGCONT)
-                                                continue; /* resume */
-                                            /* Terminating signal: return to let deliver_signal kill */
-                                            if (total == 0) total = -4;
-                                            goto writev_out;
-                                        }
-                                    }
-                                }
+                            if (pending_signal_interrupts_io()) {
+                                if (total == 0) total = -EINTR;
+                                goto writev_out;
                             }
                         }
                         if (!pipes[pid].read_open) {
