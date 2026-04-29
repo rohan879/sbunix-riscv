@@ -43,6 +43,13 @@ static int signal_send_allowed(struct proc *target) {
 }
 
 static struct proc *find_signal_target(pid_t pid) {
+    /* BF: A process signaling itself should never fail with ESRCH.
+     * During signal-heavy tests the currently running proc can be the
+     * only authoritative handle even if host-visible proc table state
+     * is in flux around wake/reap transitions. */
+    if (current_proc && current_proc->pid == pid &&
+        current_proc->state != UNUSED && current_proc->state != ZOMBIE)
+        return current_proc;
     for (int i = 0; i < NPROC; i++) {
         if (proc[i].state != UNUSED && proc[i].pid == pid)
             return &proc[i];
@@ -142,8 +149,9 @@ long sys_kill_handler(struct trapframe *tf) {
 
     /* Positive pid: send to specific process */
     struct proc *target = find_signal_target(target_pid);
-    if (!target)
+    if (!target) {
         return (long)-3; /* -ESRCH */
+    }
 
     if (!signal_send_allowed(target))
         return (long)-1; /* -EPERM */
@@ -165,15 +173,18 @@ long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
     int sig = (int)tf->a1;
     uint64_t info_uaddr = tf->a2;
 
-    if (sig < 0 || (!signal_is_valid(sig) && sig != 0))
+    if (sig < 0 || (!signal_is_valid(sig) && sig != 0)) {
         return (long)-22; /* -EINVAL */
+    }
 
     struct proc *target = find_signal_target(target_pid);
-    if (!target)
+    if (!target) {
         return (long)-3; /* -ESRCH */
+    }
 
-    if (!signal_send_allowed(target))
+    if (!signal_send_allowed(target)) {
         return (long)-EPERM;
+    }
 
     if (sig == 0)
         return 0; /* permission check only */
@@ -190,15 +201,17 @@ long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
                 break;
             }
         }
-        if (slot < 0)
+        if (slot < 0) {
             return (long)-EAGAIN;
+        }
 
         uint8_t kinfo[128];
         /* BF: Zero kinfo before copyin so bytes past K_SIGINFO_SIZE
          * are zeros, not uninitialized kernel stack data. */
         memset(kinfo, 0, sizeof(kinfo));
-        if (copyin(current_proc->pagetable, kinfo, info_uaddr, K_SIGINFO_SIZE) < 0)
+        if (copyin(current_proc->pagetable, kinfo, info_uaddr, K_SIGINFO_SIZE) < 0) {
             return (long)-EFAULT;
+        }
         /* BF: Full 128 bytes intentional — kinfo zero-padded past K_SIGINFO_SIZE */
         memcpy(target->sigqueue_buf[slot].info, kinfo, 128);
         target->sigqueue_buf[slot].signum = sig;

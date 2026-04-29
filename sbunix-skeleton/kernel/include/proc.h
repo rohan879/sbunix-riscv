@@ -270,7 +270,7 @@ struct proc {
    * Stores the siginfo_t provided by sigqueue so that sigtimedwait can
    * retrieve si_value and si_code.  Without this, queued signal data
    * was discarded and sigtimedwait returned empty siginfo. */
-  #define NSIGQUEUE 32
+  #define NSIGQUEUE 64
   struct {
     int valid;
     int signum;

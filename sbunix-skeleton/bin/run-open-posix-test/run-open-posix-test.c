@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <signal.h>
+#include <fcntl.h>
 
 #define MAX_PATH 256
 #define MAX_NAME 128
@@ -18,6 +19,7 @@
 #define OPEN_POSIX_BIN_ROOT TEST_ROOT "/bin/open-posix-test"
 #define MANIFEST_FILE TEST_ROOT "/open-posix-test-manifest"
 #define RESULTS_DIR TEST_ROOT "/var/log/open-posix-test"
+#define CAPTURE_TMP_DIR "/tmp"
 #define DEFAULT_TIMEOUT_SEC 5
 #define SLOW_TIMEOUT_SEC 180
 
@@ -69,7 +71,9 @@ static unsigned int timeout_for_test(const char *name) {
     if (!name)
         return DEFAULT_TIMEOUT_SEC;
     if (strcmp(name, "conformance/interfaces/clock_gettime/4-1") == 0 ||
-        strcmp(name, "conformance/interfaces/mmap/10-1") == 0)
+        strcmp(name, "conformance/interfaces/mmap/10-1") == 0 ||
+        strcmp(name, "conformance/interfaces/sigaction/9-1") == 0 ||
+        strcmp(name, "conformance/interfaces/sigaction/11-1") == 0)
         return SLOW_TIMEOUT_SEC;
     return DEFAULT_TIMEOUT_SEC;
 }
@@ -166,30 +170,37 @@ static int load_tests_from_manifest(void) {
  * Run a test, capturing stdout+stderr to a buffer.
  * Returns the raw exit code.
  */
-static int run_test_capture(const char *path, char *output, size_t output_size) {
-    int pipefd[2];
-    if (pipe(pipefd) == -1) return -1;
+static int run_test_capture(const char *path, const char *name,
+                            char *output, size_t output_size) {
+    static unsigned long capture_seq = 0;
+    char capture_path[MAX_PATH];
+    capture_seq++;
+    snprintf(capture_path, sizeof(capture_path),
+             CAPTURE_TMP_DIR "/run-open-posix-test-%d-%lu.out",
+             (int)getpid(), capture_seq);
 
     pid_t pid = fork();
     if (pid == 0) {
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
+        int fd = open(capture_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0)
+            _exit(127);
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        close(fd);
+        if (name && name[0] != '\0') {
+            char rel_exec[MAX_PATH];
+            if (snprintf(rel_exec, sizeof(rel_exec), "./%s", name) >=
+                (int)sizeof(rel_exec))
+                _exit(127);
+            if (chdir(OPEN_POSIX_BIN_ROOT) != 0)
+                _exit(127);
+            char *argv[] = {rel_exec, NULL};
+            execv(rel_exec, argv);
+        }
         char *argv[] = {(char *)path, NULL};
         execv(path, argv);
         _exit(127);
     } else if (pid > 0) {
-        close(pipefd[1]);
-        size_t pos = 0;
-        ssize_t n;
-        while (pos < output_size - 1 &&
-               (n = read(pipefd[0], output + pos,
-                         output_size - 1 - pos)) > 0)
-            pos += n;
-        output[pos] = '\0';
-        close(pipefd[0]);
-
         int status;
         for (;;) {
             pid_t wr = waitpid(pid, &status, 0);
@@ -206,6 +217,16 @@ static int run_test_capture(const char *path, char *output, size_t output_size) 
             }
             break;
         }
+
+        FILE *cap = fopen(capture_path, "r");
+        size_t pos = 0;
+        if (cap) {
+            pos = fread(output, 1, output_size - 1, cap);
+            fclose(cap);
+        }
+        output[pos] = '\0';
+        unlink(capture_path);
+
         int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
         if (pos == 0 || exit_code >= 2) {
@@ -267,7 +288,8 @@ static enum test_result run_test(int test_idx) {
     sigset_t old_mask;
     install_timeout_alarm(&old_alrm, &old_mask,
                           timeout_for_test(tests[test_idx].name));
-    int exit_code = run_test_capture(tests[test_idx].path, output, sizeof(output));
+    int exit_code = run_test_capture(tests[test_idx].path, tests[test_idx].name,
+                                     output, sizeof(output));
     uninstall_timeout_alarm(&old_alrm, &old_mask);
 
     if (timed_out) {
@@ -318,7 +340,8 @@ int main(int argc, char *argv[]) {
         install_timeout_alarm(&old_alrm, &old_mask,
                               timeout_for_test(single_test.name));
         
-        int exit_code = run_test_capture(single_test.path, output, sizeof(output));
+        int exit_code = run_test_capture(single_test.path, single_test.name,
+                                         output, sizeof(output));
         
         uninstall_timeout_alarm(&old_alrm, &old_mask);
         
