@@ -175,7 +175,7 @@ void (*sigset(int sig, void (*disp)(int)))(int) {
       return SIG_ERR;
     if (sigprocmask(SIG_BLOCK, &set, &set) < 0)
       return SIG_ERR;
-    return sigismember(&set, sig) == 1 ? SIG_HOLD : SIG_DFL;
+    return SIG_HOLD;
   }
 
   if (sigemptyset(&sa.sa_mask) < 0)

@@ -241,15 +241,42 @@ static void apply_actions(const posix_spawn_file_actions_t *actions) {
   }
 }
 
+static void apply_spawn_attrs(const posix_spawnattr_t *attrp) {
+  if (!attrp)
+    return;
+
+  if (attrp->sa_flags & POSIX_SPAWN_SETSIGMASK)
+    sigprocmask(SIG_SETMASK, &attrp->sa_sigmask, (sigset_t *)0);
+
+  if (attrp->sa_flags & POSIX_SPAWN_SETSIGDEF) {
+    for (int sig = 1; sig < NSIG; sig++) {
+      if (sig == SIGKILL || sig == SIGSTOP)
+        continue;
+      if (sigismember(&attrp->sa_sigdefault, sig) == 1)
+        signal(sig, SIG_DFL);
+    }
+  }
+
+  if (attrp->sa_flags & POSIX_SPAWN_SETSID)
+    setsid();
+
+  if (attrp->sa_flags & POSIX_SPAWN_SETPGROUP) {
+    pid_t pgroup = attrp->sa_pgroup;
+    if (pgroup == 0)
+      pgroup = getpid();
+    setpgid(0, pgroup);
+  }
+}
+
 static int spawn_impl(pid_t *pid, const char *path, const char *file,
                       const posix_spawn_file_actions_t *file_actions,
                       const posix_spawnattr_t *attrp,
                       char *const argv[], char *const envp[], int use_path) {
-  (void)attrp;
   pid_t cpid = fork();
   if (cpid < 0)
     return errno;
   if (cpid == 0) {
+    apply_spawn_attrs(attrp);
     apply_actions(file_actions);
     if (use_path)
       execvp(file ? file : path, argv);

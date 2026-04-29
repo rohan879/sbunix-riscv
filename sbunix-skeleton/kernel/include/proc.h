@@ -114,7 +114,7 @@ struct shared_ftable {
 };
 
 struct shared_sigactions {
-  struct kern_sigaction actions[32]; /* one per signal */
+  struct kern_sigaction actions[65]; /* one per signal (1-64, index 0 unused) */
   int                  refcount;    /* number of procs sharing */
 };
 
@@ -180,7 +180,7 @@ struct proc {
   struct vm_area *vma_list;    // sorted linked list of virtual memory areas
   uint64_t mmap_base;          // next VA to use for non-MAP_FIXED mmap
   /* signal handling */
-  struct kern_sigaction sigactions[32]; /* one per signal (indices 0-31) */
+  struct kern_sigaction sigactions[65]; /* one per signal (1-64, index 0 unused) */
   uint64_t sigmask;             /* blocked signal mask */
   uint64_t sigpending;          /* pending signal bitmask */
   uint64_t ss_sp;               /* alternate signal stack base */
@@ -234,7 +234,7 @@ struct proc {
     int32_t si_code;     /* K_SI_USER, K_SI_TIMER, K_CLD_STOPPED, etc. */
     int32_t si_status;   /* SIGCHLD: exit code (CLD_EXITED) or stop signal (CLD_STOPPED) */
     uint8_t valid;
-  } sig_sender[32];  /* index 0 unused (signal numbers 1-31) */
+  } sig_sender[65];  /* index 0 unused (signal numbers 1-64) */
 
   /* BF: Epoch counter incremented each time deliver_signal dispatches a
    * user handler.  ppoll/pselect6 snapshot this before the mask swap
@@ -293,7 +293,7 @@ static inline uint64_t signal_bit(int signum) {
 }
 
 static inline int signal_is_valid(int signum) {
-  return signum > 0 && signum < 32;
+  return signum > 0 && signum < 65;
 }
 
 /* BF: Signal info codes for kernel use (matching Linux ABI values).

@@ -162,7 +162,7 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   {
     uint64_t sig_ign = 0;
     struct kern_sigaction *sa = proc_sigactions(p);
-    for (int s = 1; s < 32; s++)
+    for (int s = 1; s < 65; s++)
       if (sa[s].handler == 1) sig_ign |= signal_bit(s); /* SIG_IGN = 1 */
     pos = append_hex16(buf, bufsz, pos, sig_ign);
   }
@@ -172,7 +172,7 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   {
     uint64_t sig_cgt = 0;
     struct kern_sigaction *sa = proc_sigactions(p);
-    for (int s = 1; s < 32; s++)
+    for (int s = 1; s < 65; s++)
       if (sa[s].handler > 1) sig_cgt |= signal_bit(s); /* user handler */
     pos = append_hex16(buf, bufsz, pos, sig_cgt);
   }

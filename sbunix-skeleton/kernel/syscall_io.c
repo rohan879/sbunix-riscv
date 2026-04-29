@@ -299,7 +299,7 @@ long sys_read_handler(struct trapframe *tf) {
             {
                 uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
                 struct kern_sigaction *sa = proc_sigactions(current_proc);
-                for (int s = 1; s < 32 && deliverable; s++) {
+                for (int s = 1; s < 65 && deliverable; s++) {
                     if (deliverable & signal_bit(s)) {
                         if (sa[s].handler > 1) /* user handler */
                             return (long)-4; /* -EINTR */
@@ -818,7 +818,7 @@ long sys_writev_handler(struct trapframe *tf) {
                             {
                                 uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
                                 struct kern_sigaction *ksa = proc_sigactions(current_proc);
-                                for (int s = 1; s < 32 && deliverable; s++) {
+                                for (int s = 1; s < 65 && deliverable; s++) {
                                     if (deliverable & signal_bit(s)) {
                                         if (ksa[s].handler > 1) { /* user handler */
                                             if (total == 0) total = -4; /* -EINTR */
@@ -920,7 +920,7 @@ long sys_readv_handler(struct trapframe *tf) {
                     {
                         uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
                         struct kern_sigaction *ksa = proc_sigactions(current_proc);
-                        for (int s = 1; s < 32 && deliverable; s++) {
+                        for (int s = 1; s < 65 && deliverable; s++) {
                             if (deliverable & signal_bit(s)) {
                                 if (ksa[s].handler > 1) { /* user handler */
                                     if (total == 0) total = -4;

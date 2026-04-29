@@ -16,6 +16,14 @@ static int rt_sigsetsize_valid(uint64_t sigsetsize) {
     return sigsetsize == sizeof(uint64_t);
 }
 
+static int signal_queue_has_more(struct proc *p, int signum) {
+    for (int i = 0; i < NSIGQUEUE; i++) {
+        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum)
+            return 1;
+    }
+    return 0;
+}
+
 static int signal_send_allowed(struct proc *target) {
     if (!current_proc || !target)
         return 0;
@@ -199,7 +207,7 @@ long sys_rt_sigaction_handler(struct trapframe *tf) {
     if (!rt_sigsetsize_valid(sigsetsize))
         return (long)-22;
 
-    if (signum < 1 || signum >= 32 || signum == 9 || signum == 19) {
+    if (!signal_is_valid(signum) || signum == 9 || signum == 19) {
         return (long)-22;
     } else {
         struct kern_sigaction *sig_sa = proc_sigactions(current_proc);
@@ -443,6 +451,8 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
                         memcpy(kinfo, current_proc->sigqueue_buf[qi].info, 128);
                         current_proc->sigqueue_buf[qi].valid = 0;
                         current_proc->sig_sender[sig].valid = 0;
+                        if (signal_queue_has_more(current_proc, sig))
+                            current_proc->sigpending |= signal_bit(sig);
                         found_queued = 1;
                         break;
                     }
@@ -586,9 +596,15 @@ long sys_sigaltstack_handler(struct trapframe *tf) {
         if (!(new_flags & 2) && new_size < 2048) /* MINSIGSTKSZ = 2048 */
             return (long)-12; /* ENOMEM */
 
-        current_proc->ss_sp = *(uint64_t *)(knew + 0);
-        current_proc->ss_flags = new_flags;
-        current_proc->ss_size = new_size;
+        if (new_flags & 2) {
+            current_proc->ss_sp = 0;
+            current_proc->ss_size = 0;
+            current_proc->ss_flags = 2; /* SS_DISABLE */
+        } else {
+            current_proc->ss_sp = *(uint64_t *)(knew + 0);
+            current_proc->ss_size = new_size;
+            current_proc->ss_flags = 0;
+        }
     }
 
     return 0;

@@ -510,7 +510,7 @@ static pid_t sys_wait4(pid_t wpid, uint64_t status_uaddr, int options) {
             {
                 uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
                 struct kern_sigaction *ksa = proc_sigactions(current_proc);
-                for (int s = 1; s < 32 && deliverable; s++) {
+                for (int s = 1; s < 65 && deliverable; s++) {
                     if (deliverable & signal_bit(s)) {
                         if (ksa[s].handler > 1) { /* user handler */
                             /* BF: SIGCHLD doesn't interrupt wait4 — it's the
@@ -862,7 +862,7 @@ long sys_execve_handler(struct trapframe *tf) {
      * stack memory is gone after exec. */
     {
         struct kern_sigaction *sa = proc_sigactions(current_proc);
-        for (int i = 1; i < 32; i++) {
+        for (int i = 1; i < 65; i++) {
             if (sa[i].handler > 1) { /* user handler, not SIG_DFL(0) or SIG_IGN(1) */
                 sa[i].handler = 0;  /* reset to SIG_DFL */
                 sa[i].flags = 0;
@@ -1167,7 +1167,7 @@ long sys_waitid_handler(struct trapframe *tf) {
             {
                 uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
                 struct kern_sigaction *ksa = proc_sigactions(current_proc);
-                for (int s = 1; s < 32 && deliverable; s++) {
+                for (int s = 1; s < 65 && deliverable; s++) {
                     if (!(deliverable & signal_bit(s)))
                         continue;
                     if (ksa[s].handler > 1) {

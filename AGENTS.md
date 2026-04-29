@@ -533,3 +533,28 @@ open-posix build:
 - **Potential follow-up issues identified by inspection (not fixed in this session)**:
   - `/proc/<pid>/cmdline` in `kernel/procfs.c` still renders `p->name` rather than the full NUL-separated argv image expected by Linux-style `/proc` consumers.
   - `sys_rt_sigsuspend_handler` in `kernel/syscall_signal.c` installs the temporary mask verbatim instead of stripping `SIGKILL`/`SIGSTOP`; delivery still succeeds because trap-return logic force-unblocks them, but the stored temporary mask is not fully POSIX-clean.
+
+#### 29. Spawn Attributes + Realtime Signal Queue Fixes (Current Session)
+- **`posix_spawn` attribute handling fixed** (`libc/spawn.c`):
+  - The child now applies `POSIX_SPAWN_SETSIGMASK` and `POSIX_SPAWN_SETSIGDEF` before `exec`.
+  - This fixes Sortix os-test spawn cases that verify inherited blocked signals and restoring ignored dispositions to `SIG_DFL`.
+- **Realtime signal range expanded in kernel state** (`kernel/include/proc.h`, related kernel loops):
+  - Signal validity and per-process handler/metadata tables now cover signals `1..64` instead of only `1..31`.
+  - This is required because libc exposes `SIGRTMIN=32` through `SIGRTMAX=64`, and Open POSIX signal queue/wait tests use `SIGRTMIN`.
+- **Queued realtime signal bookkeeping fixed** (`kernel/syscall_signal.c`, `kernel/trap.c`):
+  - After consuming one queued instance in `sigtimedwait()` or user-handler delivery, the kernel now reasserts the pending bit when more queued instances of the same signal remain.
+  - This preserves repeated `sigqueue()` deliveries for `sigwaitinfo()` and `SA_SIGINFO` handlers instead of collapsing them to a single pending instance.
+- **`sigaltstack(SS_DISABLE)` semantics corrected** (`kernel/syscall_signal.c`):
+  - Disabling the alt stack now clears the stored stack base/size instead of leaving stale values behind.
+  - This fixes the Open POSIX test that checks `sigaltstack(NULL, &old)` during an `SA_ONSTACK` handler after `SS_DISABLE` was set.
+- **`sigset(SIG_HOLD)` return behavior aligned** (`libc/signal_ext.c`):
+  - `sigset(..., SIG_HOLD)` now returns `SIG_HOLD`, matching the suite’s expected behavior for blocked signals.
+- **Focused validation**:
+  - PASS: `test/bin/os-test/basic/spawn/posix_spawnattr_setsigdefault`
+  - PASS: `test/bin/os-test/basic/spawn/posix_spawnattr_setsigmask`
+  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigaltstack/2-1`
+  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigqueue/8-1`
+  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigset/8-1`
+  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigtimedwait/1-1`
+  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigwaitinfo/7-1`
+  - PASS: `test/bin/open-posix-test/conformance/interfaces/sigwaitinfo/8-1`

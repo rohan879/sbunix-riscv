@@ -207,7 +207,7 @@ int exec(char *path) {
      * Clear flags/mask/restorer for all signals -- stale flags
      * like SA_NOCLDWAIT must not persist across exec.
      * This MUST happen after successful load, not before. */
-    for (int si = 0; si < 32; si++) {
+    for (int si = 0; si < 65; si++) {
         if (current_proc->sigactions[si].handler >= 2) {
             current_proc->sigactions[si].handler = 0;  /* SIG_DFL */
         }
@@ -504,7 +504,7 @@ int exec_vfs(const char *resolved_path) {
     }
     /* BF: Signal handler reset MUST happen after successful load.
      * POSIX: SIG_IGN preserved, user handlers reset to SIG_DFL. */
-    for (int si = 0; si < 32; si++) {
+    for (int si = 0; si < 65; si++) {
         if (current_proc->sigactions[si].handler >= 2) {
             current_proc->sigactions[si].handler = 0;  /* SIG_DFL */
         }

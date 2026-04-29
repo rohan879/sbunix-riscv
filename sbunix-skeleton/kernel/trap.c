@@ -454,6 +454,14 @@ static void fill_user_ucontext(struct user_ucontext *uc,
     uc->regs[31] = tf->t6;
 }
 
+static int signal_queue_has_more(struct proc *p, int signum) {
+    for (int i = 0; i < NSIGQUEUE; i++) {
+        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum)
+            return 1;
+    }
+    return 0;
+}
+
 /* RF: Made non-static for access by extracted signal syscall module */
 void deliver_signal(struct trapframe *tf, struct proc *p) {
     /* BF: Only SIGKILL and SIGSTOP are truly unblockable per POSIX.
@@ -477,7 +485,7 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     }
 
     int signum = 0;
-    for (int i = 1; i < 32; i++) {
+    for (int i = 1; i < 65; i++) {
         if (deliverable & signal_bit(i)) {
             signum = i;
             break;
@@ -617,6 +625,8 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
                 memcpy(ksi, p->sigqueue_buf[qi].info, 128);
                 p->sigqueue_buf[qi].valid = 0;
                 p->sig_sender[signum].valid = 0;
+                if (signal_queue_has_more(p, signum))
+                    p->sigpending |= signal_bit(signum);
                 found_queued = 1;
                 /* BF: Force si_signo to match delivered signal (POSIX requires this) */
                 int32_t si_signo = (int32_t)signum;
@@ -731,6 +741,8 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
     if (handler >= 2) {
         /* The handler frame is ready; consume this signal now. */
         p->sigpending &= ~signal_bit(signum);
+        if (signal_queue_has_more(p, signum))
+            p->sigpending |= signal_bit(signum);
         /* BF: Bump epoch so ppoll/pselect6 can detect that a signal was
          * handled between their mask swap and the blocking sleep. */
         p->signal_handled_epoch++;

@@ -183,7 +183,7 @@ long sys_futex_handler(struct trapframe *tf) {
         /* Check for signal interruption */
         if (current_proc->sigpending & ~current_proc->sigmask) {
             struct kern_sigaction *ksa = proc_sigactions(current_proc);
-            for (int s = 1; s < 32; s++) {
+            for (int s = 1; s < 65; s++) {
                 uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
                 if (deliverable & signal_bit(s)) {
                     if (ksa[s].handler > 1) /* user handler */
