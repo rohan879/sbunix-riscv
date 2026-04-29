@@ -115,10 +115,22 @@ int copy_pagetable_cow(pagetable_t dst, pagetable_t src,
 
 /* ------------------------------------------------------------------ */
 /* cleanup_proc_resources: free or release shared resources on exit      */
-/* Called from SYS_exit, signal default-kill, and SYS_kill SIGKILL.     */
+/* Called only while the dying process is current_proc.                  */
 /* ------------------------------------------------------------------ */
 /* RF: Made non-static for access by extracted process syscall module */
 void cleanup_proc_resources(struct proc *p) {
+    if (!p || p->resources_released)
+        return;
+    /* BF: Address-space and fd teardown must run on the dying process's
+     * own kernel stack/page-table context.  Cleaning a different process
+     * from the sender's syscall path races with that target resuming in a
+     * half-destroyed address space, so fail loudly instead. */
+    if (p != current_proc) {
+        printk("FATAL: cleanup_proc_resources outside current process pid=%d current=%d\n",
+               p->pid, current_proc ? current_proc->pid : -1);
+        while (1) {}
+    }
+
     /* ---- POSIX file locks ---- */
     /* POSIX: all locks held by a process are released on exit.
      * OFD locks are released separately when the open_file refcount hits 0. */
@@ -190,6 +202,7 @@ void cleanup_proc_resources(struct proc *p) {
         p->shared_sa = NULL;
     }
     /* Inline sigactions need no freeing */
+    p->resources_released = 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -211,6 +224,147 @@ void release_vfork_parent(struct proc *child) {
         if (child->parent->state == SLEEPING)
             child->parent->state = RUNNABLE;
     }
+}
+
+static struct proc *find_initproc(void) {
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        if (p->pid == 1 && p->state != UNUSED)
+            return p;
+    }
+    return NULL;
+}
+
+static void wake_exit_waiters(struct proc *exiting) {
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        if (p->state == SLEEPING && p != exiting &&
+            p->waiting_for_uart == 0)
+            p->state = RUNNABLE;
+    }
+}
+
+static void publish_zombie_current(struct proc *p) {
+    if (p->parent) {
+        struct proc *par = p->parent;
+        struct kern_sigaction *psa = proc_sigactions(par);
+        int32_t code = p->killed_by_signal ? K_CLD_KILLED : K_CLD_EXITED;
+        int32_t status = p->killed_by_signal ? p->killed_by_signal
+                                             : (p->exit_status & 0xff);
+
+        p->state = ZOMBIE;
+        release_vfork_parent(p);
+        sig_set_pending_ex(par, SIGCHLD, (int32_t)p->pid, 0, code, status);
+        if (par->state == SLEEPING)
+            par->state = RUNNABLE;
+
+        if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
+            struct proc *initproc = find_initproc();
+            p->parent = initproc;
+            if (initproc && initproc->state == SLEEPING)
+                initproc->state = RUNNABLE;
+        }
+    } else {
+        p->state = ZOMBIE;
+        release_vfork_parent(p);
+    }
+
+    struct proc *initproc = find_initproc();
+    for (struct proc *child = proc; child < &proc[NPROC]; child++) {
+        if (child->parent == p && child != p) {
+            child->parent = initproc;
+            if (initproc && initproc->state == SLEEPING)
+                initproc->state = RUNNABLE;
+        }
+    }
+
+    wake_exit_waiters(p);
+}
+
+void proc_exit_current(int status, int terminate_signal) {
+    struct proc *p = current_proc;
+    if (!p)
+        while (1) {}
+
+    p->exit_status = status;
+    p->killed_by_signal = terminate_signal;
+    p->stopped_signal = 0;
+    p->pending_terminate = 0;
+    p->terminate_signal = 0;
+
+    cleanup_proc_resources(p);
+
+    if (p->pid == 1) {
+        ext2_sync(NULL); /* flush filesystems before halt */
+        printk("\nSystem halted (init exited with status %d).\n", status);
+        printk("Process stats: highwater=%d exhaustions=%d\n",
+               get_proc_highwater(), get_proc_exhaustion_count());
+        register unsigned long a0 asm("a0") = 0;
+        register unsigned long a1 asm("a1") = 0;
+        register unsigned long a7 asm("a7") = 0x53525354;
+        asm volatile("ecall" : : "r"(a0), "r"(a1), "r"(a7));
+        while (1) {}
+    }
+
+    publish_zombie_current(p);
+    swtch(&p->context, &scheduler_context);
+    while (1) {}
+}
+
+void proc_force_terminate_wake(struct proc *target, int sig) {
+    if (!target || target->state == ZOMBIE || target->state == UNUSED)
+        return;
+    if (!signal_is_valid(sig))
+        sig = SIGKILL;
+
+    /* BF: A sender may request fatal termination, but cleanup has to run
+     * later in the dying process context.  Mark the request, make SIGKILL
+     * deliverable, and wake the target so its own syscall/trap return path
+     * can release resources before publishing a zombie. */
+    if (target == current_proc) {
+        proc_exit_current(128 + sig, sig);
+        return;
+    }
+
+    target->pending_terminate = 1;
+    target->terminate_signal = sig;
+    target->exit_status = 128 + sig;
+    target->killed_by_signal = sig;
+    target->stopped_signal = 0;
+    sig_set_pending(target, sig,
+                    current_proc ? (int32_t)current_proc->pid : 0,
+                    0, K_SI_USER);
+    target->sigmask &= ~signal_bit(SIGKILL);
+    if (target->state == SLEEPING)
+        target->state = RUNNABLE;
+}
+
+static void reap_zombie(struct proc *p) {
+    /* BF: Reap validates that exit cleanup already released user memory,
+     * files, and shared wrappers.  Continuing on failure would hide leaks
+     * or double-free bugs by freeing only scheduler-owned resources. */
+    if (!p->resources_released) {
+        printk("FATAL: reap before cleanup pid=%d state=%d\n",
+               p->pid, p->state);
+        while (1) {}
+    }
+
+    if (p->kstack) {
+        kfree_contiguous(p->kstack, p->kstack_npages);
+        p->kstack = NULL;
+    }
+    if (p->trapframe) {
+        kfree(p->trapframe);
+        p->trapframe = NULL;
+    }
+    p->state = UNUSED;
+    p->pid = 0;
+    p->parent = NULL;
+    p->exit_status = 0;
+    p->killed_by_signal = 0;
+    p->stopped_signal = 0;
+    p->resources_released = 0;
+    p->pending_terminate = 0;
+    p->terminate_signal = 0;
+    p->in_copy_fault = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -456,19 +610,7 @@ static pid_t sys_wait4(pid_t wpid, uint64_t status_uaddr, int options) {
                                 &kwstatus, sizeof(kwstatus)) < 0)
                         return (pid_t)-EFAULT;
                 }
-                /* free child resources */
-                /* BF: Free all pages of the kernel stack (1 or 2 pages) */
-                if (p->kstack) {
-                    kfree_contiguous(p->kstack, p->kstack_npages);
-                    p->kstack = NULL;
-                }
-                if (p->trapframe) { kfree(p->trapframe); p->trapframe = NULL; }
-                p->state = UNUSED;
-                p->pid = 0;
-                p->parent = NULL;
-                /* BF: Clear in_copy_fault so the slot can be reused cleanly
-                 * by allocproc without inheriting stale recursion guard state. */
-                p->in_copy_fault = 0;
+                reap_zombie(p);
                 return pid;
             }
             /* WUNTRACED: report stopped children */
@@ -1130,18 +1272,7 @@ long sys_waitid_handler(struct trapframe *tf) {
                 return (long)-EFAULT;
 
             if (report_exit && !(options & 0x01000000)) { /* WNOWAIT */
-                if (p->kstack) {
-                    kfree_contiguous(p->kstack, p->kstack_npages);
-                    p->kstack = NULL;
-                }
-                if (p->trapframe) {
-                    kfree(p->trapframe);
-                    p->trapframe = NULL;
-                }
-                p->state = UNUSED;
-                p->pid = 0;
-                p->parent = NULL;
-                p->in_copy_fault = 0;
+                reap_zombie(p);
             } else if (report_stop) {
                 p->stopped_signal = 0;
             }
@@ -1217,78 +1348,7 @@ long sys_getgid_handler(struct trapframe *tf) {
 }
 
 long sys_exit_handler(struct trapframe *tf) {
-    int status = (int)tf->a0;
-    if (current_proc) {
-        current_proc->exit_status = status;
-        current_proc->killed_by_signal = 0;
-        current_proc->stopped_signal = 0;
-        cleanup_proc_resources(current_proc);
-        if (current_proc->pid == 1) {
-            ext2_sync(NULL); /* flush filesystems before halt */
-            printk("\nSystem halted (init exited with status %d).\n", status);
-            printk("Process stats: highwater=%d exhaustions=%d\n",
-                   get_proc_highwater(), get_proc_exhaustion_count());
-            register unsigned long a0 asm("a0") = 0;
-            register unsigned long a1 asm("a1") = 0;
-            register unsigned long a7 asm("a7") = 0x53525354;
-            asm volatile("ecall" : : "r"(a0), "r"(a1), "r"(a7));
-            while (1) {}
-        }
-        if (current_proc->parent) {
-            struct proc *par = current_proc->parent;
-            struct kern_sigaction *psa = proc_sigactions(par);
-            current_proc->state = ZOMBIE;
-            release_vfork_parent(current_proc);
-            /* BF: Capture child metadata for parent's SIGCHLD SA_SIGINFO handler.
-             * CLD_EXITED for normal exit, CLD_KILLED if terminated by signal. */
-            {
-                int32_t code = current_proc->killed_by_signal ? K_CLD_KILLED
-                                                              : K_CLD_EXITED;
-                sig_set_pending_ex(par, SIGCHLD,
-                                   (int32_t)current_proc->pid, 0, code,
-                                   current_proc->exit_status & 0xff);
-            }
-            if (par->state == SLEEPING)
-                par->state = RUNNABLE;
-
-            /* SA_NOCLDWAIT: auto-reap child instead of leaving zombie */
-            if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
-                /* Reparent to init so init reaps it safely via sys_wait4 */
-                /* Do NOT kfree(kstack) here, as current thread is still running on it! */
-                struct proc *initproc = NULL;
-                for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-                    if (p->pid == 1 && p->state != UNUSED) { initproc = p; break; }
-                }
-                current_proc->parent = initproc; /* Can be NULL if init is dead */
-                if (initproc && initproc->state == SLEEPING)
-                    initproc->state = RUNNABLE;
-            }
-        } else {
-            current_proc->state = ZOMBIE;
-            release_vfork_parent(current_proc);
-        }
-        /* Reparent orphan children to init (pid 1) */
-        struct proc *initproc = NULL;
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->pid == 1 && p->state != UNUSED) { initproc = p; break; }
-        }
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->parent == current_proc && p != current_proc) {
-                p->parent = initproc;
-                /* Wake init if it's sleeping in wait4 */
-                if (initproc && initproc->state == SLEEPING)
-                    initproc->state = RUNNABLE;
-            }
-        }
-
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->state == SLEEPING && p != current_proc &&
-                p->waiting_for_uart == 0)
-                p->state = RUNNABLE;
-        }
-        swtch(&current_proc->context, &scheduler_context);
-    }
-    while(1) {}
+    proc_exit_current((int)tf->a0, 0);
     return SYSCALL_NORETURN;
 }
 

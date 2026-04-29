@@ -352,33 +352,11 @@ static void handle_timer_interrupt(void) {
 /* ------------------------------------------------------------------ */
 
 static void signal_default_terminate(struct proc *p, int signum) {
-    p->exit_status = 128 + signum;
-    p->killed_by_signal = signum;
-    p->stopped_signal = 0;
-    cleanup_proc_resources(p);
-    p->state = ZOMBIE;
-    release_vfork_parent(p);
-    if (p->parent) {
-        sig_set_pending_ex(p->parent, SIGCHLD,
-                           (int32_t)p->pid, 0, K_CLD_KILLED,
-                           p->killed_by_signal);
-        if (p->parent->state == SLEEPING)
-            p->parent->state = RUNNABLE;
-        struct kern_sigaction *psa = proc_sigactions(p->parent);
-        if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
-            struct proc *initproc = 0;
-            for (struct proc *q = proc; q < &proc[NPROC]; q++) {
-                if (q->pid == 1 && q->state != UNUSED) {
-                    initproc = q;
-                    break;
-                }
-            }
-            p->parent = initproc;
-            if (initproc && initproc->state == SLEEPING)
-                initproc->state = RUNNABLE;
-        }
+    if (p != current_proc) {
+        proc_force_terminate_wake(p, signum);
+        return;
     }
-    swtch(&p->context, &scheduler_context);
+    proc_exit_current(128 + signum, signum);
 }
 
 static void signal_frame_fault(struct proc *p) {
@@ -815,32 +793,7 @@ void kill_deliver(struct proc *target, int sig) {
     if (target->state == ZOMBIE || target->state == UNUSED)
         return;
     if (sig == 9) {
-        target->exit_status = 128 + 9;
-        target->killed_by_signal = 9;
-        target->stopped_signal = 0;
-        /* cleanup_proc_resources switches satp to kernel_pagetable.
-         * When called from the parent's syscall context (target != current_proc),
-         * we must save and restore the caller's satp so the parent can
-         * return to user mode with its own page table. */
-        uint64_t saved_satp = r_satp();
-        cleanup_proc_resources(target);
-        if (target != current_proc) {
-            w_satp(saved_satp);
-            sfence_vma();
-        }
-        target->state = ZOMBIE;
-        release_vfork_parent(target);
-        if (target->parent) {
-            /* BF: Capture child metadata for parent's SIGCHLD handler */
-            sig_set_pending_ex(target->parent, SIGCHLD,
-                               (int32_t)target->pid, 0, K_CLD_KILLED, 9);
-            if (target->parent->state == SLEEPING)
-                target->parent->state = RUNNABLE;
-        }
-        /* If killing ourselves, swtch away immediately — we're ZOMBIE
-         * and must not continue executing on this kernel stack. */
-        if (target == current_proc)
-            swtch(&target->context, &scheduler_context);
+        proc_force_terminate_wake(target, SIGKILL);
     } else if (signal_is_valid(sig)) {
         /* BF: Capture sender metadata at generation time for SA_SIGINFO */
         sig_set_pending(target, sig,
@@ -1313,7 +1266,8 @@ pagefault_kill:
                 struct kern_sigaction *sa = proc_sigactions(current_proc);
                 int has_handler = (sa[SIGSEGV].handler != 0 && sa[SIGSEGV].handler != 1);
 
-                int suppress = has_handler || current_proc->killed_by_signal;
+                int suppress = has_handler || current_proc->killed_by_signal ||
+                               current_proc->pending_terminate;
                 if (!suppress) {
                     /* Check for any pending unblocked fatal signal */
                     uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
@@ -1404,6 +1358,12 @@ pagefault_kill:
      * not here -- force-unblocking them here breaks SA_SIGINFO tests
      * that install handlers for these signals. */
     if (current_proc) {
+        if (current_proc->pending_terminate) {
+            int sig = current_proc->terminate_signal ?
+                      current_proc->terminate_signal : SIGKILL;
+            current_proc->in_syscall = 0;
+            proc_exit_current(128 + sig, sig);
+        }
         uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
         uint64_t saved = current_proc->sigmask;
         current_proc->sigmask &= ~fu;

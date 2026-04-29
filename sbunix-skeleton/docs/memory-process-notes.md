@@ -16,3 +16,11 @@ anonymous mappings created by `mmap` or split by `mprotect` can carry distinct
 permissions and future metadata ownership. The heap path has narrower
 invariants, so it can bound VMA-node growth during lazy `brk` expansion without
 coalescing unrelated mappings.
+
+## Process Termination
+
+Exit cleanup runs before zombie publication and must run in the dying process
+context. External fatal-signal delivery records `pending_terminate` and wakes
+the target; the target then releases its address space, file descriptors, and
+shared wrappers on its own kernel stack before wait paths can reap it.
+`resources_released` is a hard reap-time contract, not a best-effort hint.

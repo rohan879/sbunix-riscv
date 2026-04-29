@@ -170,6 +170,16 @@ struct proc {
   unsigned long alarm_ticks;   // tick count when alarm fires (0 = no alarm)
   int exit_status;             // exit status (for wait4)
   int killed_by_signal;        // signal number if killed by signal, 0 otherwise
+  /* BF: Exit cleanup must complete before a process becomes reappable.
+   * This flag lets wait paths reject zombies that skipped address-space,
+   * fd, or shared-resource teardown instead of masking leaks or double-free
+   * paths by freeing only the kernel stack/trapframe. */
+  int resources_released;
+  /* BF: External fatal signals cannot safely free another process's user
+   * address space from the sender's syscall context.  These fields request
+   * termination and force the target to run cleanup on its own kernel stack. */
+  int pending_terminate;
+  int terminate_signal;
   char cwd[256];               // current working directory
   char exe_path[256];          // path of executable (set by exec)
   char cmdline[256];           // NUL-separated argv image for /proc/<pid>/cmdline
