@@ -35,6 +35,9 @@ DEFAULT_COMMANDS=(
     "/test/bin/copyout_lazy"
     "/test/bin/copyinstr_lazy"
     "/test/bin/membugstest"
+    # TEST: Low-memory recovery after normal exit and SIGKILL must remain
+    # in the default smoke set because these paths recycle physical pages.
+    "/test/bin/mempressure_recovery"
 )
 
 cleanup() {

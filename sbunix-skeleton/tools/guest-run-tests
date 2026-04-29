@@ -116,6 +116,9 @@ run_test membugstest
 run_forkmemdiag_cow30
 run_forkmemdiag_postfork_pressure
 run_test forkreuse
+# TEST: This stays near the memory pressure checks because it verifies that
+# exit and SIGKILL teardown recycle pages before later children allocate.
+run_test mempressure_recovery
 run_test lazyreserve
 run_test posix_mem_test
 echo === C Binary Tests Done ===

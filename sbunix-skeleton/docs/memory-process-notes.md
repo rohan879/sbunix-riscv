@@ -24,3 +24,10 @@ context. External fatal-signal delivery records `pending_terminate` and wakes
 the target; the target then releases its address space, file descriptors, and
 shared wrappers on its own kernel stack before wait paths can reap it.
 `resources_released` is a hard reap-time contract, not a best-effort hint.
+
+## Low-Memory Recovery Coverage
+
+`mempressure_recovery` keeps large anonymous mappings live until normal exit or
+SIGKILL. It exists to catch regressions where a zombie becomes waitable before
+the dying process has returned its resident pages, which would only show up
+after a later child allocates under the 128 MiB guest memory budget.
