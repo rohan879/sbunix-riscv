@@ -15,6 +15,7 @@
  * Optional usage:
  *   forkmemdiag [cow] <mb> [<mb> ...]
  *   forkmemdiag postfork <mb> [<mb> ...]
+ *   forkmemdiag postfork-recycle <repeats> <mb> [<mb> ...]
  */
 
 #include <stdio.h>
@@ -22,11 +23,41 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 
 #define PAGE_SIZE_BYTES 4096UL
 #define DEFAULT_CASES 2
+#define RECYCLE_DRIFT_LIMIT_KB 8192L
+
+static long read_meminfo_kb(const char *key)
+{
+  int fd = open("/proc/meminfo", O_RDONLY);
+  if (fd < 0)
+    return -1;
+
+  char buf[2048];
+  int n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0)
+    return -1;
+  buf[n] = '\0';
+
+  char *p = strstr(buf, key);
+  if (!p)
+    return -1;
+  p += strlen(key);
+  while (*p == ':' || *p == ' ' || *p == '\t')
+    p++;
+
+  long val = 0;
+  while (*p >= '0' && *p <= '9') {
+    val = val * 10 + (*p - '0');
+    p++;
+  }
+  return val;
+}
 
 static int run_case_mb(size_t mb)
 {
@@ -178,12 +209,101 @@ static int run_postfork_case_mb(size_t mb)
   return 1;
 }
 
+static int run_postfork_recycle_case_mb(size_t mb, long baseline)
+{
+  size_t len = mb * 1024UL * 1024UL;
+  size_t npages = len / PAGE_SIZE_BYTES;
+  long before = read_meminfo_kb("MemFree");
+
+  if (before < 0) {
+    printf("[FAIL] recycle: could not read MemFree before %lu MB\n",
+           (unsigned long)mb);
+    return 1;
+  }
+
+  printf("\n=== forkmemdiag postfork-recycle: %lu MB ===\n",
+         (unsigned long)mb);
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    printf("[FAIL] recycle fork failed at %lu MB\n", (unsigned long)mb);
+    return 1;
+  }
+
+  if (pid == 0) {
+    unsigned char *region = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (region == MAP_FAILED)
+      _exit(30);
+
+    for (size_t i = 0; i < npages; i++) {
+      unsigned char value = (unsigned char)(0x33 ^ (i & 0x7f));
+      volatile unsigned char *p = &region[i * PAGE_SIZE_BYTES];
+      *p = value;
+      if (*p != value)
+        _exit(31);
+    }
+
+    /* TEST: Leave the mapping live at _exit so kernel exit/reap cleanup,
+     * not userspace munmap(), must recycle anonymous frames and page tables. */
+    _exit(0);
+  }
+
+  int status = 0;
+  pid_t waited = waitpid(pid, &status, 0);
+  if (waited != pid) {
+    printf("[FAIL] recycle waitpid mismatch at %lu MB\n",
+           (unsigned long)mb);
+    return 1;
+  }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    if (WIFEXITED(status)) {
+      printf("[FAIL] recycle child status %d at %lu MB\n",
+             WEXITSTATUS(status), (unsigned long)mb);
+    } else if (WIFSIGNALED(status)) {
+      printf("[FAIL] recycle child signal %d at %lu MB\n",
+             WTERMSIG(status), (unsigned long)mb);
+    } else {
+      printf("[FAIL] recycle child ended unexpectedly at %lu MB\n",
+             (unsigned long)mb);
+    }
+    return 1;
+  }
+
+  long after = read_meminfo_kb("MemFree");
+  if (after < 0) {
+    printf("[FAIL] recycle: could not read MemFree after %lu MB\n",
+           (unsigned long)mb);
+    return 1;
+  }
+
+  long local_drop = before - after;
+  long drift = baseline - after;
+  if (local_drop < 0)
+    local_drop = 0;
+  if (drift < 0)
+    drift = 0;
+
+  if (local_drop > RECYCLE_DRIFT_LIMIT_KB ||
+      drift > RECYCLE_DRIFT_LIMIT_KB) {
+    printf("[FAIL] recycle %lu MB leaked: before=%ld after=%ld baseline=%ld\n",
+           (unsigned long)mb, before, after, baseline);
+    return 1;
+  }
+
+  printf("[PASS] recycle %lu MB: drop %ld KiB drift %ld KiB\n",
+         (unsigned long)mb, local_drop, drift);
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
   size_t defaults[DEFAULT_CASES] = {30, 60};
   int failures = 0;
   int first_fail = -1;
   int mode_postfork = 0;
+  int mode_recycle = 0;
+  int repeats = 1;
   int argi = 1;
 
   printf("forkmemdiag: fork + COW memory-pressure sweep\n");
@@ -193,11 +313,30 @@ int main(int argc, char **argv)
     mode_postfork = 1;
     argi = 2;
     printf("mode: postfork allocation in child\n");
+  } else if (argc > 1 && strcmp(argv[1], "postfork-recycle") == 0) {
+    mode_recycle = 1;
+    argi = 3;
+    if (argc <= argi) {
+      printf("[FAIL] postfork-recycle usage: repeats mb...\n");
+      return 1;
+    }
+    repeats = atoi(argv[2]);
+    if (repeats <= 0) {
+      printf("[FAIL] invalid repeat count: %s\n", argv[2]);
+      return 1;
+    }
+    printf("mode: postfork allocation with exit-path recycling\n");
   } else if (argc > 1 && strcmp(argv[1], "cow") == 0) {
     argi = 2;
     printf("mode: parent prefault + child COW rewrite\n");
   } else {
     printf("mode: parent prefault + child COW rewrite\n");
+  }
+
+  long recycle_baseline = mode_recycle ? read_meminfo_kb("MemFree") : 0;
+  if (mode_recycle && recycle_baseline < 0) {
+    printf("[FAIL] could not read recycle baseline MemFree\n");
+    return 1;
   }
 
   if (argc > argi) {
@@ -207,12 +346,16 @@ int main(int argc, char **argv)
         printf("[FAIL] invalid size: %s\n", argv[i]);
         return 1;
       }
-      int rc = mode_postfork ? run_postfork_case_mb((size_t)mb)
-                             : run_case_mb((size_t)mb);
-      if (rc != 0) {
-        failures++;
-        if (first_fail < 0)
-          first_fail = mb;
+      for (int r = 0; r < repeats; r++) {
+        int rc = mode_recycle
+                   ? run_postfork_recycle_case_mb((size_t)mb, recycle_baseline)
+                   : mode_postfork ? run_postfork_case_mb((size_t)mb)
+                                   : run_case_mb((size_t)mb);
+        if (rc != 0) {
+          failures++;
+          if (first_fail < 0)
+            first_fail = mb;
+        }
       }
     }
   } else {

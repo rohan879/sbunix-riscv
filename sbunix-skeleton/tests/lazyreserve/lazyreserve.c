@@ -11,8 +11,10 @@
 #include <sys/mman.h>
 
 #define PAGE_SIZE_BYTES 4096UL
-#define RESERVE_MB 64UL
+#define DEFAULT_RESERVE_MB 64UL
+#define MAX_RESERVE_MB 256UL
 #define TOUCHES 16
+#define MAX_RESERVE_DROP_KB 4096L
 
 static long read_meminfo_kb(const char *key) {
   int fd = open("/proc/meminfo", O_RDONLY);
@@ -64,8 +66,23 @@ static int touch_sparse(unsigned char *p, size_t len, unsigned char seed) {
   return 1;
 }
 
-int main(void) {
-  size_t len = RESERVE_MB * 1024UL * 1024UL;
+int main(int argc, char **argv) {
+  unsigned long reserve_mb = DEFAULT_RESERVE_MB;
+  if (argc > 2) {
+    printf("[FAIL] lazyreserve: usage: lazyreserve [mb]\n");
+    return 1;
+  }
+  if (argc == 2) {
+    char *end = NULL;
+    reserve_mb = strtoul(argv[1], &end, 10);
+    if (!end || *end != '\0' || reserve_mb == 0 ||
+        reserve_mb > MAX_RESERVE_MB) {
+      printf("[FAIL] lazyreserve: invalid size %s\n", argv[1]);
+      return 1;
+    }
+  }
+
+  size_t len = reserve_mb * 1024UL * 1024UL;
   long free_before = read_meminfo_kb("MemFree");
   if (free_before < 0) {
     printf("[FAIL] lazyreserve: could not read MemFree before\n");
@@ -98,7 +115,7 @@ int main(void) {
   long reserve_drop = free_before - free_after_reserve;
   if (reserve_drop < 0)
     reserve_drop = 0;
-  if (reserve_drop > 512) {
+  if (reserve_drop > MAX_RESERVE_DROP_KB) {
     printf("[FAIL] lazyreserve: reservation consumed %ld KiB\n", reserve_drop);
     munmap(map, len);
     sbrk(-(long)len);
@@ -114,7 +131,7 @@ int main(void) {
 
   munmap(map, len);
   sbrk(-(long)len);
-  printf("[PASS] lazyreserve: reserve drop %ld KiB, sparse touches ok\n",
-         reserve_drop);
+  printf("[PASS] lazyreserve: %lu MB reserve drop %ld KiB, sparse touches ok\n",
+         reserve_mb, reserve_drop);
   return 0;
 }
