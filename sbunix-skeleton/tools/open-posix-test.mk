@@ -69,7 +69,7 @@ all: setup $(COMPILE_TARGETS)
 	@# Generate manifest from actually compiled binaries
 	@echo "# Test manifest for SBUnix open-posix-test" > $(MANIFEST_FILE)
 	@echo "# Format: /test/bin/open-posix-test/path/to/test" >> $(MANIFEST_FILE)
-	@find $(OPEN_POSIX_TEST_DEST) -type f ! -name '*.failed' -executable | sort | \
+	@find $(OPEN_POSIX_TEST_DEST) -type f ! -name '*.failed' ! -name '*-core-buildonly' ! -name '*-buildonly' ! -name '*-core-buildonly.test' ! -name '*-buildonly.test' -executable | sort | \
 		sed 's|$(SBUNIX_ROOT)/build/testfs|/test|' >> $(MANIFEST_FILE)
 	@# Generate summary of failed test outcomes (.out files)
 	@find $(OUT_DIRECTORY) -name '*.out' -type f | sort | while read f; do \
@@ -77,7 +77,7 @@ all: setup $(COMPILE_TARGETS)
 		outcome=$$(cat "$$f"); \
 		echo "$$rel: $$outcome" >> $(SUMMARY_FILE); \
 	done
-	@ok_count=$$(find $(OPEN_POSIX_TEST_DEST) -type f ! -name '*.failed' | wc -l); \
+	@ok_count=$$(find $(OPEN_POSIX_TEST_DEST) -type f ! -name '*.failed' ! -name '*-core-buildonly' ! -name '*-buildonly' ! -name '*-core-buildonly.test' ! -name '*-buildonly.test' | wc -l); \
 	total_count=$$(find $(POSIXTEST_SRC) -name '*.c' ! -name 'testfrmw*' | wc -l); \
 	skip_count=$$((total_count - ok_count)); \
 	out_count=$$(find $(OUT_DIRECTORY) -name '*.out' | wc -l); \
@@ -155,6 +155,9 @@ $(OPEN_POSIX_TEST_DEST)/%: $(POSIXTEST_SRC)/%.c $(CRT_OBJ) $(LIBC_A) | setup
 			fi; \
 			rm -f $(OUT_DIRECTORY)/$$relpath.o $$_tmpc $$_tmpl; \
 			cp $$outbin $@; \
+			case "$$relpath" in \
+				*-buildonly|*-core-buildonly) cp $$outbin $@.test ;; \
+			esac; \
 			rm -f $@.failed; \
 			echo "  OK: $$relpath"; \
 		else \
