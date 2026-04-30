@@ -24,8 +24,8 @@ jobs:
           fetch-tags: true
       - name: Install apt dependencies
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q \
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
             build-essential \
             git curl wget \
             strace tmux vim htop screen \
@@ -49,6 +49,6 @@ jobs:
       - name: Extract dependencies
         run: cd /tmp && unzip -q os-dep.zip && rm os-dep.zip
       - name: Build OS
-        run: cd sbunix-skeleton/ && pwd && source tools/cisourceme.sh && make clean && RUN_CI_TESTS=1 make-j$(nproc)
+        run: cd sbunix-skeleton/ && pwd && source tools/cisourceme.sh && make clean && RUN_CI_TESTS=1 make -j$(nproc)
       - name: Boot OS in QEMU and run custom boot tests, Sortix os-test, and open-posix-test suites
         run: cd sbunix-skeleton/ && source tools/cisourceme.sh && RUN_CI_TESTS=1 make qemu
