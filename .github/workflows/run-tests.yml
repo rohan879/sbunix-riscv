@@ -1,0 +1,28 @@
+name: "Run tests"
+
+# Automatically run the setup steps when they are changed to allow for easy validation, and
+# allow manual testing through the repository's "Actions" tab
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # Set the permissions to the lowest permissions possible needed for your steps.
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout submodules
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: true
+          fetch-tags: true
+      - name: Download dependencies
+        run: cd /tmp && wget https://github.com/stevennyman/os-dep/releases/download/initial/os-dep.zip && unzip os-dep.zip && pwd
+      - name: Run tests
+        run: cd sbunix-skeleton/ && source tools/cisourceme.sh && make clean && RUN_CI_TESTS=1 make qemu -j$(nproc)

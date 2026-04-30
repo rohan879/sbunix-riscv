@@ -41,6 +41,12 @@ if test -f /bin/run-tests; then
         /bin/poweroff
     else
         if test "$BOOTMODE" = "1"; then
+            if test -f /etc/.run_ci_tests; then
+                set BOOTMODE 0
+            fi
+        fi
+
+        if test "$BOOTMODE" = "1"; then
             echo ""
             echo "=========================================="
             echo "  Optional Automatic Testing"
@@ -61,6 +67,18 @@ if test -f /bin/run-tests; then
 
         echo "Running SBUnix regression tests..."
         run-tests
+
+        if test -f /etc/.run_ci_tests; then
+            echo ""
+            echo "Running Sortix os-test..."
+            run-os-test
+            echo ""
+            echo "Running Open POSIX test suite..."
+            run-open-posix-test
+            echo ""
+            echo "CI test run complete. Powering off..."
+            /bin/poweroff
+        fi
 
         if test "$BOOTMODE" = "1"; then
             echo ""

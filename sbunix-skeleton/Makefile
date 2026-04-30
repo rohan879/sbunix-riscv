@@ -37,6 +37,14 @@ TIMEOUT ?= 1800
 # put allocator freelist entries beyond the available physical memory.
 # QEMU_MEM must remain 128M for remote OS/build checks.
 QEMU_MEM ?= 128M
+# MODIFIED: Optional CI boot mode runs the priority tests from rc after the
+# normal boot suite and skips the boot-time priority pass.
+# Example: RUN_CI_TESTS=1 BUILD_TESTS=1 make qemu -j$(nproc)
+RUN_CI_TESTS ?= 0
+ifeq ($(RUN_CI_TESTS),1)
+	override BUILD_TESTS := 1
+	override SKIP_BOOT_PRIORITY_TESTS := 1
+endif
 # MODIFIED: END added
 
 # Language-specific kernel object/library
@@ -193,6 +201,11 @@ ifeq ($(SKIP_BOOT_PRIORITY_TESTS),1)
 	@touch build/rootfs/etc/.skip_boot_priority_tests
 else
 	@rm -f build/rootfs/etc/.skip_boot_priority_tests
+endif
+ifeq ($(RUN_CI_TESTS),1)
+	@touch build/rootfs/etc/.run_ci_tests
+else
+	@rm -f build/rootfs/etc/.run_ci_tests
 endif
 ifeq ($(SKIP_BOOT_TESTS),1)
 	@touch build/rootfs/etc/.skip_boot_tests
