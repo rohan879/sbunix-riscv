@@ -193,7 +193,11 @@ build/testfs-core/.prepared: build/testfs-core/.dirs $(CORE_TEST_TARGETS) build/
 # Prepare base rootfs before building os-tests
 # BF: guest-run-tests is embedded in tarfs, so runner edits must rebuild
 # build/rootfs/.prepared and the kernel image that carries it.
-build/rootfs/.prepared: $(USER_BIN) tools/guest-run-tests tools/stage-thirdparty.sh tools/slim-test-rootfs.sh $(ROOTFS_STAGE_INPUTS) $(THIRDPARTY_STAGE_INPUTS)
+# Keep build/rootfs as a host-side build output with real executable files.
+# The CI qemu step invokes make again after the build step; replacing these
+# targets with guest-only /test symlinks makes make follow dangling host paths
+# and causes linker output failures such as build/rootfs/bin/basename.
+build/rootfs/.prepared: $(USER_BIN) tools/guest-run-tests tools/stage-thirdparty.sh $(ROOTFS_STAGE_INPUTS) $(THIRDPARTY_STAGE_INPUTS)
 	mkdir -p build/rootfs
 	rm -rf build/rootfs/bin/os-test build/rootfs/os-test-manifest \
 		build/rootfs/os-test-expect build/rootfs/var/log/os-test \
@@ -226,8 +230,17 @@ ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests # MODIFIED: added
 	# run-os-test is now built as C binary via $(C_BIN) pattern
 endif
+	touch $@
+
+# Slimming is only safe on the tarfs staging copy.  The guest sees these
+# /test symlinks after the test disk is mounted, while host make targets in
+# build/rootfs stay rebuildable real files for repeated CI invocations.
+build/tarfs-rootfs/.prepared: build/rootfs/.prepared tools/slim-test-rootfs.sh build/testfs/.dirs build/testfs-core/.dirs
+	rm -rf build/tarfs-rootfs
+	mkdir -p build/tarfs-rootfs
+	cp -a build/rootfs/. build/tarfs-rootfs/
 ifeq ($(SLIM_TEST_ROOTFS),1)
-	tools/slim-test-rootfs.sh build/rootfs build/testfs build/testfs-core
+	tools/slim-test-rootfs.sh build/tarfs-rootfs build/testfs build/testfs-core
 endif
 	touch $@
 
@@ -286,8 +299,8 @@ $(OPEN_POSIX_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepare
 endif
 # MODIFIED: END added
 
-build/tarfs.o: build/rootfs/.prepared # MODIFIED: originally just : $(USER_BIN)
-	tar cf build/rootfs.tar -C build/rootfs .
+build/tarfs.o: build/tarfs-rootfs/.prepared # MODIFIED: originally just : $(USER_BIN)
+	tar cf build/rootfs.tar -C build/tarfs-rootfs .
 	cd build && $(OBJCOPY) -I binary -O elf64-littleriscv -B riscv \
 		--rename-section .data=.tarfs \
 		--redefine-sym _binary_rootfs_tar_start=_tarfs_start \
