@@ -5,7 +5,6 @@ name: "Run tests"
 on:
   workflow_dispatch:
   push:
-  pull_request:
 
 jobs:
   build:
@@ -116,13 +115,14 @@ jobs:
 
           cat "$body"
       - name: Comment on commit with test summary
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: peter-evans/commit-comment@v4
         with:
           body-path: ${{ github.workspace }}/sbunix-commit-comment.md
+      - uses: 8BitJonny/gh-get-current-pr@4.0.0
+        id: PR
       - name: Comment on pull request with test summary
-        if: ${{ github.event_name == 'pull_request' }}
-        uses: mshick/add-pr-comment@v2
+        if: steps.PR.outputs.pr_found == 'true'
+        uses: peter-evans/create-or-update-comment@v5
         with:
-          message-path: ${{ github.workspace }}/sbunix-commit-comment.md
-          message-id: sbunix-test-summary
+          issue-number: ${{ steps.PR.outputs.number }}
+          body-path: ${{ github.workspace }}/sbunix-commit-comment.md
