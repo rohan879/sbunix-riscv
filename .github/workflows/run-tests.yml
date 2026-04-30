@@ -45,10 +45,23 @@ jobs:
             flex bison \
             libusb-1.0-0-dev
       - name: Download dependencies
-        run: cd /tmp && wget -nv https://github.com/stevennyman/os-dep/releases/download/initial/os-dep.zip
+        run: |
+          cd /tmp
+          wget -nv https://github.com/stevennyman/os-dep/releases/download/initial/os-dep.zip
       - name: Extract dependencies
-        run: cd /tmp && unzip -q os-dep.zip && rm os-dep.zip
+        run: |
+          cd /tmp
+          unzip -q os-dep.zip
+          rm os-dep.zip
       - name: Build OS
-        run: cd sbunix-skeleton/ && pwd && source tools/cisourceme.sh && make clean && RUN_CI_TESTS=1 make -j$(nproc)
+        run: |
+          cd sbunix-skeleton/
+          pwd
+          source tools/cisourceme.sh
+          make clean
+          RUN_CI_TESTS=1 make -j$(nproc)
       - name: Boot OS in QEMU and run custom boot tests, Sortix os-test, and open-posix-test suites
-        run: cd sbunix-skeleton/ && source tools/cisourceme.sh && RUN_CI_TESTS=1 make qemu
+        run: |
+          cd sbunix-skeleton/
+          source tools/cisourceme.sh
+          RUN_CI_TESTS=1 make qemu

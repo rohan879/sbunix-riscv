@@ -20,6 +20,15 @@ C_BIN    := $(addprefix build/rootfs/bin/,$(shell ls -d bin/*/*.c 2>/dev/null | 
 RS_BIN   := $(addprefix build/rootfs/bin/,$(shell ls -d bin/*/*.rs 2>/dev/null | cut -d/ -f2 | sort -u))
 USER_BIN := $(C_BIN) $(RS_BIN)
 
+# MODIFIED: Optional CI boot mode runs the priority tests from rc after the
+# normal boot suite and skips the boot-time priority pass.
+# Example: RUN_CI_TESTS=1 make qemu -j$(nproc)
+RUN_CI_TESTS ?= 0
+ifeq ($(RUN_CI_TESTS),1)
+	override BUILD_TESTS := 1
+	override SKIP_BOOT_PRIORITY_TESTS := 1
+endif
+
 # MODIFIED: BEGIN added
 # Split user binaries: test binaries only included in test builds
 # Exclude thirdparty dir - it contains os-test which has its own build system
@@ -37,14 +46,6 @@ TIMEOUT ?= 1800
 # put allocator freelist entries beyond the available physical memory.
 # QEMU_MEM must remain 128M for remote OS/build checks.
 QEMU_MEM ?= 128M
-# MODIFIED: Optional CI boot mode runs the priority tests from rc after the
-# normal boot suite and skips the boot-time priority pass.
-# Example: RUN_CI_TESTS=1 BUILD_TESTS=1 make qemu -j$(nproc)
-RUN_CI_TESTS ?= 0
-ifeq ($(RUN_CI_TESTS),1)
-	override BUILD_TESTS := 1
-	override SKIP_BOOT_PRIORITY_TESTS := 1
-endif
 # MODIFIED: END added
 
 # Language-specific kernel object/library
@@ -77,7 +78,13 @@ SKIP_BOOT_TESTS ?= 0
 
 -include Makefile.local
 
-all: build/kernel.elf
+# MODIFIED from all: build/kernel.elf
+ALL_TARGETS := build/kernel.elf
+ifeq ($(RUN_CI_TESTS),1)
+	ALL_TARGETS += $(TEST_DISK_IMG)
+endif
+
+all: $(ALL_TARGETS)
 
 build/kernel/%.c.o: kernel/%.c
 	@mkdir -p $(@D)
