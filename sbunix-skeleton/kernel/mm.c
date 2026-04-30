@@ -54,7 +54,10 @@ void mm_init_page_descriptors(void) {
   
   // Initialize statistics
   mm_stats.total_pages = max_pfn;
-  mm_stats.free_pages = max_pfn;  // Will be adjusted as pages are allocated
+  /* BF: kalloc.c owns the live free-list count.  Mirror it here only for
+   * diagnostics; pressure decisions below read get_free_page_count()
+   * directly so stale advisory stats cannot drive lifecycle behavior. */
+  mm_stats.free_pages = (uint64_t)get_free_page_count();
   mm_stats.anon_pages = 0;
   mm_stats.file_pages = 0;
   mm_stats.shared_pages = 0;
@@ -209,13 +212,16 @@ void print_page_info(struct page *page) {
 
 /* Print memory management statistics */
 void mm_print_stats(void) {
+  uint64_t free_pages = (uint64_t)get_free_page_count();
+  mm_stats.free_pages = free_pages;
+
   printk("=== Memory Management Statistics ===\n");
   printk("Total pages:     %lu (%lu MB)\n", 
          mm_stats.total_pages, 
          mm_stats.total_pages * PAGE_SIZE / 1024 / 1024);
   printk("Free pages:      %lu (%lu MB)\n",
-         mm_stats.free_pages, 
-         mm_stats.free_pages * PAGE_SIZE / 1024 / 1024); 
+         free_pages,
+         free_pages * PAGE_SIZE / 1024 / 1024);
   printk("Anonymous pages: %lu\n", mm_stats.anon_pages);
   printk("File pages:      %lu\n", mm_stats.file_pages);
   printk("Shared pages:    %lu\n", mm_stats.shared_pages);
@@ -334,7 +340,11 @@ void mm_init_watermarks(void) {
 
 /* Check if system is under memory pressure */
 int mm_check_memory_pressure(void) {
-  uint64_t free_pages = mm_stats.free_pages;
+  /* BF: The allocator free list is the source of truth.  Reclaim/rmap
+   * metadata is disabled, so do not let stale advisory counters report
+   * pressure that could influence allocation or teardown paths. */
+  uint64_t free_pages = (uint64_t)get_free_page_count();
+  mm_stats.free_pages = free_pages;
   
   if (free_pages <= mm_watermarks.min_free) {
     return 3;  // Critical pressure
