@@ -139,8 +139,9 @@ static void test_kill_sigstop_cont(void) {
     if (pid == 0) {
         close(pfd[0]);
         /* BF: Signal readiness only after the post-CONT handler is installed.
-         * The older pause()-based check could consume SIGCONT before pause()
-         * started, leaving the child asleep forever. */
+         * SIGCONT was removed as the child-release signal because its default
+         * action can resume the process without running a handler; if it
+         * arrives before pause() sleeps, the child can block forever. */
         got_usr1 = 0;
         signal(SIGUSR1, usr1_handler);
         write(pfd[1], "A", 1);
@@ -167,6 +168,7 @@ static void test_kill_sigstop_cont(void) {
 
     /* Resume the child */
     kill(pid, SIGCONT);
+    /* Use SIGUSR1, not SIGCONT, as the deterministic post-resume wakeup. */
     kill(pid, SIGUSR1);
 
     /* Child should now write "B" and exit */
