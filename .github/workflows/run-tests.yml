@@ -22,7 +22,34 @@ jobs:
           fetch-depth: 0
           submodules: true
           fetch-tags: true
+      - name: Install apt dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq \
+          build-essential \
+          git curl wget \
+          strace tmux vim htop screen \
+          python3 python3-serial python3-pip \
+          jq bc patch \
+          \
+          libfdt-dev libfdt1 \
+          libpixman-1-dev libpixman-1-0 \
+          libslirp-dev libslirp0 \
+          libglib2.0-dev \
+          libncurses-dev \
+          libssl-dev \
+          \
+          autoconf automake autotools-dev \
+          libmpc-dev libmpfr-dev libgmp-dev \
+          gawk texinfo libtool patchutils zlib1g-dev \
+          libexpat1-dev \
+          ninja-build pkg-config \
+          flex bison \
+          \
+          libusb-1.0-0-dev
       - name: Download dependencies
-        run: cd /tmp && wget -nv https://github.com/stevennyman/os-dep/releases/download/initial/os-dep.zip && unzip -q os-dep.zip && pwd
-      - name: Run tests
-        run: cd sbunix-skeleton/ && pwd && source tools/cisourceme.sh && make clean && RUN_CI_TESTS=1 make qemu -j$(nproc)
+        run: cd /tmp && wget -nv https://github.com/stevennyman/os-dep/releases/download/initial/os-dep.zip
+      - name: Extract dependencies
+        run: cd /tmp && unzip -q os-dep.zip && rm os-dep.zip
+      - name: Build OS
+        run: cd sbunix-skeleton/ && pwd && source tools/cisourceme.sh && make clean && RUN_CI_TESTS=1 make-j$(nproc)
+      - name: Boot OS in QEMU and run custom boot tests, Sortix os-test, and open-posix-test suites
+        run: cd sbunix-skeleton/ && source tools/cisourceme.sh && RUN_CI_TESTS=1 make qemu
