@@ -17,43 +17,68 @@ jobs:
       issues: write
 
     steps:
-      - name: Checkout submodules
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          submodules: true
-          fetch-tags: true
-      - name: Install apt dependencies
+      - name: Prepare dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            build-essential \
-            git curl wget \
-            strace tmux vim htop screen \
-            python3 python3-serial python3-pip \
-            jq bc patch \
-            libfdt-dev libfdt1 \
-            libpixman-1-dev libpixman-1-0 \
-            libslirp-dev libslirp0 \
-            libglib2.0-dev \
-            libncurses-dev \
-            libssl-dev \
-            autoconf automake autotools-dev \
-            libmpc-dev libmpfr-dev libgmp-dev \
-            gawk texinfo libtool patchutils zlib1g-dev \
-            libexpat1-dev \
-            ninja-build pkg-config \
-            flex bison \
-            libusb-1.0-0-dev
-      - name: Download dependencies
-        run: |
-          cd /tmp
-          wget -nv https://github.com/stevennyman/os-dep/releases/download/initial/os-dep.zip
-      - name: Extract dependencies
-        run: |
+          set -euo pipefail
+
+          repo_dir="$GITHUB_WORKSPACE"
+          repo_url="https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git"
+          checkout_ref="${GITHUB_SHA}"
+
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            repo_url="${{ github.event.pull_request.head.repo.clone_url }}"
+            checkout_ref="${{ github.event.pull_request.head.sha }}"
+          fi
+
+          install_apt() {
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq \
+              build-essential \
+              git curl wget \
+              strace tmux vim htop screen \
+              python3 python3-serial python3-pip \
+              jq bc patch \
+              libfdt-dev libfdt1 \
+              libpixman-1-dev libpixman-1-0 \
+              libslirp-dev libslirp0 \
+              libglib2.0-dev \
+              libncurses-dev \
+              libssl-dev \
+              autoconf automake autotools-dev \
+              libmpc-dev libmpfr-dev libgmp-dev \
+              gawk texinfo libtool patchutils zlib1g-dev \
+              libexpat1-dev \
+              ninja-build pkg-config \
+              flex bison \
+              libusb-1.0-0-dev
+          }
+
+          download_deps() {
+            cd /tmp
+            wget -nv https://github.com/stevennyman/os-dep/releases/download/initial/os-dep.zip
+          }
+
+          clone_repo() {
+            rm -rf "$repo_dir"
+            git clone --depth 1 --recurse-submodules --shallow-submodules --no-tags "$repo_url" "$repo_dir"
+            cd "$repo_dir"
+            git checkout --force "$checkout_ref"
+          }
+
+          clone_repo &
+          clone_pid=$!
+          install_apt &
+          apt_pid=$!
+          download_deps &
+          download_pid=$!
+
+          wait "$download_pid"
+
           cd /tmp
           unzip -q os-dep.zip
           rm os-dep.zip
+          wait "$clone_pid"
+          wait "$apt_pid"
       - name: Build OS
         run: |
           cd sbunix-skeleton/
@@ -104,10 +129,10 @@ jobs:
         if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: peter-evans/commit-comment@v4
         with:
-          body-path: /tmp/sbunix-commit-comment.md
+          body-path: ${{ github.workspace }}/sbunix-commit-comment.md
       - name: Comment on pull request with test summary
         if: ${{ github.event_name == 'pull_request' }}
         uses: mshick/add-pr-comment@v2
         with:
-          message-path: /tmp/sbunix-commit-comment.md
+          message-path: ${{ github.workspace }}/sbunix-commit-comment.md
           message-id: sbunix-test-summary
