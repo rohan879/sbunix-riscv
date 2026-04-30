@@ -23,6 +23,6 @@ jobs:
           submodules: true
           fetch-tags: true
       - name: Download dependencies
-        run: cd /tmp && wget https://github.com/stevennyman/os-dep/releases/download/initial/os-dep.zip && unzip os-dep.zip && pwd
+        run: cd /tmp && wget -nv https://github.com/stevennyman/os-dep/releases/download/initial/os-dep.zip && unzip -q os-dep.zip && pwd
       - name: Run tests
-        run: cd sbunix-skeleton/ && source tools/cisourceme.sh && make clean && RUN_CI_TESTS=1 make qemu -j$(nproc)
+        run: cd sbunix-skeleton/ && pwd && source tools/cisourceme.sh && make clean && RUN_CI_TESTS=1 make qemu -j$(nproc)
