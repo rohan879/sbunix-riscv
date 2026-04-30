@@ -1065,24 +1065,29 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
     if (!f)
       return -2;
 
-    char tmp[128];
     int len = 0;
     if (f->path[0] != '\0') {
       len = strlen(f->path);
-      if (len > (int)sizeof(tmp)) len = (int)sizeof(tmp);
-      memcpy(tmp, f->path, len);
+      if (len > bufsiz) len = bufsiz;
+      memcpy(buf, f->path, len);
+      return len;
     } else if (f->is_pipe) {
+      char tmp[64];
       len = append_str(tmp, sizeof(tmp), len, "pipe:[");
       len = append_int(tmp, sizeof(tmp), len, f->pipe_id);
       if (len < (int)sizeof(tmp)) tmp[len++] = ']';
+      if (len > bufsiz) len = bufsiz;
+      memcpy(buf, tmp, len);
+      return len;
     } else {
+      char tmp[64];
       len = append_str(tmp, sizeof(tmp), len, "anon:[");
       len = append_int(tmp, sizeof(tmp), len, fd);
       if (len < (int)sizeof(tmp)) tmp[len++] = ']';
+      if (len > bufsiz) len = bufsiz;
+      memcpy(buf, tmp, len);
+      return len;
     }
-    if (len > bufsiz) len = bufsiz;
-    memcpy(buf, tmp, len);
-    return len;
   }
 
   /* /proc/<pid>/exe -> exe_path */

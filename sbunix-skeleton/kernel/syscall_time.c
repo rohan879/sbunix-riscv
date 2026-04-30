@@ -9,6 +9,7 @@
 #include <printk.h>
 #include <vm.h>
 #include <errno.h>
+#include <user_clock.h>
 
 long sys_clock_gettime_handler(struct trapframe *tf) {
     uint64_t clk_id   = tf->a0;
@@ -29,11 +30,11 @@ long sys_clock_gettime_handler(struct trapframe *tf) {
         /* CLOCK_MONOTONIC: time since boot */
         ticks_to_timespec(timekeeping_elapsed_ticks(), &kts.tv_sec, &kts.tv_nsec);
     } else if (clk_id == 2) {
-        uint64_t cpu_ticks = seconds_to_ticks(current_proc->cputime_ticks);
+        uint64_t cpu_ticks = user_clock_current_ticks(current_proc, r_time());
         ticks_to_timespec(cpu_ticks, &kts.tv_sec, &kts.tv_nsec);
     } else if (clk_id == 3) {
         /* CLOCK_THREAD_CPUTIME_ID: single-hart, so same as process time */
-        uint64_t cpu_ticks = seconds_to_ticks(current_proc->cputime_ticks);
+        uint64_t cpu_ticks = user_clock_current_ticks(current_proc, r_time());
         ticks_to_timespec(cpu_ticks, &kts.tv_sec, &kts.tv_nsec);
     } else {
         return (long)-22; /* EINVAL */
@@ -83,6 +84,7 @@ static long sleep_until_deadline(uint64_t deadline, uint64_t rem_uaddr,
     while (r_time() < deadline) {
         current_proc->sleep_until = deadline;
         current_proc->waiting_for_uart = 2;
+        timer_reschedule();
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
 
@@ -186,6 +188,7 @@ long sys_alarm_handler(struct trapframe *tf) {
         current_proc->alarm_ticks = 0;
     else
         current_proc->alarm_ticks = now + seconds_to_ticks(seconds);
+    timer_reschedule();
     return (long)remaining;
 }
 
@@ -360,6 +363,7 @@ long sys_timer_settime_handler(struct trapframe *tf) {
         current_proc->active_timer_count--;
     }
 
+    timer_reschedule();
     return (long)0;
 }
 
@@ -468,8 +472,8 @@ long sys_getrusage_handler(struct trapframe *tf) {
     /* struct rusage is 128 bytes on RISC-V LP64 (two timeval + 14 longs) */
     uint8_t kru[128];
     memset(kru, 0, sizeof(kru));
-    /* Approximate user time from elapsed ticks */
-    uint64_t elapsed = timekeeping_elapsed_ticks();
+    /* BF: Use charged CPU ticks so sleeping time does not inflate rusage. */
+    uint64_t elapsed = user_clock_current_ticks(current_proc, r_time());
     int64_t sec;
     int64_t usec;
     ticks_to_timeval(elapsed, &sec, &usec);
@@ -488,14 +492,15 @@ long sys_times_handler(struct trapframe *tf) {
     uint8_t ktms[32];
     memset(ktms, 0, sizeof(ktms));
 
-    /* Approximate process time from elapsed ticks since boot
+    /* Approximate process time from charged CPU ticks
      * tms_utime = user CPU time
      * tms_stime = system CPU time
      * tms_cutime = user CPU time of waited-for children
-     * tms_cstime = system CPU time of waited-for children
-     * For simplicity, report elapsed time as user time */
+     * tms_cstime = system CPU time of waited-for children. */
+    uint64_t cpu_elapsed = user_clock_current_ticks(current_proc, r_time());
     uint64_t elapsed = timekeeping_elapsed_ticks();
-    int64_t ticks = (int64_t)timekeeping_to_clock_ticks(elapsed);
+    int64_t ticks = (int64_t)timekeeping_to_clock_ticks(cpu_elapsed);
+    int64_t real_ticks = (int64_t)timekeeping_to_clock_ticks(elapsed);
 
     memcpy(ktms + 0, &ticks, 8);  /* tms_utime */
     /* tms_stime, tms_cutime, tms_cstime remain zero */
@@ -504,5 +509,5 @@ long sys_times_handler(struct trapframe *tf) {
         return (long)-EFAULT; /* EFAULT */
 
     /* Return value: elapsed real time in clock ticks since arbitrary point in the past */
-    return ticks;
+    return real_ticks;
 }

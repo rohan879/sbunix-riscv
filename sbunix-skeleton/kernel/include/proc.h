@@ -4,6 +4,7 @@
 #include <riscv.h>
 #include <string.h>
 #include <vfs.h>
+#include <user_clock.h>
 
 /* BF: Kernel stack is 2 contiguous pages (8KB).  A single 4KB page
  * overflows during deep syscall call chains (ext2 I/O path), corrupting
@@ -107,6 +108,7 @@ struct kern_sigaction {
 struct shared_pagetable {
   pagetable_t pt;         /* the Sv39 page table root */
   int         refcount;   /* number of procs sharing this pagetable */
+  struct user_clock_state *clock; /* borrowed CLONE_VM CPU-clock alias */
 };
 
 struct shared_ftable {
@@ -207,6 +209,8 @@ struct proc {
   struct shared_pagetable  *shared_pt;      /* non-NULL if CLONE_VM */
   struct shared_ftable     *shared_ft;      /* non-NULL if CLONE_FILES */
   struct shared_sigactions *shared_sa;      /* non-NULL if CLONE_SIGHAND */
+  struct user_clock_state  *user_clock;     /* read-only userspace CPU clock */
+  uint64_t cpu_start_ticks;                 /* rdtime when this proc was scheduled */
   /* futex support */
   uint64_t futex_addr;          /* VA being waited on (0 = not waiting) */
   /* SA_RESTART support: saved syscall args for restart after signal */
@@ -224,9 +228,9 @@ struct proc {
    * Added at the END of struct to avoid shifting field offsets. */
   int kstack_npages;
 
-  /* BF: Per-process CPU time in timer ticks for CLOCK_PROCESS_CPUTIME_ID.
-   * Incremented by the timer interrupt handler each tick while this
-   * process is current_proc.  Added at END to avoid shifting offsets. */
+  /* BF: Legacy counter kept for compatibility with older diagnostics.
+   * The authoritative CPU clock now lives in user_clock and uses rdtime
+   * deltas so sleep does not count as process CPU time. */
   uint64_t cputime_ticks;
 
   /* BF: Deferred sigmask restore for ppoll/pselect6.  When these syscalls

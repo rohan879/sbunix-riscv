@@ -45,6 +45,19 @@ copy_if_exists() {
   fi
 }
 
+strip_guest_archives() {
+  local dir=$1
+  if [ ! -d "$dir" ] || ! command -v riscv64-unknown-elf-strip >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Test disks use ext2-lite, whose inodes only carry direct plus single
+  # indirect blocks.  Strip debug data from guest archive copies so TCC's
+  # runtime libraries stay below that per-file limit without changing the
+  # host build outputs they were derived from.
+  find "$dir" -type f -name '*.a' -exec riscv64-unknown-elf-strip -g {} + 2>/dev/null || true
+}
+
 mkdir -p "$dest_root/bin" "$dest_root/usr/lib"
 
 # ENH: Promote the vendored workload binaries into every guest image so the
@@ -93,10 +106,12 @@ if [ -d "$dest_root/usr/lib/tcc" ]; then
   if [ ! -f "$dest_root/usr/lib/tcc/lib/libtcc1.a" ] && [ -f "$dest_root/usr/lib/tcc/lib/libgcc.a" ]; then
     # The vendored repo currently lacks libtcc1.a. For the simple third-
     # party integration programs, libgcc provides the helper routines TCC
-    # commonly needs, and having a guest-visible archive at this path avoids
-    # immediate link failure on a missing runtime support library.
-    copy_if_exists "$dest_root/usr/lib/tcc/lib/libgcc.a" "$dest_root/usr/lib/tcc/lib/libtcc1.a"
+    # commonly needs; a same-directory symlink keeps the test disk payload
+    # small while still giving TCC the expected guest-visible path.
+    ln -sfn libgcc.a "$dest_root/usr/lib/tcc/lib/libtcc1.a"
   fi
+
+  strip_guest_archives "$dest_root/usr/lib/tcc/lib"
 fi
 
 if [ -d "$thirdparty_dir/busybox-root" ]; then

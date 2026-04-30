@@ -3,6 +3,7 @@
 #include "include/string.h"
 #include "include/printk.h"
 #include "include/riscv.h"
+#include "include/timekeeping.h"
 
 /* Global page descriptor table */
 // Static page descriptor table to avoid bootstrap problems
@@ -53,7 +54,10 @@ void mm_init_page_descriptors(void) {
   
   // Initialize statistics
   mm_stats.total_pages = max_pfn;
-  mm_stats.free_pages = max_pfn;  // Will be adjusted as pages are allocated
+  /* BF: kalloc.c owns the live free-list count.  Mirror it here only for
+   * diagnostics; pressure decisions below read get_free_page_count()
+   * directly so stale advisory stats cannot drive lifecycle behavior. */
+  mm_stats.free_pages = (uint64_t)get_free_page_count();
   mm_stats.anon_pages = 0;
   mm_stats.file_pages = 0;
   mm_stats.shared_pages = 0;
@@ -208,13 +212,16 @@ void print_page_info(struct page *page) {
 
 /* Print memory management statistics */
 void mm_print_stats(void) {
+  uint64_t free_pages = (uint64_t)get_free_page_count();
+  mm_stats.free_pages = free_pages;
+
   printk("=== Memory Management Statistics ===\n");
   printk("Total pages:     %lu (%lu MB)\n", 
          mm_stats.total_pages, 
          mm_stats.total_pages * PAGE_SIZE / 1024 / 1024);
   printk("Free pages:      %lu (%lu MB)\n",
-         mm_stats.free_pages, 
-         mm_stats.free_pages * PAGE_SIZE / 1024 / 1024); 
+         free_pages,
+         free_pages * PAGE_SIZE / 1024 / 1024);
   printk("Anonymous pages: %lu\n", mm_stats.anon_pages);
   printk("File pages:      %lu\n", mm_stats.file_pages);
   printk("Shared pages:    %lu\n", mm_stats.shared_pages);
@@ -273,9 +280,9 @@ void mm_age_pages(void) {
   static unsigned long last_age_tick = 0;
   unsigned long current_ticks = get_ticks();
   
-  /* BF: Keep aging frequent enough that memory-pressure tests do not run
-   * with stale page age data for long stretches. */
-  if (current_ticks - last_age_tick < 10) {
+  /* BF: Express aging in heartbeat seconds so the 100 Hz timer does not
+   * accelerate page-aging policy relative to memory-pressure behavior. */
+  if (current_ticks - last_age_tick < TIMER_HZ) {
     return;
   }
   last_age_tick = current_ticks;
@@ -287,13 +294,13 @@ void mm_age_pages(void) {
     }
     
     // Pages that haven't been accessed recently lose age score
-    if (current_ticks - page->last_access > 50) {
+    if (current_ticks - page->last_access > 5 * TIMER_HZ) {
       if (page->age_score > 0) {
         page->age_score--;
       }
       
       // Also decay access count slowly
-      if (page->access_count > 0 && (current_ticks % 10) == 0) {
+      if (page->access_count > 0 && (current_ticks % TIMER_HZ) == 0) {
         page->access_count = (page->access_count * 3) / 4;
       }
     }
@@ -333,7 +340,11 @@ void mm_init_watermarks(void) {
 
 /* Check if system is under memory pressure */
 int mm_check_memory_pressure(void) {
-  uint64_t free_pages = mm_stats.free_pages;
+  /* BF: The allocator free list is the source of truth.  Reclaim/rmap
+   * metadata is disabled, so do not let stale advisory counters report
+   * pressure that could influence allocation or teardown paths. */
+  uint64_t free_pages = (uint64_t)get_free_page_count();
+  mm_stats.free_pages = free_pages;
   
   if (free_pages <= mm_watermarks.min_free) {
     return 3;  // Critical pressure

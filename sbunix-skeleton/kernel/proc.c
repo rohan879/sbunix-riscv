@@ -6,6 +6,7 @@
 #include <vm.h>
 #include <printk.h>
 #include <exec.h>
+#include <user_clock.h>
 
 struct proc proc[NPROC];
 struct proc *current_proc = NULL;
@@ -78,6 +79,9 @@ static int kern_open_console(void) {
   f->offset = 0;
   f->flags = 2; /* O_RDWR */
   f->is_pipe = 0;
+  /* BF: Kernel-opened stdio fds bypass sys_open(), so record the path here
+   * for /proc/self/fd and ttyname() to report the terminal correctly. */
+  memcpy(f->path, "/dev/tty", 9);
   /* Find lowest free fd slot */
   for (int i = 0; i < NOFILE; i++) {
     if (current_proc->ofile[i] == NULL) {
@@ -162,6 +166,18 @@ found:
     p->state = UNUSED;
     return 0;
   }
+
+  p->user_clock = user_clock_create();
+  if (!p->user_clock) {
+    kfree_contiguous(p->kstack, p->kstack_npages);
+    kfree(p->trapframe);
+    p->kstack = NULL;
+    p->trapframe = NULL;
+    p->state = UNUSED;
+    return 0;
+  }
+  p->cpu_start_ticks = 0;
+  p->cputime_ticks = 0;
 
   // Use kernel page table initially; exec() will install a user page table.
   // This ensures the scheduler can safely switch satp to this process's
@@ -307,6 +323,7 @@ void scheduler(void) {
 
         p->state = RUNNING;
         current_proc = p;
+        user_clock_start(p, r_time());
 
         /* Set sscratch and switch to process page table */
                 /* BF: sscratch = top of kernel stack (8KB if contiguous) */
@@ -317,6 +334,8 @@ void scheduler(void) {
                 }
 
         swtch(&scheduler_context, &p->context);
+
+                user_clock_stop(p, r_time());
 
                 /* Switch back to kernel page table */
                 w_satp(MAKE_SATP(kernel_pagetable));

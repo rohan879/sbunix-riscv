@@ -110,6 +110,11 @@ static inline int user_range_ok(uint64_t va, uint64_t len) {
  * above uvmmap_kernel share_limit (129), well below user stack. */
 #define SIGTRAMP_VA     0x3F000000UL
 
+/* BF: Reserve a read-only userspace CPU-clock page immediately below the
+ * signal trampoline so libc clock() can avoid a syscall without exposing
+ * the page to mmap/brk/mprotect replacement. */
+#define USER_CLOCK_VA   (SIGTRAMP_VA - PAGE_SIZE)
+
 /* BF: Floor for user mmap allocations — above all shared kernel MMIO L1
  * entries.  L1[128] = UART at 0x10000000 is the highest safe device.
  * L1[129] starts at 0x10200000, so mmap allocations begin here.

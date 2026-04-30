@@ -241,8 +241,6 @@ tmux -S /tmp/tmux-debug kill-session -t qemu
 - QEMU binary: `/home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin/qemu-system-riscv64`
 - Kernel ELF: `build/kernel.elf` (entry point `0x80200000`)
 - Do NOT pipe stdin/stdout to QEMU without a real tty; use tmux
-- In sandbox/tmux sessions, direct QEMU launches can sometimes report a stale write lock on `build/disk.img` / `build/test-disk.img` even when no live QEMU process remains. For validation-only runs, adding `file.locking=off` to the `-drive` args is an acceptable workaround.
-- Long-lived tmux guests can accumulate noisy `init: shell exited, respawning...` chatter and sporadic `sbush` `fork`/`exec` failures during repeated manual test runs. If targeted validation starts looking inconsistent, restart from a fresh guest before assuming a kernel regression.
 - `make qemu` is still the best default when you need fresh `build/disk.img` / `build/test-disk.img` artifacts or want the normal build flow to manage dependencies.
 
 **Alternate fast path for guest-only validation**:

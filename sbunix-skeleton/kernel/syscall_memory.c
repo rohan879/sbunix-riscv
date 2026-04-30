@@ -74,6 +74,8 @@ static int brk_vma_overlap(struct proc *p, uint64_t start, uint64_t end) {
 static int brk_reserved_overlap(struct proc *p, uint64_t start, uint64_t end,
                                 uint64_t target) {
     if (target >= SIGTRAMP_VA ||
+        target >= USER_CLOCK_VA ||
+        ranges_overlap(start, end, USER_CLOCK_VA, USER_CLOCK_VA + PAGE_SIZE) ||
         ranges_overlap(start, end, SIGTRAMP_VA, SIGTRAMP_VA + PAGE_SIZE))
         return 1;
     if (brk_stack_guard_overlap(p, start, end, target))
@@ -161,6 +163,25 @@ static uint64_t mmap_search_base(struct proc *p) {
 static int mmap_reserved_range(struct proc *p, uint64_t start, uint64_t len,
                                uint64_t *next_va) {
   uint64_t end = start + len;
+
+  if (len != 0 && end < start) {
+    if (next_va)
+      *next_va = USER_STACK_TOP;
+    return 1;
+  }
+
+  /* BF: Keep libc's read-only CPU-clock page and signal trampoline out of
+   * all user-controlled mapping operations. */
+  if (ranges_overlap(start, end, USER_CLOCK_VA, USER_CLOCK_VA + PAGE_SIZE)) {
+    if (next_va)
+      *next_va = USER_CLOCK_VA + PAGE_SIZE;
+    return 1;
+  }
+  if (ranges_overlap(start, end, SIGTRAMP_VA, SIGTRAMP_VA + PAGE_SIZE)) {
+    if (next_va)
+      *next_va = SIGTRAMP_VA + PAGE_SIZE;
+    return 1;
+  }
 
   for (uint64_t va = start; va < end; va += PAGE_SIZE) {
     int level = -1;
@@ -713,6 +734,9 @@ long sys_mremap_handler(struct trapframe *tf) {
         return (long)-EINVAL;
     old_size = PGROUNDUP(old_size);
     new_size = PGROUNDUP(new_size);
+    if (!user_range_ok(old_addr, old_size) ||
+        mmap_reserved_range(current_proc, old_addr, old_size, 0))
+        return (long)-EINVAL;
     if (new_size == old_size) return (long)old_addr;
     if (new_size < old_size) {
         /* BF: Shrink — writeback dirty MAP_SHARED pages before unmapping,

@@ -70,7 +70,10 @@ static void alarm_handler(int sig) {
 static unsigned int timeout_for_test(const char *name) {
     if (!name)
         return DEFAULT_TIMEOUT_SEC;
-    if (strcmp(name, "conformance/interfaces/clock_gettime/4-1") == 0 ||
+    /* BF: CPU-bound timing and VM stress cases can be correct but slower
+     * than the default smoke timeout on the emulated guest. */
+    if (strcmp(name, "conformance/interfaces/clock/1-1") == 0 ||
+        strcmp(name, "conformance/interfaces/clock_gettime/4-1") == 0 ||
         strcmp(name, "conformance/interfaces/mmap/10-1") == 0 ||
         strcmp(name, "conformance/interfaces/sigaction/9-1") == 0 ||
         strcmp(name, "conformance/interfaces/sigaction/11-1") == 0)

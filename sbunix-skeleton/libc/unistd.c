@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <stdio.h>
 
+void __clock_after_fork_child(void);
+
 ssize_t read(int fd, void *buf, size_t count) {
     return __syscall_ret(syscall(SYS_read, fd, buf, count));
 }
@@ -59,7 +61,12 @@ int pipe2(int fds[2], int flags) {
 }
 
 pid_t fork(void) {
-    return (pid_t)__syscall_ret(syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0));
+    long ret = __syscall_ret(syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0));
+    /* BF: Kernel fork gives the child a fresh CPU-clock page; reset libc's
+     * matching per-process clock() charge in the child copy as well. */
+    if (ret == 0)
+        __clock_after_fork_child();
+    return (pid_t)ret;
 }
 
 pid_t waitpid(pid_t pid, int *status, int options) {
@@ -296,14 +303,14 @@ int ioctl(int fd, unsigned long request, ...) {
 }
 
 int isatty(int fd) {
-    /* Try TIOCGWINSZ ioctl; if kernel supports it, fd is a tty */
     char buf[8];
     long ret = syscall(SYS_ioctl, fd, 0x5413, buf);
     if (ret == 0)
         return 1;
-    /* Fallback: assume stdin/stdout/stderr are ttys */
-    if (fd >= 0 && fd <= 2)
-        return 1;
+    /* BF: Do not assume stdio fds are terminals; fd validity and tty status
+     * come from the kernel so EBADF and ENOTTY are distinguishable. */
+    if (ret < 0)
+        errno = (int)(-ret);
     return 0;
 }
 
@@ -473,13 +480,17 @@ int ttyname_r(int fd, char *buf, size_t buflen) {
     ssize_t len;
     int n;
 
-    if (!isatty(fd)) {
-        errno = ENOTTY;
-        return ENOTTY;
+    if (!buf) {
+        errno = EINVAL;
+        return EINVAL;
     }
     if (buflen == 0) {
         errno = ERANGE;
         return ERANGE;
+    }
+    if (!isatty(fd)) {
+        int err = errno ? errno : ENOTTY;
+        return err == EBADF ? EBADF : ENOTTY;
     }
 
     n = snprintf(linkpath, sizeof(linkpath), "/proc/self/fd/%d", fd);
@@ -490,15 +501,14 @@ int ttyname_r(int fd, char *buf, size_t buflen) {
 
     len = readlink(linkpath, tmp, sizeof(tmp) - 1);
     if (len < 0) {
-        if (errno == 0)
-            errno = ENOTTY;
-        return errno;
+        int err = errno ? errno : ENOTTY;
+        return err;
     }
     if (len >= (ssize_t)(sizeof(tmp) - 1)) {
         errno = ERANGE;
         return ERANGE;
     }
-    if ((size_t)len + 1 > buflen) {
+    if ((size_t)len >= buflen) {
         errno = ERANGE;
         return ERANGE;
     }

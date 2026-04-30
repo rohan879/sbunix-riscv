@@ -523,13 +523,11 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
             return (long)-EAGAIN;
         }
 
-        /* BF: The global scheduler tick is 1 second, so sleeping all the way
-         * to a near-term deadline can overshoot by almost a full second.
-         * Once we're within one tick of expiry, poll in-kernel instead of
-         * sleeping so 1-second sigtimedwait() timeouts return on time. */
+        /* BF: Deadline-aware timer interrupts now handle near-term waits;
+         * only spin inside one 100 Hz heartbeat to avoid sub-tick overshoot. */
         if (has_timeout) {
             uint64_t now = r_time();
-            if (deadline_ticks > now && deadline_ticks - now <= TIMER_FREQ)
+            if (deadline_ticks > now && deadline_ticks - now <= TIMER_INTERVAL_TICKS)
                 continue;
         }
 
@@ -538,6 +536,7 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
         if (has_timeout) {
             current_proc->sleep_until = deadline_ticks;
             current_proc->waiting_for_uart = 2;
+            timer_reschedule();
         }
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);

@@ -73,24 +73,14 @@ if [ "${ALLOW_DIRTY_VALIDATION:-0}" != "1" ] &&
     exit 1
 fi
 
-echo "==> Building kernel..."
-MAKEFLAGS= make clean && mkdir -p build/kernel build/libc build/rootfs/bin && MAKEFLAGS= make -j"$MAKE_JOBS" BUILD_TESTS=1
+echo "==> Building kernel and disk images..."
+# BF: Build all full-regression artifacts in one make graph.  Test builds
+# slim tarfs binaries into guest /test symlinks; a later separate make would
+# treat those host-broken symlinks as missing binary targets and relink them.
+MAKEFLAGS= make clean
+MAKEFLAGS= make -j"$MAKE_JOBS" BUILD_TESTS=1 build/kernel.elf build/disk.img build/test-disk.img
 if [ $? -ne 0 ]; then
-    echo "FATAL: Kernel build failed"
-    exit 1
-fi
-
-echo "==> Building disk image..."
-make -j"$MAKE_JOBS" build/disk.img
-if [ $? -ne 0 ]; then
-    echo "FATAL: Disk image build failed"
-    exit 1
-fi
-
-echo "==> Building test disk image..."
-make -j"$MAKE_JOBS" BUILD_TESTS=1 build/test-disk.img
-if [ $? -ne 0 ]; then
-    echo "FATAL: Test disk image build failed"
+    echo "FATAL: Build failed"
     exit 1
 fi
 

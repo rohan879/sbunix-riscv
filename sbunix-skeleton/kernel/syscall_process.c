@@ -19,6 +19,7 @@
 #include <tar.h>
 #include <kmalloc.h>
 #include <errno.h>
+#include <user_clock.h>
 
 extern char _tarfs_start[];
 extern char _tarfs_end[];
@@ -46,6 +47,12 @@ int copy_pagetable_cow(struct proc *src_proc, pagetable_t dst, pagetable_t src,
      * Super page PTEs (level-1 leaf, detected by PTE_IS_LEAF) are skipped
      * by advancing VA to the next 2MB boundary instead of 4KB. */
     for (uint64_t va = start; va < end; ) {
+        if (va == USER_CLOCK_VA) {
+            /* BF: The CPU-clock page is lifecycle-managed outside normal
+             * COW so fork gets a fresh clock instead of inheriting CPU time. */
+            va += PAGE_SIZE;
+            continue;
+        }
         pte_t *pte = walk(src, va, 0);
         if (!pte) {
             va += PAGE_SIZE;
@@ -159,6 +166,7 @@ void cleanup_proc_resources(struct proc *p) {
             p->pagetable = kernel_pagetable;
             w_satp(MAKE_SATP(kernel_pagetable));
             sfence_vma();
+            user_clock_unmap(old_pt);
             /* BF: Release PTEs while the saved VMA list is still live so
              * MAP_SHARED writeback and anon rmap cleanup have context. */
             release_user_address_space(old_pt, old_vmas, 1, 1);
@@ -178,8 +186,15 @@ void cleanup_proc_resources(struct proc *p) {
         p->pagetable = kernel_pagetable;
         w_satp(MAKE_SATP(kernel_pagetable));
         sfence_vma();
+        user_clock_unmap(old_pt);
         release_user_address_space(old_pt, old_vmas, 1, 1);
     }
+
+    if (p->user_clock) {
+        user_clock_put(p->user_clock);
+        p->user_clock = NULL;
+    }
+    p->cpu_start_ticks = 0;
 
     /* ---- File descriptors ---- */
     if (p->shared_ft) {
@@ -375,6 +390,8 @@ static void reap_zombie(struct proc *p) {
     p->pending_terminate = 0;
     p->terminate_signal = 0;
     p->in_copy_fault = 0;
+    p->user_clock = NULL;
+    p->cpu_start_ticks = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -465,6 +482,7 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
             if (!spt) goto bad;
             spt->pt = current_proc->pagetable;
             spt->refcount = 1;
+            spt->clock = current_proc->user_clock;
             current_proc->shared_pt = spt;
             current_proc->clone_flags |= CLONE_VM;
             promoted_shared_pt = 1;
@@ -477,6 +495,13 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
             goto bad;
         current_proc->shared_pt->refcount++;
         p->shared_pt = current_proc->shared_pt;
+        /* BF: CLONE_VM/vfork shares one address-space clock mapping.  The
+         * wrapper only borrows the pointer; each proc owns its own ref. */
+        if (p->user_clock)
+            user_clock_put(p->user_clock);
+        p->user_clock = current_proc->shared_pt->clock;
+        user_clock_get(p->user_clock);
+        p->cpu_start_ticks = 0;
     } else {
         /* Traditional COW fork: build independent child page table.
          * NO kernel identity mappings — the trampoline switches satp
@@ -492,6 +517,7 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
         /* Map kernel identity pages into child page table (must be after
          * copy_pagetable_cow so pt[0] exists for MMIO level-1 sharing) */
         if (uvmmap_kernel(new_pt) < 0) goto bad;
+        if (user_clock_map(new_pt, p->user_clock) < 0) goto bad;
 
         /* Deep copy VMA list */
         p->pagetable = new_pt;
@@ -596,10 +622,16 @@ bad:
     if (new_pt) {
         struct vm_area *failed_vmas = p->vma_list;
         p->vma_list = NULL;
+        user_clock_unmap(new_pt);
         release_user_address_space(new_pt, failed_vmas, 0, 1);
     } else {
         vma_free_all(p);
     }
+    if (p->user_clock) {
+        user_clock_put(p->user_clock);
+        p->user_clock = NULL;
+    }
+    p->cpu_start_ticks = 0;
     if (p->shared_ft) {
         p->shared_ft->refcount--;
         p->shared_ft = NULL;

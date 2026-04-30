@@ -10,6 +10,7 @@
 #include <vfs.h>
 #include <proc.h>
 #include <syscall.h>
+#include <user_clock.h>
 
 extern char _tarfs_start[];
 extern char _tarfs_end[];
@@ -70,6 +71,7 @@ int exec(char *path) {
     pagetable_t pagetable;
     uint64_t sz = 0;
     struct trapframe *tf = current_proc->trapframe;
+    struct user_clock_state *new_clock = NULL;
 
     // 1. Find ELF
     elf_tar_header = tar_find_file(_tarfs_start, _tarfs_end, path);
@@ -87,6 +89,11 @@ int exec(char *path) {
      * load, we can discard the new pagetable and keep the old process. */
     pagetable = uvmcreate();
     if (pagetable == 0) return -1;
+    new_clock = user_clock_create();
+    if (!new_clock) {
+        proc_freepagetable(pagetable);
+        return -1;
+    }
 
     /* BF: Save old state so we can restore on failure.  Temporarily swap
      * vma_list to an empty staging list.  Disable SIE while vma_list
@@ -167,6 +174,7 @@ int exec(char *path) {
     // 5. Map trampoline + trapframe pages (NO kernel identity mapping needed --
     //    the trampoline switches satp to kernel_pagetable on trap entry)
     if(uvmmap_kernel(pagetable) < 0) goto bad;
+    if (user_clock_map(pagetable, new_clock) < 0) goto bad;
 
     /* ENH: Map signal trampoline page via extracted helper (replaces inline block) */
     if (map_sigtrampoline(pagetable) < 0) goto bad;
@@ -180,6 +188,8 @@ int exec(char *path) {
     /* BF: Determine shared_pt status before detaching, so we know whether
      * to free the old pagetable later. */
     int old_pt_still_shared = 0;
+    struct user_clock_state *old_clock = current_proc->user_clock;
+    user_clock_stop(current_proc, r_time());
 
     /* Detach from shared pagetable if this is a CLONE_VM thread */
     if (current_proc->shared_pt) {
@@ -223,6 +233,10 @@ int exec(char *path) {
     uint64_t exec_brk = PGROUNDUP(sz);
     current_proc->pagetable = pagetable;
     current_proc->sz = exec_brk;
+    current_proc->user_clock = new_clock;
+    current_proc->cpu_start_ticks = 0;
+    user_clock_start(current_proc, r_time());
+    new_clock = NULL;
 
     // Initialize stack bounds for auto-grow
     current_proc->stack_top = USER_STACK_TOP;
@@ -262,10 +276,14 @@ int exec(char *path) {
      * new user pagetable. */
     w_satp(MAKE_SATP(kernel_pagetable));
     sfence_vma();
-    if (old_pagetable != kernel_pagetable && !old_pt_still_shared)
+    if (old_pagetable != kernel_pagetable && !old_pt_still_shared) {
+        user_clock_unmap(old_pagetable);
         release_user_address_space(old_pagetable, old_vma_list, 1, 1);
-    else
+    } else {
         vma_free_chain(old_vma_list);
+    }
+    if (old_clock)
+        user_clock_put(old_clock);
 
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
@@ -299,6 +317,9 @@ bad:
         current_proc->vma_list = old_vma_list;
         current_proc->sz = old_sz;
         w_sstatus(old_sstatus);
+        user_clock_unmap(pagetable);
+        if (new_clock)
+            user_clock_put(new_clock);
         staged_exec_cleanup(pagetable, staged);
     }
     return -1;
@@ -349,6 +370,12 @@ int exec_vfs(const char *resolved_path) {
     /* BF: Create new pagetable BEFORE destroying old state. */
     pagetable_t pagetable = uvmcreate();
     if (pagetable == 0) {
+        kfree(phdr_buf);
+        goto fail_close;
+    }
+    struct user_clock_state *new_clock = user_clock_create();
+    if (!new_clock) {
+        proc_freepagetable(pagetable);
         kfree(phdr_buf);
         goto fail_close;
     }
@@ -472,6 +499,7 @@ int exec_vfs(const char *resolved_path) {
 
     /* 6. Map kernel entries */
     if (uvmmap_kernel(pagetable) < 0) goto bad_vfs;
+    if (user_clock_map(pagetable, new_clock) < 0) goto bad_vfs;
 
     /* ENH: Map signal trampoline page via extracted helper (replaces inline block) */
     if (map_sigtrampoline(pagetable) < 0) goto bad_vfs;
@@ -484,6 +512,8 @@ int exec_vfs(const char *resolved_path) {
 
     /* BF: Determine shared_pt status before detaching. */
     int old_pt_still_shared = 0;
+    struct user_clock_state *old_clock = current_proc->user_clock;
+    user_clock_stop(current_proc, r_time());
 
     /* Detach from shared state -- AFTER successful load */
     if (current_proc->shared_pt) {
@@ -519,6 +549,10 @@ int exec_vfs(const char *resolved_path) {
     uint64_t exec_brk = PGROUNDUP(sz);
     current_proc->pagetable = pagetable;
     current_proc->sz = exec_brk;
+    current_proc->user_clock = new_clock;
+    current_proc->cpu_start_ticks = 0;
+    user_clock_start(current_proc, r_time());
+    new_clock = NULL;
     current_proc->stack_top = USER_STACK_TOP;
     current_proc->stack_bottom = stack_va;
     current_proc->mmap_base = exec_mmap_base(exec_brk);
@@ -546,10 +580,14 @@ int exec_vfs(const char *resolved_path) {
      * a pagetable that another vfork participant still shares. */
     w_satp(MAKE_SATP(kernel_pagetable));
     sfence_vma();
-    if (old_pagetable != kernel_pagetable && !old_pt_still_shared)
+    if (old_pagetable != kernel_pagetable && !old_pt_still_shared) {
+        user_clock_unmap(old_pagetable);
         release_user_address_space(old_pagetable, old_vma_list, 1, 1);
-    else
+    } else {
         vma_free_chain(old_vma_list);
+    }
+    if (old_clock)
+        user_clock_put(old_clock);
 
     w_satp(MAKE_SATP(pagetable));
     sfence_vma();
@@ -577,6 +615,9 @@ bad_vfs:
         current_proc->vma_list = old_vma_list;
         current_proc->sz = old_sz;
         w_sstatus(old_sstatus);
+        user_clock_unmap(pagetable);
+        if (new_clock)
+            user_clock_put(new_clock);
         staged_exec_cleanup(pagetable, staged);
     }
     if (priv && ops->close) ops->close(mnt->fs_data, priv);

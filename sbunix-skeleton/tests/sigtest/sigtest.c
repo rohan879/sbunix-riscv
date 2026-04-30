@@ -138,11 +138,15 @@ static void test_kill_sigstop_cont(void) {
     pid_t pid = fork();
     if (pid == 0) {
         close(pfd[0]);
-        /* Child: write "A" to signal readiness, then pause().
-         * pause() blocks until a signal is delivered.  SIGSTOP stops us,
-         * then SIGCONT resumes us; pause() returns -1 (EINTR). */
+        /* BF: Signal readiness only after the post-CONT handler is installed.
+         * SIGCONT was removed as the child-release signal because its default
+         * action can resume the process without running a handler; if it
+         * arrives before pause() sleeps, the child can block forever. */
+        got_usr1 = 0;
+        signal(SIGUSR1, usr1_handler);
         write(pfd[1], "A", 1);
-        pause();
+        while (!got_usr1)
+            usleep(1000);
         write(pfd[1], "B", 1);
         close(pfd[1]);
         _exit(0);
@@ -164,6 +168,8 @@ static void test_kill_sigstop_cont(void) {
 
     /* Resume the child */
     kill(pid, SIGCONT);
+    /* Use SIGUSR1, not SIGCONT, as the deterministic post-resume wakeup. */
+    kill(pid, SIGUSR1);
 
     /* Child should now write "B" and exit */
     char buf2[1] = {0};
