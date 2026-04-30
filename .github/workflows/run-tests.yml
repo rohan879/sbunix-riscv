@@ -52,7 +52,7 @@ jobs:
 
           download_deps() {
             cd /tmp
-            wget -nv https://x-access-token:${{ github.token }}@github.com/AdebayoBraimah/CSE506/releases/download/ci-dependencies/os-dep.zip
+            wget --header="Authorization: Bearer ${{ github.token }}" -nv https://github.com/AdebayoBraimah/CSE506/releases/download/ci-dependencies/os-dep.zip
           }
 
           install_apt &
