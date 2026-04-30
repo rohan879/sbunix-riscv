@@ -1,37 +1,48 @@
-name: "PR Comment"
+name: Repost Commit Comments to PR
 
-# Automatically run the setup steps when they are changed to allow for easy validation, and
-# allow manual testing through the repository's "Actions" tab
 on:
-  workflow_dispatch:
   pull_request:
+    types: [opened, synchronize, reopened]
 
 jobs:
-  build:
+  repost-comments:
     runs-on: ubuntu-slim
 
-    # Set the permissions to the lowest permissions possible needed for your steps.
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
 
     steps:
-      - name: Get commit message
-        id: get_commit_message
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data } = await github.rest.repos.getCommit({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: context.payload.pull_request?.head?.sha // For pull_request event
-                        ?? context.payload.merge_group?.head_sha // For merge_group event
-                        ?? context.sha, // For push, workflow_dispatch, or other direct context.sha events
-            });
+      - name: Get latest commit SHA
+        id: sha
+        run: |
+          echo "sha=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
 
-            core.setOutput('value', data?.commit?.message);
-      - name: Comment on pull request with test summary
-        if: ${{ steps.get_commit_message.outputs.value }}
-        uses: mshick/add-pr-comment@v2
-        with:
-          message: ${{ steps.get_commit_message.outputs.value }}
+      - name: Fetch commit comments
+        id: fetch_comments
+        run: |
+          curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/commits/${{ steps.sha.outputs.sha }}/comments \
+            > comments.json
+
+      - name: Filter bot comments
+        id: filter
+        run: |
+          jq -c '.[] | select(.user.login=="github-actions[bot]")' comments.json > bot_comments.json
+          count=$(jq -s 'length' bot_comments.json)
+          echo "count=$count" >> $GITHUB_OUTPUT
+
+      - name: Repost to PR
+        if: steps.filter.outputs.count != '0'
+        run: |
+          pr_number=${{ github.event.pull_request.number }}
+          while IFS= read -r comment; do
+            body=$(echo "$comment" | jq -r '.body')
+            curl -s -X POST \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/${{ github.repository }}/issues/$pr_number/comments \
+              -d "$(jq -n --arg body "$body" '{body: $body}')"
+          done < bot_comments.json
