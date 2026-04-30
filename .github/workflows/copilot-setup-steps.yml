@@ -33,4 +33,4 @@ jobs:
           submodules: true
           fetch-tags: true
       - name: Download dependencies
-        run: cd /tmp && wget https://github.com/stevennyman/os-dep/releases/download/initial/os-dep.zip && unzip os-dep.zip && pwd
+        run: cd /tmp && wget https://x-access-token:${{ github.token }}@github.com/AdebayoBraimah/CSE506/releases/download/ci-dependencies/os-dep.zip && unzip os-dep.zip && pwd

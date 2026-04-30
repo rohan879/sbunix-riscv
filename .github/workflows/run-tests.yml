@@ -17,18 +17,15 @@ jobs:
       issues: write
 
     steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: true
+          fetch-tags: true
       - name: Prepare dependencies
         run: |
           set -euo pipefail
-
-          repo_dir="$GITHUB_WORKSPACE"
-          repo_url="https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git"
-          checkout_ref="${GITHUB_SHA}"
-
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-            repo_url="${{ github.event.pull_request.head.repo.clone_url }}"
-            checkout_ref="${{ github.event.pull_request.head.sha }}"
-          fi
 
           install_apt() {
             sudo apt-get update -qq
@@ -55,20 +52,9 @@ jobs:
 
           download_deps() {
             cd /tmp
-            wget -nv https://github.com/stevennyman/os-dep/releases/download/initial/os-dep.zip
+            wget -nv https://x-access-token:${{ github.token }}@github.com/AdebayoBraimah/CSE506/releases/download/ci-dependencies/os-dep.zip
           }
 
-          clone_repo() {
-            clone_dir="$(mktemp -d /tmp/sbunix-clone.XXXXXX)"
-            git clone --depth 1 --recurse-submodules --shallow-submodules --no-tags "$repo_url" "$clone_dir"
-            cd "$clone_dir"
-            git checkout --force "$checkout_ref"
-            rm -rf "$repo_dir"
-            mv "$clone_dir" "$repo_dir"
-          }
-
-          clone_repo &
-          clone_pid=$!
           install_apt &
           apt_pid=$!
           download_deps &
@@ -79,7 +65,6 @@ jobs:
           cd /tmp
           unzip -q os-dep.zip
           rm os-dep.zip
-          wait "$clone_pid"
           wait "$apt_pid"
       - name: Build OS
         run: |
