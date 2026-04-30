@@ -24,6 +24,9 @@ jobs:
           submodules: true
           fetch-tags: true
       - name: Prepare dependencies
+        env:
+          # Use the default token for the same repo
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: |
           set -euo pipefail
 
@@ -52,7 +55,7 @@ jobs:
 
           download_deps() {
             cd /tmp
-            wget --header="Authorization: Bearer ${{ github.token }}" -nv https://github.com/AdebayoBraimah/CSE506/releases/download/ci-dependencies/os-dep.zip
+            gh release download ci-dependencies --repo AdebayoBraimah/CSE506 --pattern 'os-dep.zip'
           }
 
           install_apt &
