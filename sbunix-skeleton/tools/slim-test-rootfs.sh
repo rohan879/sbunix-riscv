@@ -56,8 +56,10 @@ for path in "$rootfs"/bin/*; do
   name=$(basename "$path")
   # BF: Keep shell entrypoints in tarfs; third-party make recipes exec
   # /bin/sh before a test-disk symlink can safely stand in for sbush.
+  # Keep /bin/echo resident too because realpath canaries assert the
+  # canonical target is /bin/echo, not the slimmed /test/bin/rootfs copy.
   case "$name" in
-    init|sbush|sh|run-tests|run-os-test|run-open-posix-test|run-priority-tests)
+    init|sbush|sh|echo|run-tests|run-os-test|run-open-posix-test|run-priority-tests)
       continue
       ;;
   esac
