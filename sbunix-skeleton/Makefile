@@ -66,6 +66,9 @@ SKIP_BOOT_PRIORITY_TESTS ?= 0
 # start directly at the interactive shell prompt.
 # Example: BUILD_TESTS=1 SKIP_BOOT_TESTS=1 make qemu -j$(nproc)
 SKIP_BOOT_TESTS ?= 0
+# BF: Test builds carry a /test disk, so keep bulky userland payloads there
+# instead of embedding every utility and TCC support archive in kernel tarfs.
+SLIM_TEST_ROOTFS ?= $(if $(BUILD_TESTS),1,0)
 
 -include Makefile.local
 
@@ -169,13 +172,13 @@ $(CORE_TEST_TARGETS): build/testfs-core/bin/%: $$(wildcard tests/$$*/*.c) build/
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Ilibc/include build/libc/crt.S.o tests/$*/*.c build/libc.a -Wl,--gc-sections -o $@
 
-build/testfs-core/.prepared: build/testfs-core/.dirs $(CORE_TEST_TARGETS)
+build/testfs-core/.prepared: build/testfs-core/.dirs $(CORE_TEST_TARGETS) build/rootfs/.prepared
 	@touch $@
 
 # Prepare base rootfs before building os-tests
 # BF: guest-run-tests is embedded in tarfs, so runner edits must rebuild
 # build/rootfs/.prepared and the kernel image that carries it.
-build/rootfs/.prepared: $(USER_BIN) tools/guest-run-tests tools/stage-thirdparty.sh $(ROOTFS_STAGE_INPUTS) $(THIRDPARTY_STAGE_INPUTS)
+build/rootfs/.prepared: $(USER_BIN) tools/guest-run-tests tools/stage-thirdparty.sh tools/slim-test-rootfs.sh $(ROOTFS_STAGE_INPUTS) $(THIRDPARTY_STAGE_INPUTS)
 	mkdir -p build/rootfs
 	rm -rf build/rootfs/bin/os-test build/rootfs/os-test-manifest \
 		build/rootfs/os-test-expect build/rootfs/var/log/os-test \
@@ -202,6 +205,9 @@ endif
 ifdef BUILD_TESTS
 	cp tools/guest-run-tests build/rootfs/bin/run-tests # MODIFIED: added
 	# run-os-test is now built as C binary via $(C_BIN) pattern
+endif
+ifeq ($(SLIM_TEST_ROOTFS),1)
+	tools/slim-test-rootfs.sh build/rootfs build/testfs build/testfs-core
 endif
 	touch $@
 
