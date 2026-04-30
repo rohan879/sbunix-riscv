@@ -59,10 +59,12 @@ jobs:
           }
 
           clone_repo() {
-            rm -rf "$repo_dir"
-            git clone --depth 1 --recurse-submodules --shallow-submodules --no-tags "$repo_url" "$repo_dir"
-            cd "$repo_dir"
+            clone_dir="$(mktemp -d /tmp/sbunix-clone.XXXXXX)"
+            git clone --depth 1 --recurse-submodules --shallow-submodules --no-tags "$repo_url" "$clone_dir"
+            cd "$clone_dir"
             git checkout --force "$checkout_ref"
+            rm -rf "$repo_dir"
+            mv "$clone_dir" "$repo_dir"
           }
 
           clone_repo &
