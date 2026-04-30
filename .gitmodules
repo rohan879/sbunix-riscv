@@ -3,4 +3,4 @@
 	url = https://gitlab.com/sortix/os-test.git
 [submodule "sbunix-skeleton/tests/thirdparty/open-posix-test-suite/posixtest"]
 	path = sbunix-skeleton/tests/thirdparty/open-posix-test-suite/posixtest
-	url = git@github.com:stevennyman/posixtest.git
+	url = https://github.com/stevennyman/posixtest.git
