@@ -13,7 +13,8 @@ jobs:
 
     # Set the permissions to the lowest permissions possible needed for your steps.
     permissions:
-      contents: read
+      contents: write
+      issues: write
 
     steps:
       - name: Checkout submodules
@@ -61,7 +62,52 @@ jobs:
           make clean
           RUN_CI_TESTS=1 make -j$(nproc)
       - name: Boot OS in QEMU and run custom boot tests, Sortix os-test, and open-posix-test suites
+        id: qemu_tests
         run: |
+          set -euo pipefail
           cd sbunix-skeleton/
           source tools/cisourceme.sh
-          RUN_CI_TESTS=1 make qemu
+          RUN_CI_TESTS=1 make qemu 2>&1 | tee /tmp/sbunix-qemu.log
+      - name: Build commit comment body
+        run: |
+          set -euo pipefail
+          log=/tmp/sbunix-qemu.log
+          body="$GITHUB_WORKSPACE/sbunix-commit-comment.md"
+
+          {
+            printf 'SBUnix test results for `%s`\n\n' "${GITHUB_SHA}"
+
+            printf '### Boot tests\n'
+            awk '
+              /=== Summary ===/ { printing=1 }
+              printing { print }
+              /To run Sortix os-test POSIX compliance suite:/ { exit }
+            ' "$log" | sed '$d'
+
+            printf '\n### Sortix os-test\n'
+            awk '
+              /=== Final Results ===/ { count++; if (count == 1) { printing=1 } }
+              printing { print }
+              printing && /^Usage:$/ { exit }
+            ' "$log" | sed '$d'
+
+            printf '\n### Open POSIX test suite\n'
+            awk '
+              /=== Final Results ===/ { count++; if (count == 2) { printing=1 } }
+              printing { print }
+              printing && /^Usage:$/ { exit }
+            ' "$log" | sed '$d'
+          } > "$body"
+
+          cat "$body"
+      - name: Comment on commit with test summary
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: peter-evans/commit-comment@v4
+        with:
+          body-path: /tmp/sbunix-commit-comment.md
+      - name: Comment on pull request with test summary
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: mshick/add-pr-comment@v2
+        with:
+          message-path: /tmp/sbunix-commit-comment.md
+          message-id: sbunix-test-summary
