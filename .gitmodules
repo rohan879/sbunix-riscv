@@ -4,3 +4,6 @@
 [submodule "sbunix-skeleton/tests/thirdparty/open-posix-test-suite/posixtest"]
 	path = sbunix-skeleton/tests/thirdparty/open-posix-test-suite/posixtest
 	url = https://github.com/stevennyman/posixtest.git
+[submodule "sbunix-skeleton/thirdparty/python"]
+	path = sbunix-skeleton/thirdparty/python
+	url = https://github.com/micropython/micropython.git
