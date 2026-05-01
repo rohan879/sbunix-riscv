@@ -6,4 +6,4 @@
 	url = https://github.com/stevennyman/posixtest.git
 [submodule "sbunix-skeleton/thirdparty/python"]
 	path = sbunix-skeleton/thirdparty/python
-	url = https://github.com/micropython/micropython.git
+	url = https://github.com/AdebayoBraimah/micropython.git
