@@ -5,6 +5,7 @@
 #include <string.h>
 #include <vfs.h>
 #include <user_clock.h>
+#include <errno.h>
 
 /* BF: Kernel stack is 2 contiguous pages (8KB).  A single 4KB page
  * overflows during deep syscall call chains (ext2 I/O path), corrupting
@@ -278,8 +279,10 @@ struct proc {
   struct {
     int valid;
     int signum;
+    uint64_t seq;
     uint8_t info[128]; /* raw siginfo_t bytes */
   } sigqueue_buf[NSIGQUEUE];
+  uint64_t sigqueue_seq;
 
   /* BF: Flag set by copyin/copyout fault path to distinguish
    * user-address faults from true kernel bugs during copy operations.
@@ -325,6 +328,83 @@ static inline int signal_is_realtime(int signum) {
 #define K_CLD_STOPPED   5
 #define K_CLD_CONTINUED 6
 
+static inline int signal_queue_has_more(struct proc *p, int signum) {
+    for (int i = 0; i < NSIGQUEUE; i++) {
+        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum)
+            return 1;
+    }
+    return 0;
+}
+
+static inline int signal_queue_enqueue_raw(struct proc *target, int signum,
+                                           const uint8_t info[128]) {
+    if (!signal_is_valid(signum))
+        return -EINVAL;
+
+    int slot = -1;
+    for (int i = 0; i < NSIGQUEUE; i++) {
+        if (!target->sigqueue_buf[i].valid) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0)
+        return -EAGAIN;
+
+    target->sigqueue_seq++;
+    if (target->sigqueue_seq == 0)
+        target->sigqueue_seq = 1;
+    target->sigqueue_buf[slot].signum = signum;
+    target->sigqueue_buf[slot].seq = target->sigqueue_seq;
+    memcpy(target->sigqueue_buf[slot].info, info, 128);
+    target->sigqueue_buf[slot].valid = 1;
+    return 0;
+}
+
+static inline int signal_queue_enqueue_fields(struct proc *target, int signum,
+                                              int32_t si_pid, int32_t si_uid,
+                                              int32_t si_code,
+                                              int32_t si_status) {
+    uint8_t info[128];
+    memset(info, 0, sizeof(info));
+    memcpy(info + 0, &signum, 4);
+    memcpy(info + 4, &(int32_t){0}, 4);
+    memcpy(info + 8, &si_code, 4);
+    memcpy(info + 12, &si_pid, 4);
+    memcpy(info + 16, &si_uid, 4);
+    memcpy(info + 20, &si_status, 4);
+    return signal_queue_enqueue_raw(target, signum, info);
+}
+
+static inline int signal_queue_consume_one(struct proc *p, int signum,
+                                           uint8_t *info_out) {
+    int slot = -1;
+    uint64_t best_seq = 0;
+    for (int i = 0; i < NSIGQUEUE; i++) {
+        if (!p->sigqueue_buf[i].valid || p->sigqueue_buf[i].signum != signum)
+            continue;
+        if (slot < 0 || p->sigqueue_buf[i].seq < best_seq) {
+            slot = i;
+            best_seq = p->sigqueue_buf[i].seq;
+        }
+    }
+    if (slot < 0)
+        return 0;
+    if (info_out)
+        memcpy(info_out, p->sigqueue_buf[slot].info, 128);
+    p->sigqueue_buf[slot].valid = 0;
+    return 1;
+}
+
+static inline void signal_queue_purge_all(struct proc *p, int signum) {
+    for (int i = 0; i < NSIGQUEUE; i++) {
+        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum)
+            p->sigqueue_buf[i].valid = 0;
+    }
+    if (signal_is_valid(signum))
+        p->sig_sender[signum].valid = 0;
+}
+
 /* BF: Size of user-space siginfo_t for copyin/copyout to user buffers.
  * Must match libc/include/signal.h siginfo_t layout (RV64 LP64):
  *   si_signo(4) + si_errno(4) + si_code(4) + si_pid(4)
@@ -342,24 +422,12 @@ static inline void sig_set_pending(struct proc *target, int sig,
                                    int32_t si_code) {
     if (!signal_is_valid(sig)) return;
     if (signal_is_realtime(sig)) {
-        int slot = -1;
-        for (int i = 0; i < NSIGQUEUE; i++) {
-            if (!target->sigqueue_buf[i].valid) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot >= 0) {
-            uint8_t *info = target->sigqueue_buf[slot].info;
-            memset(info, 0, 128);
-            memcpy(info + 0, &sig, 4);
-            memcpy(info + 4, &(int32_t){0}, 4);
-            memcpy(info + 8, &si_code, 4);
-            memcpy(info + 12, &si_pid, 4);
-            memcpy(info + 16, &si_uid, 4);
-            target->sigqueue_buf[slot].signum = sig;
-            target->sigqueue_buf[slot].valid = 1;
-        }
+        /* BF: Realtime signals queue every generated instance.  If the
+         * fixed teaching-OS queue is full, leave the pending bit and
+         * sig_sender fallback below so kill/timer delivery still wakes
+         * the target instead of silently losing the signal. */
+        (void)signal_queue_enqueue_fields(target, sig, si_pid, si_uid,
+                                          si_code, 0);
     }
     /* BF: Only store metadata if signal is not already pending —
      * standard signals coalesce per POSIX, first sender's metadata kept. */
