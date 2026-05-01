@@ -11,6 +11,13 @@ mode=${2:-rootfs}
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 thirdparty_dir=$repo_root/thirdparty
+thirdparty_local_dir=$repo_root/thirdparty-local
+payload_dir=$thirdparty_dir
+stage_thirdparty_local=${STAGE_THIRDPARTY_LOCAL:-0}
+
+if [ "$stage_thirdparty_local" = "1" ] && [ -d "$thirdparty_local_dir" ]; then
+  payload_dir=$thirdparty_local_dir
+fi
 
 if [ -f "$repo_root/tools/sourceme.sh" ]; then
   # The TCC guest sysroot synthesis needs the cross-toolchain path even
@@ -62,24 +69,24 @@ mkdir -p "$dest_root/bin" "$dest_root/usr/lib"
 
 # ENH: Promote the vendored workload binaries into every guest image so the
 # workload tests exercise the same payloads instead of ad hoc manual copies.
-copy_binary "$thirdparty_dir/bin/micropython" "$dest_root/bin/micropython"
-copy_binary "$thirdparty_dir/bin/tcc" "$dest_root/bin/tcc"
-copy_binary "$thirdparty_dir/bin/pdpmake" "$dest_root/bin/pdpmake"
-copy_binary "$thirdparty_dir/bin/busybox" "$dest_root/bin/busybox"
+copy_binary "$payload_dir/bin/micropython" "$dest_root/bin/micropython"
+copy_binary "$payload_dir/bin/tcc" "$dest_root/bin/tcc"
+copy_binary "$payload_dir/bin/pdpmake" "$dest_root/bin/pdpmake"
+copy_binary "$payload_dir/bin/busybox" "$dest_root/bin/busybox"
 
-if [ -f "$thirdparty_dir/bin/pdpmake" ]; then
+if [ -f "$payload_dir/bin/pdpmake" ]; then
   # ENH: Expose the imported make implementation at the conventional guest
   # path so shells and recipes can discover it through PATH without wrappers.
   ln -sfn pdpmake "$dest_root/bin/make"
 fi
 
-if [ -d "$thirdparty_dir/tcc-sysroot" ]; then
+if [ -d "$payload_dir/tcc-sysroot" ]; then
   # ENH: The vendored TCC is rebuilt with /usr/lib/tcc-relative include/lib/crt
   # paths, so promote the matching guest-visible support tree there directly.
   rm -rf "$dest_root/usr/lib/tcc"
   mkdir -p "$dest_root/usr/lib/tcc"
-  copy_tree "$thirdparty_dir/tcc-sysroot/include" "$dest_root/usr/lib/tcc/include"
-  copy_tree "$thirdparty_dir/tcc-sysroot/lib" "$dest_root/usr/lib/tcc/lib"
+  copy_tree "$payload_dir/tcc-sysroot/include" "$dest_root/usr/lib/tcc/include"
+  copy_tree "$payload_dir/tcc-sysroot/lib" "$dest_root/usr/lib/tcc/lib"
 fi
 
 # Some repo snapshots only vendor TCC headers, not the companion lib/
@@ -114,12 +121,12 @@ if [ -d "$dest_root/usr/lib/tcc" ]; then
   strip_guest_archives "$dest_root/usr/lib/tcc/lib"
 fi
 
-if [ -d "$thirdparty_dir/busybox-root" ]; then
+if [ -d "$payload_dir/busybox-root" ]; then
   # ENH: Preserve the BusyBox applet link farm in a dedicated tree so the
   # guest can opt into applet-path validation without clobbering native /bin.
   rm -rf "$dest_root/usr/lib/busybox"
   mkdir -p "$dest_root/usr/lib/busybox"
-  copy_tree "$thirdparty_dir/busybox-root" "$dest_root/usr/lib/busybox"
+  copy_tree "$payload_dir/busybox-root" "$dest_root/usr/lib/busybox"
 fi
 
 # ENH: Record the staging mode for debugging serial logs when workloads fail

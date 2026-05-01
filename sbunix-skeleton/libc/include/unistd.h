@@ -95,7 +95,7 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 
 /* Time */
 unsigned int sleep(unsigned int seconds);
-int          usleep(unsigned int usecs);
+int          usleep(unsigned long usecs);
 unsigned int alarm(unsigned int seconds);
 int          utimes(const char *path, const struct timeval times[2]);
 
@@ -174,7 +174,7 @@ long    fpathconf(int fd, int name);
 int     chown(const char *path, uid_t owner, gid_t group);
 int     fchown(int fd, uid_t owner, gid_t group);
 int     fchdir(int fd);
-unsigned int getpagesize(void);
+int          getpagesize(void);
 char   *getlogin(void);
 int     nice(int inc);
 

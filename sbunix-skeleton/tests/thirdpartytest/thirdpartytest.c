@@ -20,6 +20,7 @@ extern char **environ;
 
 static int g_pass = 0;
 static int g_fail = 0;
+static int g_skip = 0;
 
 #define CHECK(label, cond) do { \
   if (cond) { \
@@ -29,6 +30,11 @@ static int g_fail = 0;
     printf("[FAIL] thirdparty: %s\n", label); \
     g_fail++; \
   } \
+} while (0)
+
+#define SKIP(label, reason) do { \
+  printf("[SKIP] thirdparty: %s (%s)\n", label, reason); \
+  g_skip++; \
 } while (0)
 
 static int read_all(int fd, char *buf, int bufsz)
@@ -109,6 +115,11 @@ static int ensure_dir(const char *path)
   return errno == EEXIST ? 0 : -1;
 }
 
+static int binary_present(const char *path)
+{
+  return access(path, X_OK) == 0;
+}
+
 static void test_micropython(void)
 {
   const char *base = "/mnt/thirdpartytest-mpy";
@@ -132,6 +143,11 @@ static void test_micropython(void)
   char *argv[] = {"/bin/micropython", (char *)script_path, NULL};
   char buf[1024];
   int status = 0;
+
+  if (!binary_present("/bin/micropython")) {
+    SKIP("micropython", "/bin/micropython missing");
+    return;
+  }
 
   unlink(alpha);
   unlink(beta);
@@ -184,6 +200,16 @@ static void test_busybox(void)
   char *rmdir_base_argv[] = {"rmdir", (char *)base, NULL};
   char buf[1024];
   int status = 0;
+
+  if (!binary_present("/bin/busybox") ||
+      !binary_present("/usr/lib/busybox/bin/mv") ||
+      !binary_present("/usr/lib/busybox/bin/mkdir") ||
+      !binary_present("/usr/lib/busybox/bin/ls") ||
+      !binary_present("/usr/lib/busybox/bin/rm") ||
+      !binary_present("/usr/lib/busybox/bin/rmdir")) {
+    SKIP("busybox", "busybox payload missing");
+    return;
+  }
 
   unlink(src);
   unlink(copy);
@@ -295,6 +321,11 @@ static void test_pdpmake(void)
   char *make_argv[] = {"make", "-f", (char *)makefile, "all", NULL};
   int status = 0;
 
+  if (!binary_present("/bin/pdpmake") || !binary_present("/bin/make")) {
+    SKIP("pdpmake", "pdpmake payload missing");
+    return;
+  }
+
   cleanup_make_outputs(base);
   unlink(makefile);
   rmdir(base);
@@ -330,6 +361,11 @@ static void test_tcc(void)
   char *tcc_argv[] = {"tcc", (char *)src, "-o", (char *)bin, NULL};
   char *run_argv[] = {(char *)bin, NULL};
   int status = 0;
+
+  if (!binary_present("/bin/tcc")) {
+    SKIP("tcc", "/bin/tcc missing");
+    return;
+  }
 
   unlink(data);
   unlink(bin);
@@ -434,6 +470,15 @@ static void test_sbush_nested(void)
   };
   int status = 0;
 
+  if (!binary_present("/bin/micropython") ||
+      !binary_present("/bin/busybox") ||
+      !binary_present("/usr/lib/busybox/bin/echo") ||
+      !binary_present("/bin/make") ||
+      !binary_present("/bin/tcc")) {
+    SKIP("subsh", "one or more third-party payloads missing");
+    return;
+  }
+
   unlink(bin);
   unlink(src);
   unlink(marker);
@@ -506,6 +551,7 @@ int main(void)
   test_tcc();
   test_sbush_nested();
 
-  printf("thirdpartytest: %d passed, %d failed\n", g_pass, g_fail);
+  printf("thirdpartytest: %d passed, %d failed, %d skipped\n",
+         g_pass, g_fail, g_skip);
   return g_fail > 0 ? 1 : 0;
 }

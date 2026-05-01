@@ -69,6 +69,41 @@ run_forkmemdiag_postfork_pressure() {
     fi
 }
 
+run_micropython_example() {
+    name=$1
+    script=$2
+    expect=$3
+    outfile=/mnt/micropython-$name.out
+
+    if test ! -x /bin/python; then
+        echo "[SKIP] micropython: $name (/bin/python missing)"
+        return
+    fi
+
+    echo "=== Running Micropython $name ==="
+    /bin/python "$script" > "$outfile" 2>&1
+    set rc $?
+    if test "$rc" = "0"; then
+        :
+    else
+        echo "[FAIL] micropython: $name exited with status $rc"
+        set FAIL $(($FAIL + 1))
+        rm "$outfile"
+        return
+    fi
+
+    grep -q "$expect" "$outfile"
+    set rc $?
+    if test "$rc" = "0"; then
+        echo "[PASS] micropython: $name"
+        set PASS $(($PASS + 1))
+    else
+        echo "[FAIL] micropython: $name missing expected output"
+        set FAIL $(($FAIL + 1))
+    fi
+    rm "$outfile"
+}
+
 echo === C Binary Tests ===
 run_test proctest
 run_test schedtest
@@ -124,6 +159,8 @@ run_test forkreuse
 run_test mempressure_recovery
 run_test lazyreserve
 run_test posix_mem_test
+run_micropython_example hello /home/hello.py "Hello from MicroPython on SBUnix!"
+run_micropython_example test /home/test.py "all tests passed"
 echo === C Binary Tests Done ===
 
 echo "=== Shell Regression Tests ==="

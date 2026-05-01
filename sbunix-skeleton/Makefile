@@ -78,6 +78,7 @@ SKIP_BOOT_TESTS ?= 0
 # BF: Test builds carry a /test disk, so keep bulky userland payloads there
 # instead of embedding every utility and TCC support archive in kernel tarfs.
 SLIM_TEST_ROOTFS ?= $(if $(BUILD_TESTS),1,0)
+STAGE_THIRDPARTY_LOCAL ?= 0
 
 -include Makefile.local
 
@@ -172,11 +173,14 @@ endif
 # local tests/* binaries and intentionally skips Sortix/open-posix payloads.
 CORE_TEST_TARGETS := $(patsubst tests/%,build/testfs-core/bin/%,$(TEST_SRC_DIRS))
 
-# BF: Any staged rootfs or vendored workload change must invalidate the
-# prepared rootfs so build/kernel.elf never reuses a stale tarfs image.
 ROOTFS_STAGE_INPUTS := $(shell find rootfs -mindepth 1 \( -type f -o -type d \) -print 2>/dev/null)
-THIRDPARTY_STAGE_INPUTS := $(shell find thirdparty -mindepth 1 \( -type f -o -type d \) -print 2>/dev/null)
-
+THIRDPARTY_LOCAL_STAGE_INPUTS := $(shell find thirdparty-local -mindepth 1 \( -type f -o -type d \) -print 2>/dev/null)
+ifeq ($(STAGE_THIRDPARTY_LOCAL),1)
+THIRDPARTY_STAGE_INPUTS := $(THIRDPARTY_LOCAL_STAGE_INPUTS)
+else
+THIRDPARTY_STAGE_INPUTS :=
+endif
+ROOTFS_BUILD_MODE := BUILD_TESTS=$(if $(BUILD_TESTS),1,0) RUN_CI_TESTS=$(RUN_CI_TESTS) SKIP_BOOT_PRIORITY_TESTS=$(SKIP_BOOT_PRIORITY_TESTS) SKIP_BOOT_TESTS=$(SKIP_BOOT_TESTS)
 build/testfs-core/.dirs:
 	@mkdir -p build/testfs-core/bin
 	@touch $@
@@ -197,7 +201,14 @@ build/testfs-core/.prepared: build/testfs-core/.dirs $(CORE_TEST_TARGETS) build/
 # The CI qemu step invokes make again after the build step; replacing these
 # targets with guest-only /test symlinks makes make follow dangling host paths
 # and causes linker output failures such as build/rootfs/bin/basename.
-build/rootfs/.prepared: $(USER_BIN) tools/guest-run-tests tools/stage-thirdparty.sh $(ROOTFS_STAGE_INPUTS) $(THIRDPARTY_STAGE_INPUTS)
+.PHONY: FORCE
+
+build/rootfs/.build-mode: FORCE
+	@mkdir -p $(@D)
+	@printf '%s\n' '$(ROOTFS_BUILD_MODE)' > $@.tmp
+	@if ! cmp -s $@.tmp $@ 2>/dev/null; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+build/rootfs/.prepared: $(USER_BIN) tools/guest-run-tests $(ROOTFS_STAGE_INPUTS) build/rootfs/.build-mode
 	mkdir -p build/rootfs
 	rm -rf build/rootfs/bin/os-test build/rootfs/os-test-manifest \
 		build/rootfs/os-test-expect build/rootfs/var/log/os-test \
@@ -208,9 +219,6 @@ build/rootfs/.prepared: $(USER_BIN) tools/guest-run-tests tools/stage-thirdparty
 	cp -a rootfs/. build/rootfs/ # MODIFIED: originally in tarfs
 	ln -sf sbush build/rootfs/bin/sh # MODIFIED: added
 	ln -sf test build/rootfs/bin/[ # MODIFIED: added
-	# ENH: Stage vendored third-party payloads into the normal guest image so
-	# workload validation does not depend on manual post-build copying.
-	tools/stage-thirdparty.sh build/rootfs rootfs
 ifeq ($(SKIP_BOOT_PRIORITY_TESTS),1)
 	@touch build/rootfs/etc/.skip_boot_priority_tests
 else
@@ -235,10 +243,11 @@ endif
 # Slimming is only safe on the tarfs staging copy.  The guest sees these
 # /test symlinks after the test disk is mounted, while host make targets in
 # build/rootfs stay rebuildable real files for repeated CI invocations.
-build/tarfs-rootfs/.prepared: build/rootfs/.prepared tools/slim-test-rootfs.sh build/testfs/.dirs build/testfs-core/.dirs
+build/tarfs-rootfs/.prepared: build/rootfs/.prepared tools/slim-test-rootfs.sh tools/stage-thirdparty.sh build/testfs/.dirs build/testfs-core/.dirs $(THIRDPARTY_STAGE_INPUTS)
 	rm -rf build/tarfs-rootfs
 	mkdir -p build/tarfs-rootfs
 	cp -a build/rootfs/. build/tarfs-rootfs/
+	STAGE_THIRDPARTY_LOCAL=$(STAGE_THIRDPARTY_LOCAL) tools/stage-thirdparty.sh build/tarfs-rootfs rootfs
 ifeq ($(SLIM_TEST_ROOTFS),1)
 	tools/slim-test-rootfs.sh build/tarfs-rootfs build/testfs build/testfs-core
 endif
@@ -311,11 +320,11 @@ build/tarfs.o: build/tarfs-rootfs/.prepared # MODIFIED: originally just : $(USER
 build/kernel.elf: $(KERN_ALL) build/tarfs.o
 	$(LD) -T kernel/kernel.ld $(KERN_ALL) build/tarfs.o -o $@
 
-thirdparty: build/rootfs/.prepared
-	# ENH: Re-stage imported third-party payloads on demand and rebuild tarfs so
-	# iterative workload testing can refresh the guest image with one command.
-	tools/stage-thirdparty.sh build/rootfs rootfs
-	@rm -f build/tarfs.o
+thirdparty: build/libc/crt.S.o build/libc.a
+	$(MAKE) build/rootfs/.prepared
+	$(MAKE) -C thirdparty install
+	STAGE_THIRDPARTY_LOCAL=$(STAGE_THIRDPARTY_LOCAL) tools/stage-thirdparty.sh build/rootfs rootfs
+	@rm -f build/tarfs-rootfs/.prepared build/tarfs.o
 	$(MAKE) build/kernel.elf
 
 build/tools/mkfs: tools/mkfs.c

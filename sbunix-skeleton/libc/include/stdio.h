@@ -19,6 +19,9 @@ typedef long fpos_t;
 #define _IOLBF 1
 #define _IONBF 2
 
+#define _F_READ  0x01
+#define _F_WRITE 0x02
+
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2
@@ -28,7 +31,10 @@ typedef long fpos_t;
 /* FILE stream type */
 typedef struct _FILE {
     int fd;
+    int flags;                    /* thirdparty compat expects _F_READ/_F_WRITE */
     int eof;
+    int err;                      /* thirdparty compat expects this spelling */
+    int ungot;                    /* -1 when no pushed-back character */
     int error;
     int buf_mode;                 /* _IONBF, _IOLBF, or _IOFBF */
     char wbuf[FILE_BUF_SIZE];    /* write buffer */

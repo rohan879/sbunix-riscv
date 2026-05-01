@@ -5,8 +5,15 @@
 #include <time.h>      /* struct timeval, struct timespec */
 #include <sys/types.h>
 
+/* Historical BSD timezone struct used by settimeofday(). */
+struct timezone {
+  int tz_minuteswest;
+  int tz_dsttime;
+};
+
 /* gettimeofday() */
 int gettimeofday(struct timeval *tv, void *tz);
+int settimeofday(const struct timeval *tv, const struct timezone *tz);
 int utimes(const char *path, const struct timeval times[2]);
 
 struct itimerval {

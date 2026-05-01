@@ -16,11 +16,41 @@
 extern void __sbunix_memstream_sync(FILE *stream);
 extern void __sbunix_memstream_close(FILE *stream);
 
+static void __stream_set_error(FILE *stream, int value) {
+    stream->error = value;
+    stream->err = value;
+}
+
+static void __stream_clear_unget(FILE *stream) {
+    stream->unget_char = 0;
+    stream->has_unget = 0;
+    stream->ungot = -1;
+}
+
+static void __stream_set_unget(FILE *stream, int c) {
+    stream->unget_char = c;
+    stream->has_unget = 1;
+    stream->ungot = c;
+}
+
+static void __stream_init(FILE *stream, int fd, int flags, int buf_mode) {
+    stream->fd = fd;
+    stream->flags = flags;
+    stream->eof = 0;
+    stream->err = 0;
+    stream->error = 0;
+    stream->buf_mode = buf_mode;
+    stream->wpos = 0;
+    stream->rpos = 0;
+    stream->rlen = 0;
+    __stream_clear_unget(stream);
+}
+
 /* Static FILE objects for stdin, stdout, stderr
  * BF: Added rpos=0, rlen=0 initialization for new read buffer fields. */
-static FILE __stdin  = { .fd = 0, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0, .rpos = 0, .rlen = 0 };
-static FILE __stdout = { .fd = 1, .eof = 0, .error = 0, .buf_mode = _IOLBF, .wpos = 0, .rpos = 0, .rlen = 0 };
-static FILE __stderr = { .fd = 2, .eof = 0, .error = 0, .buf_mode = _IONBF, .wpos = 0, .rpos = 0, .rlen = 0 };
+static FILE __stdin  = { .fd = 0, .flags = _F_READ, .eof = 0, .err = 0, .ungot = -1, .error = 0, .buf_mode = _IONBF, .wpos = 0, .rpos = 0, .rlen = 0 };
+static FILE __stdout = { .fd = 1, .flags = _F_WRITE, .eof = 0, .err = 0, .ungot = -1, .error = 0, .buf_mode = _IOLBF, .wpos = 0, .rpos = 0, .rlen = 0 };
+static FILE __stderr = { .fd = 2, .flags = _F_WRITE, .eof = 0, .err = 0, .ungot = -1, .error = 0, .buf_mode = _IONBF, .wpos = 0, .rpos = 0, .rlen = 0 };
 
 FILE *stdin  = &__stdin;
 FILE *stdout = &__stdout;
@@ -73,7 +103,7 @@ static int __fflush_stream(FILE *stream) {
     ssize_t r = write(stream->fd, stream->wbuf, stream->wpos);
     stream->wpos = 0;
     if (r < 0) {
-        stream->error = 1;
+        __stream_set_error(stream, 1);
         return EOF;
     }
     return 0;
@@ -88,7 +118,7 @@ int fputc(int c, FILE *stream) {
     if (stream->buf_mode == _IONBF) {
         /* Unbuffered: write immediately */
         ssize_t r = write(stream->fd, &ch, 1);
-        if (r < 0) { stream->error = 1; return EOF; }
+        if (r < 0) { __stream_set_error(stream, 1); return EOF; }
         return ch;
     }
 
@@ -188,6 +218,7 @@ int fgetc(FILE *stream) {
   if (!stream) return EOF;
   if (stream->has_unget) {
     stream->has_unget = 0;
+    stream->ungot = -1;
     return stream->unget_char;
   }
   if (stream->rpos < stream->rlen)
@@ -197,11 +228,11 @@ int fgetc(FILE *stream) {
     /* Unbuffered: single byte read */
     unsigned char c;
     ssize_t n = read(stream->fd, &c, 1);
-    if (n <= 0) { stream->eof = (n == 0); if (n < 0) stream->error = 1; return EOF; }
+    if (n <= 0) { stream->eof = (n == 0); if (n < 0) __stream_set_error(stream, 1); return EOF; }
     return c;
   }
   ssize_t n = read(stream->fd, stream->rbuf, FILE_BUF_SIZE);
-  if (n <= 0) { stream->eof = (n == 0); if (n < 0) stream->error = 1; return EOF; }
+  if (n <= 0) { stream->eof = (n == 0); if (n < 0) __stream_set_error(stream, 1); return EOF; }
   stream->rlen = (int)n;
   stream->rpos = 1;
   return (unsigned char)stream->rbuf[0];
@@ -230,6 +261,7 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
   if (stream->has_unget && done < total) {
     *dst++ = (char)stream->unget_char;
     stream->has_unget = 0;
+    stream->ungot = -1;
     done++;
   }
   /* Drain read buffer */
@@ -241,7 +273,7 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
   while (done < total) {
     if (total - done >= (size_t)FILE_BUF_SIZE) {
       ssize_t n = read(stream->fd, dst, total - done);
-      if (n <= 0) { if (n == 0) stream->eof = 1; else stream->error = 1; break; }
+      if (n <= 0) { if (n == 0) stream->eof = 1; else __stream_set_error(stream, 1); break; }
       dst += n; done += n;
     } else {
       int c = fgetc(stream);
@@ -275,16 +307,9 @@ FILE *fopen(const char *path, const char *mode) {
     for (int i = 0; i < FILE_POOL_SIZE; i++) {
         if (!__file_pool_used[i]) {
             __file_pool_used[i] = 1;
-            __file_pool[i].fd = fd;
-            __file_pool[i].eof = 0;
-            __file_pool[i].error = 0;
-            __file_pool[i].buf_mode = _IOFBF;
-            __file_pool[i].wpos = 0;
-            /* BF: Initialize read buffer fields for buffered reads */
-            __file_pool[i].rpos = 0;
-            __file_pool[i].rlen = 0;
-            __file_pool[i].unget_char = 0;
-            __file_pool[i].has_unget = 0;
+            __stream_init(&__file_pool[i], fd,
+                          (flags == O_RDONLY) ? _F_READ : ((flags == O_WRONLY || flags == (O_WRONLY | O_CREAT | O_TRUNC) || flags == (O_WRONLY | O_CREAT | O_APPEND)) ? _F_WRITE : (_F_READ | _F_WRITE)),
+                          _IOFBF);
             __stream_register(&__file_pool[i]);
             return &__file_pool[i];
         }
@@ -307,16 +332,12 @@ FILE *fdopen(int fd, const char *mode) {
     for (int i = 0; i < FILE_POOL_SIZE; i++) {
         if (!__file_pool_used[i]) {
             __file_pool_used[i] = 1;
-            __file_pool[i].fd = fd;
-            __file_pool[i].eof = 0;
-            __file_pool[i].error = 0;
-            __file_pool[i].buf_mode = buf_mode;
-            __file_pool[i].wpos = 0;
-            /* BF: Initialize read buffer fields for buffered reads */
-            __file_pool[i].rpos = 0;
-            __file_pool[i].rlen = 0;
-            __file_pool[i].unget_char = 0;
-            __file_pool[i].has_unget = 0;
+            int flags = _F_READ;
+            if (mode[0] == 'w' || mode[0] == 'a')
+                flags = _F_WRITE;
+            if (mode[1] == '+' || (mode[1] && mode[2] == '+'))
+                flags = _F_READ | _F_WRITE;
+            __stream_init(&__file_pool[i], fd, flags, buf_mode);
             __stream_register(&__file_pool[i]);
             return &__file_pool[i];
         }
@@ -369,13 +390,18 @@ FILE *freopen(const char *path, const char *mode, FILE *stream) {
     if (fd < 0) return (void *)0;
 
     stream->fd = fd;
+    if (mode[0] == 'r') {
+        stream->flags = (mode[1] == '+') ? (_F_READ | _F_WRITE) : _F_READ;
+    } else if (mode[0] == 'w' || mode[0] == 'a') {
+        stream->flags = (mode[1] == '+') ? (_F_READ | _F_WRITE) : _F_WRITE;
+    }
     stream->eof = 0;
-    stream->error = 0;
+    __stream_set_error(stream, 0);
     stream->wpos = 0;
     /* BF: Reset read buffer state on reopen to avoid stale data */
     stream->rpos = 0;
     stream->rlen = 0;
-    stream->has_unget = 0;
+    __stream_clear_unget(stream);
     return stream;
 }
 
@@ -448,6 +474,7 @@ int fclose(FILE *stream) {
             break;
         }
     }
+    stream->flags = 0;
     return ret;
 }
 
@@ -483,12 +510,12 @@ int feof(FILE *stream) {
 }
 
 int ferror(FILE *stream) {
-    return stream->error;
+    return stream->err;
 }
 
 void clearerr(FILE *stream) {
     stream->eof = 0;
-    stream->error = 0;
+    __stream_set_error(stream, 0);
 }
 
 /* BF: fseek previously did not flush the write buffer or invalidate
@@ -506,7 +533,7 @@ int fseek(FILE *stream, long offset, int whence) {
   }
   /* Invalidate read buffer and ungetc */
   stream->rpos = stream->rlen = 0;
-  stream->has_unget = 0;
+  __stream_clear_unget(stream);
   off_t r = lseek(stream->fd, offset, whence);
   if (r < 0) return -1;
   stream->eof = 0;
@@ -534,10 +561,10 @@ void rewind(FILE *stream) {
   if (!stream) return;
   if (stream->wpos > 0) __fflush_stream(stream);
   stream->rpos = stream->rlen = 0;
-  stream->has_unget = 0;
+  __stream_clear_unget(stream);
   lseek(stream->fd, 0, SEEK_SET);
   stream->eof = 0;
-  stream->error = 0;
+  __stream_set_error(stream, 0);
 }
 
 int sscanf(const char *str, const char *fmt, ...) {
@@ -920,7 +947,7 @@ int setvbuf(FILE *stream, char *buf, int mode, size_t size) {
     if (mode != _IONBF && mode != _IOLBF && mode != _IOFBF)
         return -1;
     __fflush_stream(stream);
-    stream->buf_mode = mode;
+  stream->buf_mode = mode;
     return 0;
 }
 
@@ -932,8 +959,7 @@ void setbuf(FILE *stream, char *buf) {
 
 int ungetc(int c, FILE *stream) {
     if (c == EOF || stream->has_unget) return EOF;
-    stream->unget_char = c;
-    stream->has_unget = 1;
+    __stream_set_unget(stream, c);
     stream->eof = 0;
     return c;
 }

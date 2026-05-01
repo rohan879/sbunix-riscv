@@ -136,7 +136,7 @@ gid_t getgid(void) {
     return (gid_t)syscall(SYS_getgid);
 }
 
-int usleep(unsigned int usecs) {
+int usleep(unsigned long usecs) {
     unsigned long sec = usecs / 1000000;
     unsigned long nsec = (usecs % 1000000) * 1000UL;
     unsigned long req[2] = { sec, nsec };
@@ -577,7 +577,7 @@ int fchdir(int fd) {
     return (int)__syscall_ret(syscall(SYS_fchdir, fd));
 }
 
-unsigned int getpagesize(void) {
+int getpagesize(void) {
     return 4096;
 }
 

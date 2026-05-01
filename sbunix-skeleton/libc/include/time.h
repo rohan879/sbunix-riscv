@@ -101,7 +101,6 @@ size_t     strftime_l(char *s, size_t max, const char *fmt, const struct tm *tm,
                       locale_t locale);
 
 /* CPU time */
-typedef long clock_t;
 #define CLOCKS_PER_SEC 1000000L
 clock_t clock(void);
 
