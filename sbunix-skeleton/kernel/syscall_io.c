@@ -1453,9 +1453,13 @@ long sys_symlinkat_handler(struct trapframe *tf) {
     if (!ktarget)
         return (long)-ENOMEM;
 
-    if (copyinstr(current_proc->pagetable, ktarget, tf->a0, EXT2_BLOCK_SIZE) < 0) {
+    /* BF: A valid user string that exhausts the single-block symlink target
+     * buffer is an overlong pathname, not a bad user pointer. */
+    int tr = copyinstr(current_proc->pagetable, ktarget, tf->a0,
+                       EXT2_BLOCK_SIZE);
+    if (tr < 0) {
         kmfree(ktarget, EXT2_BLOCK_SIZE);
-        return (long)-EFAULT;
+        return (long)(tr == -1 ? -ENAMETOOLONG : -EFAULT);
     }
     if (copyinstr(current_proc->pagetable, klinkpath, tf->a2, sizeof(klinkpath)) < 0)
     {

@@ -1660,7 +1660,7 @@ static int ext2_symlink(void *fs_data, const char *target,
 
     int targetlen = strlen(target);
     if (targetlen == 0 || targetlen >= EXT2_BLOCK_SIZE)
-        return -EINVAL;
+        return targetlen == 0 ? -EINVAL : -ENAMETOOLONG;
 
     char parent_path[256];
     const char *basename = path_parent(linkpath, parent_path, sizeof(parent_path));

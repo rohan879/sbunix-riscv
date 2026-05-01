@@ -296,30 +296,38 @@ static void test_proc_cmdline_has_args(void) {
         return;
     }
 
-    usleep(50000);
-
     char path[64];
     char *pid_str = itoa_simple((int)child);
     snprintf(path, sizeof(path), "/proc/%s/cmdline", pid_str);
 
     char buf[256];
     memset(buf, 0, sizeof(buf));
-    int n = read_file_raw(path, buf, sizeof(buf));
+    int n = -1;
+    int has_prog = 0;
+    int has_arg = 0;
+    for (int attempt = 0; attempt < 20; attempt++) {
+        n = read_file_raw(path, buf, sizeof(buf));
+        has_prog = 0;
+        has_arg = 0;
+        if (n > 0) {
+            for (int i = 0; i < n; ) {
+                int j = i;
+                while (j < n && buf[j] != '\0') j++;
+                if (j > i) {
+                    if (strcmp(buf + i, "/bin/sleep") == 0)
+                        has_prog = 1;
+                    if (strcmp(buf + i, "9") == 0)
+                        has_arg = 1;
+                }
+                i = j + 1;
+            }
+            if (has_prog && has_arg)
+                break;
+        }
+        usleep(50000);
+    }
     CHECK("procfs: proc_cmdline_has_args readable", n > 0);
     if (n > 0) {
-        int has_prog = 0;
-        int has_arg = 0;
-        for (int i = 0; i < n; ) {
-            int j = i;
-            while (j < n && buf[j] != '\0') j++;
-            if (j > i) {
-                if (strcmp(buf + i, "/bin/sleep") == 0)
-                    has_prog = 1;
-                if (strcmp(buf + i, "9") == 0)
-                    has_arg = 1;
-            }
-            i = j + 1;
-        }
         CHECK("procfs: proc_cmdline_has_args has argv0", has_prog);
         CHECK("procfs: proc_cmdline_has_args has argv1", has_arg);
     }
@@ -470,6 +478,42 @@ static void test_proc_fd_inode_unique(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 17. proc_link_sizes_and_errors -- symlink sizes and readlink errno
+ * ---------------------------------------------------------------------- */
+
+static void test_proc_link_sizes_and_errors(void) {
+    struct stat st;
+    char buf[256];
+    int n;
+
+    n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    CHECK("procfs: proc_link_sizes exe readlink", n > 0);
+    if (n > 0) {
+        buf[n] = '\0';
+        CHECK("procfs: proc_link_sizes exe lstat size",
+              lstat("/proc/self/exe", &st) == 0 && st.st_size == n);
+    }
+
+    n = readlink("/proc/self/cwd", buf, sizeof(buf) - 1);
+    CHECK("procfs: proc_link_sizes cwd readlink", n > 0);
+    if (n > 0) {
+        buf[n] = '\0';
+        CHECK("procfs: proc_link_sizes cwd lstat size",
+              lstat("/proc/self/cwd", &st) == 0 && st.st_size == n);
+    }
+
+    errno = 0;
+    n = readlink("/proc/no-such-entry", buf, sizeof(buf));
+    CHECK("procfs: proc_readlink_missing returns -1", n == -1);
+    CHECK("procfs: proc_readlink_missing errno ENOENT", errno == ENOENT);
+
+    errno = 0;
+    n = readlink("/proc/meminfo", buf, sizeof(buf));
+    CHECK("procfs: proc_readlink_file returns -1", n == -1);
+    CHECK("procfs: proc_readlink_file errno EINVAL", errno == EINVAL);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -492,6 +536,7 @@ int main(void) {
     test_proc_child_exe_link();
     test_proc_fd_entries();
     test_proc_fd_inode_unique();
+    test_proc_link_sizes_and_errors();
 
     printf("=== procfstest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

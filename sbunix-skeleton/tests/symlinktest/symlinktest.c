@@ -77,6 +77,9 @@ static void cleanup_all(void) {
     rmdir("/mnt/sl_sat_parent_real");
     unlink("/mnt/sl_sat_parent_sym");
     unlink("/mnt/sl_long_target_link");
+    unlink("/mnt/sl_nofollow_link");
+    unlink("/mnt/sl_nofollow_target");
+    unlink("/mnt/sl_overlong_link");
 }
 
 /* -----------------------------------------------------------------------
@@ -481,6 +484,45 @@ static void test_symlink_empty_paths(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 16. symlink_nofollow_open -- O_NOFOLLOW rejects final symlink
+ * ---------------------------------------------------------------------- */
+
+static void test_symlink_nofollow_open(void) {
+    unlink("/mnt/sl_nofollow_link");
+    unlink("/mnt/sl_nofollow_target");
+
+    write_file("/mnt/sl_nofollow_target", "nofollow", 8);
+    symlink("/mnt/sl_nofollow_target", "/mnt/sl_nofollow_link");
+
+    errno = 0;
+    int fd = open("/mnt/sl_nofollow_link", O_RDONLY | O_NOFOLLOW);
+    CHECK("symlink: symlink_nofollow_open returns -1", fd == -1);
+    CHECK("symlink: symlink_nofollow_open errno ELOOP", errno == ELOOP);
+    if (fd >= 0) close(fd);
+
+    unlink("/mnt/sl_nofollow_link");
+    unlink("/mnt/sl_nofollow_target");
+}
+
+/* -----------------------------------------------------------------------
+ * 17. symlink_overlong_target -- oversized target fails with ENAMETOOLONG
+ * ---------------------------------------------------------------------- */
+
+static void test_symlink_overlong_target(void) {
+    char target[4200];
+    memset(target, 'x', sizeof(target));
+    target[sizeof(target) - 1] = '\0';
+
+    unlink("/mnt/sl_overlong_link");
+    errno = 0;
+    int r = symlink(target, "/mnt/sl_overlong_link");
+    CHECK("symlink: symlink_overlong_target returns -1", r == -1);
+    CHECK("symlink: symlink_overlong_target errno ENAMETOOLONG",
+          errno == ENAMETOOLONG);
+    unlink("/mnt/sl_overlong_link");
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -505,6 +547,8 @@ int main(void) {
     test_symlinkat_parent_symlink();
     test_symlink_long_target();
     test_symlink_empty_paths();
+    test_symlink_nofollow_open();
+    test_symlink_overlong_target();
 
     printf("=== symlinktest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
