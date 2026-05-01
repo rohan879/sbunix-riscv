@@ -59,6 +59,12 @@ The repository vendors a small set of prebuilt third-party workload binaries in
 `sbunix-skeleton/thirdparty/`. These are staged into the guest image by
 `sbunix-skeleton/tools/stage-thirdparty.sh` during rootfs preparation.
 
+The old manually managed third-party payload directory was moved from
+`sbunix-skeleton/thirdparty/` to `sbunix-skeleton/thirdparty-local/`. Usage of
+`thirdparty-local` is deprecated; keep new third-party updates in the active
+`thirdparty` tree unless you are intentionally testing the legacy local staging
+path.
+
 The MicroPython source submodule is pinned to the course-container-compatible
 fork at
 `https://github.com/AdebayoBraimah/micropython/tree/sbunix-course-python`
@@ -151,9 +157,12 @@ The repository includes two POSIX compliance test suites as git submodules:
 
 ### Pulling the Submodules
 
-After cloning the repository, initialize and fetch the submodules:
+After cloning the repository, initialize and fetch the top-level submodules,
+then initialize MicroPython's nested submodules:
 
 ```bash
+git submodule update --init --recursive --depth 1
+cd sbunix-skeleton/thirdparty/python
 git submodule update --init --recursive
 ```
 
