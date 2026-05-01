@@ -753,8 +753,8 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
  * On SBUnix the kernel only handles CLOCK_REALTIME / CLOCK_MONOTONIC
  * via SYS_clock_gettime (113).  Returns 0 on success, -1 on error.
  */
-int clock_gettime(int clk_id, struct timespec *tp) {
-    long ret = syscall(SYS_clock_gettime, clk_id, tp);
+int clock_gettime(clockid_t clockid, struct timespec *tp) {
+    long ret = syscall(SYS_clock_gettime, clockid, tp);
     /* BF: Set errno from negative kernel return.  The clock_getres wrapper
      * below does this correctly; clock_gettime was missing it, causing
      * POSIX tests for invalid clock IDs to fail. */
@@ -798,7 +798,8 @@ time_t time(time_t *t) {
     return ts.tv_sec;
 }
 
-int gettimeofday(struct timeval *tv, void *tz) {
+int gettimeofday(struct timeval *restrict tv,
+                 struct timezone *restrict tz) {
     (void)tz;
     if (!tv) {
         errno = EINVAL;
@@ -812,7 +813,24 @@ int gettimeofday(struct timeval *tv, void *tz) {
     return 0;
 }
 
-int clock_nanosleep(int clockid, int flags,
+int settimeofday(const struct timeval *tv, const struct timezone *tz) {
+    (void)tz;
+    if (!tv) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    struct timespec ts;
+    ts.tv_sec = tv->tv_sec;
+    ts.tv_nsec = tv->tv_usec * 1000L;
+    if (tv->tv_usec < 0 || tv->tv_usec >= 1000000L) {
+        errno = EINVAL;
+        return -1;
+    }
+    return clock_settime(CLOCK_REALTIME, &ts);
+}
+
+int clock_nanosleep(clockid_t clockid, int flags,
                     const struct timespec *req, struct timespec *rem) {
     long ret = syscall(SYS_clock_nanosleep, clockid, flags, req, rem);
     if (ret < 0) { errno = (int)(-ret); return (int)(-ret); }

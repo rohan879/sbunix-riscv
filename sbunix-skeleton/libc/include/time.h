@@ -70,17 +70,16 @@ struct itimerspec {
 #define SIGEV_SIGNAL 0
 
 time_t time(time_t *t);
-int    clock_gettime(int clk_id, struct timespec *tp);
+int    clock_gettime(clockid_t clockid, struct timespec *tp);
 int    clock_getres(clockid_t clockid, struct timespec *res);
 int    clock_settime(clockid_t clockid, const struct timespec *tp);
 int    clock_getcpuclockid(pid_t pid, clockid_t *clock_id);
 int    nanosleep(const struct timespec *req, struct timespec *rem);
-int    gettimeofday(struct timeval *tv, void *tz);
 
 /* Timer flags */
 #define TIMER_ABSTIME 1
 
-int clock_nanosleep(int clockid, int flags,
+int clock_nanosleep(clockid_t clockid, int flags,
                     const struct timespec *req, struct timespec *rem);
 
 struct tm *gmtime(const time_t *timep);
