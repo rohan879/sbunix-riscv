@@ -13,6 +13,7 @@ typedef union sigval {
 #endif
 
 struct sigevent;
+struct timezone;
 
 #if !defined(__timespec_defined) && !defined(_STRUCT_TIMESPEC)
 struct timespec {
@@ -75,7 +76,7 @@ int    clock_getres(clockid_t clockid, struct timespec *res);
 int    clock_settime(clockid_t clockid, const struct timespec *tp);
 int    clock_getcpuclockid(pid_t pid, clockid_t *clock_id);
 int    nanosleep(const struct timespec *req, struct timespec *rem);
-int    gettimeofday(struct timeval *tv, void *tz);
+int    gettimeofday(struct timeval *tv, struct timezone *tz);
 
 /* Timer flags */
 #define TIMER_ABSTIME 1

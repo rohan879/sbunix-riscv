@@ -798,7 +798,7 @@ time_t time(time_t *t) {
     return ts.tv_sec;
 }
 
-int gettimeofday(struct timeval *tv, void *tz) {
+int gettimeofday(struct timeval *tv, struct timezone *tz) {
     (void)tz;
     if (!tv) {
         errno = EINVAL;
