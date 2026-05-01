@@ -37,32 +37,46 @@ int raise(int sig) {
  * Signal set manipulation helpers (operate on a bitmask).
  */
 int sigemptyset(sigset_t *set) {
+    if (!set) {
+        errno = EINVAL;
+        return -1;
+    }
     *set = 0;
     return 0;
 }
 
 int sigfillset(sigset_t *set) {
+    if (!set) {
+        errno = EINVAL;
+        return -1;
+    }
     *set = ~(sigset_t)0;
     return 0;
 }
 
 int sigaddset(sigset_t *set, int signum) {
-    if (signum < 1 || signum >= NSIG)
+    if (!set || signum < 1 || signum >= NSIG) {
+        errno = EINVAL;
         return -1;
+    }
     *set |= ((sigset_t)1 << (signum - 1));
     return 0;
 }
 
 int sigdelset(sigset_t *set, int signum) {
-    if (signum < 1 || signum >= NSIG)
+    if (!set || signum < 1 || signum >= NSIG) {
+        errno = EINVAL;
         return -1;
+    }
     *set &= ~((sigset_t)1 << (signum - 1));
     return 0;
 }
 
 int sigismember(const sigset_t *set, int signum) {
-    if (signum < 1 || signum >= NSIG)
+    if (!set || signum < 1 || signum >= NSIG) {
+        errno = EINVAL;
         return -1;
+    }
     return (*set & ((sigset_t)1 << (signum - 1))) != 0;
 }
 

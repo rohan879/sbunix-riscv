@@ -170,13 +170,15 @@ void (*sigset(int sig, void (*disp)(int)))(int) {
 
   if (disp == SIG_HOLD) {
     sigset_t oldset;
+    if (sigaction(sig, (const struct sigaction *)0, &old) < 0)
+      return SIG_ERR;
     if (sigemptyset(&set) < 0)
       return SIG_ERR;
     if (sigaddset(&set, sig) < 0)
       return SIG_ERR;
     if (sigprocmask(SIG_BLOCK, &set, &oldset) < 0)
       return SIG_ERR;
-    return SIG_HOLD;
+    return sigismember(&oldset, sig) == 1 ? SIG_HOLD : old.sa_handler;
   }
 
   if (sigemptyset(&sa.sa_mask) < 0)
@@ -202,8 +204,11 @@ void (*sigset(int sig, void (*disp)(int)))(int) {
  * pthread_kill delegates to kill() and pthread_sigmask delegates to
  * sigprocmask(). */
 int pthread_kill(pthread_t thread, int sig) {
-  (void)thread;
-  return kill(getpid(), sig);
+  if (sig < 0 || sig >= NSIG)
+    return EINVAL;
+  if (thread != 0 && thread != (pthread_t)getpid())
+    return ESRCH;
+  return kill(getpid(), sig) == 0 ? 0 : errno;
 }
 
 int pthread_sigmask(int how, const sigset_t *restrict set,

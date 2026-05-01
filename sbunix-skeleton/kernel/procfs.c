@@ -772,7 +772,7 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
     {
       int fd = parse_procfs_fd_leaf(p);
       if (fd >= 0 && fd < NOFILE && proc_ofile(target)[fd]) {
-        STAT_LNK((uint64_t)(5000 + self_pid * 16 + fd));
+        STAT_LNK((uint64_t)(5000 + self_pid * NOFILE + fd));
       }
     }
     return -2;
@@ -819,7 +819,7 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
   {
     int fd = parse_procfs_fd_leaf(rest);
     if (fd >= 0 && fd < NOFILE && proc_ofile(target)[fd]) {
-      STAT_LNK((uint64_t)(5000 + pid * 16 + fd));
+      STAT_LNK((uint64_t)(5000 + pid * NOFILE + fd));
     }
   }
 
@@ -868,7 +868,7 @@ static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
   case PROCFS_FDDIR:
     { uint64_t ino=(uint64_t)(400+priv->pid); memcpy(st+8,&ino,8); memcpy(st+16,&dir_mode,4); break; }
   case PROCFS_FDLINK:
-    { uint64_t ino=(uint64_t)(5000 + priv->pid * 16 + priv->fd); memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); break; }
+    { uint64_t ino=(uint64_t)(5000 + priv->pid * NOFILE + priv->fd); memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); break; }
   case PROCFS_EXE_LINK:
     { uint64_t ino=(uint64_t)(2000 + priv->pid * 10 + 1); memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); break; }
   case PROCFS_CWD_LINK:
@@ -975,7 +975,7 @@ static int procfs_readdir(void *fs_data, void *private, char *ubuf,
           if (v == 0) { fdname[ni++] = '0'; }
           else { char tmp[8]; int ti = 0; while (v > 0) { tmp[ti++] = '0' + (v % 10); v /= 10; } while (ti > 0) fdname[ni++] = tmp[--ti]; }
           fdname[ni] = '\0';
-          EMIT_DIRENT(fdname, (uint64_t)(5000 + priv->pid * 16 + fd), 10); /* DT_LNK */
+          EMIT_DIRENT(fdname, (uint64_t)(5000 + priv->pid * NOFILE + fd), 10); /* DT_LNK */
         }
       }
     }

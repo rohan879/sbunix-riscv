@@ -689,11 +689,13 @@ long sys_newfstatat_handler(struct trapframe *tf) {
     if (!tf->a1 || !tf->a2) {
         return (long)-1;
     }
+    int at_flags = (int)tf->a3;
+    if (at_flags & ~(0x100 | 0x1000))
+        return (long)-EINVAL;
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
         return (long)-EFAULT;
     }
-    int at_flags = (int)tf->a3;
     /* BF: AT_EMPTY_PATH stats the dirfd argument directly when the supplied
      * path is a valid empty string. */
     if ((at_flags & 0x1000) && kpath[0] == '\0') {
@@ -1403,6 +1405,8 @@ long sys_readlinkat_handler(struct trapframe *tf) {
     char kpath[128];
     if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
         return (long)-EFAULT;
+    if (kpath[0] == '\0')
+        return (long)-ENOENT;
 
     int bufsiz = (int)tf->a3;
     if (bufsiz <= 0)
@@ -1457,6 +1461,10 @@ long sys_symlinkat_handler(struct trapframe *tf) {
     {
         kmfree(ktarget, EXT2_BLOCK_SIZE);
         return (long)-EFAULT;
+    }
+    if (klinkpath[0] == '\0') {
+        kmfree(ktarget, EXT2_BLOCK_SIZE);
+        return (long)-ENOENT;
     }
 
     char resolved[128];

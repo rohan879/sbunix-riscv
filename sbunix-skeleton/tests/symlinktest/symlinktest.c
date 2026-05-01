@@ -463,6 +463,24 @@ static void test_symlink_long_target(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 15. symlink_empty_paths -- empty link paths fail with ENOENT
+ * ---------------------------------------------------------------------- */
+
+static void test_symlink_empty_paths(void) {
+    char buf[8];
+
+    errno = 0;
+    int r = symlink("target", "");
+    CHECK("symlink: symlink_empty_paths symlink returns -1", r == -1);
+    CHECK("symlink: symlink_empty_paths symlink errno ENOENT", errno == ENOENT);
+
+    errno = 0;
+    int n = readlink("", buf, sizeof(buf));
+    CHECK("symlink: symlink_empty_paths readlink returns -1", n == -1);
+    CHECK("symlink: symlink_empty_paths readlink errno ENOENT", errno == ENOENT);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -486,6 +504,7 @@ int main(void) {
     test_readlink_intermediate_dir_symlink();
     test_symlinkat_parent_symlink();
     test_symlink_long_target();
+    test_symlink_empty_paths();
 
     printf("=== symlinktest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

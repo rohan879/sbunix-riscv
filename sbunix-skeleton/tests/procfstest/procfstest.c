@@ -430,6 +430,46 @@ static void test_proc_fd_entries(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 16. proc_fd_inode_unique -- /proc fd symlink inodes don't collide
+ * ---------------------------------------------------------------------- */
+
+static void test_proc_fd_inode_unique(void) {
+    struct stat st_self;
+    struct stat st_child;
+    int pfd[2];
+
+    if (pipe(pfd) != 0) {
+        CHECK("procfs: proc_fd_inode_unique pipe", 0);
+        return;
+    }
+
+    pid_t child = fork();
+    if (child == 0) {
+        close(pfd[1]);
+        char c;
+        read(pfd[0], &c, 1);
+        close(pfd[0]);
+        _exit(0);
+    }
+
+    close(pfd[0]);
+    char child_path[64];
+    snprintf(child_path, sizeof(child_path), "/proc/%d/fd/0", (int)child);
+
+    int r1 = lstat("/proc/self/fd/0", &st_self);
+    int r2 = lstat(child_path, &st_child);
+    CHECK("procfs: proc_fd_inode_unique lstat works", r1 == 0 && r2 == 0);
+    if (r1 == 0 && r2 == 0) {
+        CHECK("procfs: proc_fd_inode_unique different pids differ",
+              st_self.st_ino != st_child.st_ino);
+    }
+
+    write(pfd[1], "x", 1);
+    close(pfd[1]);
+    waitpid(child, NULL, 0);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -451,6 +491,7 @@ int main(void) {
     test_proc_cmdline_has_args();
     test_proc_child_exe_link();
     test_proc_fd_entries();
+    test_proc_fd_inode_unique();
 
     printf("=== procfstest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

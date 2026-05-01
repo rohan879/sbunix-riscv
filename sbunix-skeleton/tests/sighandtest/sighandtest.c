@@ -466,6 +466,26 @@ static void test_sa_siginfo_sigqueue(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 13. signal_set_helpers_errors — invalid set operations report EINVAL
+ * ---------------------------------------------------------------------- */
+
+static void test_signal_set_helpers_errors(void) {
+    sigset_t set;
+
+    errno = 0;
+    CHECK("signal_set_helpers_errors: sigaddset invalid returns -1",
+          sigaddset(&set, NSIG) == -1);
+    CHECK("signal_set_helpers_errors: sigaddset errno EINVAL",
+          errno == EINVAL);
+
+    errno = 0;
+    CHECK("signal_set_helpers_errors: sigismember NULL returns -1",
+          sigismember(NULL, SIGUSR1) == -1);
+    CHECK("signal_set_helpers_errors: sigismember NULL errno EINVAL",
+          errno == EINVAL);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -484,6 +504,7 @@ int main(void) {
     test_sigaction_sigkill_fails();
     test_sigaction_sigstop_fails();
     test_sa_siginfo_sigqueue();
+    test_signal_set_helpers_errors();
 
     printf("=== sighandtest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
