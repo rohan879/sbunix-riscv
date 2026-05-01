@@ -54,13 +54,24 @@ SBUnix has three test systems:
 # Build with tests
 BUILD_TESTS=1 make
 
-# Run QEMU (tests do NOT auto-run on boot)
-make qemu
+# Run QEMU with tests and skip automatic boot tests
+BUILD_TESTS=1 SKIP_BOOT_TESTS=1 make qemu
 
 # Inside SBUnix shell:
 run-tests          # Run SBUnix regression tests
 run-os-test        # Run Sortix POSIX compliance tests
 run-open-posix-test # Run Open POSIX test suite
+```
+
+When `BUILD_TESTS=1` is enabled, custom regression binaries from `tests/*`
+are staged on the second test disk under `/test/bin`, not `/bin`. Run targeted
+tests by absolute path, for example:
+
+```bash
+/test/bin/sigtest
+/test/bin/sighandtest
+/test/bin/procfstest
+/test/bin/symlinktest
 ```
 
 ### Manual Testing (Original)
@@ -204,15 +215,14 @@ Example: `BF: Fix null pointer in allocproc`
 **Note: In sandboxed environments, tmux may need a custom socket path.** Use `-S /tmp/tmux-debug` instead of the default socket:
 
 ```bash
-# Start a tmux session and run QEMU inside it (use custom socket in sandbox)
+# Start a tmux session and run QEMU through make with the toolchain environment.
+# Sourcing tools/snsourceme.sh inside tmux is important; otherwise make may fail
+# with missing riscv64-unknown-elf-* tools even if the outer shell is configured.
 rm -f /tmp/tmux-debug 2>/dev/null
 tmux -S /tmp/tmux-debug new-session -d -s qemu \
-  "export PATH=/home/steven/College/Graduate_Spring_2026/CSE506/riscv-toolchain/bin:/home/steven/College/Graduate_Spring_2026/CSE506/qemu/bin:\$PATH && \
-   cd /home/steven/College/Graduate_Spring_2026/CSE506/CSE506/sbunix-skeleton && \
-   qemu-system-riscv64 -machine virt -bios default -kernel build/kernel.elf \
-   -drive file=build/disk.img,format=raw,if=none,id=hd0 \
-   -device virtio-blk-pci-non-transitional,drive=hd0 \
-   -nographic 2>&1; bash"
+  "cd /home/steven/College/Graduate_Spring_2026/CSE506/CSE506/sbunix-skeleton && \
+   source tools/snsourceme.sh && \
+   BUILD_TESTS=1 SKIP_BOOT_TESTS=1 make qemu -j\$(nproc); bash"
 
 # Wait for boot (~10s including build), then capture screen
 sleep 10
@@ -223,9 +233,6 @@ tmux -S /tmp/tmux-debug capture-pane -t qemu -p | tail -5
 tmux -S /tmp/tmux-debug send-keys -t qemu "ls" Enter
 sleep 2
 tmux -S /tmp/tmux-debug capture-pane -t qemu -p | tail -10
-
-# To include test disk image (for /test access):
-# Add: -drive file=build/test-disk.img,format=raw,if=none,id=hd1 -device virtio-blk-pci-non-transitional,drive=hd1
 
 # Exit cleanly
 tmux -S /tmp/tmux-debug send-keys -t qemu "poweroff" Enter
@@ -242,10 +249,14 @@ tmux -S /tmp/tmux-debug kill-session -t qemu
 - Kernel ELF: `build/kernel.elf` (entry point `0x80200000`)
 - Do NOT pipe stdin/stdout to QEMU without a real tty; use tmux
 - `make qemu` is still the best default when you need fresh `build/disk.img` / `build/test-disk.img` artifacts or want the normal build flow to manage dependencies.
+- `BUILD_TESTS=1 make qemu` rebuilds and attaches `build/test-disk.img`, so `/test/bin/...` is available. Without `BUILD_TESTS=1`, only the normal rootfs is available and commands like `sigtest` will not be found.
+- Rebuilding `build/test-disk.img` can be slow because it may rebuild/stage third-party test suites and a multi-GB ext2 image. If you only changed kernel/libc/rootfs code and the test disk is already current enough, prefer the direct-launch fast path below.
+- After editing custom regression tests under `tests/*`, rebuild the affected binary and test disk before guest validation, e.g. `BUILD_TESTS=1 make build/testfs/bin/sighandtest build/test-disk.img -j$(nproc)`.
 
 **Alternate fast path for guest-only validation**:
 - If `build/kernel.elf`, `build/disk.img`, and `build/test-disk.img` are already up to date, launching QEMU directly from tmux is much faster than rerunning `make qemu`.
 - This is especially useful for repeated targeted guest checks after kernel-only edits or when `make qemu` would otherwise spend time rebuilding the large test disk.
+- This path does not rebuild anything. Use it only after a successful `make` or when you intentionally want to reuse existing images.
 - Example direct launch:
 ```bash
 rm -f /tmp/tmux-debug 2>/dev/null
@@ -275,12 +286,13 @@ Boot-test control flags in `make qemu`:
 - `SKIP_BOOT_TESTS=1` currently works by dropping `/etc/.skip_boot_tests` into tarfs during the rootfs-prep step. Rebuilding only `build/disk.img` is not enough; the updated tarfs must be present in `build/kernel.elf`.
 - When driving guest tests through `sbush` from tmux, avoid long chained command lines; truncated paths can produce misleading `exec failed` results.
 - For isolated third-party regressions, prefer one guest command per `tmux send-keys` call and capture after each command rather than batching several long `/test/bin/...` paths together.
+- For focused custom regression checks, send `/test/bin/<name>` explicitly. Do not assume test binaries are in `PATH`.
 
 To run test suites from the shell prompt:
 ```
 run-tests          # SBUnix regression tests (C tests + shell integration tests)
-run-os-test        # All 1,103 Sortix POSIX compliance tests (dynamically discovered)
-run-open-posix-test # All 423 compiled Open POSIX tests (2,044 in suite, 1,621 skipped)
+run-os-test        # All compiled Sortix POSIX compliance tests (dynamically discovered)
+run-open-posix-test # All compiled Open POSIX tests from /test/open-posix-test-manifest
 ```
 
 **Parallel building**: Use `BUILD_TESTS=1 make -j16` for 16-way parallel os-test compilation (reduces build time to ~2-3 minutes on multi-core systems).
@@ -364,7 +376,7 @@ BUILD_TESTS=1 make
 ```
 
 os-test build:
-- **Results**: 1,103 tests compile successfully out of 5,301 total (21% success rate)
+- **Recent result**: 4,709 tests compile successfully, 945 skipped for missing features.
 
 open-posix build:
-- **Results**: 423 tests compile successfully out of 2,044 total (21% success rate)
+- **Recent result**: 1,030 tests compile successfully, 1,014 skipped for missing features.
