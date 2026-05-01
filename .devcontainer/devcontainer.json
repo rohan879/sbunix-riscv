@@ -1,5 +1,6 @@
 {
   "postCreateCommand": "bash .devcontainer/setup.sh",
+  "waitFor": "postCreateCommand",
   "customizations": {
     "vscode": {
       "extensions": [
