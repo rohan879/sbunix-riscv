@@ -73,10 +73,10 @@ jobs:
           cd sbunix-skeleton/
           pwd
           source tools/cisourceme.sh
-          cd thirdparty/python
-          git apply ../python-sbunix.patch
-          cd ../..
           make clean
+          cd thirdparty
+          make install -j$(nproc)
+          cd ..
           RUN_CI_TESTS=1 make -j$(nproc)
       - name: Boot OS in QEMU and run custom boot tests, Sortix os-test, and open-posix-test suites
         id: qemu_tests
