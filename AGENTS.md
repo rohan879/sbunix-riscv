@@ -252,6 +252,7 @@ tmux -S /tmp/tmux-debug kill-session -t qemu
 - `BUILD_TESTS=1 make qemu` rebuilds and attaches `build/test-disk.img`, so `/test/bin/...` is available. Without `BUILD_TESTS=1`, only the normal rootfs is available and commands like `sigtest` will not be found.
 - Rebuilding `build/test-disk.img` can be slow because it may rebuild/stage third-party test suites and a multi-GB ext2 image. If you only changed kernel/libc/rootfs code and the test disk is already current enough, prefer the direct-launch fast path below.
 - After editing custom regression tests under `tests/*`, rebuild the affected binary and test disk before guest validation, e.g. `BUILD_TESTS=1 make build/testfs/bin/sighandtest build/test-disk.img -j$(nproc)`.
+- After editing libc, targeted third-party test executables may not relink unless their testfs binaries are rebuilt. For Open POSIX regressions, rebuild the relevant targets and test disk before QEMU validation, e.g. `BUILD_TESTS=1 make build/testfs/bin/open-posix-test/conformance/interfaces/sigset/6-1 build/testfs/bin/open-posix-test/conformance/interfaces/sigset/7-1 build/testfs/bin/open-posix-test/conformance/interfaces/sigset/8-1 build/test-disk.img -j$(nproc)`.
 
 **Alternate fast path for guest-only validation**:
 - If `build/kernel.elf`, `build/disk.img`, and `build/test-disk.img` are already up to date, launching QEMU directly from tmux is much faster than rerunning `make qemu`.
