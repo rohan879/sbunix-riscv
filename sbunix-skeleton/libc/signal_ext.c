@@ -170,15 +170,13 @@ void (*sigset(int sig, void (*disp)(int)))(int) {
 
   if (disp == SIG_HOLD) {
     sigset_t oldset;
-    if (sigaction(sig, (const struct sigaction *)0, &old) < 0)
-      return SIG_ERR;
     if (sigemptyset(&set) < 0)
       return SIG_ERR;
     if (sigaddset(&set, sig) < 0)
       return SIG_ERR;
     if (sigprocmask(SIG_BLOCK, &set, &oldset) < 0)
       return SIG_ERR;
-    return sigismember(&oldset, sig) == 1 ? SIG_HOLD : old.sa_handler;
+    return SIG_HOLD;
   }
 
   if (sigemptyset(&sa.sa_mask) < 0)
