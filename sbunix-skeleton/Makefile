@@ -175,10 +175,14 @@ CORE_TEST_TARGETS := $(patsubst tests/%,build/testfs-core/bin/%,$(TEST_SRC_DIRS)
 
 ROOTFS_STAGE_INPUTS := $(shell find rootfs -mindepth 1 \( -type f -o -type d \) -print 2>/dev/null)
 THIRDPARTY_LOCAL_STAGE_INPUTS := $(shell find thirdparty-local -mindepth 1 \( -type f -o -type d \) -print 2>/dev/null)
+THIRDPARTY_MICROPYTHON_BIN := thirdparty/python/ports/unix/build-minimal/micropython
 ifeq ($(STAGE_THIRDPARTY_LOCAL),1)
 THIRDPARTY_STAGE_INPUTS := $(THIRDPARTY_LOCAL_STAGE_INPUTS)
 else
 THIRDPARTY_STAGE_INPUTS :=
+endif
+ifneq ($(wildcard $(THIRDPARTY_MICROPYTHON_BIN)),)
+THIRDPARTY_STAGE_INPUTS += $(THIRDPARTY_MICROPYTHON_BIN)
 endif
 ROOTFS_BUILD_MODE := BUILD_TESTS=$(if $(BUILD_TESTS),1,0) RUN_CI_TESTS=$(RUN_CI_TESTS) SKIP_BOOT_PRIORITY_TESTS=$(SKIP_BOOT_PRIORITY_TESTS) SKIP_BOOT_TESTS=$(SKIP_BOOT_TESTS)
 build/testfs-core/.dirs:

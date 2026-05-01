@@ -88,6 +88,7 @@ python: python-patch $(DUMMY_OBJ) $(COMPAT_OBJ) $(SETJMP_OBJ)
 python-install: python
 	@mkdir -p $(abspath ../build/rootfs/bin) $(abspath ../build/rootfs/home)
 	cp $(PYTHON_DIR)/build-minimal/micropython $(abspath ../build/rootfs/bin/python)
+	cp $(PYTHON_DIR)/build-minimal/micropython $(abspath ../build/rootfs/bin/micropython)
 	cp python-examples/*.py $(abspath ../build/rootfs/home/)
 
 python-clean:

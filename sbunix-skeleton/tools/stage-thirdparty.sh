@@ -52,6 +52,22 @@ copy_if_exists() {
   fi
 }
 
+copy_micropython_payload() {
+  local src=""
+  if [ -f "$payload_dir/bin/micropython" ]; then
+    src="$payload_dir/bin/micropython"
+  elif [ -f "$thirdparty_dir/python/ports/unix/build-minimal/micropython" ]; then
+    # ENH: Let a source-built MicroPython survive root build cleanups by
+    # staging the binary from the thirdparty source tree into each image.
+    src="$thirdparty_dir/python/ports/unix/build-minimal/micropython"
+  fi
+
+  if [ -n "$src" ]; then
+    install -D -m 0755 "$src" "$dest_root/bin/micropython"
+    install -D -m 0755 "$src" "$dest_root/bin/python"
+  fi
+}
+
 strip_guest_archives() {
   local dir=$1
   if [ ! -d "$dir" ] || ! command -v riscv64-unknown-elf-strip >/dev/null 2>&1; then
@@ -69,7 +85,7 @@ mkdir -p "$dest_root/bin" "$dest_root/usr/lib"
 
 # ENH: Promote the vendored workload binaries into every guest image so the
 # workload tests exercise the same payloads instead of ad hoc manual copies.
-copy_binary "$payload_dir/bin/micropython" "$dest_root/bin/micropython"
+copy_micropython_payload
 copy_binary "$payload_dir/bin/tcc" "$dest_root/bin/tcc"
 copy_binary "$payload_dir/bin/pdpmake" "$dest_root/bin/pdpmake"
 copy_binary "$payload_dir/bin/busybox" "$dest_root/bin/busybox"
