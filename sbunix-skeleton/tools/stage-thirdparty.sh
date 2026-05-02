@@ -66,6 +66,11 @@ copy_micropython_payload() {
     install -D -m 0755 "$src" "$dest_root/bin/micropython"
     install -D -m 0755 "$src" "$dest_root/bin/python"
   fi
+
+  if [ -d "$thirdparty_dir/python-examples" ]; then
+    mkdir -p "$dest_root/home"
+    cp -a "$thirdparty_dir/python-examples"/. "$dest_root/home"/
+  fi
 }
 
 strip_guest_archives() {
