@@ -363,15 +363,12 @@ void proc_force_terminate_wake(struct proc *target, int sig) {
     if (!signal_is_valid(sig))
         sig = SIGKILL;
 
-    /* BF: A sender may request fatal termination, but cleanup has to run
-     * later in the dying process context.  Mark the request, make SIGKILL
-     * deliverable, and wake the target so its own syscall/trap return path
-     * can release resources before publishing a zombie. */
-    if (target == current_proc) {
-        proc_exit_current(128 + sig, sig);
-        return;
-    }
-
+    /* BF: Fatal self-signals must also use deferred teardown.  Exiting
+     * synchronously here lets kill(-pgid, SIGKILL) terminate the sender
+     * in the middle of the proc-table walk, so later group members never
+     * get marked.  Queue the termination request first; the current
+     * syscall/trap return path will notice pending_terminate and exit
+     * after the full delivery loop completes. */
     target->pending_terminate = 1;
     target->terminate_signal = sig;
     target->exit_status = 128 + sig;
