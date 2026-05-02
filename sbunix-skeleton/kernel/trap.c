@@ -14,6 +14,7 @@
 #include <mm.h>
 #include <rtc.h>
 #include <user_clock.h>
+#include <shared_mapping.h>
 /* RF: New headers for trap.c modular decomposition */
 #include <syscall_handlers.h>
 #include <trap_internal.h>
@@ -1031,6 +1032,103 @@ void syscall_init(void) {
     syscall_table[SYS_inotify_rm_watch]  = sys_inotify_rm_watch_handler;
 }
 
+static struct vm_area *stack_vma_for(struct proc *p) {
+    struct vm_area *v;
+
+    if (!p)
+        return 0;
+    for (v = p->vma_list; v; v = v->next) {
+        if (v->flags & VMA_STACK)
+            return v;
+    }
+    return 0;
+}
+
+static int stack_growth_conflicts(struct proc *p, uint64_t new_start,
+                                  uint64_t old_bottom) {
+    uint64_t guard_start = new_start > PAGE_SIZE ? new_start - PAGE_SIZE : 0;
+    uint64_t heap_top;
+    struct vm_area *v;
+
+    if (!p)
+        return 1;
+    heap_top = PGROUNDUP(p->sz);
+    /* BF: Keep a one-page guard between heap and stack growth.  brk uses
+     * the same policy in the opposite direction, so neither side can win
+     * a collision race by publishing metadata first. */
+    if (heap_top > new_start || new_start - heap_top < PAGE_SIZE)
+        return 1;
+
+    for (v = p->vma_list; v; v = v->next) {
+        if (v->flags & VMA_STACK)
+            continue;
+        if (v->end <= guard_start || v->start >= old_bottom)
+            continue;
+        return 1;
+    }
+    return 0;
+}
+
+static int grow_user_stack(struct proc *p, uint64_t fault_va) {
+    struct vm_area *stk_vma = stack_vma_for(p);
+    uint64_t va = PGROUNDDOWN(fault_va);
+    uint64_t old_bottom;
+    uint64_t stack_floor;
+    uint64_t mapped_start;
+
+    if (!p || !stk_vma || p->stack_top == 0 || p->stack_bottom == 0)
+        return -1;
+    if (va >= p->stack_bottom || va >= p->stack_top)
+        return -1;
+    stack_floor = p->stack_top > 256 * PAGE_SIZE
+                ? p->stack_top - 256 * PAGE_SIZE
+                : 0;
+    if (va < stack_floor)
+        return -1;
+
+    old_bottom = p->stack_bottom;
+    if (stack_growth_conflicts(p, va, old_bottom))
+        return -1;
+
+    /* BF: Publish the expanded stack VMA before installing PTEs so any
+     * copy/rmap helper invoked during mapping sees the correct stack range.
+     * Rollback below restores both metadata fields if allocation fails. */
+    p->stack_bottom = va;
+    stk_vma->start = va;
+    mapped_start = old_bottom;
+
+    while (mapped_start > va) {
+        uint64_t page_va = mapped_start - PAGE_SIZE;
+        char *pg = kalloc();
+        if (!pg)
+            goto rollback;
+        memset(pg, 0, PAGE_SIZE);
+        if (mappages(p->pagetable, page_va, PAGE_SIZE, (uint64_t)pg,
+                     PTE_R | PTE_W | PTE_U) < 0) {
+            kfree(pg);
+            goto rollback;
+        }
+        mapped_start = page_va;
+        if (stk_vma->anon_vma) {
+            struct page *stk_pg = virt_to_page(pg);
+            if (stk_pg)
+                page_add_anon_rmap(stk_pg, stk_vma, page_va);
+        }
+    }
+
+    asm volatile("sfence.vma %0, zero" : : "r"(va));
+    return 0;
+
+rollback:
+    if (mapped_start < old_bottom) {
+        uvmunmap_proc(p, p->pagetable, mapped_start, old_bottom - mapped_start);
+        sfence_vma();
+    }
+    p->stack_bottom = old_bottom;
+    stk_vma->start = old_bottom;
+    return -1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Main trap handler                                                    */
 /* ------------------------------------------------------------------ */
@@ -1040,6 +1138,13 @@ void trap_handler(struct trapframe *tf) {
     unsigned long stval = r_stval();
     unsigned long sstatus = r_sstatus();
     int from_user = (sstatus & SSTATUS_SPP) == 0;
+
+    if (current_proc && from_user) {
+        /* BF: trap.S switches to kernel_pagetable before C, so the saved
+         * frame must carry the process root that trap_restore will install
+         * at the final return to U-mode. */
+        tf->user_satp = MAKE_SATP(current_proc->pagetable);
+    }
 
     if (cause & SCAUSE_INTERRUPT) {
         if (cause == SCAUSE_S_TIMER_INT) {
@@ -1090,38 +1195,10 @@ void trap_handler(struct trapframe *tf) {
                 }
             }
 
-            /* --- Stack auto-grow (any page fault near current stack) --- */
-            if (from_user && current_proc && current_proc->stack_top > 0 &&
-                stval >= current_proc->stack_bottom - 256 * PAGE_SIZE &&
-                stval < current_proc->stack_top) {
-                uint64_t va = PGROUNDDOWN(stval);
-                int grew = 0;
-                while (current_proc->stack_bottom > va) {
-                    current_proc->stack_bottom -= PAGE_SIZE;
-                    char *pg = kalloc();
-                    if (!pg)
-                        break;
-                    memset(pg, 0, PAGE_SIZE);
-                    if (mappages(current_proc->pagetable, current_proc->stack_bottom,
-                                 PAGE_SIZE, (uint64_t)pg, PTE_R | PTE_W | PTE_U) < 0) {
-                        kfree(pg);
-                        break;
-                    }
-                    /* BF: Register stack page in anon rmap so reclaim can
-                     * track and evict stack pages under memory pressure. */
-                    {
-                      struct vm_area *stk_vma = vma_find(current_proc, current_proc->stack_bottom);
-                      if (stk_vma && stk_vma->anon_vma) {
-                        struct page *stk_pg = virt_to_page(pg);
-                        if (stk_pg) page_add_anon_rmap(stk_pg, stk_vma, current_proc->stack_bottom);
-                      }
-                    }
-                    grew = 1;
-                }
-                if (grew && current_proc->stack_bottom <= va) {
-                    asm volatile("sfence.vma %0, zero" : : "r"(va));
-                    return; /* resume -- page is now mapped */
-                }
+            /* --- Stack auto-grow (fault below current stack) --- */
+            if (from_user && current_proc &&
+                grow_user_stack(current_proc, stval) == 0) {
+                return; /* resume -- page is now mapped */
             }
 
             /* --- Demand paging for VMA regions --- */
@@ -1180,13 +1257,24 @@ void trap_handler(struct trapframe *tf) {
                             }
                         }
 
-                        /* Page not yet allocated — demand-page it */
-                        char *pg = kalloc();
-                        if (pg) {
-                            memset(pg, 0, PAGE_SIZE);
-
-                            /* File-backed VMA: read page content from file */
-                            if (fvma->file && fvma->file->ops && fvma->file->ops->read) {
+                        /* Page not yet allocated — demand-page it.  Shared
+                         * mappings resolve through the global slot registry
+                         * so fork-before-touch and separate opens see the
+                         * same physical page. */
+                        char *pg = NULL;
+                        int pg_ready = 0;
+                        if (fvma->shared) {
+                            pg_ready = shared_mapping_map_page(fvma, va, &pg) == 0;
+                        } else {
+                            pg = kalloc();
+                            if (pg) {
+                                memset(pg, 0, PAGE_SIZE);
+                                pg_ready = 1;
+                            }
+                        }
+                        if (pg_ready) {
+                            /* File-backed private VMA: read page content from file */
+                            if (!fvma->shared && fvma->file && fvma->file->ops && fvma->file->ops->read) {
                                 uint64_t file_off = fvma->file_offset + (va - fvma->start);
                                 int64_t foff = (int64_t)file_off;
                                 fvma->file->ops->read(fvma->file->fs_data,
@@ -1199,12 +1287,14 @@ void trap_handler(struct trapframe *tf) {
                             if (mappages(current_proc->pagetable, va, PAGE_SIZE,
                                          (uint64_t)pg, perm) != 0) {
                                 /* BF: A failed PTE install leaves the new
-                                 * frame unattached; free it before killing
-                                 * the process to avoid retry leaks under
-                                 * allocation pressure. */
+                             * frame unattached; free it before killing
+                             * the process to avoid retry leaks under
+                             * allocation pressure. */
                                 kfree(pg);
                                 goto pagefault_kill;
                             }
+                            if (cause == SCAUSE_STORE_PAGE_FAULT && fvma->shared)
+                                shared_slot_mark_dirty(fvma, va);
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
                             if ((perm & PTE_X) || cause == SCAUSE_INST_PAGE_FAULT)
                                 asm volatile("fence.i");
@@ -1242,7 +1332,8 @@ void trap_handler(struct trapframe *tf) {
                         if (need) {
                             uint64_t rpa = PTE2PA(*pte);
                             int rref = page_ref_get(rpa);
-                            if (rref > 1 && (cause == SCAUSE_STORE_PAGE_FAULT)) {
+                            if (rref > 1 && (cause == SCAUSE_STORE_PAGE_FAULT) &&
+                                !(fvma->flags & MAP_SHARED)) {
                                 /* Page is shared (ref > 1) but lost its
                                  * PTE_COW flag. Must COW-copy before
                                  * granting write. */
@@ -1319,38 +1410,10 @@ pagefault_kill:
                 while(1) {}
             }
             if (current_proc) {
-                /* Suppress page-fault noise when the fault is a side-effect of
-                 * an ongoing signal kill.  Check three conditions:
-                 *   1. Process has a SIGSEGV handler (it will handle the fault).
-                 *   2. Process was already killed by a signal (killed_by_signal
-                 *      set by deliver_signal or kill_deliver).
-                 *   3. Process has a pending unblocked fatal signal whose default
-                 *      action is terminate — the fault is just a consequence of
-                 *      that pending kill (e.g., SIGINT/SIGPIPE with SIG_DFL). */
-                struct kern_sigaction *sa = proc_sigactions(current_proc);
-                int has_handler = (sa[SIGSEGV].handler != 0 && sa[SIGSEGV].handler != 1);
-
-                int suppress = has_handler || current_proc->killed_by_signal ||
-                               current_proc->pending_terminate;
-                if (!suppress) {
-                    /* Check for any pending unblocked fatal signal */
-                    uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
-                    /* Mask of signals whose default action is ignore or stop
-                     * (not terminate): SIGCHLD(17) SIGURG(23) SIGWINCH(28)
-                     * SIGCONT(18) SIGSTOP(19) SIGTSTP(20) SIGTTIN(21) SIGTTOU(22) */
-                    uint64_t non_fatal = signal_bit(SIGCHLD) | signal_bit(SIGURG) |
-                                         signal_bit(SIGWINCH) | signal_bit(SIGCONT) |
-                                         signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
-                                         signal_bit(SIGTTIN) | signal_bit(SIGTTOU);
-                    uint64_t fatal_pending = deliverable & ~non_fatal;
-                    if (fatal_pending)
-                        suppress = 1;
-                }
-
-                if (!suppress) {
-                    printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
-                           current_proc->pid, tf->epc, stval, cause);
-                }
+                /* BF: User faults are normal synchronous-signal events
+                 * for POSIX programs.  Keep the serial log quiet here so
+                 * tests that intentionally probe SIGSEGV/SIGBUS behavior
+                 * do not look like kernel faults. */
                 deliver_sync_fault_signal(tf, current_proc, SIGSEGV, 0);
                 return;
             }

@@ -23,7 +23,9 @@ long sys_ioctl_handler(struct trapframe *tf) {
     uint64_t argp = tf->a2;
     struct open_file *f = (fd >= 0 && fd < NOFILE) ? proc_ofile(current_proc)[fd] : NULL;
 
-    if (!f) return (long)-9; /* -EBADF */
+    /* BF: Treat stale or corrupted descriptor slots as EBADF before
+     * dereferencing f->ops; ioctl is commonly probed on arbitrary fds. */
+    if (!f || !vfs_file_valid(f)) return (long)-9; /* -EBADF */
 
     {
         int is_tty = 0;

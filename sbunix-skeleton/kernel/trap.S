@@ -3,8 +3,9 @@
 .global trap_restore
 
 .extern trap_handler
+.extern kernel_pagetable
 
-.equ TF_SIZE, 272
+.equ TF_SIZE, 288
 .equ TF_T0, 8
 .equ TF_T1, 16
 .equ TF_T6, 56
@@ -12,7 +13,9 @@
 .equ TF_EPC, 248
 .equ TF_SSTATUS, 256
 .equ TF_RETURN_TO_USER, 264
+.equ TF_USER_SATP, 272
 .equ SSTATUS_SPP_BIT, 0x100
+.equ SATP_SV39_VALUE, 0x8000000000000000
 
 kernel_trap_handler:
   # Swap sp with sscratch
@@ -89,6 +92,17 @@ _got_user_sp:
   # sscratch=0 means "in kernel mode" for kernel_trap_handler.
   csrw sscratch, zero
 
+  # Kernel C always runs on kernel_pagetable.  User page tables still share
+  # the kernel direct-map so this entry stub can save the frame first; switch
+  # away before calling C so root entries 0/1 may be fully user-owned.
+  la t0, kernel_pagetable
+  ld t0, 0(t0)
+  srli t0, t0, 12
+  li t1, SATP_SV39_VALUE
+  or t0, t0, t1
+  csrw satp, t0
+  sfence.vma
+
   # Call C handler
   mv a0, sp
   call trap_handler
@@ -149,6 +163,12 @@ _ret_user:
   # sscratch must hold the kernel stack top for the next user trap.
   addi t0, sp, TF_SIZE
   csrw sscratch, t0
+
+  # Only the final return to U-mode installs the process user page table.
+  # Kernel contexts resume under kernel_pagetable after every swtch.
+  ld t0, TF_USER_SATP(sp)
+  csrw satp, t0
+  sfence.vma
 
   # Restore scratch registers, then atomically load the saved user sp using
   # the old trapframe base.  ld sp, offset(sp) uses the pre-write base.

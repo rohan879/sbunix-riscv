@@ -13,6 +13,8 @@
 #include <sys/mman.h>
 #include <syscall.h>
 #include <string.h>
+#include <errno.h>
+#include <stdint.h>
 
 /* -----------------------------------------------------------------------
  * sbrk / brk — raw heap expansion via SYS_brk
@@ -30,6 +32,7 @@ int brk(void *addr) {
         heap_end = addr;
         return 0;
     }
+    errno = ENOMEM;
     return -1;
 }
 
@@ -43,12 +46,22 @@ void *sbrk(long increment) {
         heap_end = (void *)syscall(SYS_brk, 0);
 
     void *old_break = heap_end;
+    if (increment == 0)
+        return old_break;
+    if ((increment > 0 &&
+         (uintptr_t)heap_end > UINTPTR_MAX - (uintptr_t)increment) ||
+        (increment < 0 &&
+         (uintptr_t)heap_end < (uintptr_t)(-increment))) {
+        errno = ENOMEM;
+        return (void *)-1;
+    }
     void *new_break = (char *)heap_end + increment;
 
     void *result = (void *)syscall(SYS_brk, new_break);
-    /* The kernel may round up to a page boundary; accept any result >= new_break */
-    if ((char *)result < (char *)new_break)
+    if (result != new_break) {
+        errno = ENOMEM;
         return (void *)-1;
+    }
 
     heap_end = new_break;
     return old_break;

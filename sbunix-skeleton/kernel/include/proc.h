@@ -70,6 +70,8 @@ struct trapframe {
   /* 248 */ uint64_t epc;
   /* 256 */ uint64_t saved_sstatus;
   /* 264 */ uint64_t return_to_user;
+  /* 272 */ uint64_t user_satp;
+  /* 280 */ uint64_t reserved0;
 };
 
 struct signal_frame {
@@ -164,6 +166,7 @@ struct proc {
   struct proc *parent;         // Parent process
   void *kstack;                // Virtual address of kernel stack
   uint64_t sz;                 // Size of process memory (bytes)
+  uint64_t initial_brk;        // lowest legal program break after exec
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
   struct context context;      // swtch() here to run process
@@ -192,7 +195,7 @@ struct proc {
   uint8_t fd_flags[NOFILE]; /* Per-fd flags: FD_CLOEXEC=1, FD_CLOFORK=2 */
   /* VMA list for tracking all user memory regions */
   struct vm_area *vma_list;    // sorted linked list of virtual memory areas
-  uint64_t mmap_base;          // next VA to use for non-MAP_FIXED mmap
+  uint64_t mmap_base;          // top-down search hint for non-MAP_FIXED mmap
   /* signal handling */
   struct kern_sigaction sigactions[65]; /* one per signal (1-64, index 0 unused) */
   uint64_t sigmask;             /* blocked signal mask */

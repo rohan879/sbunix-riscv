@@ -12,7 +12,8 @@
 
 #define PAGE_SIZE_BYTES 4096UL
 #define DEFAULT_RESERVE_MB 64UL
-#define MAX_RESERVE_MB 256UL
+#define MAX_RESERVE_MB 768UL
+#define MAX_HEAP_RESERVE_MB 64UL
 #define TOUCHES 16
 #define MAX_RESERVE_DROP_KB 4096L
 
@@ -83,6 +84,10 @@ int main(int argc, char **argv) {
   }
 
   size_t len = reserve_mb * 1024UL * 1024UL;
+  unsigned long heap_reserve_mb = reserve_mb;
+  if (heap_reserve_mb > MAX_HEAP_RESERVE_MB)
+    heap_reserve_mb = MAX_HEAP_RESERVE_MB;
+  size_t heap_len = heap_reserve_mb * 1024UL * 1024UL;
   long free_before = read_meminfo_kb("MemFree");
   if (free_before < 0) {
     printf("[FAIL] lazyreserve: could not read MemFree before\n");
@@ -97,7 +102,10 @@ int main(int argc, char **argv) {
   }
 
   unsigned char *old_brk = sbrk(0);
-  unsigned char *heap = sbrk((long)len);
+  /* BF: brk is a contiguous frontier and must not cross the reserved low
+   * device window.  Large arguments still exercise mmap sparsity while the
+   * heap portion stays inside the legal contiguous heap range. */
+  unsigned char *heap = sbrk((long)heap_len);
   if (old_brk == (void *)-1 || heap == (void *)-1 || heap != old_brk) {
     printf("[FAIL] lazyreserve: sbrk reserve failed\n");
     munmap(map, len);
@@ -108,7 +116,7 @@ int main(int argc, char **argv) {
   if (free_after_reserve < 0) {
     printf("[FAIL] lazyreserve: could not read MemFree after reserve\n");
     munmap(map, len);
-    sbrk(-(long)len);
+    sbrk(-(long)heap_len);
     return 1;
   }
 
@@ -118,20 +126,21 @@ int main(int argc, char **argv) {
   if (reserve_drop > MAX_RESERVE_DROP_KB) {
     printf("[FAIL] lazyreserve: reservation consumed %ld KiB\n", reserve_drop);
     munmap(map, len);
-    sbrk(-(long)len);
+    sbrk(-(long)heap_len);
     return 1;
   }
 
-  if (!touch_sparse(map, len, 0x40) || !touch_sparse(heap, len, 0x70)) {
+  if (!touch_sparse(map, len, 0x40) ||
+      !touch_sparse(heap, heap_len, 0x70)) {
     printf("[FAIL] lazyreserve: sparse touches did not verify\n");
     munmap(map, len);
-    sbrk(-(long)len);
+    sbrk(-(long)heap_len);
     return 1;
   }
 
   munmap(map, len);
-  sbrk(-(long)len);
-  printf("[PASS] lazyreserve: %lu MB reserve drop %ld KiB, sparse touches ok\n",
-         reserve_mb, reserve_drop);
+  sbrk(-(long)heap_len);
+  printf("[PASS] lazyreserve: %lu MB mmap, %lu MB brk reserve drop %ld KiB, sparse touches ok\n",
+         reserve_mb, heap_reserve_mb, reserve_drop);
   return 0;
 }

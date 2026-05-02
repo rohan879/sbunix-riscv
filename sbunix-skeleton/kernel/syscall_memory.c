@@ -17,6 +17,7 @@
 #include <kmalloc.h>
 #include <syscall.h>
 #include <errno.h>
+#include <shared_mapping.h>
 
 static int mmap_reserved_range(struct proc *p, uint64_t start, uint64_t len,
                                uint64_t *next_va);
@@ -46,8 +47,8 @@ static int brk_stack_guard_overlap(struct proc *p, uint64_t start,
         return 0;
 
     uint64_t guard_bytes = 256 * PAGE_SIZE;
-    uint64_t guard_start = p->stack_bottom > guard_bytes
-                         ? p->stack_bottom - guard_bytes
+    uint64_t guard_start = p->stack_top > guard_bytes + PAGE_SIZE
+                         ? p->stack_top - guard_bytes - PAGE_SIZE
                          : 0;
     uint64_t guard_end = p->stack_top ? p->stack_top : USER_STACK_TOP;
 
@@ -100,6 +101,11 @@ long sys_brk_handler(struct trapframe *tf) {
         return (long)cur_sz;
 
     if (new_brk == 0) {
+        return (long)cur_sz;
+    } else if (new_brk < current_proc->initial_brk) {
+        /* BF: The loader's initial break is the lower heap boundary.
+         * Shrinking below it would let brk overlap ELF data/BSS metadata,
+         * so raw brk reports rejection by returning the unchanged break. */
         return (long)cur_sz;
     } else if (new_brk < cur_sz) {
         if (!user_addr_ok(new_brk) ||
@@ -157,6 +163,13 @@ static uint64_t mmap_search_base(struct proc *p) {
   return base;
 }
 
+static uint64_t mmap_search_limit(void) {
+  /* BF: Unhinted mmap searches downward below the user clock/trampoline
+   * pages.  Keeping large mappings high preserves room for later lazy heap
+   * growth while leaving the fixed signal and clock pages reserved. */
+  return PGROUNDDOWN(USER_CLOCK_VA);
+}
+
 /* BF: Treat supervisor-only MMIO aliases in the user page table as reserved
  * holes.  This keeps MAP_FIXED, munmap, mprotect, and mremap from walking
  * into shared kernel MMIO slots that would break zero-fill semantics. */
@@ -201,20 +214,24 @@ static int mmap_reserved_range(struct proc *p, uint64_t start, uint64_t len,
   return 0;
 }
 
-/* BF: Find a hole in the user address space for a new mapping of len bytes.
- * Walks the VMA list to skip overlaps.  Returns 0 on failure (ENOMEM). */
+/* BF: Find a top-down hole in the user address space for a new mapping of
+ * len bytes.  Walks the VMA list to skip overlaps and stays above
+ * USER_MMAP_FLOOR so low supervisor MMIO aliases remain reserved. */
 static uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
   uint64_t floor = mmap_search_base(p);
-  uint64_t candidate = p->mmap_base ? p->mmap_base : floor;
-  if (candidate < floor) candidate = floor;
-  candidate = PGROUNDUP(candidate);
+  uint64_t limit = mmap_search_limit();
+  uint64_t candidate_end = limit;
+  if (p->mmap_base > floor && p->mmap_base <= limit)
+    candidate_end = PGROUNDDOWN(p->mmap_base);
   for (;;) {
-    if (candidate > USER_STACK_TOP || len > USER_STACK_TOP - candidate)
+    if (candidate_end <= floor || len > candidate_end - floor)
       return 0;
+    uint64_t candidate = candidate_end - len;
     {
       uint64_t reserved_end = 0;
       if (mmap_reserved_range(p, candidate, len, &reserved_end)) {
-        candidate = PGROUNDUP(reserved_end);
+        (void)reserved_end;
+        candidate_end = candidate;
         continue;
       }
     }
@@ -222,8 +239,8 @@ static uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
     int overlap = 0;
     while (v) {
       if (v->end <= candidate) { v = v->next; continue; }
-      if (v->start >= candidate + len) break;
-      candidate = PGROUNDUP(v->end);
+      if (v->start >= candidate_end) break;
+      candidate_end = PGROUNDDOWN(v->start);
       overlap = 1;
       break;
     }
@@ -255,6 +272,7 @@ long sys_mmap_handler(struct trapframe *tf) {
     int      flags = (int)tf->a3;
     int      fd    = (int)tf->a4;
     uint64_t offset = tf->a5;
+    struct shared_mapping *shared_obj = NULL;
 
     if (shared_vfork_child())
         return (long)-22; /* EINVAL */
@@ -322,6 +340,13 @@ long sys_mmap_handler(struct trapframe *tf) {
             return (long)-22; /* EINVAL */
         if (mmap_reserved_range(current_proc, va, len, 0))
             return (long)-22; /* EINVAL */
+        if (flags & MAP_SHARED) {
+            int src = flags & MAP_ANONYMOUS
+                    ? shared_mapping_create_anon(&shared_obj)
+                    : shared_mapping_get_file(ftab[fd], &shared_obj);
+            if (src < 0)
+                return (long)src;
+        }
         /* BF: POSIX requires MAP_FIXED to replace any existing mappings
          * in the target range [va, va+len).  Without this, old PTEs and
          * VMA entries persist, causing incorrect data reads. */
@@ -335,7 +360,14 @@ long sys_mmap_handler(struct trapframe *tf) {
         va = mmap_find_hole(current_proc, len);
         if (va == 0)
             return (long)-12; /* ENOMEM */
-        current_proc->mmap_base = va + len;
+        if (flags & MAP_SHARED) {
+            int src = flags & MAP_ANONYMOUS
+                    ? shared_mapping_create_anon(&shared_obj)
+                    : shared_mapping_get_file(ftab[fd], &shared_obj);
+            if (src < 0)
+                return (long)src;
+        }
+        current_proc->mmap_base = va;
     }
 
     /* BF: Removed forced PTE_R for PROT_NONE -- demand paging handles this
@@ -344,6 +376,8 @@ long sys_mmap_handler(struct trapframe *tf) {
 
     /* Register VMA — pages allocated lazily on first access. */
     if (vma_add(current_proc, va, va + len, prot, flags) < 0) {
+        if (shared_obj)
+            shared_mapping_put(shared_obj);
         /* BF: return -ENOMEM (not -1) so libc mmap wrapper sets
          * the correct errno for the caller. */
         return (long)-12; /* ENOMEM */
@@ -363,6 +397,17 @@ long sys_mmap_handler(struct trapframe *tf) {
         }
     }
 
+    if (shared_obj) {
+        struct vm_area *vma = vma_find(current_proc, va);
+        if (!vma) {
+            shared_mapping_put(shared_obj);
+            vma_remove(current_proc, va, va + len);
+            return (long)-12;
+        }
+        vma->shared = shared_obj;
+        vma->shared_offset_pages = 0;
+    }
+
     return (long)va;
 }
 
@@ -375,6 +420,11 @@ void mmap_writeback_shared_from(pagetable_t pagetable, struct vm_area *vmas,
     while (v) {
         if (v->file && (v->flags & 0x01) /* MAP_SHARED */ &&
             v->start < end && v->end > start) {
+            if (v->shared) {
+                shared_mapping_writeback_range(v, start, end);
+                v = v->next;
+                continue;
+            }
             /* BF: Get file size ONCE per VMA to clip writeback per page.
              * Bytes beyond EOF in a partial page must NOT be persisted
              * (POSIX mmap partial-page zero-fill semantics). */
@@ -472,7 +522,7 @@ long sys_munmap_handler(struct trapframe *tf) {
     /* BF: Reset the search hint after unmap so future allocations can
      * reuse low holes without inheriting stale stack-top or MMIO-adjacent
      * placement from older mappings. */
-    current_proc->mmap_base = mmap_search_base(current_proc);
+    current_proc->mmap_base = mmap_search_limit();
 
     return 0;
 }
@@ -630,6 +680,11 @@ long sys_mprotect_handler(struct trapframe *tf) {
           suffix->file  = v->file;
           suffix->file_offset = v->file_offset + (range_start - v->start);
           if (suffix->file) suffix->file->refcount++;
+          suffix->shared = v->shared;
+          suffix->shared_offset_pages =
+            v->shared_offset_pages + ((range_start - v->start) >> 12);
+          if (suffix->shared)
+            shared_mapping_get(suffix->shared);
           /* BF: Initialize anon_vma for split VMA using pre-allocated chain
            * to avoid allocation failure during mutation. */
           INIT_LIST_HEAD(&suffix->anon_vma_chain);
@@ -669,6 +724,11 @@ long sys_mprotect_handler(struct trapframe *tf) {
           tail->file  = v->file;
           tail->file_offset = v->file_offset + (range_end - v->start);
           if (tail->file) tail->file->refcount++;
+          tail->shared = v->shared;
+          tail->shared_offset_pages =
+            v->shared_offset_pages + ((range_end - v->start) >> 12);
+          if (tail->shared)
+            shared_mapping_get(tail->shared);
           /* BF: Initialize anon_vma for split tail using pre-allocated chain. */
           INIT_LIST_HEAD(&tail->anon_vma_chain);
           tail->anon_vma = NULL;
@@ -783,7 +843,7 @@ long sys_mremap_handler(struct trapframe *tf) {
         uint64_t new_va = mmap_find_hole(current_proc, new_size);
         if (new_va == 0)
             return (long)-12; /* ENOMEM */
-        current_proc->mmap_base = new_va + new_size;
+        current_proc->mmap_base = new_va;
 
         /* --- Step 1: Initialize rollback state --- */
         int copy_failed = 0;
@@ -811,6 +871,12 @@ long sys_mremap_handler(struct trapframe *tf) {
               dv->file_offset = sv->file_offset + (seg_start - sv->start);
               dv->max_prot = sv->max_prot;
             }
+            if (dv && sv->shared) {
+              dv->shared = sv->shared;
+              dv->shared_offset_pages =
+                sv->shared_offset_pages + ((seg_start - sv->start) >> 12);
+              shared_mapping_get(dv->shared);
+            }
             sv = sv->next;
           }
         }
@@ -825,10 +891,29 @@ long sys_mremap_handler(struct trapframe *tf) {
             sv2 = sv2->next;
           }
           int tail_prot = last_sv ? last_sv->prot : (PROT_READ | PROT_WRITE);
-          /* BF: growth tail is always anonymous, never file-backed */
+          int tail_flags = last_sv && last_sv->shared
+                         ? last_sv->flags
+                         : (MAP_PRIVATE | MAP_ANON);
           if (vma_add(current_proc, new_va + old_size, new_va + new_size,
-                      tail_prot, MAP_PRIVATE | MAP_ANON) < 0)
+                      tail_prot, tail_flags) < 0)
             goto mremap_rollback;
+          if (last_sv) {
+            struct vm_area *tail_v = vma_find(current_proc, new_va + old_size);
+            if (tail_v && last_sv->file && last_sv->shared) {
+              tail_v->file = last_sv->file;
+              tail_v->file->refcount++;
+              tail_v->file_offset =
+                last_sv->file_offset + ((old_addr + old_size) - last_sv->start);
+              tail_v->max_prot = last_sv->max_prot;
+            }
+            if (tail_v && last_sv->shared) {
+              tail_v->shared = last_sv->shared;
+              tail_v->shared_offset_pages =
+                last_sv->shared_offset_pages +
+                (((old_addr + old_size) - last_sv->start) >> 12);
+              shared_mapping_get(tail_v->shared);
+            }
+          }
         }
 
         /* --- Step 4: Phase 1 -- copy pages without freeing old ones --- */
@@ -845,6 +930,16 @@ long sys_mremap_handler(struct trapframe *tf) {
           }
 
           if (*old_pte & PTE_V) {
+            if (page_vma && page_vma->shared) {
+              uint64_t old_pa = PTE2PA(*old_pte);
+              page_ref_inc(old_pa);
+              if (mappages(current_proc->pagetable, new_va + off, PAGE_SIZE,
+                           old_pa, pte_flags) != 0) {
+                page_ref_dec(old_pa);
+                copy_failed = 1; copied_up_to = off; break;
+              }
+              continue;
+            }
             char *newpg = kalloc();
             if (!newpg) { copy_failed = 1; copied_up_to = off; break; }
             memcpy(newpg, (void *)PTE2PA(*old_pte), PAGE_SIZE);

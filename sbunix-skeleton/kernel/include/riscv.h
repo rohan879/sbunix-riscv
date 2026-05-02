@@ -84,9 +84,11 @@ typedef int            pid_t;
 #define RECURSIVE_L2_PTE_VA(vpn2) \
     RECURSIVE_PA2VA((uint64_t)kernel_pagetable + (vpn2) * sizeof(pte_t))
 
-// User address space boundary.
-// Set to 1GB to stay safely below kernel space (0x80000000).
-#define MAXVA 0x40000000L
+/* User address space boundary.
+ * User VA owns root entries 0 and 1: [0, KERNBASE).  KERNBASE itself is
+ * exclusive so supervisor direct-map/kernel addresses cannot be reached
+ * through user-controlled VMAs. */
+#define MAXVA KERNBASE
 #define USER_TOP MAXVA
 
 static inline int user_addr_ok(uint64_t va) {
@@ -103,12 +105,12 @@ static inline int user_range_ok(uint64_t va, uint64_t len) {
     return 1;
 }
 
-#define USER_STACK_TOP  MAXVA   /* user stack grows down from top of VA space */
+#define USER_STACK_TOP  USER_TOP   /* user stack grows down from top of VA space */
 
 /* BF: Per-process sigtrampoline page VA — executes rt_sigreturn when
- * no sa_restorer is set.  In L1 index 252 (0x3F000000 >> 21 = 504 >> 2),
- * above uvmmap_kernel share_limit (129), well below user stack. */
-#define SIGTRAMP_VA     0x3F000000UL
+ * no sa_restorer is set.  Keep it below the stack and below KERNBASE
+ * after user VA expands through root entry 1. */
+#define SIGTRAMP_VA     0x7F000000UL
 
 /* BF: Reserve a read-only userspace CPU-clock page immediately below the
  * signal trampoline so libc clock() can avoid a syscall without exposing

@@ -47,6 +47,29 @@ int copy_pagetable_cow(struct proc *src_proc, pagetable_t dst, pagetable_t src,
      * Super page PTEs (level-1 leaf, detected by PTE_IS_LEAF) are skipped
      * by advancing VA to the next 2MB boundary instead of 4KB. */
     for (uint64_t va = start; va < end; ) {
+        pte_t l2 = src[PX(2, va)];
+        if (!(l2 & PTE_V)) {
+            /* BF: USER_TOP spans two Sv39 root entries now.  Fork must not
+             * spend a page at a time probing empty 1 GiB holes. */
+            va = ((va >> 30) + 1) << 30;
+            continue;
+        }
+        if (PTE_IS_LEAF(l2)) {
+            va = ((va >> 30) + 1) << 30;
+            continue;
+        }
+        pagetable_t l1pt = (pagetable_t)PTE2PA(l2);
+        pte_t l1 = l1pt[PX(1, va)];
+        if (!(l1 & PTE_V)) {
+            /* BF: Sparse reservations leave most 2 MiB subtrees absent;
+             * skip them so each fork scales with populated page tables. */
+            va = SPGROUNDUP(va + 1);
+            continue;
+        }
+        if (PTE_IS_LEAF(l1)) {
+            va = SPGROUNDUP(va + 1);
+            continue;
+        }
         if (va == USER_CLOCK_VA) {
             /* BF: The CPU-clock page is lifecycle-managed outside normal
              * COW so fork gets a fresh clock instead of inheriting CPU time. */
@@ -154,9 +177,9 @@ void cleanup_proc_resources(struct proc *p) {
     file_locks_release_pid(p->pid);
 
     /* ---- Pagetable / VMAs ---- */
-    /* Switch to kernel_pagetable before freeing the process's page table.
-     * The kernel runs on the process's page table (shared kernel mapping),
-     * so we must switch away before freeing it. */
+    /* Keep teardown on kernel_pagetable before freeing the process root.
+     * User roots are installed only by trap_restore, but this is also safe
+     * for older paths that may already be on the kernel root. */
     if (p->shared_pt) {
         pagetable_t old_pt = p->pagetable;
         struct vm_area *old_vmas = p->vma_list;
@@ -472,6 +495,7 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     p->stack_bottom = current_proc->stack_bottom;
     p->mmap_base = current_proc->mmap_base;
     p->sz = current_proc->sz;
+    p->initial_brk = current_proc->initial_brk;
 
     /* ---- CLONE_VM: share address space ---- */
     if (clone_flags & CLONE_VM) {
@@ -504,8 +528,8 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
         p->cpu_start_ticks = 0;
     } else {
         /* Traditional COW fork: build independent child page table.
-         * NO kernel identity mappings — the trampoline switches satp
-         * to kernel_pagetable on trap entry. */
+         * Kernel sharing starts at KERNBASE; root entries 0 and 1 remain
+         * child-owned so sparse user reservations can fill that range. */
         new_pt = uvmcreate();
         if (!new_pt) goto bad;
 
@@ -513,6 +537,10 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
         if (copy_pagetable_cow(current_proc, new_pt, current_proc->pagetable,
                                0, MAXVA) < 0)
             goto bad;
+        /* BF: The user-clock page is a per-process kernel-owned alias.
+         * COW fork may encounter stale copies while walking sparse upper
+         * roots, so force the child slot empty before installing its clock. */
+        user_clock_unmap(new_pt);
 
         /* Map kernel identity pages into child page table (must be after
          * copy_pagetable_cow so pt[0] exists for MMIO level-1 sharing) */
@@ -569,6 +597,7 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     }
 
     /* Child's kernel context: resume at forkret */
+    p->trapframe->user_satp = MAKE_SATP(p->pagetable);
     p->context.ra = (uint64_t)forkret;
     /* BF: Fork child inherits parent's kstack_npages for proper stack top */
     p->context.sp = (uint64_t)p->kstack + (uint64_t)p->kstack_npages * PAGE_SIZE;

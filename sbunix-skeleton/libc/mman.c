@@ -45,6 +45,17 @@ int mprotect(void *addr, size_t length, int prot) {
     return 0;
 }
 
+int msync(void *addr, size_t length, int flags) {
+    /* BF: Keep shared mappings observable through the libc ABI instead of
+     * relying on munmap/exit writeback side effects. */
+    long ret = syscall(SYS_msync, addr, length, flags);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return 0;
+}
+
 /* ENH: mremap syscall wrapper for memory remapping support */
 void *mremap(void *old_address, size_t old_size, size_t new_size, int flags, ...) {
   void *ret = (void *)syscall(SYS_mremap, old_address, old_size,
