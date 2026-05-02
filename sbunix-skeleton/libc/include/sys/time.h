@@ -14,7 +14,6 @@ struct timezone {
 #define __timezone_defined
 #endif
 
-/* gettimeofday() */
 /* BF: External shims redeclare the historical timezone-typed prototype.
  * Keep this compatibility signature even though POSIX Issue 8 now specifies
  * void * for the second parameter. */
