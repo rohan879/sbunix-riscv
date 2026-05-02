@@ -109,6 +109,43 @@ static struct proc *find_proc(pid_t pid) {
   return 0;
 }
 
+static int procfs_fd_target_len(struct proc *target, int fd) {
+  if (!target || fd < 0 || fd >= NOFILE)
+    return 0;
+  struct open_file **ftable = proc_ofile(target);
+  struct open_file *f = ftable[fd];
+  if (!f)
+    return 0;
+  if (f->path[0] != '\0')
+    return strlen(f->path);
+
+  char tmp[64];
+  int len = 0;
+  if (f->is_pipe) {
+    len = append_str(tmp, sizeof(tmp), len, "pipe:[");
+    len = append_int(tmp, sizeof(tmp), len, f->pipe_id);
+  } else {
+    len = append_str(tmp, sizeof(tmp), len, "anon:[");
+    len = append_int(tmp, sizeof(tmp), len, fd);
+  }
+  if (len < (int)sizeof(tmp))
+    tmp[len++] = ']';
+  return len;
+}
+
+static int procfs_link_target_len(struct proc *target, enum procfs_type type,
+                                  int fd) {
+  if (!target)
+    return 0;
+  if (type == PROCFS_EXE_LINK)
+    return strlen(target->exe_path);
+  if (type == PROCFS_CWD_LINK)
+    return target->cwd[0] ? strlen(target->cwd) : 1;
+  if (type == PROCFS_FDLINK)
+    return procfs_fd_target_len(target, fd);
+  return 0;
+}
+
 /* Helper: state name string */
 static const char *state_name(enum procstate s) {
   switch (s) {
@@ -728,11 +765,13 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
     return 0; \
   } while(0)
 
-  #define STAT_LNK(ino_val) do { \
+  #define STAT_LNK(ino_val, size_val) do { \
     uint32_t mode = (uint32_t)(0xA000 | 0777); \
     uint64_t ino = (ino_val); \
+    uint64_t sz = (uint64_t)(size_val); \
     memcpy(st + 8, &ino, 8); \
     memcpy(st + 16, &mode, 4); \
+    memcpy(st + 48, &sz, 8); \
     return 0; \
   } while(0)
 
@@ -746,7 +785,11 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
 
   /* /proc/self — symlink to current PID */
   pid_t self_pid = current_proc ? current_proc->pid : 1;
-  if (strcmp(p, "self") == 0) { STAT_LNK(207); }
+  if (strcmp(p, "self") == 0) {
+    char tmp[16];
+    int len = append_int(tmp, sizeof(tmp), 0, self_pid);
+    STAT_LNK(207, len);
+  }
   if (strncmp(p, "self/", 5) == 0) {
     /* Delegate to numeric pid path */
     p += 5;
@@ -763,16 +806,19 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
       STAT_FILE((uint64_t)(1000 + self_pid * 10 + 5));
     }
     if (strcmp(p, "exe") == 0) {
-      STAT_LNK((uint64_t)(2000 + self_pid * 10 + 1));
+      STAT_LNK((uint64_t)(2000 + self_pid * 10 + 1),
+               procfs_link_target_len(target, PROCFS_EXE_LINK, -1));
     }
     if (strcmp(p, "cwd") == 0) {
-      STAT_LNK((uint64_t)(2000 + self_pid * 10 + 2));
+      STAT_LNK((uint64_t)(2000 + self_pid * 10 + 2),
+               procfs_link_target_len(target, PROCFS_CWD_LINK, -1));
     }
     if (strcmp(p, "fd") == 0) { STAT_DIR((uint64_t)(400 + self_pid)); }
     {
       int fd = parse_procfs_fd_leaf(p);
       if (fd >= 0 && fd < NOFILE && proc_ofile(target)[fd]) {
-        STAT_LNK((uint64_t)(5000 + self_pid * NOFILE + fd));
+        STAT_LNK((uint64_t)(5000 + self_pid * NOFILE + fd),
+                 procfs_link_target_len(target, PROCFS_FDLINK, fd));
       }
     }
     return -2;
@@ -809,17 +855,20 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
   }
 
   if (strcmp(rest, "exe") == 0) {
-    STAT_LNK((uint64_t)(2000 + pid * 10 + 1));
+    STAT_LNK((uint64_t)(2000 + pid * 10 + 1),
+             procfs_link_target_len(target, PROCFS_EXE_LINK, -1));
   }
 
   if (strcmp(rest, "cwd") == 0) {
-    STAT_LNK((uint64_t)(2000 + pid * 10 + 2));
+    STAT_LNK((uint64_t)(2000 + pid * 10 + 2),
+             procfs_link_target_len(target, PROCFS_CWD_LINK, -1));
   }
 
   {
     int fd = parse_procfs_fd_leaf(rest);
     if (fd >= 0 && fd < NOFILE && proc_ofile(target)[fd]) {
-      STAT_LNK((uint64_t)(5000 + pid * NOFILE + fd));
+      STAT_LNK((uint64_t)(5000 + pid * NOFILE + fd),
+               procfs_link_target_len(target, PROCFS_FDLINK, fd));
     }
   }
 
@@ -868,11 +917,20 @@ static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
   case PROCFS_FDDIR:
     { uint64_t ino=(uint64_t)(400+priv->pid); memcpy(st+8,&ino,8); memcpy(st+16,&dir_mode,4); break; }
   case PROCFS_FDLINK:
-    { uint64_t ino=(uint64_t)(5000 + priv->pid * NOFILE + priv->fd); memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); break; }
+    { struct proc *target = find_proc(priv->pid);
+      uint64_t ino=(uint64_t)(5000 + priv->pid * NOFILE + priv->fd);
+      uint64_t sz=(uint64_t)procfs_link_target_len(target, PROCFS_FDLINK, priv->fd);
+      memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); memcpy(st+48,&sz,8); break; }
   case PROCFS_EXE_LINK:
-    { uint64_t ino=(uint64_t)(2000 + priv->pid * 10 + 1); memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); break; }
+    { struct proc *target = find_proc(priv->pid);
+      uint64_t ino=(uint64_t)(2000 + priv->pid * 10 + 1);
+      uint64_t sz=(uint64_t)procfs_link_target_len(target, PROCFS_EXE_LINK, -1);
+      memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); memcpy(st+48,&sz,8); break; }
   case PROCFS_CWD_LINK:
-    { uint64_t ino=(uint64_t)(2000 + priv->pid * 10 + 2); memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); break; }
+    { struct proc *target = find_proc(priv->pid);
+      uint64_t ino=(uint64_t)(2000 + priv->pid * 10 + 2);
+      uint64_t sz=(uint64_t)procfs_link_target_len(target, PROCFS_CWD_LINK, -1);
+      memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); memcpy(st+48,&sz,8); break; }
   case PROCFS_STATUS:
   case PROCFS_CMDLINE:
   case PROCFS_MAPS:
@@ -1042,7 +1100,18 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
     while (p[i] && p[i] != '/' && i < 15) { pidstr[i] = p[i]; i++; }
     pidstr[i] = '\0';
     int pid = parse_pid(pidstr);
-    if (pid < 0) return -22; /* EINVAL */
+    if (pid < 0) {
+      /* BF: Existing non-link procfs nodes fail readlink with EINVAL, while
+       * absent root entries fail with ENOENT.  Keep those errno values
+       * distinct so readlink("/proc/no-such") is not reported as a type
+       * error on an existing node. */
+      if (*p == '\0' || strcmp(p, "dmesg") == 0 ||
+          strcmp(p, "mounts") == 0 || strcmp(p, "cpuinfo") == 0 ||
+          strcmp(p, "version") == 0 || strcmp(p, "uptime") == 0 ||
+          strcmp(p, "meminfo") == 0)
+        return -22; /* EINVAL */
+      return -2; /* ENOENT */
+    }
     target_pid = (pid_t)pid;
     rest = p + i;
     while (*rest == '/') rest++;
@@ -1107,6 +1176,11 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
     memcpy(buf, target->cwd, len);
     return len;
   }
+
+  if (*rest != '\0' && strcmp(rest, "status") != 0 &&
+      strcmp(rest, "cmdline") != 0 && strcmp(rest, "maps") != 0 &&
+      strcmp(rest, "stat") != 0 && strcmp(rest, "fd") != 0)
+    return -2; /* ENOENT */
 
   return -22; /* EINVAL — not a symlink */
 }

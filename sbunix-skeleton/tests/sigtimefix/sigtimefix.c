@@ -129,12 +129,65 @@ static void test_signal_permission_checks(void) {
           WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
+static void test_realtime_signal_ordering(void) {
+    sigset_t rtset;
+    sigset_t allrt;
+    sigset_t old;
+    union sigval value;
+    siginfo_t info;
+
+    sigemptyset(&rtset);
+    sigaddset(&rtset, SIGRTMAX);
+    sigprocmask(SIG_BLOCK, &rtset, &old);
+
+    int queue_ok = 1;
+    for (int i = 1; i <= 3; i++) {
+        value.sival_int = 100 + i;
+        if (sigqueue(getpid(), SIGRTMAX, value) != 0)
+            queue_ok = 0;
+    }
+    CHECK("realtime FIFO sigqueue returns 0", queue_ok);
+
+    int fifo_ok = 1;
+    for (int i = 1; i <= 3; i++) {
+        memset(&info, 0, sizeof(info));
+        int ret = sigtimedwait(&rtset, &info, NULL);
+        if (ret != SIGRTMAX || info.si_value.sival_int != 100 + i)
+            fifo_ok = 0;
+    }
+    CHECK("realtime FIFO sigtimedwait preserves queued order", fifo_ok);
+
+    sigemptyset(&allrt);
+    for (int sig = SIGRTMIN; sig <= SIGRTMAX; sig++) {
+        sigaddset(&allrt, sig);
+        sigprocmask(SIG_BLOCK, &allrt, NULL);
+    }
+    queue_ok = 1;
+    for (int sig = SIGRTMAX; sig >= SIGRTMIN; sig--) {
+        value.sival_int = sig;
+        if (sigqueue(getpid(), sig, value) != 0)
+            queue_ok = 0;
+    }
+    CHECK("realtime lowest sigqueue returns 0", queue_ok);
+    memset(&info, 0, sizeof(info));
+    int ret = sigwaitinfo(&allrt, &info);
+    CHECK("realtime sigwaitinfo returns lowest pending signal",
+          ret == SIGRTMIN && info.si_signo == SIGRTMIN);
+    for (int sig = SIGRTMIN + 1; sig <= SIGRTMAX; sig++) {
+        memset(&info, 0, sizeof(info));
+        (void)sigtimedwait(&allrt, &info, NULL);
+    }
+
+    sigprocmask(SIG_SETMASK, &old, NULL);
+}
+
 int main(void) {
     printf("=== sigtimefix: signal/time regression tests ===\n");
     test_sigtimedwait_timeout();
     test_nanosleep_interrupt();
     test_sa_siginfo_ucontext();
     test_signal_permission_checks();
+    test_realtime_signal_ordering();
     printf("=== sigtimefix: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

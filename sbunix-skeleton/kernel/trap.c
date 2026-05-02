@@ -369,10 +369,12 @@ static void handle_timer_interrupt(void) {
             if (now >= p->timers[i].next_expiry_ticks) {
                 /* Timer expired — deliver signal */
                 /* BF: Capture timer metadata for SA_SIGINFO delivery */
-                sig_set_pending(p, p->timers[i].signo, 0, 0, K_SI_TIMER);
-                if (p->state == SLEEPING) {
-                    p->state = RUNNABLE;
-                    woke_deadline = 1;
+                if (p->timers[i].signo != 0) {
+                    sig_set_pending(p, p->timers[i].signo, 0, 0, K_SI_TIMER);
+                    if (p->state == SLEEPING) {
+                        p->state = RUNNABLE;
+                        woke_deadline = 1;
+                    }
                 }
 
                 /* Handle periodic vs one-shot timers */
@@ -439,6 +441,32 @@ static void signal_frame_fault(struct proc *p) {
     signal_default_terminate(p, SIGSEGV);
 }
 
+static void deliver_sync_fault_signal(struct trapframe *tf, struct proc *p,
+                                      int sig, int32_t si_code) {
+    uint64_t bit = signal_bit(sig);
+    uint64_t old_mask = p->sigmask;
+    struct kern_sigaction *sa = proc_sigactions(p);
+
+    /* BF: Synchronous CPU faults cannot be postponed behind the process
+     * signal mask.  If user code installed SIG_IGN for the fault signal,
+     * force the default terminate action instead of returning to the same
+     * faulting instruction forever. */
+    if (sa[sig].handler == 1) {
+        signal_queue_purge_all(p, sig);
+        p->sigpending &= ~bit;
+        sa[sig].handler = 0;
+    }
+
+    if (old_mask & bit) {
+        p->saved_sigmask_restore = old_mask;
+        p->has_saved_sigmask = 1;
+        p->sigmask &= ~bit;
+    }
+
+    sig_set_pending(p, sig, (int32_t)p->pid, 0, si_code);
+    deliver_signal(tf, p);
+}
+
 struct user_ucontext {
     uint64_t uc_link;
     uint64_t uc_sigmask;
@@ -497,33 +525,6 @@ static void fill_user_ucontext(struct user_ucontext *uc,
     uc->regs[29] = tf->t4;
     uc->regs[30] = tf->t5;
     uc->regs[31] = tf->t6;
-}
-
-static int signal_queue_has_more(struct proc *p, int signum) {
-    for (int i = 0; i < NSIGQUEUE; i++) {
-        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum)
-            return 1;
-    }
-    return 0;
-}
-
-static int signal_queue_consume_one(struct proc *p, int signum, uint8_t *info_out) {
-    for (int i = 0; i < NSIGQUEUE; i++) {
-        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum) {
-            if (info_out)
-                memcpy(info_out, p->sigqueue_buf[i].info, 128);
-            p->sigqueue_buf[i].valid = 0;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static void signal_queue_purge_all(struct proc *p, int signum) {
-    for (int i = 0; i < NSIGQUEUE; i++) {
-        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum)
-            p->sigqueue_buf[i].valid = 0;
-    }
 }
 
 /* RF: Made non-static for access by extracted signal syscall module */
@@ -684,10 +685,8 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
          * the wrong offset (16 instead of 12). */
         uint8_t ksi[128];
         memset(ksi, 0, sizeof(ksi));
-        /* BF: Search sigqueue_buf for queued siginfo from sigqueue().
-         * FIFO ordering is approximate (first-valid-match scan, not
-         * sequence-ordered).  Acceptable for a teaching OS since repeated
-         * same-signal queueing is rare. */
+        /* BF: Consume the oldest queued instance for this signal so
+         * realtime sigqueue delivery preserves FIFO order. */
         int found_queued = signal_queue_consume_one(p, signum, ksi);
         consumed_queued = found_queued;
         if (found_queued) {
@@ -1174,10 +1173,8 @@ void trap_handler(struct trapframe *tf) {
                                 uint64_t file_end_page = ((uint64_t)file_sz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
                                 uint64_t page_file_off = fvma->file_offset + (va - fvma->start);
                                 if (page_file_off >= file_end_page) {
-                                    /* BF: Capture sender metadata for SA_SIGINFO */
-                                    sig_set_pending(current_proc, SIGBUS,
-                                                    (int32_t)current_proc->pid, 0, 0);
-                                    deliver_signal(tf, current_proc);
+                                    deliver_sync_fault_signal(tf, current_proc,
+                                                              SIGBUS, 0);
                                     return;
                                 }
                             }
@@ -1354,10 +1351,7 @@ pagefault_kill:
                     printk("Page fault pid=%d epc=0x%lx stval=0x%lx cause=%lu\n",
                            current_proc->pid, tf->epc, stval, cause);
                 }
-                /* BF: Capture sender metadata for SA_SIGINFO */
-                sig_set_pending(current_proc, SIGSEGV,
-                                (int32_t)current_proc->pid, 0, 0);
-                deliver_signal(tf, current_proc);
+                deliver_sync_fault_signal(tf, current_proc, SIGSEGV, 0);
                 return;
             }
             /* No process context — truly fatal */
@@ -1373,10 +1367,7 @@ pagefault_kill:
             else if (cause == 5 || cause == 7) sig = SIGBUS;  /* Access fault */
             printk("trap pid=%d scause=0x%lx epc=0x%lx stval=0x%lx -> sig %d\n",
                    current_proc->pid, cause, tf->epc, stval, sig);
-            /* BF: Capture sender metadata for SA_SIGINFO */
-            sig_set_pending(current_proc, sig,
-                            (int32_t)current_proc->pid, 0, 0);
-            deliver_signal(tf, current_proc);
+            deliver_sync_fault_signal(tf, current_proc, sig, 0);
             return;
         }
         printk("UNEXPECTED TRAP! scause: 0x%lx, epc: 0x%lx, tval: 0x%lx sstatus=0x%lx\n",

@@ -277,18 +277,26 @@ extract_status_marker() {
 
 sortix_status="$(extract_status_marker sortix)"
 open_posix_status="$(extract_status_marker open-posix)"
+final_results_count=$(grep -c "=== Final Results ===" "$BOOT1_LOG" 2>/dev/null || true)
 if [ -z "$sortix_status" ]; then
     mark_phase_failed "missing Sortix exit status marker"
 elif [ "$sortix_status" -ne 0 ]; then
-    mark_phase_failed "Sortix suite exited with status $sortix_status"
+    if [ "$final_results_count" -lt 2 ]; then
+        mark_phase_failed "Sortix suite exited with status $sortix_status before final summaries"
+    else
+        echo "NOTE: Sortix suite exited with status $sortix_status; threshold checks parse final results."
+    fi
 fi
 if [ -z "$open_posix_status" ]; then
     mark_phase_failed "missing Open POSIX exit status marker"
 elif [ "$open_posix_status" -ne 0 ]; then
-    mark_phase_failed "Open POSIX suite exited with status $open_posix_status"
+    if [ "$final_results_count" -lt 2 ]; then
+        mark_phase_failed "Open POSIX suite exited with status $open_posix_status before final summaries"
+    else
+        echo "NOTE: Open POSIX suite exited with status $open_posix_status; threshold checks parse final results."
+    fi
 fi
 
-final_results_count=$(grep -c "=== Final Results ===" "$BOOT1_LOG" 2>/dev/null || true)
 if [ "$final_results_count" -lt 2 ]; then
     # BF: A status marker alone is not enough; the full suites must reach
     # final summaries before their nonzero statuses are interpretable.

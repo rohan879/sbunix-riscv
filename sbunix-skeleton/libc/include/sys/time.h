@@ -1,18 +1,24 @@
 #ifndef _SYS_TIME_H
 #define _SYS_TIME_H
 
-#include <sys/select.h>
-#include <time.h>      /* struct timeval, struct timespec */
 #include <sys/types.h>
+#include <time.h>      /* struct timeval, struct timespec */
+#include <sys/select.h>
 
 /* Historical BSD timezone struct used by settimeofday(). */
+#ifndef __timezone_defined
 struct timezone {
   int tz_minuteswest;
   int tz_dsttime;
 };
+#define __timezone_defined
+#endif
 
-/* gettimeofday() */
-int gettimeofday(struct timeval *tv, struct timezone *tz);
+/* BF: External shims redeclare the historical timezone-typed prototype.
+ * Keep this compatibility signature even though POSIX Issue 8 now specifies
+ * void * for the second parameter. */
+int gettimeofday(struct timeval *restrict tv,
+                 struct timezone *restrict tz);
 int settimeofday(const struct timeval *tv, const struct timezone *tz);
 int utimes(const char *path, const struct timeval times[2]);
 

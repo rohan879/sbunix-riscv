@@ -16,26 +16,6 @@ static int rt_sigsetsize_valid(uint64_t sigsetsize) {
     return sigsetsize == sizeof(uint64_t);
 }
 
-static int signal_queue_has_more(struct proc *p, int signum) {
-    for (int i = 0; i < NSIGQUEUE; i++) {
-        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum)
-            return 1;
-    }
-    return 0;
-}
-
-static int signal_queue_consume_one(struct proc *p, int signum, uint8_t *info_out) {
-    for (int i = 0; i < NSIGQUEUE; i++) {
-        if (p->sigqueue_buf[i].valid && p->sigqueue_buf[i].signum == signum) {
-            if (info_out)
-                memcpy(info_out, p->sigqueue_buf[i].info, 128);
-            p->sigqueue_buf[i].valid = 0;
-            return 1;
-        }
-    }
-    return 0;
-}
-
 static int signal_send_allowed(struct proc *target) {
     if (!current_proc || !target)
         return 0;
@@ -189,22 +169,9 @@ long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
     if (sig == 0)
         return 0; /* permission check only */
 
-    /* BF: Store the user-provided siginfo_t in the target's queue so
-     * that sigtimedwait can later retrieve si_value / si_code.  Without
-     * this, sigqueue data was discarded and sigtimedwait returned empty
-     * siginfo. */
+    /* BF: Store the user-provided siginfo_t in the shared sequence queue so
+     * sigtimedwait and SA_SIGINFO delivery consume queued instances FIFO. */
     if (info_uaddr) {
-        int slot = -1;
-        for (int i = 0; i < NSIGQUEUE; i++) {
-            if (!target->sigqueue_buf[i].valid) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot < 0) {
-            return (long)-EAGAIN;
-        }
-
         uint8_t kinfo[128];
         /* BF: Zero kinfo before copyin so bytes past K_SIGINFO_SIZE
          * are zeros, not uninitialized kernel stack data. */
@@ -212,10 +179,12 @@ long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
         if (copyin(current_proc->pagetable, kinfo, info_uaddr, K_SIGINFO_SIZE) < 0) {
             return (long)-EFAULT;
         }
-        /* BF: Full 128 bytes intentional — kinfo zero-padded past K_SIGINFO_SIZE */
-        memcpy(target->sigqueue_buf[slot].info, kinfo, 128);
-        target->sigqueue_buf[slot].signum = sig;
-        target->sigqueue_buf[slot].valid = 1;
+        /* BF: A sender-provided si_signo must not let one queued slot
+         * masquerade as another signal. */
+        memcpy(kinfo + 0, &sig, 4);
+        int qret = signal_queue_enqueue_raw(target, sig, kinfo);
+        if (qret < 0)
+            return (long)qret;
     }
 
     if (signal_is_realtime(sig)) {
@@ -230,6 +199,8 @@ long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
         if (target->state == SLEEPING)
             target->state = RUNNABLE;
     } else {
+        /* BF: Standard signals still need kill_deliver's stop/continue and
+         * wakeup behavior; queued siginfo, if any, was already recorded above. */
         kill_deliver(target, sig);
     }
     return 0;
@@ -280,19 +251,18 @@ long sys_rt_sigaction_handler(struct trapframe *tf) {
             sig_sa[signum].restorer = act.restorer;
 
             /* BF: POSIX: setting SIG_IGN for a signal clears any pending
-             * instance of that signal.  Without this, a pending signal could
-             * be delivered even after the process explicitly ignored it. */
+             * and queued instance of that signal. */
             if (act.handler == 1) { /* SIG_IGN */
                 current_proc->sigpending &= ~signal_bit(signum);
+                signal_queue_purge_all(current_proc, signum);
             }
             /* BF: POSIX requires that setting SIG_DFL for signals whose default
              * action is "ignore" (SIGCHLD, SIGURG, SIGWINCH, SIGCONT) also
-             * discards any pending instance.  Without this, a pending SIGCHLD
-             * can survive a SIG_DFL->handler->SIG_DFL transition and fire
-             * unexpectedly when unblocked. */
+             * discards queued metadata. */
             if (act.handler == 0 && (signum == SIGCHLD || signum == SIGURG ||
                                      signum == SIGWINCH || signum == SIGCONT)) {
                 current_proc->sigpending &= ~signal_bit(signum);
+                signal_queue_purge_all(current_proc, signum);
             }
         }
         return (long)0;
@@ -373,25 +343,15 @@ long sys_rt_sigsuspend_handler(struct trapframe *tf) {
     mask &= ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
     uint64_t old_mask = current_proc->sigmask;
     current_proc->sigmask = mask;
-    /* Suspend until a signal is deliverable.  Check under both the
-     * temporary mask and the old mask — a signal may arrive while
-     * blocked by the temporary mask (kill_deliver wakes us but the
-     * standard deliverability check fails). */
+    /* BF: Suspend until a signal is deliverable under the temporary mask.
+     * A signal still blocked by this mask may wake the task, but must not
+     * end sigsuspend; the loop will simply go back to sleep. */
     while (1) {
         if (current_proc->sigpending & ~current_proc->sigmask)
-            break;
-        if (current_proc->sigpending & ~old_mask)
             break;
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
     }
-    /* If a signal is only deliverable under the old mask (blocked by the
-     * temporary mask), restore old_mask so the trap handler's post-syscall
-     * deliver_signal can process it.  For signals already deliverable under
-     * the new mask, keep the new mask — sigreturn restores the old mask
-     * after the handler. */
-    if (!(current_proc->sigpending & ~current_proc->sigmask))
-        current_proc->sigmask = old_mask;
 
     /* BF: Defer mask restore via saved_sigmask_restore (same pattern
      * as ppoll/pselect6). deliver_signal will embed old_mask in the

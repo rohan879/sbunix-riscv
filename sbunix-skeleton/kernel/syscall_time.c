@@ -222,9 +222,18 @@ long sys_timer_create_handler(struct trapframe *tf) {
         int32_t ksigevent[8]; /* sigevent is ~64 bytes */
         if (copyin(current_proc->pagetable, ksigevent, evp_uaddr, 32) < 0)
             return (long)-EFAULT; /* EFAULT */
-        signo = ksigevent[1]; /* sigev_signo */
-        if (signo <= 0 || signo >= 32)
+        int notify = ksigevent[0]; /* sigev_notify */
+        if (notify == 1) { /* SIGEV_NONE */
+            signo = 0;
+        } else if (notify == 0) { /* SIGEV_SIGNAL */
+            signo = ksigevent[1]; /* sigev_signo */
+            /* BF: POSIX timers may target the advertised realtime range
+             * SIGRTMIN..SIGRTMAX, not just traditional signals below 32. */
+            if (!signal_is_valid(signo))
+                return (long)-22; /* EINVAL */
+        } else {
             return (long)-22; /* EINVAL */
+        }
     }
 
     /* Initialize timer.  active_timer_count tracks armed timers only,

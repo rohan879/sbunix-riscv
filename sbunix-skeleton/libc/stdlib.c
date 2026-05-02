@@ -656,39 +656,56 @@ int remove(const char *path) {
  *   - "." and ".." components
  *   - symbolic links (via readlink)
  *
- * If resolved_path is NULL a static buffer is used.
+ * If resolved_path is NULL a PATH_MAX buffer is allocated for the caller.
  * Returns NULL on error (sets errno).
  */
 char *realpath(const char *path, char *resolved_path) {
-    static char static_buf[PATH_MAX];
     char work[PATH_MAX];   /* working copy we walk through */
     char result[PATH_MAX]; /* canonical result being built */
     int  rlen = 0;         /* length of result so far */
     int  symlinks = 0;     /* symlink recursion counter */
+    int  allocated = 0;
+
+#define REALPATH_FAIL(err_) do { \
+        errno = (err_); \
+        if (allocated) \
+            free(resolved_path); \
+        return (void *)0; \
+    } while (0)
 
     if (!path || !*path) {
-        errno = EINVAL;
+        errno = path ? ENOENT : EINVAL;
         return (void *)0;
     }
 
-    if (!resolved_path)
-        resolved_path = static_buf;
+    if (!resolved_path) {
+        /* BF: POSIX realpath(path, NULL) allocates a PATH_MAX-sized result
+         * buffer owned by the caller.  The old static buffer broke callers
+         * that expected independent, freeable results. */
+        resolved_path = malloc(PATH_MAX);
+        if (!resolved_path) {
+            errno = ENOMEM;
+            return (void *)0;
+        }
+        allocated = 1;
+    }
 
     /* Build an absolute working path */
     if (path[0] != '/') {
-        if (!getcwd(work, sizeof(work)))
+        if (!getcwd(work, sizeof(work))) {
+            if (allocated)
+                free(resolved_path);
             return (void *)0;
+        }
         int wlen = strlen(work);
         if (wlen + 1 + (int)strlen(path) + 1 > (int)sizeof(work)) {
-            errno = ENAMETOOLONG;
-            return (void *)0;
+            REALPATH_FAIL(ENAMETOOLONG);
         }
         work[wlen] = '/';
         strcpy(work + wlen + 1, path);
     } else {
         if ((int)strlen(path) >= (int)sizeof(work)) {
-            errno = ENAMETOOLONG;
-            return (void *)0;
+            REALPATH_FAIL(ENAMETOOLONG);
         }
         strcpy(work, path);
     }
@@ -731,8 +748,7 @@ char *realpath(const char *path, char *resolved_path) {
         /* Append '/' if result doesn't already end with one */
         if (rlen > 0 && result[rlen - 1] != '/') {
             if (rlen + 1 >= (int)sizeof(result)) {
-                errno = ENAMETOOLONG;
-                return (void *)0;
+                REALPATH_FAIL(ENAMETOOLONG);
             }
             result[rlen++] = '/';
             result[rlen] = '\0';
@@ -740,8 +756,7 @@ char *realpath(const char *path, char *resolved_path) {
 
         /* Append the component */
         if (rlen + slen >= (int)sizeof(result)) {
-            errno = ENAMETOOLONG;
-            return (void *)0;
+            REALPATH_FAIL(ENAMETOOLONG);
         }
         memcpy(result + rlen, seg, slen);
         rlen += slen;
@@ -753,8 +768,7 @@ char *realpath(const char *path, char *resolved_path) {
         if (llen >= 0) {
             /* It is a symlink */
             if (++symlinks > 40) {
-                errno = ELOOP;
-                return (void *)0;
+                REALPATH_FAIL(ELOOP);
             }
             link_buf[llen] = '\0';
 
@@ -765,8 +779,7 @@ char *realpath(const char *path, char *resolved_path) {
             if (link_buf[0] == '/') {
                 /* Absolute symlink: restart from root */
                 if (llen + 1 + remaining_len + 1 > (int)sizeof(newwork)) {
-                    errno = ENAMETOOLONG;
-                    return (void *)0;
+                    REALPATH_FAIL(ENAMETOOLONG);
                 }
                 memcpy(newwork, link_buf, llen);
                 if (remaining_len > 0) {
@@ -796,8 +809,7 @@ char *realpath(const char *path, char *resolved_path) {
                 (void)parent_rlen;
 
                 if (llen + 1 + remaining_len + 1 > (int)sizeof(newwork)) {
-                    errno = ENAMETOOLONG;
-                    return (void *)0;
+                    REALPATH_FAIL(ENAMETOOLONG);
                 }
                 memcpy(newwork, link_buf, llen);
                 if (remaining_len > 0) {
@@ -810,8 +822,7 @@ char *realpath(const char *path, char *resolved_path) {
 
             /* Continue parsing from newwork */
             if ((int)strlen(newwork) >= (int)sizeof(work)) {
-                errno = ENAMETOOLONG;
-                return (void *)0;
+                REALPATH_FAIL(ENAMETOOLONG);
             }
             strcpy(work, newwork);
             p = work;
@@ -826,10 +837,10 @@ char *realpath(const char *path, char *resolved_path) {
     }
 
     if (rlen >= (int)sizeof(result)) {
-        errno = ENAMETOOLONG;
-        return (void *)0;
+        REALPATH_FAIL(ENAMETOOLONG);
     }
 
     memcpy(resolved_path, result, rlen + 1);
+#undef REALPATH_FAIL
     return resolved_path;
 }
