@@ -5,8 +5,13 @@
 #define _PIPE_H
 
 #define NPIPES    64
-/* Kernel pipe buffer size; distinct from POSIX PIPE_BUF (4096 in libc) */
-#define KPIPE_BUF 65536
+/* BF: Keep capacity at the POSIX atomic-write limit.  Larger buffers make
+ * one-byte fill/drain poll workloads scale with avoidable syscall count now
+ * that every user trap switches between process and kernel page tables. */
+#define KPIPE_BUF 4096
+/* BF: poll/select should report pipe write readiness only when a full
+ * PIPE_BUF-sized atomic write can complete without blocking. */
+#define KPIPE_WRITE_READY_MIN 4096
 
 struct kpipe {
   int used;
