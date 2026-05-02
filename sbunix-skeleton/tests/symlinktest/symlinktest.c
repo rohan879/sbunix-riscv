@@ -65,6 +65,9 @@ static void cleanup_all(void) {
     unlink("/mnt/sl_stat_target");
     unlink("/mnt/sl_rel_link");
     unlink("/mnt/sl_rel_target");
+    unlink("/mnt/sl_rp_dir/link");
+    unlink("/mnt/sl_rp_dir/target");
+    rmdir("/mnt/sl_rp_dir");
     unlink("/mnt/sl_unlink_link");
     unlink("/mnt/sl_unlink_target");
     unlink("/mnt/sl_dangle");
@@ -312,7 +315,45 @@ static void test_symlink_relative_target(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 10. symlink_unlink -- unlink symlink doesn't remove target file
+ * 10. realpath_relative_symlink_parent -- keep parent for relative target
+ * ---------------------------------------------------------------------- */
+
+static void test_realpath_relative_symlink_parent(void) {
+    const char *expected = "/mnt/sl_rp_dir/target";
+
+    unlink("/mnt/sl_rp_dir/link");
+    unlink("/mnt/sl_rp_dir/target");
+    rmdir("/mnt/sl_rp_dir");
+
+    CHECK("symlink: realpath_relative_symlink_parent mkdir",
+          mkdir("/mnt/sl_rp_dir", 0755) == 0);
+    CHECK("symlink: realpath_relative_symlink_parent target",
+          write_file(expected, "rp", 2) == 0);
+    CHECK("symlink: realpath_relative_symlink_parent link",
+          symlink("target", "/mnt/sl_rp_dir/link") == 0);
+
+    /* BF: realpath keeps the containing directory in its resolved prefix while
+     * it replays a relative symlink target, so /dir/link -> target becomes
+     * /dir/target rather than resolving target from the process cwd. */
+    char resolved[256];
+    memset(resolved, 0, sizeof(resolved));
+    char *rp = realpath("/mnt/sl_rp_dir/link", resolved);
+    CHECK("symlink: realpath_relative_symlink_parent static buffer",
+          rp == resolved && strcmp(resolved, expected) == 0);
+
+    rp = realpath("/mnt/sl_rp_dir/link", NULL);
+    CHECK("symlink: realpath_relative_symlink_parent allocated buffer",
+          rp != NULL && strcmp(rp, expected) == 0);
+    if (rp)
+        free(rp);
+
+    unlink("/mnt/sl_rp_dir/link");
+    unlink("/mnt/sl_rp_dir/target");
+    rmdir("/mnt/sl_rp_dir");
+}
+
+/* -----------------------------------------------------------------------
+ * 11. symlink_unlink -- unlink symlink doesn't remove target file
  * ---------------------------------------------------------------------- */
 
 static void test_symlink_unlink(void) {
@@ -341,7 +382,7 @@ static void test_symlink_unlink(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 11. symlink_dangling -- symlink to nonexistent file, open returns ENOENT
+ * 12. symlink_dangling -- symlink to nonexistent file, open returns ENOENT
  * ---------------------------------------------------------------------- */
 
 static void test_symlink_dangling(void) {
@@ -360,7 +401,7 @@ static void test_symlink_dangling(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 12. readlink_intermediate_dir_symlink -- follow dirname symlink only
+ * 13. readlink_intermediate_dir_symlink -- follow dirname symlink only
  * ---------------------------------------------------------------------- */
 
 static void test_readlink_intermediate_dir_symlink(void) {
@@ -394,7 +435,7 @@ static void test_readlink_intermediate_dir_symlink(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 13. symlinkat_parent_symlink -- create link through symlinked dirname
+ * 14. symlinkat_parent_symlink -- create link through symlinked dirname
  * ---------------------------------------------------------------------- */
 
 static void test_symlinkat_parent_symlink(void) {
@@ -425,7 +466,7 @@ static void test_symlinkat_parent_symlink(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 14. symlink_long_target -- long target strings survive symlink/readlink
+ * 15. symlink_long_target -- long target strings survive symlink/readlink
  * ---------------------------------------------------------------------- */
 
 static void test_symlink_long_target(void) {
@@ -466,7 +507,7 @@ static void test_symlink_long_target(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 15. symlink_empty_paths -- empty link paths fail with ENOENT
+ * 16. symlink_empty_paths -- empty link paths fail with ENOENT
  * ---------------------------------------------------------------------- */
 
 static void test_symlink_empty_paths(void) {
@@ -484,7 +525,7 @@ static void test_symlink_empty_paths(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 16. symlink_nofollow_open -- O_NOFOLLOW rejects final symlink
+ * 17. symlink_nofollow_open -- O_NOFOLLOW rejects final symlink
  * ---------------------------------------------------------------------- */
 
 static void test_symlink_nofollow_open(void) {
@@ -505,7 +546,7 @@ static void test_symlink_nofollow_open(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 17. symlink_overlong_target -- oversized target fails with ENAMETOOLONG
+ * 18. symlink_overlong_target -- oversized target fails with ENAMETOOLONG
  * ---------------------------------------------------------------------- */
 
 static void test_symlink_overlong_target(void) {
@@ -541,6 +582,7 @@ int main(void) {
     test_stat_follows_symlink();
     test_lstat_no_follow();
     test_symlink_relative_target();
+    test_realpath_relative_symlink_parent();
     test_symlink_unlink();
     test_symlink_dangling();
     test_readlink_intermediate_dir_symlink();
