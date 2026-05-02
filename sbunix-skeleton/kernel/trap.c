@@ -1293,8 +1293,6 @@ void trap_handler(struct trapframe *tf) {
                                 kfree(pg);
                                 goto pagefault_kill;
                             }
-                            if (cause == SCAUSE_STORE_PAGE_FAULT && fvma->shared)
-                                shared_slot_mark_dirty(fvma, va);
                             asm volatile("sfence.vma %0, zero" : : "r"(va));
                             if ((perm & PTE_X) || cause == SCAUSE_INST_PAGE_FAULT)
                                 asm volatile("fence.i");

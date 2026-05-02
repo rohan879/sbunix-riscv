@@ -9,9 +9,9 @@
  * one-byte fill/drain poll workloads scale with avoidable syscall count now
  * that every user trap switches between process and kernel page tables. */
 #define KPIPE_BUF 4096
-/* BF: poll/select should report pipe write readiness only when a full
- * PIPE_BUF-sized atomic write can complete without blocking. */
-#define KPIPE_WRITE_READY_MIN 4096
+/* BF: Keep the write-ready threshold tied to pipe capacity so poll/select
+ * reports readiness only when a full atomic pipe write can complete. */
+#define KPIPE_WRITE_READY_MIN KPIPE_BUF
 
 struct kpipe {
   int used;

@@ -52,4 +52,4 @@ Focused validation covered sparse reservation, user-top boundaries, lazy
 copyin/copyout, signal return, shared mappings, stack/brk guards, mremap,
 mprotect, filesystem access, virtio stress, and memory-pressure recovery under
 `QEMU_MEM=128M`.  Detailed commands and artifacts are recorded in
-`/home/adebayo/test-findings/test-findings-30.md`.
+the local validation artifact `test-findings-30.md`.

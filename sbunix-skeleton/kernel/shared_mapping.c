@@ -13,7 +13,6 @@ enum shared_mapping_kind {
 struct shared_slot {
   uint64_t index;
   uint64_t pa;
-  int dirty;
   struct shared_slot *next;
 };
 
@@ -239,23 +238,12 @@ int shared_mapping_map_page(struct vm_area *vma, uint64_t va, char **page_out) {
 
   slot->index = index;
   slot->pa = (uint64_t)page;
-  slot->dirty = 0;
   slot->next = mapping->slots;
   mapping->slots = slot;
 
   page_ref_inc(slot->pa);
   *page_out = page;
   return 0;
-}
-
-void shared_slot_mark_dirty(struct vm_area *vma, uint64_t va) {
-  struct shared_slot *slot;
-
-  if (!vma || !vma->shared)
-    return;
-  slot = shared_slot_find(vma->shared, shared_vma_page_index(vma, va));
-  if (slot)
-    slot->dirty = 1;
 }
 
 void shared_mapping_writeback_range(struct vm_area *vma, uint64_t start,
@@ -276,6 +264,9 @@ void shared_mapping_writeback_range(struct vm_area *vma, uint64_t start,
   if (wb_start >= wb_end)
     return;
 
+  /* BF: Shared pages stay writable after the first fault, so SBUnix has no
+   * reliable per-slot dirty state without write-protecting shared PTEs.
+   * Write mapped slots conservatively instead of carrying a stale dirty bit. */
   (void)shared_file_size(mapping, &file_size);
   for (uint64_t page_va = PGROUNDDOWN(wb_start);
        page_va < wb_end; page_va += PAGE_SIZE) {
@@ -308,6 +299,5 @@ void shared_mapping_writeback_range(struct vm_area *vma, uint64_t start,
                               mapping->file->private,
                               (char *)slot->pa + page_off,
                               write_len, &foff);
-    slot->dirty = 0;
   }
 }

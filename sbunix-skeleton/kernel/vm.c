@@ -1590,12 +1590,6 @@ static int copyout_impl(struct proc *p, pagetable_t pagetable, uint64_t dstva,
 
     // Copy to physical address directly since we are in kernel 1:1 map
     memcpy((void *)pa0, s, n);
-    {
-      struct vm_area *vma = p ? vma_find(p, PGROUNDDOWN(dstva)) : 0;
-      if (vma && vma->shared)
-        shared_slot_mark_dirty(vma, PGROUNDDOWN(dstva));
-    }
-
     len -= n;
     s += n;
     dstva = va0 + page_size;

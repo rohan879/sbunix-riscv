@@ -48,14 +48,25 @@ void *sbrk(long increment) {
     void *old_break = heap_end;
     if (increment == 0)
         return old_break;
-    if ((increment > 0 &&
-         (uintptr_t)heap_end > UINTPTR_MAX - (uintptr_t)increment) ||
-        (increment < 0 &&
-         (uintptr_t)heap_end < (uintptr_t)(-increment))) {
-        errno = ENOMEM;
-        return (void *)-1;
+    uintptr_t old_addr = (uintptr_t)heap_end;
+    uintptr_t new_addr;
+    /* BF: Use unsigned address arithmetic so LONG_MIN is never negated. */
+    if (increment > 0) {
+        uintptr_t delta = (uintptr_t)increment;
+        if (old_addr > UINTPTR_MAX - delta) {
+            errno = ENOMEM;
+            return (void *)-1;
+        }
+        new_addr = old_addr + delta;
+    } else {
+        uintptr_t delta = (uintptr_t)0 - (uintptr_t)increment;
+        if (old_addr < delta) {
+            errno = ENOMEM;
+            return (void *)-1;
+        }
+        new_addr = old_addr - delta;
     }
-    void *new_break = (char *)heap_end + increment;
+    void *new_break = (void *)new_addr;
 
     void *result = (void *)syscall(SYS_brk, new_break);
     if (result != new_break) {
