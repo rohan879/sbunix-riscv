@@ -15,8 +15,8 @@
 
 #define PAGE_SIZE_BYTES 4096UL
 #define ONE_GIB (1024UL * 1024UL * 1024UL)
-#define USER_TOP_ADDR 0x40000000UL
-#define SIGTRAMP_ADDR 0x3F000000UL
+#define USER_TOP_ADDR 0x80000000UL
+#define SIGTRAMP_ADDR 0x7F000000UL
 #define KERNEL_ADDR 0x80000000UL
 
 static uintptr_t current_break(void)
@@ -193,10 +193,14 @@ int main(void) {
     return 1;
   }
 
-  if (run_raw_child(after + ONE_GIB, "raw 1GiB growth") != 0)
+  if (run_raw_child(after + 2 * ONE_GIB, "raw oversized growth") != 0)
     return 1;
 
-  if (run_sbrk_child((long)ONE_GIB, "sbrk 1GiB growth") != 0)
+  if (run_sbrk_child((long)(2 * ONE_GIB), "sbrk oversized growth") != 0)
+    return 1;
+
+  if (run_sbrk_child(-(long)(2 * PAGE_SIZE_BYTES),
+                     "sbrk below initial break") != 0)
     return 1;
 
   if (run_raw_child(USER_TOP_ADDR, "user top collision") != 0)

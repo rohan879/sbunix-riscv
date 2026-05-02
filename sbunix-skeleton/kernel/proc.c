@@ -12,7 +12,7 @@ struct proc proc[NPROC];
 struct proc *current_proc = NULL;
 struct context scheduler_context;
 
-_Static_assert(sizeof(struct trapframe) == 272, "trapframe size mismatch with trap.S");
+_Static_assert(sizeof(struct trapframe) == 288, "trapframe size mismatch with trap.S");
 _Static_assert(__builtin_offsetof(struct trapframe, t0) == 8, "TF_T0 mismatch");
 _Static_assert(__builtin_offsetof(struct trapframe, t1) == 16, "TF_T1 mismatch");
 _Static_assert(__builtin_offsetof(struct trapframe, t6) == 56, "TF_T6 mismatch");
@@ -22,6 +22,8 @@ _Static_assert(__builtin_offsetof(struct trapframe, saved_sstatus) == 256,
                "TF_SSTATUS mismatch");
 _Static_assert(__builtin_offsetof(struct trapframe, return_to_user) == 264,
                "TF_RETURN_TO_USER mismatch");
+_Static_assert(__builtin_offsetof(struct trapframe, user_satp) == 272,
+               "TF_USER_SATP mismatch");
 
 int nextpid = 1;
 
@@ -48,6 +50,7 @@ void forkret(void) {
 
     current_proc->trapframe->saved_sstatus = x;
     current_proc->trapframe->return_to_user = 1;
+    current_proc->trapframe->user_satp = MAKE_SATP(current_proc->pagetable);
 
     /* BF: Place trapframe immediately below kstack_top so trap_restore can
      * derive the next user-trap sscratch value from the frame size. */
@@ -153,6 +156,7 @@ found:
     p->state = UNUSED;
     return 0;
   }
+  memset(p->trapframe, 0, PAGE_SIZE);
 
   /* Allocate 2 contiguous pages (8KB) for the kernel stack.  A single
    * 4KB stack is not a supported fallback: deep syscall and VFS paths can
@@ -179,10 +183,11 @@ found:
   p->cpu_start_ticks = 0;
   p->cputime_ticks = 0;
 
-  // Use kernel page table initially; exec() will install a user page table.
-  // This ensures the scheduler can safely switch satp to this process's
-  // page table before the process has run exec().
+  /* Use kernel page table initially; exec() will install a user page table.
+   * Kernel contexts always run under kernel_pagetable, and trap_restore
+   * loads the process satp only for the final return to U-mode. */
   p->pagetable = kernel_pagetable;
+  p->initial_brk = 0;
 
   // Set up new context to start executing at forkret
   memset(&p->context, 0, sizeof(p->context));
@@ -326,21 +331,15 @@ void scheduler(void) {
         current_proc = p;
         user_clock_start(p, r_time());
 
-        /* Set sscratch and switch to process page table */
-                /* BF: sscratch = top of kernel stack (8KB if contiguous) */
-                asm volatile("csrw sscratch, %0" : : "r"((uint64_t)p->kstack + (uint64_t)p->kstack_npages * PAGE_SIZE));
-                if (p->pagetable != kernel_pagetable) {
-                    w_satp(MAKE_SATP(p->pagetable));
-                    sfence_vma();
-                }
+        /* BF: Keep sscratch zero while resuming kernel C contexts.  A
+         * nonzero value means "trap came from user" to trap.S; installing it
+         * here lets timer interrupts overwrite the live kernel stack.  The
+         * final user-return path sets sscratch immediately before sret. */
+        asm volatile("csrw sscratch, zero");
 
         swtch(&scheduler_context, &p->context);
 
                 user_clock_stop(p, r_time());
-
-                /* Switch back to kernel page table */
-                w_satp(MAKE_SATP(kernel_pagetable));
-                sfence_vma();
 
         current_proc = 0;
 

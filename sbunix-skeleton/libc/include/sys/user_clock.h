@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define USER_CLOCK_VA 0x3EFFF000UL
+#define USER_CLOCK_VA 0x7EFFF000UL
 #define USER_CLOCK_TIMER_FREQ 10000000UL
 
 struct user_clock_page {

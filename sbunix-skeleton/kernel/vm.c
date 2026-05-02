@@ -8,6 +8,7 @@
 #include <mm.h>  /* BF: needed for anon_vma_get/link/unlink in vma_remove splits */
 #include <errno.h>  /* BF: EFAULT for copyinstr page fault distinction */
 #include <dtb.h>
+#include <shared_mapping.h>
 
 #ifndef VM_FREEWALK_TRACE
 #define VM_FREEWALK_TRACE 0
@@ -612,9 +613,10 @@ int kernel_wx_audit(void) {
  * page table page leak that occurred when kernel entries were
  * duplicated per-process. */
 int uvmmap_kernel(pagetable_t pt) {
-  /* Share VPN[2]=1..511: these root entries cover kernel RAM, PCIe MMIO BAR,
-   * and other regions entirely above user space. */
-  for (int i = 1; i < 512; i++) {
+  /* Share only VPN[2]=2..511.  Root entries 0 and 1 are user-owned after
+   * USER_TOP moves to KERNBASE; in particular the PCIe MMIO BAR at
+   * [0x40000000, 0x80000000) must not be copied into process roots. */
+  for (int i = 2; i < 512; i++) {
     uint64_t va = (uint64_t)i << 30;
     if (pte_update(pt, va, &pt[i], kernel_pagetable[i],
                    2, PTE_UPDATE_KERNEL_SHARE,
@@ -832,6 +834,8 @@ int vma_add(struct proc *p, uint64_t start, uint64_t end, int prot, int flags) {
   vma->next  = NULL;
   vma->file  = NULL;
   vma->file_offset = 0;
+  vma->shared = NULL;
+  vma->shared_offset_pages = 0;
 
   /* Initialize anon_vma fields */
   INIT_LIST_HEAD(&vma->anon_vma_chain);
@@ -983,6 +987,11 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
       tail->file_offset = v->file_offset + (end - old_start);
       if (tail->file)
         tail->file->refcount++;
+      tail->shared = v->shared;
+      tail->shared_offset_pages =
+        v->shared_offset_pages + ((end - old_start) >> 12);
+      if (tail->shared)
+        shared_mapping_get(tail->shared);
       /* BF: Initialize anon_vma fields on split tail so that rmap
        * chains remain consistent and page reclaim doesn't follow
        * uninitialized pointers. */
@@ -1010,6 +1019,8 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
       /* VMA ends after range: trim start */
       if (v->file)
         v->file_offset += (end - v->start);
+      if (v->shared)
+        v->shared_offset_pages += (end - v->start) >> 12;
       v->start = end;
       pp = &v->next;
     } else {
@@ -1023,6 +1034,10 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
       if (v->file) {
         vfs_close_file(v->file);
         v->file = NULL;
+      }
+      if (v->shared) {
+        shared_mapping_put(v->shared);
+        v->shared = NULL;
       }
       kmfree(v, sizeof(struct vm_area));
     }
@@ -1052,6 +1067,10 @@ int vma_dup(struct proc *src, struct proc *dst) {
     nv->file_offset = sv->file_offset;
     if (nv->file)
       nv->file->refcount++;
+    nv->shared = sv->shared;
+    nv->shared_offset_pages = sv->shared_offset_pages;
+    if (nv->shared)
+      shared_mapping_get(nv->shared);
     nv->next  = NULL;
     
     /* Initialize anon_vma fields for child VMA */
@@ -1067,6 +1086,8 @@ int vma_dup(struct proc *src, struct proc *dst) {
          * before anon_vma inheritance failed. */
         if (nv->file)
           vfs_close_file(nv->file);
+        if (nv->shared)
+          shared_mapping_put(nv->shared);
         kmfree(nv, sizeof(struct vm_area));
         vma_free_all(dst);
         return -1;
@@ -1102,6 +1123,10 @@ void vma_free_all(struct proc *p) {
     if (v->file) {
       vfs_close_file(v->file);
       v->file = NULL;
+    }
+    if (v->shared) {
+      shared_mapping_put(v->shared);
+      v->shared = NULL;
     }
     
     /* Unlink from anon_vma chains for anonymous mappings */
@@ -1273,43 +1298,48 @@ void release_user_address_space(pagetable_t pagetable, struct vm_area *vmas,
   if (do_writeback && vmas)
     mmap_writeback_shared_from(pagetable, vmas, 0, MAXVA);
 
-  /* VPN[2]=1..511: shared kernel entries — detach without freeing */
-  for (int i = 1; i < 512; i++)
+  /* VPN[2]=2..511: shared kernel entries — detach without freeing.
+   * VPN[2]=0 and 1 are user-owned subtrees and are released below. */
+  for (int i = 2; i < 512; i++)
     pagetable[i] = 0;
 
-  /* VPN[2]=0: user owns this level-1 table; individual kernel MMIO leaves
-   * copied into it are supervisor-only and release_level only detaches them. */
-  pte_t upte0 = pagetable[0];
-  enum pte_kind root0_kind = pte_classify(upte0, 2);
-  if (root0_kind == PTE_KIND_NONLEAF) {
-    pagetable_t user_L1 = (pagetable_t)PTE2PA(upte0);
-    pte_t kpte0 = kernel_pagetable[0];
-    pagetable_t kernel_L1 =
-      (kpte0 & PTE_V) && pte_classify(kpte0, 2) == PTE_KIND_NONLEAF
-        ? (pagetable_t)PTE2PA(kpte0)
-        : 0;
-    int share_limit = USER_MMAP_FLOOR / SUPERPAGE_SIZE;
-    for (int j = 0; j < share_limit && kernel_L1; j++) {
-      if (user_L1[j] == kernel_L1[j])
-        user_L1[j] = 0;
+  for (int root = 0; root < 2; root++) {
+    pte_t upte = pagetable[root];
+    enum pte_kind root_kind = pte_classify(upte, 2);
+    uint64_t root_base = (uint64_t)root << 30;
+    if (root_kind == PTE_KIND_NONLEAF) {
+      pagetable_t user_L1 = (pagetable_t)PTE2PA(upte);
+      if (root == 0) {
+        pte_t kpte0 = kernel_pagetable[0];
+        pagetable_t kernel_L1 =
+          (kpte0 & PTE_V) && pte_classify(kpte0, 2) == PTE_KIND_NONLEAF
+            ? (pagetable_t)PTE2PA(kpte0)
+            : 0;
+        int share_limit = USER_MMAP_FLOOR / SUPERPAGE_SIZE;
+        for (int j = 0; j < share_limit && kernel_L1; j++) {
+          if (user_L1[j] == kernel_L1[j])
+            user_L1[j] = 0;
+        }
+      }
+      if (pa_is_live_ptpage((uint64_t)user_L1))
+        release_level(user_L1, 1, root_base, vmas);
+      vm_trace_freewalk("user-l1-root", pagetable, 2, root, upte,
+                        (uint64_t)user_L1);
+      if (pa_is_live_ptpage((uint64_t)user_L1))
+        kfree((void *)user_L1);
+      pagetable[root] = 0;
+    } else if (root_kind == PTE_KIND_LEAF ||
+               root_kind == PTE_KIND_COW_LEAF ||
+               root_kind == PTE_KIND_PROT_NONE) {
+      if (upte & PTE_U) {
+        struct vm_area *v = vma_find_in_list(vmas, root_base);
+        unmap_user_leaf(pagetable, root_base, &pagetable[root], 2, v);
+      } else {
+        pagetable[root] = 0;
+      }
+    } else if (root_kind == PTE_KIND_RESERVED) {
+      pagetable[root] = 0;
     }
-    if (pa_is_live_ptpage((uint64_t)user_L1))
-      release_level(user_L1, 1, 0, vmas);
-    vm_trace_freewalk("user-l1-root", pagetable, 2, 0, upte0, (uint64_t)user_L1);
-    if (pa_is_live_ptpage((uint64_t)user_L1))
-      kfree((void *)user_L1);
-    pagetable[0] = 0;
-  } else if (root0_kind == PTE_KIND_LEAF ||
-             root0_kind == PTE_KIND_COW_LEAF ||
-             root0_kind == PTE_KIND_PROT_NONE) {
-    if (upte0 & PTE_U) {
-      struct vm_area *v = vma_find_in_list(vmas, 0);
-      unmap_user_leaf(pagetable, 0, &pagetable[0], 2, v);
-    } else {
-      pagetable[0] = 0;
-    }
-  } else if (root0_kind == PTE_KIND_RESERVED) {
-    pagetable[0] = 0;
   }
 
   /* Free the root page table page itself */
@@ -1414,10 +1444,16 @@ static uint64_t vm_resolve_user_page(struct proc *p, pagetable_t pagetable,
     /* Page not present — demand-allocate it.  BF: syscall buffers may live
      * in lazy file-backed mappings, so copyin/copyout must fault those in
      * just like the trap path instead of returning a false EFAULT. */
-    char *pg = kalloc();
-    if (!pg) goto out;
-    memset(pg, 0, PAGE_SIZE);
-    if (vma->file) {
+    char *pg = NULL;
+    if (vma->shared) {
+      if (shared_mapping_map_page(vma, page_va, &pg) < 0)
+        goto out;
+    } else {
+      pg = kalloc();
+      if (!pg) goto out;
+      memset(pg, 0, PAGE_SIZE);
+    }
+    if (vma->file && !vma->shared) {
       if (!(vma->file->ops && vma->file->ops->read)) {
         kfree(pg);
         goto out;
@@ -1522,11 +1558,20 @@ static int copyout_impl(struct proc *p, pagetable_t pagetable, uint64_t dstva,
       int ref = page_ref_get(old_pa);
       if ((*pte & PTE_W) == 0 && !vma_allows_write(p, dstva))
         return -1;
-      if ((*pte & PTE_COW) || (ref > 1 && !(*pte & PTE_W))) {
+      struct vm_area *vma = p ? vma_find(p, PGROUNDDOWN(dstva)) : 0;
+      if ((*pte & PTE_COW) ||
+          (ref > 1 && !(*pte & PTE_W) &&
+           !(vma && (vma->flags & MAP_SHARED)))) {
         /* Use cow_break for proper rmap registration of new page */
         uint64_t va_page = PGROUNDDOWN(dstva);
-        struct vm_area *vma = p ? vma_find(p, va_page) : 0;
         if (cow_break(pagetable, pte, va_page, vma) < 0)
+          return -1;
+      } else if (vma && (vma->flags & MAP_SHARED) && (*pte & PTE_W) == 0) {
+        uint64_t va_page = PGROUNDDOWN(dstva);
+        int perm = PTE_U | prot_to_pte_flags(vma->prot);
+        if (pte_update(pagetable, va_page, pte,
+                       (*pte & ~(PTE_R | PTE_W | PTE_X)) | perm,
+                       0, PTE_UPDATE_MPROTECT, PTE_SFENCE_NONE) < 0)
           return -1;
       }
       if ((*pte & PTE_W) == 0)
@@ -1545,7 +1590,6 @@ static int copyout_impl(struct proc *p, pagetable_t pagetable, uint64_t dstva,
 
     // Copy to physical address directly since we are in kernel 1:1 map
     memcpy((void *)pa0, s, n);
-
     len -= n;
     s += n;
     dstva = va0 + page_size;
@@ -1701,6 +1745,10 @@ void vma_free_chain(struct vm_area *head) {
     if (head->file) {
       vfs_close_file(head->file);
       head->file = NULL;
+    }
+    if (head->shared) {
+      shared_mapping_put(head->shared);
+      head->shared = NULL;
     }
     if ((head->flags & MAP_ANON) && head->anon_vma) {
       anon_vma_unlink(head);

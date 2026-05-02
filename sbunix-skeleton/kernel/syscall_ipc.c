@@ -67,7 +67,8 @@ short check_fd_ready(struct open_file *f, short events) {
         }
         if (f->pipe_write) {
             if (events & KPOLLOUT) {
-                if (pipe_avail(pid) < KPIPE_BUF)
+                int free_space = KPIPE_BUF - pipe_avail(pid);
+                if (free_space >= KPIPE_WRITE_READY_MIN)
                     revents |= KPOLLOUT;
             }
             /* POLLERR: read end closed */

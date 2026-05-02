@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <signal.h>
 #include <stdio.h>
@@ -18,7 +19,9 @@
 #define PRESSURE_MB 40
 #define DATA_CHUNK 4096
 #define MILESTONE_BYTES 4096
-#define PIPE_CAPACITY_BYTES 65536
+/* Match the kernel's pipe capacity so this test still waits for the writer to
+ * block after the capacity was reduced to the POSIX atomic-write guarantee. */
+#define PIPE_CAPACITY_BYTES PIPE_BUF
 #define IDLE_POLLS_REQUIRED 3
 #define IDLE_POLL_USEC 100000
 #define OVERALL_TIMEOUT_SEC 180

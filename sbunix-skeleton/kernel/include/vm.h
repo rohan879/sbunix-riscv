@@ -25,8 +25,12 @@ static inline int prot_to_pte_flags(int prot) {
 #define MAP_PRIVATE   0x02
 #define MAP_ANON      0x20
 
+/* Internal VMA flags.  Keep these outside the userspace MAP_* bit range. */
+#define VMA_STACK     0x10000000
+
 /* Virtual memory area descriptor */
 struct open_file; /* forward declaration */
+struct shared_mapping;
 
 struct vm_area {
   uint64_t start;       /* page-aligned start address */
@@ -39,6 +43,12 @@ struct vm_area {
   /* File-backed mapping (NULL for anonymous) */
   struct open_file *file; /* backing file (refcount'd) */
   uint64_t file_offset;   /* offset within file for start of mapping */
+
+  /* Shared MAP_SHARED backing object.  Anonymous mappings use page offsets
+   * relative to shared_offset_pages; file-backed mappings key slots by
+   * page-aligned file offset. */
+  struct shared_mapping *shared;
+  uint64_t shared_offset_pages;
   
   /* Anonymous VMA reverse mapping support */
   struct list_head anon_vma_chain;   /* list of anon_vma_chain entries */

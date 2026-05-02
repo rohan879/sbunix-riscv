@@ -43,6 +43,7 @@ static void trapframe_prepare_user_return(struct trapframe *tf) {
   sstatus |= SSTATUS_SPIE;
   tf->saved_sstatus = sstatus;
   tf->return_to_user = 1;
+  tf->user_satp = MAKE_SATP(current_proc->pagetable);
 }
 
 static uint64_t exec_mmap_base(uint64_t sz) {
@@ -101,6 +102,7 @@ int exec(char *path) {
     pagetable_t old_pagetable = current_proc->pagetable;
     struct vm_area *old_vma_list = current_proc->vma_list;
     uint64_t old_sz = current_proc->sz;
+    uint64_t old_initial_brk = current_proc->initial_brk;
 
     unsigned long old_sstatus = r_sstatus();
     w_sstatus(old_sstatus & ~SSTATUS_SIE);
@@ -169,10 +171,10 @@ int exec(char *path) {
     }
 
     /* Add a VMA for the user stack region (up to USER_STACK_TOP, not MAXVA) */
-    vma_add(current_proc, stack_va, USER_STACK_TOP, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+    vma_add(current_proc, stack_va, USER_STACK_TOP, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANON | VMA_STACK);
 
-    // 5. Map trampoline + trapframe pages (NO kernel identity mapping needed --
-    //    the trampoline switches satp to kernel_pagetable on trap entry)
+    // 5. Map supervisor/kernel aliases needed by trap entry before satp switch.
     if(uvmmap_kernel(pagetable) < 0) goto bad;
     if (user_clock_map(pagetable, new_clock) < 0) goto bad;
 
@@ -233,6 +235,7 @@ int exec(char *path) {
     uint64_t exec_brk = PGROUNDUP(sz);
     current_proc->pagetable = pagetable;
     current_proc->sz = exec_brk;
+    current_proc->initial_brk = exec_brk;
     current_proc->user_clock = new_clock;
     current_proc->cpu_start_ticks = 0;
     user_clock_start(current_proc, r_time());
@@ -285,8 +288,9 @@ int exec(char *path) {
     if (old_clock)
         user_clock_put(old_clock);
 
-    w_satp(MAKE_SATP(pagetable));
-    sfence_vma();
+    /* BF: Stay on kernel_pagetable after exec commit.  The prepared
+     * trapframe carries the user satp for trap_restore's final U-mode
+     * transition, so kernel teardown never executes under a user root. */
     asm volatile("fence.i");
 
     /* Re-enable SIE now that all state is consistent */
@@ -316,6 +320,7 @@ bad:
         struct vm_area *staged = current_proc->vma_list;
         current_proc->vma_list = old_vma_list;
         current_proc->sz = old_sz;
+        current_proc->initial_brk = old_initial_brk;
         w_sstatus(old_sstatus);
         user_clock_unmap(pagetable);
         if (new_clock)
@@ -385,6 +390,7 @@ int exec_vfs(const char *resolved_path) {
     pagetable_t old_pagetable = current_proc->pagetable;
     struct vm_area *old_vma_list = current_proc->vma_list;
     uint64_t old_sz = current_proc->sz;
+    uint64_t old_initial_brk = current_proc->initial_brk;
 
     unsigned long old_sstatus = r_sstatus();
     w_sstatus(old_sstatus & ~SSTATUS_SIE);
@@ -495,7 +501,7 @@ int exec_vfs(const char *resolved_path) {
     /* RF: Use symbolic constants instead of raw hex flags for readability.
      * Values verified against libc/include/sys/mman.h. */
     vma_add(current_proc, stack_va, USER_STACK_TOP,
-            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON);
+            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | VMA_STACK);
 
     /* 6. Map kernel entries */
     if (uvmmap_kernel(pagetable) < 0) goto bad_vfs;
@@ -549,6 +555,7 @@ int exec_vfs(const char *resolved_path) {
     uint64_t exec_brk = PGROUNDUP(sz);
     current_proc->pagetable = pagetable;
     current_proc->sz = exec_brk;
+    current_proc->initial_brk = exec_brk;
     current_proc->user_clock = new_clock;
     current_proc->cpu_start_ticks = 0;
     user_clock_start(current_proc, r_time());
@@ -589,8 +596,8 @@ int exec_vfs(const char *resolved_path) {
     if (old_clock)
         user_clock_put(old_clock);
 
-    w_satp(MAKE_SATP(pagetable));
-    sfence_vma();
+    /* BF: Stay on kernel_pagetable; trap_restore installs the user satp
+     * from the trapframe at the final return to userspace. */
     asm volatile("fence.i");
 
     /* Re-enable SIE now that all state is consistent */
@@ -614,6 +621,7 @@ bad_vfs:
         struct vm_area *staged = current_proc->vma_list;
         current_proc->vma_list = old_vma_list;
         current_proc->sz = old_sz;
+        current_proc->initial_brk = old_initial_brk;
         w_sstatus(old_sstatus);
         user_clock_unmap(pagetable);
         if (new_clock)

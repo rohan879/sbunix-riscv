@@ -46,6 +46,10 @@ static void restore_user_signal_context(struct trapframe *dst,
     memcpy(dst, src, __builtin_offsetof(struct trapframe, saved_sstatus));
     dst->saved_sstatus = safe_sstatus;
     dst->return_to_user = 1;
+    /* BF: sigreturn restores user registers, not the address-space root.
+     * Keep the kernel-owned satp derived from current_proc so a crafted
+     * signal frame cannot redirect trap_restore to an arbitrary page table. */
+    dst->user_satp = MAKE_SATP(current_proc->pagetable);
 }
 
 long sys_kill_handler(struct trapframe *tf) {
