@@ -82,6 +82,7 @@ static void cleanup_all(void) {
     unlink("/mnt/sl_sat_parent_sym");
     unlink("/mnt/sl_long_target_link");
     unlink("/tmp/sl_ramfs_long_link");
+    unlink("/mnt/sl_empty_target_link");
     unlink("/mnt/sl_nofollow_link");
     unlink("/mnt/sl_nofollow_target");
     unlink("/mnt/sl_overlong_link");
@@ -542,14 +543,22 @@ static void test_symlink_ramfs_max_target(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 17. symlink_empty_paths -- empty link paths fail with ENOENT
+ * 17. symlink_empty_paths -- empty symlink operands fail with ENOENT
  * ---------------------------------------------------------------------- */
 
 static void test_symlink_empty_paths(void) {
     char buf[8];
 
+    unlink("/mnt/sl_empty_target_link");
     errno = 0;
-    int r = symlink("target", "");
+    int r = symlink("", "/mnt/sl_empty_target_link");
+    CHECK("symlink: symlink_empty_paths empty target returns -1", r == -1);
+    CHECK("symlink: symlink_empty_paths empty target errno ENOENT",
+          errno == ENOENT);
+    unlink("/mnt/sl_empty_target_link");
+
+    errno = 0;
+    r = symlink("target", "");
     CHECK("symlink: symlink_empty_paths symlink returns -1", r == -1);
     CHECK("symlink: symlink_empty_paths symlink errno ENOENT", errno == ENOENT);
 

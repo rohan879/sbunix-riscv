@@ -27,6 +27,17 @@
  * POSIX locks are keyed by (path, pid); OFD locks by (path, open_file *). */
 struct file_lock lock_table[MAX_FILE_LOCKS];
 
+enum {
+  KERN_O_CREAT = 0100,
+  KERN_O_TRUNC = 01000,
+  KERN_O_DIRECTORY = 0200000,
+  KERN_O_NOFOLLOW = 0400000,
+  KERN_O_CLOEXEC = 02000000,
+  KERN_O_CLOFORK = 040000000,
+  KERN_AT_REMOVEDIR = 0x200,
+  KERN_AT_SYMLINK_FOLLOW = 0x400,
+};
+
 /* Two ranges [s1, s1+l1) and [s2, s2+l2) overlap.
  * l_len=0 means "to EOF" -- treat as infinite extent.
  * RF: Made static -- only used within this module */
@@ -392,9 +403,6 @@ pipe_eof:
 long sys_openat_handler(struct trapframe *tf) {
     int dirfd = (int)tf->a0;
     int flags = (int)tf->a2;
-#define O_CREAT    0100
-#define O_TRUNC    01000
-#define O_DIRECTORY 0200000
 
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
@@ -407,9 +415,9 @@ long sys_openat_handler(struct trapframe *tf) {
 
     /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
     {
-        int nofollow = (flags & 0400000); /* O_NOFOLLOW = 0400000 */
+        int nofollow = (flags & KERN_O_NOFOLLOW);
         int symret = resolve_symlinks_in_path(resolved, 6, !nofollow);
-        if (symret == -ENOENT && (flags & O_CREAT) && !nofollow) {
+        if (symret == -ENOENT && (flags & KERN_O_CREAT) && !nofollow) {
             /* BF: A missing final component under O_CREAT is not an error;
              * preserve intermediate symlink resolution and let the backend
              * create the new file. */
@@ -436,7 +444,7 @@ long sys_openat_handler(struct trapframe *tf) {
     {
         int is_dir = vfs_is_dir(resolved);
         /* Reject O_DIRECTORY on a non-directory before any side-effects */
-        if ((flags & O_DIRECTORY) && !is_dir)
+        if ((flags & KERN_O_DIRECTORY) && !is_dir)
             return (long)-20; /* -ENOTDIR */
         /* Reject O_WRONLY/O_RDWR on directories */
         if (is_dir) {
@@ -445,7 +453,7 @@ long sys_openat_handler(struct trapframe *tf) {
                 return (long)-21; /* -EISDIR */
         }
         /* Reject O_CREAT on an existing directory (POSIX: EISDIR) */
-        if (is_dir && (flags & O_CREAT))
+        if (is_dir && (flags & KERN_O_CREAT))
             return (long)-21; /* -EISDIR */
     }
 
@@ -481,9 +489,9 @@ long sys_openat_handler(struct trapframe *tf) {
         /* ENH: Propagate O_CLOEXEC and O_CLOFORK open flags to per-fd
          * flags so that F_GETFD/F_SETFD and fork/exec use fd_flags. */
         current_proc->fd_flags[fd] = 0;
-        if (flags & 02000000) /* O_CLOEXEC */
+        if (flags & KERN_O_CLOEXEC)
             current_proc->fd_flags[fd] |= 1; /* FD_CLOEXEC */
-        if (flags & 040000000) /* O_CLOFORK */
+        if (flags & KERN_O_CLOFORK)
             current_proc->fd_flags[fd] |= 2; /* FD_CLOFORK */
         return (long)fd;
     }
@@ -528,9 +536,9 @@ long sys_dup3_handler(struct trapframe *tf) {
         {
             int flags = (int)tf->a2;
             current_proc->fd_flags[newfd] = 0;
-            if (flags & 02000000)  /* O_CLOEXEC */
+            if (flags & KERN_O_CLOEXEC)
                 current_proc->fd_flags[newfd] |= 1; /* FD_CLOEXEC */
-            if (flags & 040000000) /* O_CLOFORK */
+            if (flags & KERN_O_CLOFORK)
                 current_proc->fd_flags[newfd] |= 2; /* FD_CLOFORK */
         }
         return (long)newfd;
@@ -1097,9 +1105,9 @@ long sys_fcntl_handler(struct trapframe *tf) {
          * compat with the O_CLOEXEC-based close-on-exec path in execve. */
         current_proc->fd_flags[fd] = (uint8_t)((int)tf->a2 & 3);
         if ((int)tf->a2 & 1) /* FD_CLOEXEC */
-            ftab[fd]->flags |= 02000000; /* O_CLOEXEC */
+            ftab[fd]->flags |= KERN_O_CLOEXEC;
         else
-            ftab[fd]->flags &= ~02000000;
+            ftab[fd]->flags &= ~KERN_O_CLOEXEC;
         return (long)0;
     } else if (cmd == 3) { /* F_GETFL */
         return (long)ftab[fd]->flags;
@@ -1203,7 +1211,7 @@ long sys_faccessat_handler(struct trapframe *tf) {
 long sys_unlinkat_handler(struct trapframe *tf) {
     int dirfd = (int)tf->a0;
     int flags = (int)tf->a2;
-    if (flags & ~0x200) /* AT_REMOVEDIR */
+    if (flags & ~KERN_AT_REMOVEDIR)
         return (long)-EINVAL;
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
@@ -1219,7 +1227,7 @@ long sys_unlinkat_handler(struct trapframe *tf) {
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
         struct vfs_ops *ops = mnt ? mnt->ops : NULL;
-        if (flags & 0x200) {
+        if (flags & KERN_AT_REMOVEDIR) {
             if (ops && ops->rmdir) {
                 int ret = ops->rmdir(mnt->fs_data, relpath);
                 return (long)(int64_t)ret;
@@ -1242,7 +1250,7 @@ long sys_linkat_handler(struct trapframe *tf) {
     int olddirfd = (int)tf->a0;
     int newdirfd = (int)tf->a2;
     int flags = (int)tf->a4;
-    if (flags & ~0x400) /* AT_SYMLINK_FOLLOW */
+    if (flags & ~KERN_AT_SYMLINK_FOLLOW)
         return (long)-EINVAL;
     char kold[KPATH_MAX], knew[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kold, sizeof(kold), 0);
@@ -1261,7 +1269,8 @@ long sys_linkat_handler(struct trapframe *tf) {
      * literal ext2 entry instead of resolving through the symlinked parent. */
     /* BF: AT_SYMLINK_FOLLOW switches only the old final component from
      * no-follow to follow; the new link name itself must remain literal. */
-    { int sr = resolve_symlinks_in_path(old_resolved, 6, !!(flags & 0x400));
+    { int sr = resolve_symlinks_in_path(old_resolved, 6,
+                                        !!(flags & KERN_AT_SYMLINK_FOLLOW));
       if (sr < 0) return (long)sr; }
     { int sr = resolve_symlinks_in_path(new_resolved, 6, 0);
       if (sr < 0) return (long)sr; }
@@ -1460,7 +1469,8 @@ long sys_symlinkat_handler(struct trapframe *tf) {
         return (long)-ENOMEM;
 
     /* BF: Match the advertised SYMLINK_MAX capacity and distinguish a
-     * too-long target from an invalid user pointer. */
+     * too-long target from an invalid user pointer.  The target is stored
+     * opaquely, but empty target strings still fail with ENOENT. */
     { int pr = copy_user_path_arg(tf->a0, ktarget, KSYMLINK_MAX + 1, 0);
       if (pr < 0) { kmfree(ktarget, KSYMLINK_MAX + 1); return (long)pr; } }
     { int pr = copy_user_path_arg(tf->a2, klinkpath, sizeof(klinkpath), 0);
