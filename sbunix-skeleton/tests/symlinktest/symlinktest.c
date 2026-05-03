@@ -15,6 +15,7 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 static int g_pass = 0, g_fail = 0;
 
@@ -80,9 +81,15 @@ static void cleanup_all(void) {
     rmdir("/mnt/sl_sat_parent_real");
     unlink("/mnt/sl_sat_parent_sym");
     unlink("/mnt/sl_long_target_link");
+    unlink("/tmp/sl_ramfs_long_link");
+    unlink("/mnt/sl_empty_target_link");
     unlink("/mnt/sl_nofollow_link");
     unlink("/mnt/sl_nofollow_target");
     unlink("/mnt/sl_overlong_link");
+    unlink("/tmp/sl_linkat_hard");
+    unlink("/tmp/sl_linkat_sym");
+    unlink("/tmp/sl_linkat_target");
+    unlink("/mnt/sl_dtype_link");
 }
 
 /* -----------------------------------------------------------------------
@@ -507,14 +514,51 @@ static void test_symlink_long_target(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 16. symlink_empty_paths -- empty link paths fail with ENOENT
+ * 16. symlink_ramfs_max_target -- ramfs stores SYMLINK_MAX-byte targets
+ * ---------------------------------------------------------------------- */
+
+static void test_symlink_ramfs_max_target(void) {
+    char target[256];
+    char buf[300];
+
+    unlink("/tmp/sl_ramfs_long_link");
+
+    for (int i = 0; i < 255; i++)
+        target[i] = (char)('a' + (i % 26));
+    target[255] = '\0';
+
+    CHECK("symlink: symlink_ramfs_max_target create",
+          symlink(target, "/tmp/sl_ramfs_long_link") == 0);
+
+    memset(buf, 0, sizeof(buf));
+    int n = readlink("/tmp/sl_ramfs_long_link", buf, sizeof(buf) - 1);
+    CHECK("symlink: symlink_ramfs_max_target readlink length", n == 255);
+    if (n > 0) {
+        buf[n] = '\0';
+        CHECK("symlink: symlink_ramfs_max_target target matches",
+              strcmp(buf, target) == 0);
+    }
+
+    unlink("/tmp/sl_ramfs_long_link");
+}
+
+/* -----------------------------------------------------------------------
+ * 17. symlink_empty_paths -- empty symlink operands fail with ENOENT
  * ---------------------------------------------------------------------- */
 
 static void test_symlink_empty_paths(void) {
     char buf[8];
 
+    unlink("/mnt/sl_empty_target_link");
     errno = 0;
-    int r = symlink("target", "");
+    int r = symlink("", "/mnt/sl_empty_target_link");
+    CHECK("symlink: symlink_empty_paths empty target returns -1", r == -1);
+    CHECK("symlink: symlink_empty_paths empty target errno ENOENT",
+          errno == ENOENT);
+    unlink("/mnt/sl_empty_target_link");
+
+    errno = 0;
+    r = symlink("target", "");
     CHECK("symlink: symlink_empty_paths symlink returns -1", r == -1);
     CHECK("symlink: symlink_empty_paths symlink errno ENOENT", errno == ENOENT);
 
@@ -525,7 +569,7 @@ static void test_symlink_empty_paths(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 17. symlink_nofollow_open -- O_NOFOLLOW rejects final symlink
+ * 18. symlink_nofollow_open -- O_NOFOLLOW rejects final symlink
  * ---------------------------------------------------------------------- */
 
 static void test_symlink_nofollow_open(void) {
@@ -546,7 +590,7 @@ static void test_symlink_nofollow_open(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 18. symlink_overlong_target -- oversized target fails with ENAMETOOLONG
+ * 19. symlink_overlong_target -- oversized target fails with ENAMETOOLONG
  * ---------------------------------------------------------------------- */
 
 static void test_symlink_overlong_target(void) {
@@ -561,6 +605,87 @@ static void test_symlink_overlong_target(void) {
     CHECK("symlink: symlink_overlong_target errno ENAMETOOLONG",
           errno == ENAMETOOLONG);
     unlink("/mnt/sl_overlong_link");
+}
+
+static int find_dirent_type(const char *dirpath, const char *name, unsigned char *dtype) {
+    DIR *dir = opendir(dirpath);
+    if (!dir)
+        return -1;
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        if (strcmp(de->d_name, name) == 0) {
+            *dtype = de->d_type;
+            closedir(dir);
+            return 0;
+        }
+    }
+    closedir(dir);
+    return -1;
+}
+
+/* -----------------------------------------------------------------------
+ * 20. symlink_linkat_follow -- AT_SYMLINK_FOLLOW links target file
+ * ---------------------------------------------------------------------- */
+
+static void test_linkat_symlink_follow(void) {
+    const char *target = "/tmp/sl_linkat_target";
+    const char *linkp = "/tmp/sl_linkat_sym";
+    const char *hardp = "/tmp/sl_linkat_hard";
+
+    unlink(hardp);
+    unlink(linkp);
+    unlink(target);
+
+    CHECK("symlink: linkat_symlink_follow target setup",
+          write_file(target, "lf", 2) == 0);
+    CHECK("symlink: linkat_symlink_follow symlink setup",
+          symlink(target, linkp) == 0);
+
+    int r = linkat(AT_FDCWD, linkp, AT_FDCWD, hardp, AT_SYMLINK_FOLLOW);
+    CHECK("symlink: linkat_symlink_follow returns 0", r == 0);
+
+    struct stat st;
+    int sr = lstat(hardp, &st);
+    CHECK("symlink: linkat_symlink_follow hardlink is regular",
+          sr == 0 && S_ISREG(st.st_mode));
+
+    char buf[8];
+    int n = read_file(hardp, buf, sizeof(buf));
+    CHECK("symlink: linkat_symlink_follow content",
+          n == 2 && memcmp(buf, "lf", 2) == 0);
+
+    errno = 0;
+    r = linkat(AT_FDCWD, target, AT_FDCWD, "/tmp/sl_linkat_bad", 0x8000);
+    CHECK("symlink: linkat_unsupported_flags errno EINVAL",
+          r == -1 && errno == EINVAL);
+
+    unlink("/tmp/sl_linkat_bad");
+    unlink(hardp);
+    unlink(linkp);
+    unlink(target);
+}
+
+/* -----------------------------------------------------------------------
+ * 21. symlink_dirent_metadata -- filesystem readdir reports DT_LNK
+ * ---------------------------------------------------------------------- */
+
+static void test_symlink_dirent_metadata(void) {
+    unsigned char dtype = 0;
+
+    unlink("/mnt/sl_dtype_link");
+    CHECK("symlink: dirent_metadata ext2 create",
+          symlink("/mnt/sl_no_such_target", "/mnt/sl_dtype_link") == 0);
+    CHECK("symlink: dirent_metadata ext2 DT_LNK",
+          find_dirent_type("/mnt", "sl_dtype_link", &dtype) == 0 &&
+          dtype == DT_LNK);
+    unlink("/mnt/sl_dtype_link");
+
+    struct stat st;
+    int sr = lstat("/bin/sh", &st);
+    CHECK("symlink: dirent_metadata tarfs lstat link",
+          sr == 0 && S_ISLNK(st.st_mode) && st.st_size == 5);
+    CHECK("symlink: dirent_metadata tarfs DT_LNK",
+          find_dirent_type("/bin", "sh", &dtype) == 0 && dtype == DT_LNK);
 }
 
 /* -----------------------------------------------------------------------
@@ -588,9 +713,12 @@ int main(void) {
     test_readlink_intermediate_dir_symlink();
     test_symlinkat_parent_symlink();
     test_symlink_long_target();
+    test_symlink_ramfs_max_target();
     test_symlink_empty_paths();
     test_symlink_nofollow_open();
     test_symlink_overlong_target();
+    test_linkat_symlink_follow();
+    test_symlink_dirent_metadata();
 
     printf("=== symlinktest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

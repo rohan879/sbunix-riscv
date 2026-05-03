@@ -310,7 +310,7 @@ int tty_read(char *buf, int len) {
     while (ring_avail(tty0.cooked_r, tty0.cooked_w) == 0 &&
            !tty0.cooked_eof) {
       /* Check for pending signals */
-      if (current_proc->sigpending & ~current_proc->sigmask)
+      if (signal_deliverable_mask(current_proc))
         return -4; /* -EINTR */
       current_proc->waiting_for_uart = 1;
       current_proc->state = SLEEPING;
@@ -324,7 +324,7 @@ int tty_read(char *buf, int len) {
       }
       swtch(&current_proc->context, &scheduler_context);
       /* Re-check for signals after waking */
-      if (current_proc->sigpending & ~current_proc->sigmask)
+      if (signal_deliverable_mask(current_proc))
         return -4; /* -EINTR */
     }
 
@@ -349,7 +349,7 @@ int tty_read(char *buf, int len) {
     /* ---- Raw mode: return as soon as any data is available ---- */
     while (ring_avail(tty0.raw_r, tty0.raw_w) == 0) {
       /* Check for pending signals */
-      if (current_proc->sigpending & ~current_proc->sigmask)
+      if (signal_deliverable_mask(current_proc))
         return -4; /* -EINTR */
       current_proc->waiting_for_uart = 1;
       current_proc->state = SLEEPING;
@@ -360,7 +360,7 @@ int tty_read(char *buf, int len) {
         break;
       }
       swtch(&current_proc->context, &scheduler_context);
-      if (current_proc->sigpending & ~current_proc->sigmask)
+      if (signal_deliverable_mask(current_proc))
         return -4; /* -EINTR */
     }
 

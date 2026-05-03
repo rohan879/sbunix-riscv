@@ -215,7 +215,8 @@ int main(void) {
   if (run_mmap_collision_child("mmap collision") != 0)
     return 1;
 
-  if (run_repeated_raw_child(after + ONE_GIB, "repeated rejected growth") != 0)
+  if (run_repeated_raw_child(after + 2 * ONE_GIB,
+                             "repeated oversized growth") != 0)
     return 1;
 
   printf("[PASS] brk_enomem\n");

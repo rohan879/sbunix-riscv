@@ -608,46 +608,20 @@ int kernel_wx_audit(void) {
   return bad;
 }
 
-/* Map kernel page table entries into a user page table by sharing
- * references (not copying page table pages).  This avoids the ~65
- * page table page leak that occurred when kernel entries were
- * duplicated per-process. */
+/* Map kernel page table entries into a user page table by sharing root
+ * references (not copying page table pages).  Root entries 0 and 1 stay fully
+ * user-owned; low device MMIO aliases are reachable only through the kernel
+ * page table after trap entry switches satp. */
 int uvmmap_kernel(pagetable_t pt) {
-  /* Share only VPN[2]=2..511.  Root entries 0 and 1 are user-owned after
-   * USER_TOP moves to KERNBASE; in particular the PCIe MMIO BAR at
-   * [0x40000000, 0x80000000) must not be copied into process roots. */
+  /* Share only VPN[2]=2..511.  The trap entry stub needs the kernel stack and
+   * direct map in the high half before it switches to kernel_pagetable; user
+   * mappings below KERNBASE must not inherit supervisor-only MMIO leaves. */
   for (int i = 2; i < 512; i++) {
     uint64_t va = (uint64_t)i << 30;
     if (pte_update(pt, va, &pt[i], kernel_pagetable[i],
                    2, PTE_UPDATE_KERNEL_SHARE,
                    PTE_SFENCE_NONE) < 0)
       return -1;
-  }
-
-  /* VPN[2]=0: user and kernel MMIO share this region.  The user already
-   * has its own level-1 table (created by mappages for code/stack).
-   * Copy kernel MMIO level-1 entries into empty slots of that table. */
-  pte_t kpte0 = kernel_pagetable[0];
-  pte_t upte0 = pt[0];
-  if (!(kpte0 & PTE_V) || !(upte0 & PTE_V))
-    return 0; /* nothing to share */
-
-  pagetable_t kernel_L1 = (pagetable_t)PTE2PA(kpte0);
-  pagetable_t user_L1   = (pagetable_t)PTE2PA(upte0);
-  /* BF: Only share kernel MMIO L1 entries below USER_MMAP_FLOOR.
-   * L1 index j maps VA range [j*2MB, (j+1)*2MB) within VPN[2]=0.
-   * L1[128] = UART at 0x10000000, safely below mmap floor.
-   * L1[384-510] = PCIe ECAM at 0x30000000+ — within user mmap range, SKIP.
-   * Limit = USER_MMAP_FLOOR / SUPERPAGE_SIZE = 0x10200000 / 0x200000 = 129. */
-  int share_limit = USER_MMAP_FLOOR / SUPERPAGE_SIZE;
-  for (int j = 0; j < share_limit; j++) {
-    if ((kernel_L1[j] & PTE_V) && !(user_L1[j] & PTE_V)) {
-      uint64_t va = (uint64_t)j * SUPERPAGE_SIZE;
-      if (pte_update(pt, va, &user_L1[j], kernel_L1[j],
-                     1, PTE_UPDATE_KERNEL_SHARE,
-                     PTE_SFENCE_NONE) < 0)
-        return -1;
-    }
   }
   return 0;
 }
@@ -735,8 +709,7 @@ void uvmunmap_proc(struct proc *p, pagetable_t pagetable, uint64_t va, uint64_t 
             continue;
         }
         if (*pte & PTE_V) {
-            /* BF: Skip kernel-only PTEs (shared MMIO via uvmmap_kernel) —
-             * must not free kernel pages from user unmap paths. */
+            /* Kernel-owned aliases must not be freed from user unmap paths. */
             if (!(*pte & PTE_U)) {
                 a += pte_level_span(level);
                 continue;
@@ -1045,6 +1018,41 @@ int vma_remove(struct proc *p, uint64_t start, uint64_t end) {
   return 0;
 }
 
+/* Preflight whether vma_remove() would need a split tail allocation.  Callers
+ * that are about to drop PTEs first use this to avoid leaving stale VMA
+ * metadata if kmalloc would fail while splitting a VMA around [start, end). */
+int vma_remove_preflight(struct proc *p, uint64_t start, uint64_t end) {
+  struct vm_area *v = p ? p->vma_list : NULL;
+
+  while (v) {
+    if (v->end <= start) {
+      v = v->next;
+      continue;
+    }
+    if (v->start >= end)
+      break;
+
+    if (v->start < start && v->end > end) {
+      struct vm_area *tail = (struct vm_area *)kmalloc(sizeof(struct vm_area));
+      if (!tail)
+        return -1;
+      kmfree(tail, sizeof(struct vm_area));
+
+      if (v->anon_vma) {
+        struct anon_vma_chain *avc =
+          (struct anon_vma_chain *)kmalloc(sizeof(struct anon_vma_chain));
+        if (!avc)
+          return -1;
+        kmfree(avc, sizeof(struct anon_vma_chain));
+      }
+      return 0;
+    }
+    v = v->next;
+  }
+
+  return 0;
+}
+
 /* Deep copy the VMA list from src to dst process. Used by fork.
  * Returns 0 on success, -1 on error. */
 int vma_dup(struct proc *src, struct proc *dst) {
@@ -1309,18 +1317,6 @@ void release_user_address_space(pagetable_t pagetable, struct vm_area *vmas,
     uint64_t root_base = (uint64_t)root << 30;
     if (root_kind == PTE_KIND_NONLEAF) {
       pagetable_t user_L1 = (pagetable_t)PTE2PA(upte);
-      if (root == 0) {
-        pte_t kpte0 = kernel_pagetable[0];
-        pagetable_t kernel_L1 =
-          (kpte0 & PTE_V) && pte_classify(kpte0, 2) == PTE_KIND_NONLEAF
-            ? (pagetable_t)PTE2PA(kpte0)
-            : 0;
-        int share_limit = USER_MMAP_FLOOR / SUPERPAGE_SIZE;
-        for (int j = 0; j < share_limit && kernel_L1; j++) {
-          if (user_L1[j] == kernel_L1[j])
-            user_L1[j] = 0;
-        }
-      }
       if (pa_is_live_ptpage((uint64_t)user_L1))
         release_level(user_L1, 1, root_base, vmas);
       vm_trace_freewalk("user-l1-root", pagetable, 2, root, upte,

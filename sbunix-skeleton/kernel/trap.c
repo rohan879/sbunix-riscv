@@ -530,25 +530,13 @@ static void fill_user_ucontext(struct user_ucontext *uc,
 
 /* RF: Made non-static for access by extracted signal syscall module */
 void deliver_signal(struct trapframe *tf, struct proc *p) {
-    /* BF: Only SIGKILL and SIGSTOP are truly unblockable per POSIX.
-     * Synchronous fault signals (SIGILL, SIGSEGV, SIGBUS, SIGFPE) are
-     * unmasked at their exception handler sites, not here. */
-    uint64_t force_unblock = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
-
-    /* Find lowest-numbered pending unblocked signal.  Unblockable signals
-     * must be deliverable even if sa_mask has them blocked. */
-    uint64_t saved_mask = p->sigmask;
-    p->sigmask &= ~force_unblock;
-    uint64_t deliverable = p->sigpending & ~p->sigmask;
-    p->sigmask = saved_mask;
-    if (deliverable == 0) {
-        /* BF: Clear has_saved_sigmask when no signal is actually delivered.
-         * Without this, a deferred mask restore from ppoll/pselect6 would
-         * persist across unrelated syscalls, corrupting the process sigmask
-         * on a later sigreturn. */
-        p->has_saved_sigmask = 0;
+    /* Find lowest-numbered pending signal that is deliverable under the
+     * process mask.  Synchronous CPU faults are unmasked at their exception
+     * handlers; ordinary trap-return delivery only force-unblocks KILL/STOP. */
+    uint64_t force_unblock = signal_unblockable_mask();
+    uint64_t deliverable = signal_deliverable_mask(p);
+    if (deliverable == 0)
         return;
-    }
 
     int signum = 0;
     for (int i = 1; i < 65; i++) {
@@ -881,10 +869,10 @@ void kill_deliver(struct proc *target, int sig) {
          * syscall context, so this is safe.  Clear the pending bit to
          * prevent deliver_signal from processing the stop a second time.
          *
-         * SIGSTOP cannot be caught, so always immediate-stop.
-         * SIGTSTP/SIGTTIN/SIGTTOU only immediate-stop when handler is
-         * SIG_DFL; if the process has a custom handler, leave the signal
-         * pending for deliver_signal.
+         * SIGSTOP cannot be caught, so always immediate-stop.  The other
+         * job-control stops immediate-stop only when unblocked and SIG_DFL;
+         * otherwise they stay pending until the process unmasks them or a
+         * handler is delivered.
          *
          * When the target IS the current process (self-stop via
          * kill(getpid(),SIGSTOP)), leave the signal pending so that
@@ -893,7 +881,8 @@ void kill_deliver(struct proc *target, int sig) {
              sig == SIGTTIN || sig == SIGTTOU) &&
             target != current_proc &&
             (sig == SIGSTOP ||
-             proc_sigactions(target)[sig].handler == 0)) {
+             (!(target->sigmask & signal_bit(sig)) &&
+              proc_sigactions(target)[sig].handler == 0))) {
             target->sigpending &= ~signal_bit(sig);
             target->stopped_signal = sig;
             target->exit_status = (sig << 8) | 0x7f; /* BF: Fix 2 — for WIFSTOPPED/WSTOPSIG */
@@ -1158,15 +1147,9 @@ void trap_handler(struct trapframe *tf) {
          * Unblockable signals (SIGKILL, synchronous faults) must be
          * deliverable even if sa_mask has them blocked, so we
          * temporarily unblock them for the deliverability check. */
-        /* BF: Narrowed force_unblock to only SIGKILL/SIGSTOP (same as
-         * syscall return path) -- synchronous signals unmasked at fault. */
         if (current_proc && from_user) {
-            uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
-            uint64_t saved = current_proc->sigmask;
-            current_proc->sigmask &= ~fu;
-            int has = (current_proc->sigpending & ~current_proc->sigmask) != 0;
-            current_proc->sigmask = saved;
-            if (has) deliver_signal(tf, current_proc);
+            if (signal_deliverable_mask(current_proc))
+                deliver_signal(tf, current_proc);
         }
         return;
     }
@@ -1226,9 +1209,8 @@ void trap_handler(struct trapframe *tf) {
                     }
 
                     uint64_t va = PGROUNDDOWN(stval);
-                    /* BF: Guard — reject kernel-only superpages before demand-paging.
-                     * These are shared MMIO entries from uvmmap_kernel() that should
-                     * not be demand-paged by user processes. */
+                    /* Guard against any kernel-owned superpage that appears below
+                     * USER_TOP through future layout changes. */
                     {
                         int pte_level = -1;
                         pte_t *spte = walk_super(current_proc->pagetable, va, &pte_level);
@@ -1483,12 +1465,8 @@ pagefault_kill:
             current_proc->in_syscall = 0;
             proc_exit_current(128 + sig, sig);
         }
-        uint64_t fu = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
-        uint64_t saved = current_proc->sigmask;
-        current_proc->sigmask &= ~fu;
-        int has = (current_proc->sigpending & ~current_proc->sigmask) != 0;
-        current_proc->sigmask = saved;
-        if (has) deliver_signal(tf, current_proc);
+        if (signal_deliverable_mask(current_proc))
+            deliver_signal(tf, current_proc);
         current_proc->in_syscall = 0;
     }
     return;

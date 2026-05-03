@@ -295,13 +295,12 @@ long sys_rt_sigprocmask_handler(struct trapframe *tf) {
         }
         /* BF: POSIX forbids blocking SIGKILL or SIGSTOP.  Strip these from
          * any mask modification.  Also return -EINVAL for invalid how. */
-        uint64_t unblockable = signal_bit(SIGKILL) | signal_bit(SIGSTOP);
         if (how == 0)       /* SIG_BLOCK */
-            current_proc->sigmask |= (newset & ~unblockable);
+            current_proc->sigmask |= signal_mask_sanitize(newset);
         else if (how == 1)  /* SIG_UNBLOCK */
             current_proc->sigmask &= ~newset;
         else if (how == 2)  /* SIG_SETMASK */
-            current_proc->sigmask = (newset & ~unblockable);
+            current_proc->sigmask = signal_mask_sanitize(newset);
         else
             return (long)-22; /* EINVAL for invalid how */
     }
@@ -317,7 +316,7 @@ long sys_rt_sigreturn_handler(struct trapframe *tf) {
         return (long)-EFAULT;
     }
 
-    current_proc->sigmask = frame.saved_sigmask;
+    current_proc->sigmask = signal_mask_sanitize(frame.saved_sigmask);
     restore_user_signal_context(tf, &frame.saved_tf);
 
     /* BF: Clear SS_ONSTACK if the restored sp is outside the alternate
@@ -344,14 +343,14 @@ long sys_rt_sigsuspend_handler(struct trapframe *tf) {
         return -EFAULT; // EFAULT
     /* POSIX: SIGKILL and SIGSTOP are never blockable, even in temporary
      * sigsuspend masks. */
-    mask &= ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
+    mask = signal_mask_sanitize(mask);
     uint64_t old_mask = current_proc->sigmask;
     current_proc->sigmask = mask;
     /* BF: Suspend until a signal is deliverable under the temporary mask.
      * A signal still blocked by this mask may wake the task, but must not
      * end sigsuspend; the loop will simply go back to sleep. */
     while (1) {
-        if (current_proc->sigpending & ~current_proc->sigmask)
+        if (signal_deliverable_mask(current_proc))
             break;
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
@@ -508,7 +507,7 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
             current_proc->waiting_for_uart = 0;
 
         /* Check for other signals that should interrupt the wait */
-        uint64_t other_signals = current_proc->sigpending & ~waitset & ~current_proc->sigmask;
+        uint64_t other_signals = signal_deliverable_mask(current_proc) & ~waitset;
         if (other_signals)
             return (long)-EINTR;
     }

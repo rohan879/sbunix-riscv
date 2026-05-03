@@ -116,6 +116,8 @@ run_test_expect_status segvtest 42
 run_test fdiotest
 run_test sigtest
 run_test sighandtest
+run_test sigsuspend_mask
+run_test sigmask_stop
 run_test safetyabitest
 run_test dirtest
 run_test procfstest
@@ -158,6 +160,7 @@ run_test forkreuse
 # exit and SIGKILL teardown recycle pages before later children allocate.
 run_test mempressure_recovery
 run_test lazyreserve
+run_test lazy_sparse_1g
 run_test posix_mem_test
 run_micropython_example hello /home/hello.py "Hello from MicroPython on SBUnix!"
 run_micropython_example test /home/test.py "all tests passed"

@@ -286,24 +286,23 @@ long sys_uname_handler(struct trapframe *tf) {
 }
 
 /* Static storage for dynamically mounted paths */
-static char mount_path_storage[8][128];
+static char mount_path_storage[8][KPATH_MAX];
 static int mount_path_next = 0;
 
 long sys_mount_handler(struct trapframe *tf) {
-    char ksrc[128], ktgt[256], kfstype[64];
-    if (copyinstr(current_proc->pagetable, ksrc, tf->a0, sizeof(ksrc)) < 0)
-        return (long)-EFAULT;
-    if (copyinstr(current_proc->pagetable, ktgt, tf->a1, sizeof(ktgt)) < 0)
-        return (long)-EFAULT;
+    char ksrc[KPATH_MAX], ktgt[KPATH_MAX], kfstype[64];
+    { int pr = copy_user_path_arg(tf->a0, ksrc, sizeof(ksrc), 0);
+      if (pr < 0) return (long)pr; }
+    { int pr = copy_user_path_arg(tf->a1, ktgt, sizeof(ktgt), 0);
+      if (pr < 0) return (long)pr; }
     if (copyinstr(current_proc->pagetable, kfstype, tf->a2, sizeof(kfstype)) < 0)
         return (long)-EFAULT;
 
-    char source_resolved[128], target_resolved[256];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, ksrc, source_resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
-    if (resolve_path(current_proc->cwd, ktgt, target_resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    char source_resolved[KPATH_MAX], target_resolved[KPATH_MAX];
+    { int rr = resolve_path(current_proc->cwd, ksrc, source_resolved);
+      if (rr < 0) return (long)rr; }
+    { int rr = resolve_path(current_proc->cwd, ktgt, target_resolved);
+      if (rr < 0) return (long)rr; }
 
     /* BF: mount must resolve symlinks for both source and target */
     { int sr = resolve_symlinks_in_path(source_resolved, 6, 1);
@@ -333,14 +332,13 @@ long sys_mount_handler(struct trapframe *tf) {
 }
 
 long sys_umount2_handler(struct trapframe *tf) {
-    char ktgt[128];
-    if (copyinstr(current_proc->pagetable, ktgt, tf->a0, sizeof(ktgt)) < 0)
-        return (long)-EFAULT;
+    char ktgt[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a0, ktgt, sizeof(ktgt), 0);
+      if (pr < 0) return (long)pr; }
 
-    char resolved[128];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, ktgt, resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    char resolved[KPATH_MAX];
+    { int rr = resolve_path(current_proc->cwd, ktgt, resolved);
+      if (rr < 0) return (long)rr; }
 
     /* BF: umount2 must resolve symlinks in the target path */
     { int sr = resolve_symlinks_in_path(resolved, 6, 1);
@@ -421,11 +419,11 @@ long sys_utimensat_handler(struct trapframe *tf) {
         return 0;
     }
 
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, path_uva, sizeof(kpath)) < 0)
-        return (long)-EFAULT;
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(path_uva, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
 
-    char resolved[128];
+    char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at(dirfd, kpath, resolved);
       if (rr < 0) return (long)rr; }
@@ -478,14 +476,13 @@ long sys_utimensat_handler(struct trapframe *tf) {
 /* statfs/fstatfs — filesystem statistics */
 long sys_statfs_handler(struct trapframe *tf) {
     /* a0 = path, a1 = buf (struct statfs, 120 bytes on RISC-V) */
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0)
-        return (long)-EFAULT;
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a0, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
 
-    char resolved[128];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    char resolved[KPATH_MAX];
+    { int rr = resolve_path(current_proc->cwd, kpath, resolved);
+      if (rr < 0) return (long)rr; }
 
     /* BF: statfs must resolve symlinks in the target path */
     { int sr = resolve_symlinks_in_path(resolved, 6, 1);
@@ -557,11 +554,11 @@ long sys_fstatfs_handler(struct trapframe *tf) {
 
 /* Ownership/credential stubs — single-user OS, always uid/gid 0 */
 long sys_fchownat_handler(struct trapframe *tf) {
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
-        return (long)-EFAULT;
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
 
-    char resolved[128];
+    char resolved[KPATH_MAX];
     { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
       if (rr < 0) return (long)rr; }
 

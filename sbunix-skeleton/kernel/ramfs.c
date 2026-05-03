@@ -52,8 +52,8 @@ struct ramfs_inode {
   } children[RAMFS_MAX_CHILDREN];
   int              nchildren;
   struct ramfs_inode *parent;   /* ".." link */
-  /* ENH: Symlink target storage — 128 bytes matches pathres buffer sizes */
-  char symlink_target[128];
+  /* BF: Store SYMLINK_MAX bytes plus NUL so ramfs matches libc limits. */
+  char symlink_target[256];
 };
 
 static struct ramfs_inode inodes[RAMFS_MAX_INODES];
