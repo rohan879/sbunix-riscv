@@ -11,6 +11,8 @@
 #include <printk.h>
 #include <errno.h>
 #include <syscall.h>
+#include <vm.h>
+#include <kmalloc.h>
 
 /* Convert an absolute/relative path to the tarfs "./..." format.
  * tarfs uses paths like "./bin/echo", "./etc/rc", etc.
@@ -42,20 +44,18 @@ int to_tarfs_path(const char *path, char *out, int outsize) {
  * BF: Returns 0 on success, -36 (ENAMETOOLONG) if any component was
  * silently truncated due to buffer overflow. */
 int normalize_path(const char *in, char *out) {
-    /* Use a small stack of component offsets into out[] */
+    /* Use a bounded stack of component offsets into out[] */
     /* We build the result into out directly, tracking segment starts. */
-    char tmp[128];
+    char tmp[KPATH_MAX];
     int tlen = 0;
     const char *p = in;
-    /* BF: Track whether any component was dropped due to truncation */
-    int truncated = 0;
 
     /* Skip leading slash — we'll add it back */
     while (*p == '/') p++;
 
     tmp[tlen++] = '/';
     /* Stack of segment-end positions in tmp (indices of the '/' before each segment) */
-    int stack[64];
+    int stack[(KPATH_MAX / 2) + 1];
     int depth = 0;
 
     while (*p) {
@@ -73,17 +73,18 @@ int normalize_path(const char *in, char *out) {
             }
         } else {
             /* Normal component — push */
+            if (depth >= (int)(sizeof(stack) / sizeof(stack[0])))
+                return -ENAMETOOLONG;
             stack[depth++] = tlen; /* save position before adding '/' + component */
-            if (tlen > 1) tmp[tlen++] = '/'; /* add separator (root already has '/') */
-            /* BF: Use sizeof(tmp) instead of hardcoded 255 to prevent
-             * buffer overflow — tmp is only 128 bytes, not 256. */
-            if (tlen + clen < (int)sizeof(tmp) - 1) {
-                memcpy(tmp + tlen, start, clen);
-                tlen += clen;
-            } else {
-                /* BF: Component dropped — flag truncation for ENAMETOOLONG */
-                truncated = 1;
+            if (tlen > 1) {
+                if (tlen >= (int)sizeof(tmp) - 1)
+                    return -ENAMETOOLONG;
+                tmp[tlen++] = '/'; /* add separator (root already has '/') */
             }
+            if (tlen + clen > (int)sizeof(tmp) - 1)
+                return -ENAMETOOLONG;
+            memcpy(tmp + tlen, start, clen);
+            tlen += clen;
         }
 
         /* skip slashes between components */
@@ -94,19 +95,34 @@ int normalize_path(const char *in, char *out) {
     /* Result: if only the root slash remains, that's "/" */
     memcpy(out, tmp, tlen + 1);
 
-    /* BF: Return -ENAMETOOLONG if truncation occurred */
-    return truncated ? -36 : 0;
+    return 0;
 }
 
-/* Resolve a path against cwd.  Result in out[128].
- * BF: Returns 0 on success, -36 (ENAMETOOLONG) when the combined
- * path exceeds the internal buffer or normalize_path truncates. */
-/* BF: Reduced raw[] from 256 to 128 to prevent kernel stack overflow.
- * Deep call chains (openat -> resolve_path -> resolve_symlinks ->
- * ext2_open -> bcache -> virtio_blk) on 4KB stacks caused corruption. */
+int copy_user_path_arg(uint64_t uaddr, char *dst, int dstsz, int allow_empty) {
+    if (!dst || dstsz <= 0)
+        return -EFAULT;
+
+    /* BF: copyinstr returns -1 when a valid string does not fit in the
+     * supplied buffer; that is ENAMETOOLONG, not EFAULT. */
+    int ret = copyinstr(current_proc->pagetable, dst, uaddr, (uint64_t)dstsz);
+    if (ret < 0)
+        return ret == -1 ? -ENAMETOOLONG : -EFAULT;
+    if (!allow_empty && dst[0] == '\0')
+        return -ENOENT;
+    return 0;
+}
+
+/* Resolve a path against cwd.  Result in out[KPATH_MAX].
+ * BF: Empty paths are invalid for path lookup; callers that implement
+ * AT_EMPTY_PATH handle that case before calling into the resolver. */
 int resolve_path(const char *cwd, const char *path, char *out) {
-    char raw[128]; /* intermediate buffer before normalization */
+    char raw[KPATH_MAX]; /* intermediate buffer before normalization */
     int rlen;
+
+    if (path[0] == '\0') {
+        out[0] = '\0';
+        return -ENOENT;
+    }
 
     if (path[0] == '/') {
         /* absolute */
@@ -115,7 +131,7 @@ int resolve_path(const char *cwd, const char *path, char *out) {
          * instead of silently truncating (which resolves a different path). */
         if (rlen > (int)sizeof(raw) - 1) {
             out[0] = '/'; out[1] = '\0';
-            return -36; /* -ENAMETOOLONG */
+            return -ENAMETOOLONG;
         }
         memcpy(raw, path, rlen);
         raw[rlen] = '\0';
@@ -123,14 +139,15 @@ int resolve_path(const char *cwd, const char *path, char *out) {
         /* relative — prepend cwd */
         int cwdlen = strlen(cwd);
         int pathlen = strlen(path);
+        int add_slash = (cwdlen == 0 || cwd[cwdlen - 1] != '/');
         /* BF: Use sizeof(raw)-2 instead of hardcoded 254 */
-        if (cwdlen + 1 + pathlen > (int)sizeof(raw) - 2) {
+        if (cwdlen + add_slash + pathlen > (int)sizeof(raw) - 1) {
             /* BF: Return -ENAMETOOLONG instead of silently falling back to "/" */
             out[0] = '/'; out[1] = '\0';
-            return -36; /* -ENAMETOOLONG */
+            return -ENAMETOOLONG;
         }
         memcpy(raw, cwd, cwdlen);
-        if (cwdlen == 0 || cwd[cwdlen-1] != '/') {
+        if (add_slash) {
             raw[cwdlen++] = '/';
         }
         memcpy(raw + cwdlen, path, pathlen);
@@ -175,10 +192,8 @@ int vfs_is_dir(const char *path) {
 }
 
 /* Follow symlinks in a resolved path (up to 6 levels to prevent loops).
- * BF: Added bufsiz parameter so the copy-back step respects the caller's
- * actual buffer size instead of assuming 256 bytes.
- * BF: Reduced from 8 to 6 levels; each frame uses ~640 bytes of stack
- * (target[128] + new_resolved[128] + dir[128] + combined[128] + locals). */
+ * BF: Use heap scratch for target expansion so SYMLINK_MAX-sized targets
+ * do not consume recursive kernel stack frames. */
 int follow_symlinks(char *resolved, int maxdepth, int bufsiz) {
     if (maxdepth <= 0) return -40; /* ELOOP */
 
@@ -187,26 +202,50 @@ int follow_symlinks(char *resolved, int maxdepth, int bufsiz) {
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops || !ops->readlink) return 0; /* no readlink = not a symlink-capable fs */
 
-    /* BF: Increased from 64 to 128 to match ramfs symlink_target size
-     * and prevent truncation of longer symlink targets. */
-    char target[128];
-    int ret = ops->readlink(mnt->fs_data, relpath, target, sizeof(target) - 1);
-    if (ret < 0) return 0; /* not a symlink, path is final */
+    char *target = (char *)kmalloc(KSYMLINK_MAX + 1);
+    if (!target)
+        return -ENOMEM;
+
+    int ret = ops->readlink(mnt->fs_data, relpath, target, KSYMLINK_MAX);
+    if (ret == -EINVAL) {
+        kmfree(target, KSYMLINK_MAX + 1);
+        return 0; /* not a symlink, path is final */
+    }
+    if (ret < 0) {
+        kmfree(target, KSYMLINK_MAX + 1);
+        return ret;
+    }
     target[ret] = '\0';
 
-    /* Resolve the symlink target.  Use small local buffers to avoid
-     * kernel stack overflow — follow_symlinks recurses up to 6 levels
-     * and each frame consumes the sum of all local arrays. */
-    char new_resolved[128];
+    char *new_resolved = (char *)kmalloc(KPATH_MAX);
+    if (!new_resolved) {
+        kmfree(target, KSYMLINK_MAX + 1);
+        return -ENOMEM;
+    }
+
     int rp_ret; /* BF: Propagate ENAMETOOLONG from resolve_path */
     if (target[0] == '/') {
         rp_ret = resolve_path("/", target, new_resolved);
-        if (rp_ret < 0) return rp_ret;
+        if (rp_ret < 0) {
+            kmfree(new_resolved, KPATH_MAX);
+            kmfree(target, KSYMLINK_MAX + 1);
+            return rp_ret;
+        }
     } else {
         /* Relative: resolve from symlink's parent directory */
-        char dir[128];
+        char *dir = (char *)kmalloc(KPATH_MAX);
+        if (!dir) {
+            kmfree(new_resolved, KPATH_MAX);
+            kmfree(target, KSYMLINK_MAX + 1);
+            return -ENOMEM;
+        }
         int rlen = strlen(resolved);
-        if (rlen > (int)sizeof(dir) - 1) rlen = (int)sizeof(dir) - 1;
+        if (rlen > KPATH_MAX - 1) {
+            kmfree(dir, KPATH_MAX);
+            kmfree(new_resolved, KPATH_MAX);
+            kmfree(target, KSYMLINK_MAX + 1);
+            return -ENAMETOOLONG;
+        }
         memcpy(dir, resolved, rlen);
         dir[rlen] = '\0';
         char *last_slash = dir;
@@ -217,22 +256,27 @@ int follow_symlinks(char *resolved, int maxdepth, int bufsiz) {
         else
             dir[1] = '\0';
 
-        char combined[128];
-        int dlen = strlen(dir);
-        int tlen = strlen(target);
-        if (dlen + tlen >= (int)sizeof(combined) - 2) return -36; /* ENAMETOOLONG */
-        memcpy(combined, dir, dlen);
-        memcpy(combined + dlen, target, tlen + 1);
-
-        rp_ret = resolve_path("/", combined, new_resolved);
-        if (rp_ret < 0) return rp_ret; /* BF: Propagate ENAMETOOLONG */
+        rp_ret = resolve_path(dir, target, new_resolved);
+        kmfree(dir, KPATH_MAX);
+        if (rp_ret < 0) {
+            kmfree(new_resolved, KPATH_MAX);
+            kmfree(target, KSYMLINK_MAX + 1);
+            return rp_ret; /* BF: Propagate ENAMETOOLONG */
+        }
     }
 
     int nlen = strlen(new_resolved);
     /* BF: Respect caller's buffer size instead of hardcoded 255 */
-    if (nlen > bufsiz - 1) nlen = bufsiz - 1;
+    if (nlen > bufsiz - 1) {
+        kmfree(new_resolved, KPATH_MAX);
+        kmfree(target, KSYMLINK_MAX + 1);
+        return -ENAMETOOLONG;
+    }
     memcpy(resolved, new_resolved, nlen);
     resolved[nlen] = '\0';
+
+    kmfree(new_resolved, KPATH_MAX);
+    kmfree(target, KSYMLINK_MAX + 1);
 
     /* Recursively follow in case target is also a symlink */
     return follow_symlinks(resolved, maxdepth - 1, bufsiz);
@@ -249,18 +293,27 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
     int rlen = strlen(resolved);
     if (rlen == 0 || (rlen == 1 && resolved[0] == '/'))
         return 0; /* root or empty — nothing to resolve */
+    if (rlen > KPATH_MAX - 1)
+        return -ENAMETOOLONG;
 
     /* Split into components */
-    char work[128];
-    /* BF: Use sizeof(work)-1 instead of hardcoded 255 to match actual
-     * buffer size and prevent out-of-bounds writes. */
-    if (rlen > (int)sizeof(work) - 1) rlen = (int)sizeof(work) - 1;
+    char *work = (char *)kmalloc(KPATH_MAX);
+    char *built = (char *)kmalloc(KPATH_MAX);
+    char *before = (char *)kmalloc(KPATH_MAX);
+    char *normalized = (char *)kmalloc(KPATH_MAX);
+    if (!work || !built || !before || !normalized) {
+        if (work) kmfree(work, KPATH_MAX);
+        if (built) kmfree(built, KPATH_MAX);
+        if (before) kmfree(before, KPATH_MAX);
+        if (normalized) kmfree(normalized, KPATH_MAX);
+        return -ENOMEM;
+    }
+    int ret = 0;
     memcpy(work, resolved, rlen);
     work[rlen] = '\0';
 
-    char built[128]; /* path built so far */
     int bi = 0;
-    int bmax = (int)sizeof(built) - 1; /* max usable index */
+    int bmax = KPATH_MAX - 1; /* max usable index */
 
     int wi = 0; /* index into work */
 
@@ -291,7 +344,7 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
             if (bi < bmax) built[bi++] = '/';
         }
         if (bi + comp_len > bmax)
-            return -36; /* ENAMETOOLONG */
+            { ret = -ENAMETOOLONG; goto out; }
         memcpy(built + bi, work + comp_start, comp_len);
         bi += comp_len;
         built[bi] = '\0';
@@ -303,12 +356,11 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
 
         /* Try to resolve this component as a symlink */
         int old_bi = bi;
-        char before[128];
         memcpy(before, built, bi + 1);
 
-        int sym_ret = follow_symlinks(built, maxdepth, sizeof(built));
+        int sym_ret = follow_symlinks(built, maxdepth, KPATH_MAX);
         /* BF: Propagate all negative errors, not just ELOOP */
-        if (sym_ret < 0) return sym_ret;
+        if (sym_ret < 0) { ret = sym_ret; goto out; }
 
         bi = strlen(built);
 
@@ -326,24 +378,24 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
                 }
                 /* BF: Return ENAMETOOLONG instead of silently truncating the
                  * remaining suffix, which would resolve a different path. */
-                if (bi + remaining > bmax) return -36; /* ENAMETOOLONG */
+                if (bi + remaining > bmax) { ret = -ENAMETOOLONG; goto out; }
                 memcpy(built + bi, work + wi, remaining);
                 bi += remaining;
                 built[bi] = '\0';
 
                 /* BF: Propagate ENAMETOOLONG from resolve_path */
-                char normalized[128];
                 int rp_ret = resolve_path("/", built, normalized);
-                if (rp_ret < 0) return rp_ret;
+                if (rp_ret < 0) { ret = rp_ret; goto out; }
                 int nlen = strlen(normalized);
                 /* BF: Return ENAMETOOLONG instead of silently truncating
                  * the normalized path, which could resolve wrong target. */
-                if (nlen >= (int)sizeof(built)) return -36; /* ENAMETOOLONG */
+                if (nlen >= KPATH_MAX) { ret = -ENAMETOOLONG; goto out; }
                 memcpy(resolved, normalized, nlen);
                 resolved[nlen] = '\0';
 
                 /* Recurse to resolve any further symlinks */
-                return resolve_symlinks_in_path(resolved, maxdepth - 1, resolve_final);
+                ret = resolve_symlinks_in_path(resolved, maxdepth - 1, resolve_final);
+                goto out;
             }
         }
     }
@@ -351,8 +403,14 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
     /* Copy result back */
     /* BF: Return ENAMETOOLONG instead of silently clamping the built
      * path length, which would produce a truncated (wrong) path. */
-    if (bi > bmax) return -36; /* ENAMETOOLONG */
+    if (bi > bmax) { ret = -ENAMETOOLONG; goto out; }
     memcpy(resolved, built, bi);
     resolved[bi] = '\0';
-    return 0;
+
+out:
+    kmfree(normalized, KPATH_MAX);
+    kmfree(before, KPATH_MAX);
+    kmfree(built, KPATH_MAX);
+    kmfree(work, KPATH_MAX);
+    return ret;
 }

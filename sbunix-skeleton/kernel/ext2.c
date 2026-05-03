@@ -1369,7 +1369,8 @@ static int ext2_readdir(void *fs_data, void *private, char *ubuf,
         uint64_t d_ino = (uint64_t)de->inode_number;
         int64_t d_off = (int64_t)(pos + de->rec_len);
         uint16_t d_reclen = (uint16_t)rl;
-        uint8_t d_type = (de->file_type == EXT2_FT_DIR) ? 4 : 8;
+        uint8_t d_type = (de->file_type == EXT2_FT_DIR) ? 4 :
+                         (de->file_type == EXT2_FT_SYMLINK) ? 10 : 8;
 
         memcpy(d + 0, &d_ino, 8);
         memcpy(d + 8, &d_off, 8);
