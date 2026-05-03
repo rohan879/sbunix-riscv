@@ -530,7 +530,8 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
         new_pt = uvmcreate();
         if (!new_pt) goto bad;
 
-        /* COW-share user pages first (creates level-1 table for VPN[2]=0) */
+        /* COW-share user pages first, then attach the shared high-half kernel
+         * roots.  Low roots remain entirely child-owned. */
         if (copy_pagetable_cow(current_proc, new_pt, current_proc->pagetable,
                                0, MAXVA) < 0)
             goto bad;
@@ -539,8 +540,7 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
          * roots, so force the child slot empty before installing its clock. */
         user_clock_unmap(new_pt);
 
-        /* Map kernel identity pages into child page table (must be after
-         * copy_pagetable_cow so pt[0] exists for MMIO level-1 sharing) */
+        /* Map high-half kernel identity roots into the child page table. */
         if (uvmmap_kernel(new_pt) < 0) goto bad;
         if (user_clock_map(new_pt, p->user_clock) < 0) goto bad;
 

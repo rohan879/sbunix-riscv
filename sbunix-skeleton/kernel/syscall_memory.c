@@ -41,6 +41,15 @@ static int ranges_overlap(uint64_t a_start, uint64_t a_end,
     return a_start < b_end && b_start < a_end;
 }
 
+static int mmap_prot_valid(int prot) {
+    return (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) == 0;
+}
+
+static int mmap_flags_valid(int flags) {
+    const int supported = MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS;
+    return (flags & ~supported) == 0;
+}
+
 static int brk_stack_guard_overlap(struct proc *p, uint64_t start,
                                    uint64_t end, uint64_t target) {
     if (!p || p->stack_top == 0 || p->stack_bottom == 0)
@@ -154,8 +163,9 @@ long sys_brk_handler(struct trapframe *tf) {
 /* RF: Made non-static for access from cleanup_proc_resources (exit path). */
 void mmap_writeback_shared(struct proc *p, uint64_t start, uint64_t end);
 
-/* BF: Compute the floor for mmap allocations, ensuring it never
- * falls below USER_MMAP_FLOOR (avoiding shared kernel MMIO range). */
+/* BF: Compute the floor for unhinted mmap allocations.  Low fixed hints are
+ * still allowed; the default top-down search stays clear of the legacy device
+ * aperture and early process image. */
 static uint64_t mmap_search_base(struct proc *p) {
   uint64_t base = PGROUNDUP(p->sz) + PAGE_SIZE;
   if (base < USER_MMAP_FLOOR)
@@ -170,9 +180,10 @@ static uint64_t mmap_search_limit(void) {
   return PGROUNDDOWN(USER_CLOCK_VA);
 }
 
-/* BF: Treat supervisor-only MMIO aliases in the user page table as reserved
- * holes.  This keeps MAP_FIXED, munmap, mprotect, and mremap from walking
- * into shared kernel MMIO slots that would break zero-fill semantics. */
+/* BF: Treat kernel-owned aliases in a user page table as reserved holes.  User
+ * page tables no longer copy low MMIO leaves, but this still protects fixed
+ * kernel-owned pages such as the clock/trampoline and any supervisor mapping
+ * inherited through future layout changes. */
 static int mmap_reserved_range(struct proc *p, uint64_t start, uint64_t len,
                                uint64_t *next_va) {
   uint64_t end = start + len;
@@ -196,11 +207,20 @@ static int mmap_reserved_range(struct proc *p, uint64_t start, uint64_t len,
     return 1;
   }
 
-  for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+  for (uint64_t va = start; va < end;) {
     int level = -1;
     pte_t *pte = walk_super(p->pagetable, va, &level);
-    if (!pte || !(*pte & PTE_V) || (*pte & PTE_U))
+    uint64_t next = PGROUNDUP(va + 1);
+
+    if (pte && (*pte & PTE_V) && level == 1)
+      next = SPGROUNDUP(va + 1);
+    if (next <= va || next > end)
+      next = end;
+
+    if (!pte || !(*pte & PTE_V) || (*pte & PTE_U)) {
+      va = next;
       continue;
+    }
 
     if (next_va) {
       if (level == 1)
@@ -215,8 +235,9 @@ static int mmap_reserved_range(struct proc *p, uint64_t start, uint64_t len,
 }
 
 /* BF: Find a top-down hole in the user address space for a new mapping of
- * len bytes.  Walks the VMA list to skip overlaps and stays above
- * USER_MMAP_FLOOR so low supervisor MMIO aliases remain reserved. */
+ * len bytes.  Walks the VMA list to skip overlaps and starts above
+ * USER_MMAP_FLOOR while still permitting callers to request low MAP_FIXED
+ * addresses explicitly. */
 static uint64_t mmap_find_hole(struct proc *p, uint64_t len) {
   uint64_t floor = mmap_search_base(p);
   uint64_t limit = mmap_search_limit();
@@ -275,6 +296,9 @@ long sys_mmap_handler(struct trapframe *tf) {
     struct shared_mapping *shared_obj = NULL;
 
     if (shared_vfork_child())
+        return (long)-22; /* EINVAL */
+
+    if (!mmap_prot_valid(prot) || !mmap_flags_valid(flags))
         return (long)-22; /* EINVAL */
 
     /* BF: POSIX requires offset to be page-aligned for mmap. */
@@ -347,6 +371,11 @@ long sys_mmap_handler(struct trapframe *tf) {
             if (src < 0)
                 return (long)src;
         }
+        if (vma_remove_preflight(current_proc, va, va + len) < 0) {
+            if (shared_obj)
+                shared_mapping_put(shared_obj);
+            return (long)-12; /* ENOMEM */
+        }
         /* BF: POSIX requires MAP_FIXED to replace any existing mappings
          * in the target range [va, va+len).  Without this, old PTEs and
          * VMA entries persist, causing incorrect data reads. */
@@ -356,7 +385,7 @@ long sys_mmap_handler(struct trapframe *tf) {
         vma_remove(current_proc, va, va + len);
     } else {
         /* BF: Use mmap_find_hole() to find a gap that skips VMA overlaps
-         * and stays above USER_MMAP_FLOOR (no kernel MMIO collision). */
+         * and stays above USER_MMAP_FLOOR by default. */
         va = mmap_find_hole(current_proc, len);
         if (va == 0)
             return (long)-12; /* ENOMEM */
@@ -505,6 +534,8 @@ long sys_munmap_handler(struct trapframe *tf) {
         return -22; /* -EINVAL */
     if (mmap_reserved_range(current_proc, addr, len, 0))
         return -22; /* -EINVAL */
+    if (vma_remove_preflight(current_proc, addr, addr + len) < 0)
+        return -12; /* -ENOMEM */
 
     /* Write back MAP_SHARED pages before unmapping */
     mmap_writeback_shared(current_proc, addr, addr + len);
@@ -517,7 +548,8 @@ long sys_munmap_handler(struct trapframe *tf) {
     /* Remove VMA tracking (handles splits automatically).
      * BF: Check return — if split allocation fails the VMA list is
      * inconsistent, but pages are safely freed above. */
-    vma_remove(current_proc, addr, addr + len);
+    if (vma_remove(current_proc, addr, addr + len) < 0)
+        return -12; /* -ENOMEM */
 
     /* BF: Reset the search hint after unmap so future allocations can
      * reuse low holes without inheriting stale stack-top or MMIO-adjacent
@@ -533,6 +565,8 @@ long sys_mprotect_handler(struct trapframe *tf) {
     int prot      = (int)tf->a2;
 
     if (shared_vfork_child())
+        return -EINVAL;
+    if (!mmap_prot_valid(prot))
         return -EINVAL;
 
     /* Validate alignment */
@@ -792,6 +826,8 @@ long sys_mremap_handler(struct trapframe *tf) {
 
     if (shared_vfork_child())
         return (long)-EINVAL;
+    if (flags & ~1) /* supported: MREMAP_MAYMOVE */
+        return (long)-EINVAL;
     old_size = PGROUNDUP(old_size);
     new_size = PGROUNDUP(new_size);
     if (!user_range_ok(old_addr, old_size) ||
@@ -802,11 +838,16 @@ long sys_mremap_handler(struct trapframe *tf) {
         /* BF: Shrink — writeback dirty MAP_SHARED pages before unmapping,
          * then use vma_remove() to properly trim/split VMAs instead of
          * the old v->end assignment which breaks after K5-style splits. */
+        if (vma_remove_preflight(current_proc, old_addr + new_size,
+                                 old_addr + old_size) < 0)
+            return (long)-12; /* ENOMEM */
         mmap_writeback_shared(current_proc, old_addr + new_size, old_addr + old_size);
         uvmunmap_proc(current_proc, current_proc->pagetable,
                      old_addr + new_size, old_size - new_size);
         sfence_vma();
-        vma_remove(current_proc, old_addr + new_size, old_addr + old_size);
+        if (vma_remove(current_proc, old_addr + new_size,
+                       old_addr + old_size) < 0)
+            return (long)-12; /* ENOMEM */
         return (long)old_addr;
     }
     /* Grow: try to expand in place (check if space after is unmapped) */

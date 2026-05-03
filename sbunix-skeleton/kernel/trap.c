@@ -1209,9 +1209,8 @@ void trap_handler(struct trapframe *tf) {
                     }
 
                     uint64_t va = PGROUNDDOWN(stval);
-                    /* BF: Guard — reject kernel-only superpages before demand-paging.
-                     * These are shared MMIO entries from uvmmap_kernel() that should
-                     * not be demand-paged by user processes. */
+                    /* Guard against any kernel-owned superpage that appears below
+                     * USER_TOP through future layout changes. */
                     {
                         int pte_level = -1;
                         pte_t *spte = walk_super(current_proc->pagetable, va, &pte_level);

@@ -92,9 +92,9 @@ _got_user_sp:
   # sscratch=0 means "in kernel mode" for kernel_trap_handler.
   csrw sscratch, zero
 
-  # Kernel C always runs on kernel_pagetable.  User page tables still share
-  # the kernel direct-map so this entry stub can save the frame first; switch
-  # away before calling C so root entries 0/1 may be fully user-owned.
+  # Kernel C always runs on kernel_pagetable.  User page tables share the
+  # high-half kernel stack/direct-map roots so this stub can save the frame
+  # first; switch away before calling C so roots 0/1 stay fully user-owned.
   la t0, kernel_pagetable
   ld t0, 0(t0)
   srli t0, t0, 12

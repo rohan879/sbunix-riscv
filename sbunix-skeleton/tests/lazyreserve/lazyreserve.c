@@ -3,6 +3,7 @@
  */
 
 #include <stdint.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,8 @@
 #define MAX_HEAP_RESERVE_MB 64UL
 #define TOUCHES 16
 #define MAX_RESERVE_DROP_KB 4096L
+#define BAD_MMAP_FLAG 0x40000000
+#define BAD_MMAP_PROT 0x80
 
 static long read_meminfo_kb(const char *key) {
   int fd = open("/proc/meminfo", O_RDONLY);
@@ -67,6 +70,21 @@ static int touch_sparse(unsigned char *p, size_t len, unsigned char seed) {
   return 1;
 }
 
+static int expect_mmap_einval(int prot, int flags, const char *label) {
+  errno = 0;
+  void *p = mmap(NULL, PAGE_SIZE_BYTES, prot, flags, -1, 0);
+  if (p != MAP_FAILED) {
+    munmap(p, PAGE_SIZE_BYTES);
+    printf("[FAIL] lazyreserve: %s unexpectedly mapped\n", label);
+    return 0;
+  }
+  if (errno != EINVAL) {
+    printf("[FAIL] lazyreserve: %s errno %d\n", label, errno);
+    return 0;
+  }
+  return 1;
+}
+
 int main(int argc, char **argv) {
   unsigned long reserve_mb = DEFAULT_RESERVE_MB;
   if (argc > 2) {
@@ -91,6 +109,15 @@ int main(int argc, char **argv) {
   long free_before = read_meminfo_kb("MemFree");
   if (free_before < 0) {
     printf("[FAIL] lazyreserve: could not read MemFree before\n");
+    return 1;
+  }
+
+  if (!expect_mmap_einval(PROT_READ | BAD_MMAP_PROT,
+                          MAP_PRIVATE | MAP_ANONYMOUS,
+                          "invalid mmap prot") ||
+      !expect_mmap_einval(PROT_READ,
+                          MAP_PRIVATE | MAP_ANONYMOUS | BAD_MMAP_FLAG,
+                          "invalid mmap flag")) {
     return 1;
   }
 
