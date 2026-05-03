@@ -182,10 +182,10 @@ long sys_futex_handler(struct trapframe *tf) {
         swtch(&current_proc->context, &scheduler_context);
         current_proc->futex_addr = 0;
         /* Check for signal interruption */
-        if (current_proc->sigpending & ~current_proc->sigmask) {
+        if (signal_deliverable_mask(current_proc)) {
             struct kern_sigaction *ksa = proc_sigactions(current_proc);
             for (int s = 1; s < 65; s++) {
-                uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                uint64_t deliverable = signal_deliverable_mask(current_proc);
                 if (deliverable & signal_bit(s)) {
                     if (ksa[s].handler > 1) /* user handler */
                         return (long)-4; /* EINTR */
@@ -543,14 +543,14 @@ long sys_ppoll_handler(struct trapframe *tf) {
         uint64_t new_mask;
         if (copyin(current_proc->pagetable, &new_mask, sigmask_uaddr, 8) < 0)
             return (long)-EFAULT;
-        current_proc->sigmask = new_mask;
+        current_proc->sigmask = signal_mask_sanitize(new_mask);
     }
 
     /* BF: POSIX requires ppoll to atomically replace the mask and check
      * for deliverable signals.  If a signal was pending but blocked, and
      * the new mask unblocks it, ppoll must return -EINTR immediately
      * without entering the poll loop. */
-    if (current_proc->sigpending & ~current_proc->sigmask) {
+    if (signal_deliverable_mask(current_proc)) {
         if (sigmask_uaddr != 0) {
             /* BF: Defer mask restore so deliver_signal (at trap return) can
              * deliver the handler under the ppoll-swapped mask.  sigreturn
@@ -629,7 +629,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
          * Also check epoch: if a signal was handled between the mask swap
          * and entering sleep, we must still return -EINTR even if
          * sigpending is now clear. */
-        if ((current_proc->sigpending & ~current_proc->sigmask) ||
+        if (signal_deliverable_mask(current_proc) ||
             current_proc->signal_handled_epoch != epoch_before) {
             if (sigmask_uaddr != 0) {
                 /* BF: Defer mask restore -- same as early EINTR path above. */
@@ -700,7 +700,7 @@ long sys_pselect6_handler(struct trapframe *tf) {
             sig_args[0] != 0) {
             uint64_t new_mask;
             if (copyin(current_proc->pagetable, &new_mask, sig_args[0], 8) == 0) {
-                current_proc->sigmask = new_mask;
+                current_proc->sigmask = signal_mask_sanitize(new_mask);
                 has_sigmask = 1;
             }
         }
@@ -775,7 +775,7 @@ long sys_pselect6_handler(struct trapframe *tf) {
     }
 
     /* BF: Check for pending signals before blocking (POSIX atomicity). */
-    if (ready == 0 && (current_proc->sigpending & ~current_proc->sigmask)) {
+    if (ready == 0 && signal_deliverable_mask(current_proc)) {
         if (has_sigmask) {
             current_proc->saved_sigmask_restore = old_mask;
             current_proc->has_saved_sigmask = 1;
@@ -823,7 +823,7 @@ long sys_pselect6_handler(struct trapframe *tf) {
         }
 
         /* BF: Check for signal after wakeup. */
-        if (current_proc->sigpending & ~current_proc->sigmask) {
+        if (signal_deliverable_mask(current_proc)) {
             if (has_sigmask) {
                 current_proc->saved_sigmask_restore = old_mask;
                 current_proc->has_saved_sigmask = 1;

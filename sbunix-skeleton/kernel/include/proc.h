@@ -321,6 +321,22 @@ static inline int signal_is_realtime(int signum) {
   return signum >= 32 && signum < 65;
 }
 
+/* BF: Centralize signal deliverability so all trap-return and blocking
+ * syscall paths agree that only SIGKILL and SIGSTOP bypass the process mask.
+ * Job-control stop signals such as SIGTSTP remain pending while blocked. */
+static inline uint64_t signal_unblockable_mask(void) {
+  return signal_bit(SIGKILL) | signal_bit(SIGSTOP);
+}
+
+static inline uint64_t signal_mask_sanitize(uint64_t mask) {
+  return mask & ~signal_unblockable_mask();
+}
+
+static inline uint64_t signal_deliverable_mask(struct proc *p) {
+  if (!p) return 0;
+  return p->sigpending & ~signal_mask_sanitize(p->sigmask);
+}
+
 /* BF: Signal info codes for kernel use (matching Linux ABI values).
  * Libc defines are unavailable in kernel, so use K_ prefixed literals. */
 #define K_SI_USER       0

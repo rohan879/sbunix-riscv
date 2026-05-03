@@ -756,7 +756,7 @@ static pid_t sys_wait4(pid_t wpid, uint64_t status_uaddr, int options) {
              * prevent wait4 from finding the zombie (or detecting ECHILD when
              * SA_NOCLDWAIT auto-reaped the child). Let the loop re-check. */
             {
-                uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                uint64_t deliverable = signal_deliverable_mask(current_proc);
                 struct kern_sigaction *ksa = proc_sigactions(current_proc);
                 for (int s = 1; s < 65 && deliverable; s++) {
                     if (deliverable & signal_bit(s)) {
@@ -1402,7 +1402,7 @@ long sys_waitid_handler(struct trapframe *tf) {
             swtch(&current_proc->context, &scheduler_context);
             current_proc->waiting_for_child = 0;
             {
-                uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                uint64_t deliverable = signal_deliverable_mask(current_proc);
                 struct kern_sigaction *ksa = proc_sigactions(current_proc);
                 for (int s = 1; s < 65 && deliverable; s++) {
                     if (!(deliverable & signal_bit(s)))

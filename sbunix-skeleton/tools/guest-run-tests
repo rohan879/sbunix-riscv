@@ -116,6 +116,8 @@ run_test_expect_status segvtest 42
 run_test fdiotest
 run_test sigtest
 run_test sighandtest
+run_test sigsuspend_mask
+run_test sigmask_stop
 run_test safetyabitest
 run_test dirtest
 run_test procfstest

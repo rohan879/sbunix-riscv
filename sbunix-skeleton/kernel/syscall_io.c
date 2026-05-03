@@ -171,7 +171,7 @@ void file_locks_release_ofd(struct open_file *ofd) {
 /* ------------------------------------------------------------------ */
 
 static int pending_signal_interrupts_io(void) {
-    uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+    uint64_t deliverable = signal_deliverable_mask(current_proc);
     struct kern_sigaction *ksa = proc_sigactions(current_proc);
 
     for (int s = 1; s < 65 && deliverable; s++) {
@@ -324,7 +324,7 @@ long sys_read_handler(struct trapframe *tf) {
              * - SIG_DFL terminating signal: break out to let deliver_signal kill us
              * - SIG_IGN / SIG_DFL ignore-class: continue sleeping */
             {
-                uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                uint64_t deliverable = signal_deliverable_mask(current_proc);
                 struct kern_sigaction *sa = proc_sigactions(current_proc);
                 for (int s = 1; s < 65 && deliverable; s++) {
                     if (deliverable & signal_bit(s)) {
@@ -927,7 +927,7 @@ long sys_readv_handler(struct trapframe *tf) {
                     swtch(&current_proc->context, &scheduler_context);
                     /* Check for terminating signals after waking */
                     {
-                        uint64_t deliverable = current_proc->sigpending & ~current_proc->sigmask;
+                        uint64_t deliverable = signal_deliverable_mask(current_proc);
                         struct kern_sigaction *ksa = proc_sigactions(current_proc);
                         for (int s = 1; s < 65 && deliverable; s++) {
                             if (deliverable & signal_bit(s)) {
