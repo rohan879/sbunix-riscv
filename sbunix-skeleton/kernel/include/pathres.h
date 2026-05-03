@@ -5,10 +5,19 @@
 #ifndef _PATHRES_H
 #define _PATHRES_H
 
+#include <riscv.h>
+
+/* Paths stored in proc->cwd and open_file->path are 256-byte snapshots.
+ * Keep resolver outputs capped to that size and report ENAMETOOLONG rather
+ * than truncating to a different path. */
+#define KPATH_MAX     256
+#define KSYMLINK_MAX  255
+
 /* BF: Changed signature to accept outsize and return error on overflow */
 int  to_tarfs_path(const char *path, char *out, int outsize);
 /* BF: Changed return type from void to int to propagate ENAMETOOLONG */
 int  normalize_path(const char *in, char *out);
+int  copy_user_path_arg(uint64_t uaddr, char *dst, int dstsz, int allow_empty);
 int  resolve_path(const char *cwd, const char *path, char *out);
 int  resolve_path_at(int dirfd, const char *path, char *out);
 int  vfs_is_dir(const char *path);

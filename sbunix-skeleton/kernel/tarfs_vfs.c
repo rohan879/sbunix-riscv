@@ -75,6 +75,12 @@ static int tarfs_open(void *fs_data, const char *path, int flags, void **private
   if (!hdr && !tarfs_is_dir(path))
     return -2; /* -ENOENT */
 
+  /* BF: The path layer leaves a final symlink unresolved for O_NOFOLLOW.
+   * Reject raw symlink opens instead of exposing the tar link metadata as
+   * file contents. */
+  if (hdr && hdr->typeflag == '2')
+    return -40; /* -ELOOP */
+
   struct tarfs_private *priv = (struct tarfs_private *)kmalloc(sizeof(struct tarfs_private));
   if (!priv)
     return -12; /* -ENOMEM */
@@ -182,6 +188,8 @@ static int tarfs_fstat(void *fs_data, void *private, uint8_t *st) {
     mode = (uint32_t)(0x8000 | (hdr_mode & 0777)); /* S_IFREG */
   uint32_t nlink = 1;
   int64_t size = (int64_t)priv->size;
+  if (priv->hdr && priv->hdr->typeflag == '2')
+    size = (int64_t)strlen(priv->hdr->linkname);
   int32_t blksz = 512;
   int64_t blks = ((int64_t)priv->size + 511) / 512;
 
@@ -253,7 +261,9 @@ static int tarfs_stat(void *fs_data, const char *path, uint8_t *st) {
   else
     mode = (uint32_t)(0x8000 | (hdr_mode & 0777)); /* S_IFREG */
   uint32_t nlink = 1;
-  int64_t size = (int64_t)fsz;
+  int64_t size = (hdr->typeflag == '2')
+    ? (int64_t)strlen(hdr->linkname)
+    : (int64_t)fsz;
   int32_t blksz = 512;
   int64_t blks = ((int64_t)fsz + 511) / 512;
   memcpy(st + 0, &tdev, 8);
@@ -363,7 +373,8 @@ static int tarfs_readdir(void *fs_data, void *private, char *ubuf,
         uint64_t ino = (uint64_t)((char *)hdr - _tarfs_start) / 512 + 1;
         int64_t doff = (int64_t)(seen + 1);
         uint16_t rlen = (uint16_t)reclen;
-        uint8_t dtype = (hdr->typeflag == '5') ? 4 : 8;
+        uint8_t dtype = (hdr->typeflag == '5') ? 4 :
+                        (hdr->typeflag == '2') ? 10 : 8;
         memcpy(d + 0, &ino, 8);
         memcpy(d + 8, &doff, 8);
         memcpy(d + 16, &rlen, 2);
@@ -397,6 +408,16 @@ static int tarfs_readlink(void *fs_data, const char *path, char *buf, int bufsiz
     return -2; /* -ENOENT: path too long for tarfs */
 
   struct posix_header *hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+  if (!hdr) {
+    int tplen = strlen(tarpath);
+    if (tplen > 0 && tplen < 254 && tarpath[tplen - 1] != '/') {
+      tarpath[tplen] = '/';
+      tarpath[tplen + 1] = '\0';
+      hdr = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
+    }
+  }
+  if (!hdr && tarfs_is_dir(path))
+    return -22; /* EINVAL — directories are not symlinks */
   if (!hdr)
     return -2; /* ENOENT */
 

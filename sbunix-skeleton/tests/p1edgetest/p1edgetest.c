@@ -306,6 +306,29 @@ static void test_renameat2_zero_flags(void) {
   CHECK("renameat2 zero flags renames", rr == 0 && nfd >= 0 && ofd == -1);
 }
 
+static void test_renameat2_rejects_flags(void) {
+  const char *oldp = "/tmp/p1_rename_flag_old";
+  const char *newp = "/tmp/p1_rename_flag_new";
+  unlink(oldp);
+  unlink(newp);
+  int fd = open(oldp, O_CREAT | O_RDWR | O_TRUNC, 0644);
+  if (fd >= 0) {
+    write(fd, "r", 1);
+    close(fd);
+  }
+
+  errno = 0;
+  int rr = syscall_to_int(syscall(SYS_renameat2, AT_FDCWD, oldp,
+                                  AT_FDCWD, newp, 1));
+  int saved_errno = errno;
+  int old_exists = access(oldp, F_OK) == 0;
+  int new_exists = access(newp, F_OK) == 0;
+  unlink(oldp);
+  unlink(newp);
+  CHECK("renameat2 rejects unsupported flags",
+        rr == -1 && saved_errno == EINVAL && old_exists && !new_exists);
+}
+
 static pid_t spawn_group_child(pid_t pgid, int ready_write) {
   pid_t pid = fork();
   if (pid == 0) {
@@ -373,6 +396,7 @@ int main(int argc, char **argv) {
   test_open_flags_ext2();
   test_at_empty_path();
   test_renameat2_zero_flags();
+  test_renameat2_rejects_flags();
   test_stopped_process_group_wait();
 
   printf("p1edgetest: passed=%d failed=%d\n", g_pass, g_fail);

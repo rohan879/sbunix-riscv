@@ -800,10 +800,9 @@ long sys_clone_handler(struct trapframe *tf) {
 }
 
 long sys_execve_handler(struct trapframe *tf) {
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
-        return (long)-EFAULT;
-    }
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a0, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
 
     uint64_t uargv = tf->a1;
     uint64_t uenvp = tf->a2;
@@ -896,17 +895,16 @@ long sys_execve_handler(struct trapframe *tf) {
         }
     }
 
-    char resolved[128];
+    char resolved[KPATH_MAX];
     char tarpath[128];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, kpath, resolved) < 0) {
+    { int rr = resolve_path(current_proc->cwd, kpath, resolved);
+      if (rr < 0) {
         kfree(kstrbuf);
         if (kenvbuf) kfree(kenvbuf);
-        return (long)-36; /* -ENAMETOOLONG */
-    }
-    /* BF: Reduced maxdepth from 8 to 6 to prevent kernel stack overflow.
-     * Each recursion level costs ~1152 bytes; 6*1152+600 = 7512, leaving
-     * ~680 bytes margin on the 8KB kernel stack. */
+        return (long)rr;
+      } }
+    /* BF: Keep the resolver depth finite; the resolver keeps large scratch
+     * buffers on the heap so long symlink targets do not grow stack frames. */
     /* BF: Propagate all negative errors from resolve_symlinks_in_path */
     { int sr = resolve_symlinks_in_path(resolved, 6, 1);
       if (sr < 0) { kfree(kstrbuf); if (kenvbuf) kfree(kenvbuf); return (long)sr; } }
@@ -932,7 +930,7 @@ long sys_execve_handler(struct trapframe *tf) {
     /* Shebang (#!) handling: if exec failed, check if file is a script */
     int shebang_file_found = 0;
     if (ret < 0) {
-        char first_bytes[128];
+        char first_bytes[256];
         int got = 0;
         struct posix_header *th = tar_find_file(_tarfs_start, _tarfs_end, tarpath);
         if (!th) {
@@ -979,12 +977,13 @@ long sys_execve_handler(struct trapframe *tf) {
         if (got > 0) shebang_file_found = 1;
         if (got >= 2 && first_bytes[0] == '#' && first_bytes[1] == '!') {
             /* Parse interpreter path */
-            char interp[128];
+            char interp[KPATH_MAX];
             int j = 2;
             while (first_bytes[j] == ' ' || first_bytes[j] == '\t') j++;
             int k = 0;
             while (j < got && first_bytes[j] != '\n' && first_bytes[j] != '\r' &&
-                   first_bytes[j] != ' ' && first_bytes[j] != '\t' && k < 254)
+                   first_bytes[j] != ' ' && first_bytes[j] != '\t' &&
+                   k < KPATH_MAX - 1)
                 interp[k++] = first_bytes[j++];
             interp[k] = '\0';
 
@@ -1028,10 +1027,10 @@ long sys_execve_handler(struct trapframe *tf) {
                     kfree(tmpbuf);
 
                     /* Now exec the interpreter (follow symlinks) */
-                    char interp_resolved[128];
-                    /* BF: Propagate ENAMETOOLONG from resolve_path */
-                    if (resolve_path("/", interp, interp_resolved) < 0) {
-                        ret = -36; /* -ENAMETOOLONG */
+                    char interp_resolved[KPATH_MAX];
+                    { int rr = resolve_path("/", interp, interp_resolved);
+                      if (rr < 0) {
+                        ret = rr;
                     } else {
                         /* BF: Propagate all negative errors from symlink resolution */
                         int sr = resolve_symlinks_in_path(interp_resolved, 6, 1);
@@ -1045,7 +1044,7 @@ long sys_execve_handler(struct trapframe *tf) {
                                               sizeof(interp_tarpath)) == 0)
                                 ret = exec(interp_tarpath);
                         }
-                    }
+                    } }
                 }
             }
         }

@@ -3,6 +3,7 @@
 
 #include <syscall_handlers.h>
 #include <trap_internal.h>
+#include <pathres.h>
 #include <pipe.h>
 #include <proc.h>
 #include <vfs.h>
@@ -480,12 +481,12 @@ long sys_inotify_add_watch_handler(struct trapframe *tf) {
     struct inotify_private *ip = (struct inotify_private *)ftab[ifd]->private;
     if (!ip || ip->count >= MAX_INOTIFY_WATCHES) return (long)-28;
     char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, path_uva, sizeof(kpath)) < 0)
-        return (long)-EFAULT;
+    { int pr = copy_user_path_arg(path_uva, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
     int wd = ip->next_wd++;
     struct inotify_watch *w = &ip->watches[ip->count++];
     int len = strlen(kpath);
-    if (len >= 127) len = 127;
+    if (len >= (int)sizeof(w->path)) len = (int)sizeof(w->path) - 1;
     memcpy(w->path, kpath, len);
     w->path[len] = '\0';
     w->mask = mask;

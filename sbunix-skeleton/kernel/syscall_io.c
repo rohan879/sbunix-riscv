@@ -392,13 +392,15 @@ pipe_eof:
 long sys_openat_handler(struct trapframe *tf) {
     int dirfd = (int)tf->a0;
     int flags = (int)tf->a2;
+#define O_CREAT    0100
+#define O_TRUNC    01000
+#define O_DIRECTORY 0200000
 
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-EFAULT;
-    }
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
 
-    char resolved[128];
+    char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at(dirfd, kpath, resolved);
       if (rr < 0) return (long)rr; }
@@ -407,6 +409,14 @@ long sys_openat_handler(struct trapframe *tf) {
     {
         int nofollow = (flags & 0400000); /* O_NOFOLLOW = 0400000 */
         int symret = resolve_symlinks_in_path(resolved, 6, !nofollow);
+        if (symret == -ENOENT && (flags & O_CREAT) && !nofollow) {
+            /* BF: A missing final component under O_CREAT is not an error;
+             * preserve intermediate symlink resolution and let the backend
+             * create the new file. */
+            { int rr = resolve_path_at(dirfd, kpath, resolved);
+              if (rr < 0) return (long)rr; }
+            symret = resolve_symlinks_in_path(resolved, 6, 0);
+        }
         /* BF: Propagate all negative errors, not just ELOOP */
         if (symret < 0)
             return (long)symret;
@@ -423,9 +433,6 @@ long sys_openat_handler(struct trapframe *tf) {
      * ops->open() so that flags like O_TRUNC do not modify the file
      * when the open should have failed (e.g., O_DIRECTORY on a regular
      * file, or O_CREAT on an existing directory). */
-#define O_CREAT    0100
-#define O_TRUNC    01000
-#define O_DIRECTORY 0200000
     {
         int is_dir = vfs_is_dir(resolved);
         /* Reject O_DIRECTORY on a non-directory before any side-effects */
@@ -546,16 +553,12 @@ long sys_getcwd_handler(struct trapframe *tf) {
 }
 
 long sys_chdir_handler(struct trapframe *tf) {
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a0, sizeof(kpath)) < 0) {
-        return (long)-EFAULT;
-    }
-    /* Empty path is invalid */
-    if (kpath[0] == '\0') return (long)-2; /* -ENOENT */
-    char resolved[128];
-    /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (resolve_path(current_proc->cwd, kpath, resolved) < 0)
-        return (long)-36; /* -ENAMETOOLONG */
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a0, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
+    char resolved[KPATH_MAX];
+    { int rr = resolve_path(current_proc->cwd, kpath, resolved);
+      if (rr < 0) return (long)rr; }
     /* BF: Propagate all negative errors from resolve_symlinks_in_path */
     { int sr = resolve_symlinks_in_path(resolved, 6, 1);
       if (sr < 0) return (long)sr; }
@@ -692,16 +695,15 @@ long sys_newfstatat_handler(struct trapframe *tf) {
     int at_flags = (int)tf->a3;
     if (at_flags & ~(0x100 | 0x1000))
         return (long)-EINVAL;
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-EFAULT;
-    }
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 1);
+      if (pr < 0) return (long)pr; }
     /* BF: AT_EMPTY_PATH stats the dirfd argument directly when the supplied
      * path is a valid empty string. */
     if ((at_flags & 0x1000) && kpath[0] == '\0') {
         return copy_fstat_to_user((int)tf->a0, tf->a2);
     }
-    char resolved[128];
+    char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
       if (rr < 0) return (long)rr; }
@@ -1169,12 +1171,11 @@ long sys_fcntl_handler(struct trapframe *tf) {
 }
 
 long sys_faccessat_handler(struct trapframe *tf) {
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-EFAULT;
-    }
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
 
-    char resolved[128];
+    char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
       if (rr < 0) return (long)rr; }
@@ -1202,12 +1203,13 @@ long sys_faccessat_handler(struct trapframe *tf) {
 long sys_unlinkat_handler(struct trapframe *tf) {
     int dirfd = (int)tf->a0;
     int flags = (int)tf->a2;
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-EFAULT;
-    }
+    if (flags & ~0x200) /* AT_REMOVEDIR */
+        return (long)-EINVAL;
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
     {
-        char resolved[128];
+        char resolved[KPATH_MAX];
         /* BF: Propagate dirfd resolution errors before VFS dispatch. */
         { int rr = resolve_path_at(dirfd, kpath, resolved);
           if (rr < 0) return (long)rr; }
@@ -1239,13 +1241,16 @@ long sys_linkat_handler(struct trapframe *tf) {
     /* a0 = olddirfd (AT_FDCWD), a1 = oldpath, a2 = newdirfd, a3 = newpath, a4 = flags */
     int olddirfd = (int)tf->a0;
     int newdirfd = (int)tf->a2;
-    char kold[128], knew[256];
-    if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
-        return (long)-EFAULT;
-    if (copyinstr(current_proc->pagetable, knew, tf->a3, sizeof(knew)) < 0)
-        return (long)-EFAULT;
+    int flags = (int)tf->a4;
+    if (flags & ~0x400) /* AT_SYMLINK_FOLLOW */
+        return (long)-EINVAL;
+    char kold[KPATH_MAX], knew[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a1, kold, sizeof(kold), 0);
+      if (pr < 0) return (long)pr; }
+    { int pr = copy_user_path_arg(tf->a3, knew, sizeof(knew), 0);
+      if (pr < 0) return (long)pr; }
 
-    char old_resolved[128], new_resolved[256];
+    char old_resolved[KPATH_MAX], new_resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at(olddirfd, kold, old_resolved);
       if (rr < 0) return (long)rr; }
@@ -1254,7 +1259,9 @@ long sys_linkat_handler(struct trapframe *tf) {
     /* BF: linkat must follow symlinked parent directories while preserving
      * the final path component, otherwise /mnt/linkdir/file is treated as a
      * literal ext2 entry instead of resolving through the symlinked parent. */
-    { int sr = resolve_symlinks_in_path(old_resolved, 6, 0);
+    /* BF: AT_SYMLINK_FOLLOW switches only the old final component from
+     * no-follow to follow; the new link name itself must remain literal. */
+    { int sr = resolve_symlinks_in_path(old_resolved, 6, !!(flags & 0x400));
       if (sr < 0) return (long)sr; }
     { int sr = resolve_symlinks_in_path(new_resolved, 6, 0);
       if (sr < 0) return (long)sr; }
@@ -1300,13 +1307,16 @@ long sys_linkat_handler(struct trapframe *tf) {
 long sys_renameat2_handler(struct trapframe *tf) {
     int olddirfd = (int)tf->a0;
     int newdirfd = (int)tf->a2;
-    char kold[128], knew[256];
-    if (copyinstr(current_proc->pagetable, kold, tf->a1, sizeof(kold)) < 0)
-        return (long)-EFAULT;
-    if (copyinstr(current_proc->pagetable, knew, tf->a3, sizeof(knew)) < 0)
-        return (long)-EFAULT;
+    int flags = (int)tf->a4;
+    if (flags != 0)
+        return (long)-EINVAL;
+    char kold[KPATH_MAX], knew[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a1, kold, sizeof(kold), 0);
+      if (pr < 0) return (long)pr; }
+    { int pr = copy_user_path_arg(tf->a3, knew, sizeof(knew), 0);
+      if (pr < 0) return (long)pr; }
 
-    char old_resolved[128], new_resolved[256];
+    char old_resolved[KPATH_MAX], new_resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at(olddirfd, kold, old_resolved);
       if (rr < 0) return (long)rr; }
@@ -1339,12 +1349,11 @@ long sys_renameat2_handler(struct trapframe *tf) {
 long sys_mkdirat_handler(struct trapframe *tf) {
     int dirfd = (int)tf->a0;
     int mode = (int)tf->a2;
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-EFAULT;
-    }
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
     {
-        char resolved[128];
+        char resolved[KPATH_MAX];
         /* BF: Propagate dirfd resolution errors before VFS dispatch. */
         { int rr = resolve_path_at(dirfd, kpath, resolved);
           if (rr < 0) return (long)rr; }
@@ -1367,12 +1376,11 @@ long sys_mknodat_handler(struct trapframe *tf) {
     int dirfd = (int)tf->a0;
     uint32_t mode = (uint32_t)tf->a2;
     uint32_t rdev = (uint32_t)tf->a3;
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0) {
-        return (long)-EFAULT;
-    }
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
     {
-        char resolved[128];
+        char resolved[KPATH_MAX];
         /* BF: Propagate dirfd resolution errors before VFS dispatch. */
         { int rr = resolve_path_at(dirfd, kpath, resolved);
           if (rr < 0) return (long)rr; }
@@ -1402,17 +1410,15 @@ long sys_mknodat_handler(struct trapframe *tf) {
 }
 
 long sys_readlinkat_handler(struct trapframe *tf) {
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
-        return (long)-EFAULT;
-    if (kpath[0] == '\0')
-        return (long)-ENOENT;
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
 
     int bufsiz = (int)tf->a3;
     if (bufsiz <= 0)
         return (long)-22;
 
-    char resolved[128];
+    char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
       if (rr < 0) return (long)rr; }
@@ -1447,35 +1453,24 @@ out:
 
 long sys_symlinkat_handler(struct trapframe *tf) {
     char *ktarget;
-    char klinkpath[256];
+    char klinkpath[KPATH_MAX];
 
-    ktarget = (char *)kmalloc(EXT2_BLOCK_SIZE);
+    ktarget = (char *)kmalloc(KSYMLINK_MAX + 1);
     if (!ktarget)
         return (long)-ENOMEM;
 
-    /* BF: A valid user string that exhausts the single-block symlink target
-     * buffer is an overlong pathname, not a bad user pointer. */
-    int tr = copyinstr(current_proc->pagetable, ktarget, tf->a0,
-                       EXT2_BLOCK_SIZE);
-    if (tr < 0) {
-        kmfree(ktarget, EXT2_BLOCK_SIZE);
-        return (long)(tr == -1 ? -ENAMETOOLONG : -EFAULT);
-    }
-    if (copyinstr(current_proc->pagetable, klinkpath, tf->a2, sizeof(klinkpath)) < 0)
-    {
-        kmfree(ktarget, EXT2_BLOCK_SIZE);
-        return (long)-EFAULT;
-    }
-    if (klinkpath[0] == '\0') {
-        kmfree(ktarget, EXT2_BLOCK_SIZE);
-        return (long)-ENOENT;
-    }
+    /* BF: Match the advertised SYMLINK_MAX capacity and distinguish a
+     * too-long target from an invalid user pointer. */
+    { int pr = copy_user_path_arg(tf->a0, ktarget, KSYMLINK_MAX + 1, 0);
+      if (pr < 0) { kmfree(ktarget, KSYMLINK_MAX + 1); return (long)pr; } }
+    { int pr = copy_user_path_arg(tf->a2, klinkpath, sizeof(klinkpath), 0);
+      if (pr < 0) { kmfree(ktarget, KSYMLINK_MAX + 1); return (long)pr; } }
 
-    char resolved[128];
+    char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at((int)tf->a1, klinkpath, resolved);
       if (rr < 0) {
-          kmfree(ktarget, EXT2_BLOCK_SIZE);
+          kmfree(ktarget, KSYMLINK_MAX + 1);
           return (long)rr;
       } }
 
@@ -1485,7 +1480,7 @@ long sys_symlinkat_handler(struct trapframe *tf) {
      * entry at the literal path instead of the resolved target directory. */
     { int sr = resolve_symlinks_in_path(resolved, 6, 0);
       if (sr < 0) {
-          kmfree(ktarget, EXT2_BLOCK_SIZE);
+          kmfree(ktarget, KSYMLINK_MAX + 1);
           return (long)sr;
       } }
 
@@ -1495,7 +1490,7 @@ long sys_symlinkat_handler(struct trapframe *tf) {
     int ret = -30; /* EROFS */
     if (ops && ops->symlink)
         ret = ops->symlink(mnt->fs_data, ktarget, relpath);
-    kmfree(ktarget, EXT2_BLOCK_SIZE);
+    kmfree(ktarget, KSYMLINK_MAX + 1);
     return (long)(int64_t)ret;
 }
 
@@ -1521,12 +1516,12 @@ struct ramfs_private {
 
 long sys_fchmodat_handler(struct trapframe *tf) {
     /* a0 = dirfd (AT_FDCWD), a1 = user path, a2 = mode, a3 = flags */
-    char kpath[128];
-    if (copyinstr(current_proc->pagetable, kpath, tf->a1, sizeof(kpath)) < 0)
-        return (long)-EFAULT; /* EFAULT */
+    char kpath[KPATH_MAX];
+    { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
+      if (pr < 0) return (long)pr; }
 
     /* Resolve path and verify it exists via stat */
-    char resolved[128];
+    char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
       if (rr < 0) return (long)rr; }
