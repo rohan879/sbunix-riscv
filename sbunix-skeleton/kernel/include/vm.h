@@ -96,6 +96,7 @@ int vma_extend_heap(struct proc *p, uint64_t start, uint64_t end,
                     int prot, int flags);
 struct vm_area *vma_find(struct proc *p, uint64_t addr);
 struct vm_area *vma_find_in_list(struct vm_area *vmas, uint64_t addr);
+int vma_remove_preflight(struct proc *p, uint64_t start, uint64_t end);
 int vma_remove(struct proc *p, uint64_t start, uint64_t end);
 int vma_dup(struct proc *src, struct proc *dst);
 void vma_free_all(struct proc *p);
