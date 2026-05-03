@@ -16,6 +16,9 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
+#include <dirent.h>
+#include <syscall.h>
 
 static int g_pass = 0, g_fail = 0;
 
@@ -61,6 +64,82 @@ static int simple_atoi(const char *s) {
         s++;
     }
     return val;
+}
+
+static unsigned long simple_atoul(const char *s) {
+    unsigned long val = 0;
+    while (*s >= '0' && *s <= '9') {
+        val = val * 10UL + (unsigned long)(*s - '0');
+        s++;
+    }
+    return val;
+}
+
+static int count_lines(const char *s) {
+    int lines = 0;
+    while (*s) {
+        if (*s == '\n')
+            lines++;
+        s++;
+    }
+    return lines;
+}
+
+static int proc_stat_fields_and_vsize(const char *buf, unsigned long *vsize) {
+    const char *p = buf;
+    int field = 0;
+
+    if (vsize)
+        *vsize = 0;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (!*p)
+            break;
+
+        field++;
+        if (field == 2 && *p == '(') {
+            while (*p && *p != ')')
+                p++;
+            if (*p == ')')
+                p++;
+        } else {
+            if (field == 23 && vsize)
+                *vsize = simple_atoul(p);
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+                p++;
+        }
+    }
+
+    return field;
+}
+
+static unsigned long proc_status_vmsize_kb(const char *buf) {
+    const char *p = strstr(buf, "VmSize:");
+    if (!p)
+        return 0;
+    while (*p && (*p < '0' || *p > '9'))
+        p++;
+    return simple_atoul(p);
+}
+
+static int split_fields(char *line, char *fields[], int max_fields) {
+    int n = 0;
+    char *p = line;
+
+    while (*p && n < max_fields) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (!*p)
+            break;
+        fields[n++] = p;
+        while (*p && *p != ' ' && *p != '\t')
+            p++;
+        if (*p)
+            *p++ = '\0';
+    }
+
+    return n;
 }
 
 /* Format an integer into a decimal string, return pointer to static buf */
@@ -514,6 +593,128 @@ static void test_proc_link_sizes_and_errors(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 18. proc_errno_semantics -- directories and files report parser errno
+ * ---------------------------------------------------------------------- */
+
+static void test_proc_errno_semantics(void) {
+    char c;
+    char dbuf[128];
+    int fd = open("/proc", O_RDONLY);
+
+    errno = 0;
+    int n = fd >= 0 ? read(fd, &c, 1) : -2;
+    CHECK("procfs: proc_read_dir returns error", n == -1);
+    CHECK("procfs: proc_read_dir errno EISDIR", errno == EISDIR);
+    if (fd >= 0)
+        close(fd);
+
+    fd = open("/proc/self/status", O_RDONLY);
+    long gd = fd >= 0 ? syscall(SYS_getdents64, fd, dbuf, sizeof(dbuf)) : -1;
+    CHECK("procfs: proc_getdents_file returns ENOTDIR", gd == -ENOTDIR);
+    if (fd >= 0)
+        close(fd);
+}
+
+/* -----------------------------------------------------------------------
+ * 19. proc_mounts_six_fields -- /proc/mounts is fstab-compatible
+ * ---------------------------------------------------------------------- */
+
+static void test_proc_mounts_six_fields(void) {
+    char buf[2048];
+    int n = read_file("/proc/mounts", buf, sizeof(buf));
+    int ok = n > 0;
+    int saw_line = 0;
+    char *line = buf;
+
+    CHECK("procfs: proc_mounts readable", n > 0);
+    while (ok && *line) {
+        char *end = line;
+        char *fields[8];
+        int nf;
+
+        while (*end && *end != '\n')
+            end++;
+        if (*end)
+            *end++ = '\0';
+        if (*line) {
+            saw_line = 1;
+            nf = split_fields(line, fields, 8);
+            if (nf != 6 || strcmp(fields[4], "0") != 0 ||
+                strcmp(fields[5], "0") != 0)
+                ok = 0;
+        }
+        line = end;
+    }
+
+    CHECK("procfs: proc_mounts has entries", saw_line);
+    CHECK("procfs: proc_mounts six fields", ok && saw_line);
+}
+
+/* -----------------------------------------------------------------------
+ * 20. proc_vmsize_accounts_vmas -- status/stat include mmap VMAs
+ * ---------------------------------------------------------------------- */
+
+static void test_proc_vmsize_accounts_vmas(void) {
+    const unsigned long len = 2UL * 1024UL * 1024UL;
+    char status_before[2048], status_after[2048], statbuf[2048];
+    unsigned long vm_before, vm_after, stat_vsize;
+    int fields;
+
+    if (read_file("/proc/self/status", status_before, sizeof(status_before)) <= 0) {
+        CHECK("procfs: proc_vmsize status setup", 0);
+        return;
+    }
+    vm_before = proc_status_vmsize_kb(status_before);
+
+    void *map = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (map == MAP_FAILED) {
+        CHECK("procfs: proc_vmsize mmap setup", 0);
+        return;
+    }
+
+    int n1 = read_file("/proc/self/status", status_after, sizeof(status_after));
+    int n2 = read_file("/proc/self/stat", statbuf, sizeof(statbuf));
+    vm_after = proc_status_vmsize_kb(status_after);
+    fields = proc_stat_fields_and_vsize(statbuf, &stat_vsize);
+
+    CHECK("procfs: proc_status VmSize grows for mmap",
+          n1 > 0 && vm_after >= vm_before + (len / 1024UL));
+    CHECK("procfs: proc_stat has 52 fields", n2 > 0 && fields == 52);
+    CHECK("procfs: proc_stat vsize includes mmap",
+          n2 > 0 && stat_vsize >= vm_after * 1024UL);
+
+    munmap(map, len);
+}
+
+/* -----------------------------------------------------------------------
+ * 21. proc_maps_streams_past_1k -- /proc/self/maps is not 1024-byte capped
+ * ---------------------------------------------------------------------- */
+
+static void test_proc_maps_streams_past_1k(void) {
+    enum { MAP_COUNT = 32 };
+    void *maps[MAP_COUNT];
+    char buf[8192];
+    int made = 0;
+
+    for (int i = 0; i < MAP_COUNT; i++) {
+        maps[i] = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (maps[i] == MAP_FAILED)
+            break;
+        made++;
+    }
+
+    int n = read_file("/proc/self/maps", buf, sizeof(buf));
+    CHECK("procfs: proc_maps_many setup", made >= MAP_COUNT / 2);
+    CHECK("procfs: proc_maps streams beyond 1k", n > 1024);
+    CHECK("procfs: proc_maps_many has many lines", count_lines(buf) >= made);
+
+    for (int i = 0; i < made; i++)
+        munmap(maps[i], 4096);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -537,6 +738,10 @@ int main(void) {
     test_proc_fd_entries();
     test_proc_fd_inode_unique();
     test_proc_link_sizes_and_errors();
+    test_proc_errno_semantics();
+    test_proc_mounts_six_fields();
+    test_proc_vmsize_accounts_vmas();
+    test_proc_maps_streams_past_1k();
 
     printf("=== procfstest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

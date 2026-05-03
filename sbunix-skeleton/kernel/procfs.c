@@ -15,6 +15,7 @@
 #include <kalloc.h>
 #include <trap.h>
 #include <vm.h>
+#include <errno.h>
 
 /* Types of procfs entries */
 enum procfs_type {
@@ -64,6 +65,8 @@ static int append_int(char *buf, int bufsz, int pos, long v) {
 /* Helper: write a string into buf */
 static int append_str(char *buf, int bufsz, int pos, const char *s) {
   int l = strlen(s);
+  if (pos >= bufsz)
+    return pos;
   if (pos + l > bufsz) l = bufsz - pos;
   if (l > 0) { memcpy(buf + pos, s, l); pos += l; }
   return pos;
@@ -77,6 +80,22 @@ static int append_hex16(char *buf, int bufsz, int pos, uint64_t v) {
       buf[pos++] = hex[(v >> (i * 4)) & 0xF];
   }
   return pos;
+}
+
+static int append_hex_min(char *buf, int bufsz, int pos, uint64_t v) {
+  char tmp[17];
+  int ti = 0;
+  int seen = 0;
+
+  for (int shift = 60; shift >= 0; shift -= 4) {
+    int nibble = (int)((v >> shift) & 0xF);
+    if (nibble || seen || shift == 0) {
+      tmp[ti++] = "0123456789abcdef"[nibble];
+      seen = 1;
+    }
+  }
+  tmp[ti] = '\0';
+  return append_str(buf, bufsz, pos, tmp);
 }
 
 /* Helper: parse a decimal PID from a string. Returns -1 on failure. */
@@ -107,6 +126,21 @@ static struct proc *find_proc(pid_t pid) {
       return p;
   }
   return 0;
+}
+
+static struct proc *procfs_find_target(pid_t pid) {
+  if (current_proc && current_proc->pid == pid && current_proc->state != UNUSED)
+    return current_proc;
+  return find_proc(pid);
+}
+
+static int procfs_is_dir(enum procfs_type type) {
+  return type == PROCFS_ROOT || type == PROCFS_PIDDIR || type == PROCFS_FDDIR;
+}
+
+static int procfs_is_link(enum procfs_type type) {
+  return type == PROCFS_FDLINK || type == PROCFS_EXE_LINK ||
+         type == PROCFS_CWD_LINK;
 }
 
 static int procfs_fd_target_len(struct proc *target, int fd) {
@@ -158,6 +192,35 @@ static const char *state_name(enum procstate s) {
   }
 }
 
+static uint64_t procfs_vmsize_bytes(struct proc *p) {
+  uint64_t total;
+  uint64_t covered_end;
+
+  if (!p)
+    return 0;
+
+  total = PGROUNDUP(p->sz);
+  covered_end = total;
+
+  for (struct vm_area *vma = p->vma_list; vma; vma = vma->next) {
+    uint64_t start = vma->start;
+    uint64_t end = vma->end;
+    uint64_t add_start;
+    uint64_t add;
+
+    if (end <= start || end <= covered_end)
+      continue;
+    add_start = start < covered_end ? covered_end : start;
+    add = end - add_start;
+    if (total > (uint64_t)-1 - add)
+      return (uint64_t)-1;
+    total += add;
+    covered_end = end;
+  }
+
+  return total;
+}
+
 /* Render /proc/<pid>/status */
 static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   int pos = 0;
@@ -183,7 +246,7 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   pos = append_str(buf, bufsz, pos, "Gid:\t0\t0\t0\t0\n");
 
   pos = append_str(buf, bufsz, pos, "VmSize:\t");
-  pos = append_int(buf, bufsz, pos, (long)(p->sz / 1024));
+  pos = append_int(buf, bufsz, pos, (long)(procfs_vmsize_bytes(p) / 1024));
   pos = append_str(buf, bufsz, pos, " kB\n");
 
   pos = append_str(buf, bufsz, pos, "SigPnd:\t");
@@ -271,7 +334,7 @@ static int procfs_render_stat_file(char *buf, int bufsz, struct proc *p) {
    * starttime(22)=0  =>  vsize(23)  =>  rss(24) ... exit_code(52) */
   pos = append_str(buf, bufsz, pos,
     "0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 0 ");
-  pos = append_int(buf, bufsz, pos, (long)(p->sz)); /* vsize */
+  pos = append_int(buf, bufsz, pos, (long)procfs_vmsize_bytes(p)); /* vsize */
   /* BF: Fields 24-52 per Linux proc(5). exit_signal is field 38 (SIGCHLD).
    * Previously had 17 at field 37 (cnswap) instead of field 38.
    * Layout: 14 zeros (fields 24-37), SIGCHLD (field 38), 14 zeros (39-52). */
@@ -284,47 +347,72 @@ static int procfs_render_stat_file(char *buf, int bufsz, struct proc *p) {
   return pos;
 }
 
-/* Render /proc/<pid>/maps (VMA list) */
-static int procfs_render_maps(char *buf, int bufsz, struct proc *p) {
+static int procfs_render_maps_line(char *buf, int bufsz, struct vm_area *vma) {
   int pos = 0;
-  struct vm_area *vma = p->vma_list;
-  while (vma && pos < bufsz - 1) {
-    /* "start-end rwxp 00000000 00:00 0\n" */
-    /* Print start address as hex */
-    uint64_t start = vma->start;
-    uint64_t end   = vma->end;
-    /* Minimal hex printer */
-    char hexbuf[17];
-    int hi;
-    /* start */
-    hi = 0;
-    for (int shift = 60; shift >= 0; shift -= 4) {
-      int nibble = (int)((start >> shift) & 0xF);
-      if (nibble || hi || shift == 0)
-        hexbuf[hi++] = "0123456789abcdef"[nibble];
-    }
-    hexbuf[hi] = '\0';
-    pos = append_str(buf, bufsz, pos, hexbuf);
-    if (pos < bufsz) buf[pos++] = '-';
-    /* end */
-    hi = 0;
-    for (int shift = 60; shift >= 0; shift -= 4) {
-      int nibble = (int)((end >> shift) & 0xF);
-      if (nibble || hi || shift == 0)
-        hexbuf[hi++] = "0123456789abcdef"[nibble];
-    }
-    hexbuf[hi] = '\0';
-    pos = append_str(buf, bufsz, pos, hexbuf);
-    if (pos < bufsz) buf[pos++] = ' ';
-    /* permissions */
-    if (pos < bufsz) buf[pos++] = (vma->prot & 1) ? 'r' : '-'; /* PROT_READ */
-    if (pos < bufsz) buf[pos++] = (vma->prot & 2) ? 'w' : '-'; /* PROT_WRITE */
-    if (pos < bufsz) buf[pos++] = (vma->prot & 4) ? 'x' : '-'; /* PROT_EXEC */
-    if (pos < bufsz) buf[pos++] = 'p'; /* private */
-    pos = append_str(buf, bufsz, pos, " 00000000 00:00 0\n");
-    vma = vma->next;
-  }
+
+  pos = append_hex_min(buf, bufsz, pos, vma->start);
+  if (pos < bufsz) buf[pos++] = '-';
+  pos = append_hex_min(buf, bufsz, pos, vma->end);
+  if (pos < bufsz) buf[pos++] = ' ';
+  if (pos < bufsz) buf[pos++] = (vma->prot & PROT_READ) ? 'r' : '-';
+  if (pos < bufsz) buf[pos++] = (vma->prot & PROT_WRITE) ? 'w' : '-';
+  if (pos < bufsz) buf[pos++] = (vma->prot & PROT_EXEC) ? 'x' : '-';
+  if (pos < bufsz) buf[pos++] = (vma->flags & MAP_SHARED) ? 's' : 'p';
+  pos = append_str(buf, bufsz, pos, " 00000000 00:00 0\n");
+
   return pos;
+}
+
+static uint64_t procfs_maps_size(struct proc *p) {
+  uint64_t total = 0;
+  char line[96];
+
+  if (!p)
+    return 0;
+  for (struct vm_area *vma = p->vma_list; vma; vma = vma->next) {
+    int len = procfs_render_maps_line(line, sizeof(line), vma);
+    if (total > (uint64_t)-1 - (uint64_t)len)
+      return (uint64_t)-1;
+    total += (uint64_t)len;
+  }
+  return total;
+}
+
+static int64_t procfs_read_maps(struct procfs_private *priv, char *buf,
+                                uint64_t count, int64_t *offset) {
+  struct proc *target;
+  uint64_t skip;
+  uint64_t copied = 0;
+  char line[96];
+
+  if (*offset < 0)
+    return -EINVAL;
+  target = procfs_find_target(priv->pid);
+  if (!target)
+    return -ENOENT;
+
+  skip = (uint64_t)*offset;
+  for (struct vm_area *vma = target->vma_list; vma; vma = vma->next) {
+    int len = procfs_render_maps_line(line, sizeof(line), vma);
+    uint64_t take;
+
+    if (skip >= (uint64_t)len) {
+      skip -= (uint64_t)len;
+      continue;
+    }
+
+    take = (uint64_t)len - skip;
+    if (take > count - copied)
+      take = count - copied;
+    memcpy(buf + copied, line + skip, take);
+    copied += take;
+    skip = 0;
+    if (copied == count)
+      break;
+  }
+
+  *offset += (int64_t)copied;
+  return (int64_t)copied;
 }
 
 /* Render /proc/cpuinfo */
@@ -428,15 +516,19 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
     const char *mpath, *fstype;
     for (int i = 0; vfs_get_mount_info(i, &mpath, &fstype) == 0; i++) {
       const char *rw = (strcmp(fstype, "ext2") == 0 || strcmp(fstype, "ramfs") == 0) ? "rw" : "ro";
-      int fl = strlen(fstype), pl = strlen(mpath), rl = strlen(rw);
-      int need = fl + 4 + pl + 2 + rl + 2;
-      if (pos + need >= PROCFS_BUF) break;
-      memcpy(priv->buf + pos, fstype, fl); pos += fl;
-      memcpy(priv->buf + pos, " on ", 4); pos += 4;
-      memcpy(priv->buf + pos, mpath, pl); pos += pl;
-      memcpy(priv->buf + pos, " (", 2); pos += 2;
-      memcpy(priv->buf + pos, rw, rl); pos += rl;
-      memcpy(priv->buf + pos, ")\n", 2); pos += 2;
+      int before = pos;
+      pos = append_str(priv->buf, PROCFS_BUF, pos, fstype);
+      if (pos < PROCFS_BUF) priv->buf[pos++] = ' ';
+      pos = append_str(priv->buf, PROCFS_BUF, pos, mpath);
+      if (pos < PROCFS_BUF) priv->buf[pos++] = ' ';
+      pos = append_str(priv->buf, PROCFS_BUF, pos, fstype);
+      if (pos < PROCFS_BUF) priv->buf[pos++] = ' ';
+      pos = append_str(priv->buf, PROCFS_BUF, pos, rw);
+      pos = append_str(priv->buf, PROCFS_BUF, pos, " 0 0\n");
+      if (pos >= PROCFS_BUF) {
+        pos = before;
+        break;
+      }
     }
     priv->len = pos;
     *private = priv;
@@ -485,7 +577,7 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
     const char *rest = p + 5; /* after "self/" */
     /* BF: /proc/self must describe the live caller even when that short-lived
      * child has not become discoverable through a proc-table lookup yet. */
-    struct proc *target = current_proc ? current_proc : find_proc(self_pid);
+    struct proc *target = procfs_find_target(self_pid);
     if (!target) { kmfree(priv, sizeof(*priv)); return -2; }
     priv->pid = self_pid;
     if (*rest == '\0') {
@@ -509,7 +601,7 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
       }
     } else if (strcmp(rest, "maps") == 0) {
       priv->type = PROCFS_MAPS;
-      priv->len = procfs_render_maps(priv->buf, PROCFS_BUF, target);
+      priv->len = (int)procfs_maps_size(target);
     } else if (strcmp(rest, "stat") == 0) {
       priv->type = PROCFS_STAT_FILE;
       priv->len = procfs_render_stat_file(priv->buf, PROCFS_BUF, target);
@@ -562,7 +654,7 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
   int pid = parse_pid(pidstr);
   if (pid < 0) { kmfree(priv, sizeof(*priv)); return -2; }
 
-  struct proc *target = find_proc((pid_t)pid);
+  struct proc *target = procfs_find_target((pid_t)pid);
   if (!target) { kmfree(priv, sizeof(*priv)); return -2; }
 
   priv->pid = (pid_t)pid;
@@ -604,7 +696,7 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
 
   if (strcmp(rest, "maps") == 0) {
     priv->type = PROCFS_MAPS;
-    priv->len = procfs_render_maps(priv->buf, PROCFS_BUF, target);
+    priv->len = (int)procfs_maps_size(target);
     *private = priv;
     return 0;
   }
@@ -694,11 +786,16 @@ static int64_t procfs_read(void *fs_data, void *private, char *buf,
     priv->len = procfs_render_meminfo(priv->buf, PROCFS_BUF);
   }
 
-  /* All other buffer-backed types */
-  if (priv->type == PROCFS_ROOT || priv->type == PROCFS_PIDDIR ||
-      priv->type == PROCFS_FDDIR || priv->type == PROCFS_FDLINK ||
-      priv->type == PROCFS_EXE_LINK || priv->type == PROCFS_CWD_LINK)
-    return 0; /* directories return nothing on read */
+  if (priv->type == PROCFS_MAPS)
+    return procfs_read_maps(priv, buf, count, offset);
+
+  if (procfs_is_dir(priv->type))
+    return -EISDIR;
+  if (procfs_is_link(priv->type))
+    return -EINVAL;
+
+  if (*offset < 0)
+    return -EINVAL;
 
   int64_t off = *offset;
   if (off >= priv->len) return 0;
@@ -795,7 +892,7 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
     p += 5;
     /* BF: Mirror procfs_open's live-task handling so self stat/lookups do not
      * fail just because the current child is transient in the proc table. */
-    struct proc *target = current_proc ? current_proc : find_proc(self_pid);
+    struct proc *target = procfs_find_target(self_pid);
     if (!target) return -2;
     if (*p == '\0') { STAT_DIR((uint64_t)(300 + self_pid)); }
     if (strcmp(p, "status") == 0 || strcmp(p, "cmdline") == 0 ||
@@ -833,7 +930,7 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
   int pid = parse_pid(pidstr);
   if (pid < 0) return -2;
 
-  struct proc *target = find_proc((pid_t)pid);
+  struct proc *target = procfs_find_target((pid_t)pid);
   if (!target) return -2;
 
   const char *rest = p + i;
@@ -917,17 +1014,17 @@ static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
   case PROCFS_FDDIR:
     { uint64_t ino=(uint64_t)(400+priv->pid); memcpy(st+8,&ino,8); memcpy(st+16,&dir_mode,4); break; }
   case PROCFS_FDLINK:
-    { struct proc *target = find_proc(priv->pid);
+    { struct proc *target = procfs_find_target(priv->pid);
       uint64_t ino=(uint64_t)(5000 + priv->pid * NOFILE + priv->fd);
       uint64_t sz=(uint64_t)procfs_link_target_len(target, PROCFS_FDLINK, priv->fd);
       memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); memcpy(st+48,&sz,8); break; }
   case PROCFS_EXE_LINK:
-    { struct proc *target = find_proc(priv->pid);
+    { struct proc *target = procfs_find_target(priv->pid);
       uint64_t ino=(uint64_t)(2000 + priv->pid * 10 + 1);
       uint64_t sz=(uint64_t)procfs_link_target_len(target, PROCFS_EXE_LINK, -1);
       memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); memcpy(st+48,&sz,8); break; }
   case PROCFS_CWD_LINK:
-    { struct proc *target = find_proc(priv->pid);
+    { struct proc *target = procfs_find_target(priv->pid);
       uint64_t ino=(uint64_t)(2000 + priv->pid * 10 + 2);
       uint64_t sz=(uint64_t)procfs_link_target_len(target, PROCFS_CWD_LINK, -1);
       memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); memcpy(st+48,&sz,8); break; }
@@ -935,11 +1032,14 @@ static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
   case PROCFS_CMDLINE:
   case PROCFS_MAPS:
   case PROCFS_STAT_FILE:
-    { uint64_t sub = (priv->type == PROCFS_STATUS) ? 1 :
+    { struct proc *target = procfs_find_target(priv->pid);
+      uint64_t sub = (priv->type == PROCFS_STATUS) ? 1 :
                      (priv->type == PROCFS_CMDLINE) ? 2 :
                      (priv->type == PROCFS_MAPS) ? 3 : 5;
       uint64_t ino=(uint64_t)(1000+priv->pid*10+sub);
-      uint64_t sz=(uint64_t)priv->len;
+      uint64_t sz= priv->type == PROCFS_MAPS && target
+                 ? procfs_maps_size(target)
+                 : (uint64_t)priv->len;
       memcpy(st+8,&ino,8); memcpy(st+16,&reg_mode,4); memcpy(st+48,&sz,8); break; }
   default:
     return -2;
@@ -959,6 +1059,9 @@ static int procfs_readdir(void *fs_data, void *private, char *ubuf,
   uint64_t skip = (uint64_t)*offset;
   unsigned int written = 0;
   uint64_t seen = 0;
+
+  if (!procfs_is_dir(priv->type))
+    return -ENOTDIR;
 
   #define EMIT_DIRENT(name_str, ino_val, dtype) do { \
     if (seen >= skip) { \
@@ -1021,7 +1124,7 @@ static int procfs_readdir(void *fs_data, void *private, char *ubuf,
     uint64_t base = (uint64_t)(400 + priv->pid);
     EMIT_DIRENT(".", base, 4);
     EMIT_DIRENT("..", (uint64_t)(300 + priv->pid), 4);
-    struct proc *p = find_proc(priv->pid);
+    struct proc *p = procfs_find_target(priv->pid);
     if (p) {
       struct open_file **ftable = proc_ofile(p);
       for (int fd = 0; fd < NOFILE; fd++) {
@@ -1088,9 +1191,7 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
   pid_t target_pid;
   const char *rest;
 
-  int self_path = 0;
   if (strncmp(p, "self/", 5) == 0) {
-    self_path = 1;
     target_pid = current_proc ? current_proc->pid : 1;
     rest = p + 5;
   } else {
@@ -1119,8 +1220,7 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
 
   /* BF: /proc/self/{exe,cwd} must resolve against the live caller, not only
    * whatever is presently discoverable through the proc table. */
-  struct proc *target = self_path && current_proc ? current_proc
-                                                  : find_proc(target_pid);
+  struct proc *target = procfs_find_target(target_pid);
   if (!target) return -2; /* ENOENT */
 
   /* BF: /proc/<pid>/fd/<n> directory entries are symlinks; readlink should
