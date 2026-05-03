@@ -221,7 +221,105 @@ static void test_kill_process_group(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 9. setpgid_session_leader_fails: process that called setsid()
+ * 9. kill_process_group_fatal_self_sender: a process sends SIGKILL to its
+ *    own process group; all members must be marked before the sender exits
+ * ----------------------------------------------------------------------- */
+static void test_kill_process_group_fatal_self_sender(void) {
+    int sender_start[2];
+    int member_ready[2];
+    pid_t sender;
+    pid_t members[2];
+    int statuses[3] = {0, 0, 0};
+    int reaped[3] = {0, 0, 0};
+
+    if (pipe(sender_start) != 0 || pipe(member_ready) != 0) {
+        CHECK("kill_process_group_fatal_self_sender: setup", 0);
+        return;
+    }
+
+    sender = fork();
+    if (sender == 0) {
+        char ch;
+
+        close(sender_start[1]);
+        close(member_ready[0]);
+        close(member_ready[1]);
+        setpgid(0, 0);
+        if (read(sender_start[0], &ch, 1) == 1)
+            kill(-getpgrp(), SIGKILL);
+        _exit(99);
+    }
+
+    setpgid(sender, sender);
+
+    for (int i = 0; i < 2; i++) {
+        members[i] = fork();
+        if (members[i] == 0) {
+            close(sender_start[0]);
+            close(sender_start[1]);
+            close(member_ready[0]);
+            setpgid(0, sender);
+            write(member_ready[1], "R", 1);
+            for (;;)
+                usleep(1000);
+        }
+        setpgid(members[i], sender);
+    }
+
+    close(member_ready[1]);
+    for (int i = 0; i < 2; i++) {
+        char ch;
+        if (read(member_ready[0], &ch, 1) != 1) {
+            CHECK("kill_process_group_fatal_self_sender: members ready", 0);
+            close(member_ready[0]);
+            close(sender_start[0]);
+            close(sender_start[1]);
+            return;
+        }
+    }
+    close(member_ready[0]);
+
+    close(sender_start[0]);
+    write(sender_start[1], "K", 1);
+    close(sender_start[1]);
+
+    for (int attempt = 0; attempt < 500; attempt++) {
+        if (!reaped[0]) {
+            pid_t got = waitpid(sender, &statuses[0], WNOHANG);
+            if (got == sender)
+                reaped[0] = 1;
+        }
+        for (int i = 0; i < 2; i++) {
+            if (!reaped[i + 1]) {
+                pid_t got = waitpid(members[i], &statuses[i + 1], WNOHANG);
+                if (got == members[i])
+                    reaped[i + 1] = 1;
+            }
+        }
+        if (reaped[0] && reaped[1] && reaped[2])
+            break;
+        usleep(10000);
+    }
+
+    for (int i = 0; i < 3; i++) {
+        pid_t pid = (i == 0) ? sender : members[i - 1];
+        if (!reaped[i]) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &statuses[i], 0);
+            reaped[i] = 1;
+        }
+    }
+
+    CHECK("kill_process_group_fatal_self_sender: sender died by SIGKILL",
+          WIFSIGNALED(statuses[0]) && WTERMSIG(statuses[0]) == SIGKILL);
+    CHECK("kill_process_group_fatal_self_sender: member 1 died by SIGKILL",
+          WIFSIGNALED(statuses[1]) && WTERMSIG(statuses[1]) == SIGKILL);
+    CHECK("kill_process_group_fatal_self_sender: member 2 died by SIGKILL",
+          WIFSIGNALED(statuses[2]) && WTERMSIG(statuses[2]) == SIGKILL);
+}
+
+/* -----------------------------------------------------------------------
+ * 10. setpgid_session_leader_fails: process that called setsid()
  *    cannot have its pgid changed
  * ----------------------------------------------------------------------- */
 static void test_setpgid_session_leader_fails(void) {
@@ -239,7 +337,7 @@ static void test_setpgid_session_leader_fails(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 10. pgid_inherited: fork child, child's pgid matches parent's pgid
+ * 11. pgid_inherited: fork child, child's pgid matches parent's pgid
  * ----------------------------------------------------------------------- */
 static void test_pgid_inherited(void) {
     pid_t parent_pgid = getpgid(0);
@@ -267,6 +365,7 @@ int main(void) {
     test_setsid_creates_session();
     test_setsid_new_pgid();
     test_kill_process_group();
+    test_kill_process_group_fatal_self_sender();
     test_setpgid_session_leader_fails();
     test_pgid_inherited();
 
