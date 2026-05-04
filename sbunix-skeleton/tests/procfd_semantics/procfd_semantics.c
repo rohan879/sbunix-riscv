@@ -26,6 +26,11 @@ static int read_one(int fd, char *out) {
   return n;
 }
 
+static int same_file_stat(const struct stat *a, const struct stat *b) {
+  return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+         ((a->st_mode & S_IFMT) == (b->st_mode & S_IFMT));
+}
+
 static void test_regular_reopen_is_fresh(void) {
   const char *path = "/tmp/procfd-sem-regular";
   char procpath[64];
@@ -72,6 +77,54 @@ static void test_regular_reopen_is_fresh(void) {
   }
   if (dirfd >= 0)
     close(dirfd);
+
+  close(fd);
+  unlink(path);
+}
+
+static void test_regular_reopen_preserves_identity(const char *path) {
+  char procpath[80];
+  char c = 0;
+  struct stat st_src;
+  struct stat st_reopen;
+  struct stat st_replacement;
+
+  unlink(path);
+  int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+  if (fd < 0) {
+    check("procfd_semantics: identity setup", 0);
+    return;
+  }
+  check("procfd_semantics: identity write old", write(fd, "old", 3) == 3);
+  snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
+  check("procfd_semantics: identity source stat", fstat(fd, &st_src) == 0);
+
+  check("procfd_semantics: identity unlink source", unlink(path) == 0);
+  int replacement = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+  check("procfd_semantics: identity replacement create", replacement >= 0);
+  if (replacement >= 0) {
+    check("procfd_semantics: identity write replacement",
+          write(replacement, "new", 3) == 3);
+    check("procfd_semantics: identity replacement stat",
+          fstat(replacement, &st_replacement) == 0);
+    close(replacement);
+  } else {
+    memset(&st_replacement, 0, sizeof(st_replacement));
+  }
+
+  int rfd = open(procpath, O_RDONLY);
+  check("procfd_semantics: identity procfd reopen succeeds", rfd >= 0);
+  if (rfd >= 0) {
+    check("procfd_semantics: identity procfd reads original",
+          read_one(rfd, &c) == 1 && c == 'o');
+    check("procfd_semantics: identity procfd stat matches source",
+          fstat(rfd, &st_reopen) == 0 && same_file_stat(&st_src, &st_reopen));
+    if (replacement >= 0) {
+      check("procfd_semantics: identity differs from replacement",
+            !same_file_stat(&st_reopen, &st_replacement));
+    }
+    close(rfd);
+  }
 
   close(fd);
   unlink(path);
@@ -143,6 +196,8 @@ static void test_common_proc_nodes(void) {
 int main(void) {
   printf("=== procfd_semantics ===\n");
   test_regular_reopen_is_fresh();
+  test_regular_reopen_preserves_identity("/tmp/procfd-sem-identity");
+  test_regular_reopen_preserves_identity("/mnt/procfd-sem-identity");
   test_pipe_reopen();
   test_common_proc_nodes();
   printf("=== procfd_semantics: %d passed, %d failed ===\n", g_pass, g_fail);

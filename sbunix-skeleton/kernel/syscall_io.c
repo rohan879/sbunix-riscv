@@ -71,6 +71,66 @@ static int require_resolved_dir(const char *path) {
     return ((mode & 0xF000) == 0x4000) ? 0 : -ENOTDIR;
 }
 
+static void set_open_fd_flags(int fd, int flags);
+
+static int open_file_mode(struct open_file *f, uint32_t *mode_out) {
+    if (!f || f->is_pipe || !f->ops || !f->ops->fstat)
+        return -ENOTDIR;
+    uint8_t st[128];
+    int ret = f->ops->fstat(f->fs_data, f->private, st);
+    if (ret < 0)
+        return ret;
+    memcpy(mode_out, st + 16, 4);
+    return 0;
+}
+
+static long procfd_reopen_open_file(struct open_file *src, int flags,
+                                    int trailing_slash) {
+    uint32_t mode;
+    int ret = open_file_mode(src, &mode);
+    if (ret < 0)
+        return (long)ret;
+    int is_dir = ((mode & 0xF000) == 0x4000);
+    if ((trailing_slash || (flags & KERN_O_DIRECTORY)) && !is_dir)
+        return (long)-ENOTDIR;
+    int accmode = flags & 3;
+    if (is_dir && (accmode == 1 || accmode == 2))
+        return (long)-EISDIR;
+    if (!src->ops->reopen)
+        return PROCFS_FD_REOPEN_PATH;
+
+    struct open_file *nf = vfs_alloc_file();
+    if (!nf)
+        return (long)-EMFILE;
+    int newfd = alloc_fd();
+    if (newfd < 0) {
+        vfs_free_file(nf);
+        return (long)-EMFILE;
+    }
+
+    void *priv = NULL;
+    ret = src->ops->reopen(src->fs_data, src->private, flags, &priv);
+    if (ret < 0) {
+        vfs_free_file(nf);
+        return (long)ret;
+    }
+
+    nf->ops = src->ops;
+    nf->fs_data = src->fs_data;
+    nf->private = priv;
+    nf->offset = 0;
+    nf->flags = flags;
+    nf->is_pipe = 0;
+    int plen = strlen(src->path);
+    if (plen > 255)
+        plen = 255;
+    memcpy(nf->path, src->path, plen);
+    nf->path[plen] = '\0';
+    proc_ofile(current_proc)[newfd] = nf;
+    set_open_fd_flags(newfd, flags);
+    return (long)newfd;
+}
+
 static void set_open_fd_flags(int fd, int flags) {
     current_proc->fd_flags[fd] = 0;
     if (flags & KERN_O_CLOEXEC)
@@ -192,13 +252,14 @@ static long open_procfs_fd_link(const char *resolved, int flags,
         return (long)newfd;
     }
 
+    /* BF: Reopen the underlying object when the filesystem can clone its
+     * private handle; pathname fallback is only for immutable/simple nodes. */
+    long reopened = procfd_reopen_open_file(src, flags, trailing_slash);
+    if (reopened != PROCFS_FD_REOPEN_PATH)
+        return reopened;
+
     if (src->path[0] == '\0')
         return (long)-ENXIO;
-    if (trailing_slash) {
-        int ret = require_resolved_dir(src->path);
-        if (ret < 0)
-            return (long)ret;
-    }
     int plen = strlen(src->path);
     if (plen > reopen_path_size - 1)
         return (long)-ENAMETOOLONG;
