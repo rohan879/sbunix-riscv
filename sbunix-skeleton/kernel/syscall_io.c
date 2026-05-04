@@ -38,6 +38,102 @@ enum {
   KERN_AT_SYMLINK_FOLLOW = 0x400,
 };
 
+static struct proc *procfs_open_find_pid(pid_t pid) {
+    if (current_proc && current_proc->pid == pid &&
+        current_proc->state != UNUSED)
+        return current_proc;
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        if (p->pid == pid && p->state != UNUSED)
+            return p;
+    }
+    return NULL;
+}
+
+static int parse_uint_component(const char **pp, int *out) {
+    const char *p = *pp;
+    int val = 0;
+    if (*p < '0' || *p > '9')
+        return -1;
+    while (*p >= '0' && *p <= '9') {
+        if (val > 1000000)
+            return -1;
+        val = val * 10 + (*p - '0');
+        p++;
+    }
+    *pp = p;
+    *out = val;
+    return 0;
+}
+
+static int parse_procfs_fd_path(const char *path, pid_t *pid_out, int *fd_out) {
+    const char *p = path;
+    int pid = 0;
+    int fd = 0;
+
+    if (strncmp(p, "/proc/", 6) != 0)
+        return 0;
+    p += 6;
+    if (strncmp(p, "self", 4) == 0 && p[4] == '/') {
+        if (!current_proc)
+            return 0;
+        pid = current_proc->pid;
+        p += 5;
+    } else {
+        if (parse_uint_component(&p, &pid) < 0 || *p != '/')
+            return 0;
+        p++;
+    }
+    if (strncmp(p, "fd/", 3) != 0)
+        return 0;
+    p += 3;
+    if (parse_uint_component(&p, &fd) < 0 || *p != '\0')
+        return 0;
+
+    *pid_out = (pid_t)pid;
+    *fd_out = fd;
+    return 1;
+}
+
+static long open_procfs_fd_link(const char *resolved, int flags) {
+    pid_t pid;
+    int oldfd;
+    int matched = parse_procfs_fd_path(resolved, &pid, &oldfd);
+    if (!matched)
+        return -4096; /* internal: not a proc fd link */
+
+    struct proc *target = procfs_open_find_pid(pid);
+    if (!target)
+        return (long)-ENOENT;
+    if (oldfd < 0 || oldfd >= NOFILE || !proc_ofile(target)[oldfd])
+        return (long)-ENOENT;
+    if (target != current_proc)
+        return (long)-EACCES;
+    if (flags & (KERN_O_CREAT | KERN_O_TRUNC))
+        return (long)-EINVAL;
+    if (flags & KERN_O_NOFOLLOW)
+        return (long)-ELOOP;
+
+    struct open_file *src = proc_ofile(current_proc)[oldfd];
+    if (!vfs_file_valid(src) || src->is_pipe)
+        return (long)-ENXIO;
+    if ((flags & KERN_O_DIRECTORY) &&
+        (src->path[0] == '\0' || !vfs_is_dir(src->path)))
+        return (long)-ENOTDIR;
+
+    int newfd = alloc_fd();
+    if (newfd < 0)
+        return (long)-EMFILE;
+
+    src->refcount++;
+    proc_ofile(current_proc)[newfd] = src;
+    current_proc->fd_flags[newfd] = 0;
+    if (flags & KERN_O_CLOEXEC)
+        current_proc->fd_flags[newfd] |= 1;
+    if (flags & KERN_O_CLOFORK)
+        current_proc->fd_flags[newfd] |= 2;
+    return (long)newfd;
+}
+
 /* Two ranges [s1, s1+l1) and [s2, s2+l2) overlap.
  * l_len=0 means "to EOF" -- treat as infinite extent.
  * RF: Made static -- only used within this module */
@@ -413,17 +509,25 @@ long sys_openat_handler(struct trapframe *tf) {
     { int rr = resolve_path_at(dirfd, kpath, resolved);
       if (rr < 0) return (long)rr; }
 
+    /* BF: /proc/self/fd/N is a magic link for open(2): it duplicates the
+     * current open file description instead of resolving to a pathname. */
+    {
+        long procfd = open_procfs_fd_link(resolved, flags);
+        if (procfd != -4096)
+            return procfd;
+    }
+
     /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
     {
         int nofollow = (flags & KERN_O_NOFOLLOW);
-        int symret = resolve_symlinks_in_path(resolved, 6, !nofollow);
+        int symret = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, !nofollow);
         if (symret == -ENOENT && (flags & KERN_O_CREAT) && !nofollow) {
             /* BF: A missing final component under O_CREAT is not an error;
              * preserve intermediate symlink resolution and let the backend
              * create the new file. */
             { int rr = resolve_path_at(dirfd, kpath, resolved);
               if (rr < 0) return (long)rr; }
-            symret = resolve_symlinks_in_path(resolved, 6, 0);
+            symret = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
         }
         /* BF: Propagate all negative errors, not just ELOOP */
         if (symret < 0)
@@ -568,7 +672,7 @@ long sys_chdir_handler(struct trapframe *tf) {
     { int rr = resolve_path(current_proc->cwd, kpath, resolved);
       if (rr < 0) return (long)rr; }
     /* BF: Propagate all negative errors from resolve_symlinks_in_path */
-    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
+    { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 1);
       if (sr < 0) return (long)sr; }
     /* Check if path exists by trying stat */
     const char *relpath;
@@ -719,7 +823,7 @@ long sys_newfstatat_handler(struct trapframe *tf) {
     /* Resolve symlinks: intermediate always, final unless AT_SYMLINK_NOFOLLOW */
     {
         int nofollow = (at_flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
-        int symret = resolve_symlinks_in_path(resolved, 6, !nofollow);
+        int symret = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, !nofollow);
         /* BF: Propagate all negative errors, not just ELOOP */
         if (symret < 0)
             return (long)symret;
@@ -1192,7 +1296,7 @@ long sys_faccessat_handler(struct trapframe *tf) {
     {
       int flags = (int)tf->a3;
       int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
-      int sr = resolve_symlinks_in_path(resolved, 6, !nofollow);
+      int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, !nofollow);
       if (sr < 0) return (long)sr;
     }
 
@@ -1222,7 +1326,7 @@ long sys_unlinkat_handler(struct trapframe *tf) {
         { int rr = resolve_path_at(dirfd, kpath, resolved);
           if (rr < 0) return (long)rr; }
         /* BF: Propagate all negative errors from resolve_symlinks_in_path */
-        { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+        { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
           if (sr < 0) return (long)sr; }
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1269,10 +1373,10 @@ long sys_linkat_handler(struct trapframe *tf) {
      * literal ext2 entry instead of resolving through the symlinked parent. */
     /* BF: AT_SYMLINK_FOLLOW switches only the old final component from
      * no-follow to follow; the new link name itself must remain literal. */
-    { int sr = resolve_symlinks_in_path(old_resolved, 6,
+    { int sr = resolve_symlinks_in_path(old_resolved, KSYMLINK_MAX_HOPS,
                                         !!(flags & KERN_AT_SYMLINK_FOLLOW));
       if (sr < 0) return (long)sr; }
-    { int sr = resolve_symlinks_in_path(new_resolved, 6, 0);
+    { int sr = resolve_symlinks_in_path(new_resolved, KSYMLINK_MAX_HOPS, 0);
       if (sr < 0) return (long)sr; }
 
     /* Both paths must be on the same filesystem. */
@@ -1296,13 +1400,13 @@ long sys_linkat_handler(struct trapframe *tf) {
             return (long)-EPERM;
     }
     if (ext2_is_ops(old_ops)) {
-        /* ext2: use inode-based hard link */
-        void *priv = NULL;
-        if (old_ops->open(old_mnt->fs_data, old_rel, 0, &priv) < 0)
-            return (long)-2; /* ENOENT */
-        struct ext2_open_private *ep = (struct ext2_open_private *)priv;
-        uint32_t src_ino = ep->ino;
-        if (old_ops->close) old_ops->close(old_mnt->fs_data, priv);
+        /* BF: Hard-link the resolved ext2 inode directly.  Opening the
+         * source rejects symlink inodes, but linkat without
+         * AT_SYMLINK_FOLLOW must preserve the symlink itself. */
+        uint32_t src_ino = 0;
+        int lret = ext2_lookup_inode(old_mnt->fs_data, old_rel, &src_ino, NULL);
+        if (lret < 0)
+            return (long)lret;
         int ret = ext2_hardlink(new_mnt->fs_data, new_rel, src_ino);
         return (long)ret;
     } else if (old_ops && old_ops->link) {
@@ -1334,9 +1438,9 @@ long sys_renameat2_handler(struct trapframe *tf) {
     /* BF: renameat2 follows symlinked parent directories but must leave the
      * source and destination basenames unresolved so renaming a symlink still
      * acts on the link itself rather than the target. */
-    { int sr = resolve_symlinks_in_path(old_resolved, 6, 0);
+    { int sr = resolve_symlinks_in_path(old_resolved, KSYMLINK_MAX_HOPS, 0);
       if (sr < 0) return (long)sr; }
-    { int sr = resolve_symlinks_in_path(new_resolved, 6, 0);
+    { int sr = resolve_symlinks_in_path(new_resolved, KSYMLINK_MAX_HOPS, 0);
       if (sr < 0) return (long)sr; }
 
     const char *old_relpath, *new_relpath;
@@ -1367,7 +1471,7 @@ long sys_mkdirat_handler(struct trapframe *tf) {
         { int rr = resolve_path_at(dirfd, kpath, resolved);
           if (rr < 0) return (long)rr; }
         /* BF: Propagate all negative errors from resolve_symlinks_in_path */
-        { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+        { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
           if (sr < 0) return (long)sr; }
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1395,7 +1499,7 @@ long sys_mknodat_handler(struct trapframe *tf) {
           if (rr < 0) return (long)rr; }
 
         /* BF: mknodat must resolve intermediate symlinked directories. */
-        { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+        { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
           if (sr < 0) return (long)sr; }
 
         const char *relpath;
@@ -1434,7 +1538,7 @@ long sys_readlinkat_handler(struct trapframe *tf) {
     /* BF: readlinkat must resolve intermediate symlinks but leave the final
      * path component untouched.  Without this, readlink("dirlink/child")
      * fails when dirlink is itself a symlink to a directory. */
-    { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+    { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
       if (sr < 0) return (long)sr; }
 
     const char *relpath;
@@ -1488,7 +1592,7 @@ long sys_symlinkat_handler(struct trapframe *tf) {
      * preserving the final component (the new link path itself).  Without
      * this, creating a link under a symlinked parent directory stores the
      * entry at the literal path instead of the resolved target directory. */
-    { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+    { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
       if (sr < 0) {
           kmfree(ktarget, KSYMLINK_MAX + 1);
           return (long)sr;
@@ -1541,7 +1645,7 @@ long sys_fchmodat_handler(struct trapframe *tf) {
     {
       int flags = (int)tf->a3;
       int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
-      int sr = resolve_symlinks_in_path(resolved, 6, !nofollow);
+      int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, !nofollow);
       if (sr < 0) return (long)sr;
     }
 

@@ -170,6 +170,8 @@ void ext2_sync(void *fs_data);
 int  ext2_mknod(void *fs_data, const char *path, uint32_t mode, uint32_t rdev);
 int  ext2_ftruncate_ino(void *fs_data, uint32_t ino, uint64_t length);
 int  ext2_fchmod_ino(void *fs_data, uint32_t ino, uint32_t mode);
+int  ext2_lookup_inode(void *fs_data, const char *path, uint32_t *ino_out,
+                       uint16_t *type_out);
 int  ext2_hardlink(void *fs_data, const char *newpath, uint32_t src_ino);
 
 #endif
