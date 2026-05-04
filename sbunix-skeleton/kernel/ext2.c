@@ -971,7 +971,7 @@ static struct ext2_inode_mem *ext2_namei_r(struct ext2_fs *fs, const char *path,
 }
 
 static struct ext2_inode_mem *ext2_namei(struct ext2_fs *fs, const char *path) {
-  return ext2_namei_r(fs, path, 8);
+  return ext2_namei_r(fs, path, 40);
 }
 
 /* ================================================================== */
@@ -2245,6 +2245,18 @@ int ext2_fchmod_ino(void *fs_data, uint32_t ino, uint32_t mode) {
   ip->mode = mode & 07777;
   ip->dirty = 1;
   icache_writeback(fs, ip);
+  icache_release(ip);
+  return 0;
+}
+
+int ext2_lookup_inode(void *fs_data, const char *path, uint32_t *ino_out,
+                      uint16_t *type_out) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted) return -EROFS;
+  struct ext2_inode_mem *ip = ext2_namei(fs, path);
+  if (!ip) return -ENOENT;
+  if (ino_out) *ino_out = ip->ino;
+  if (type_out) *type_out = ip->type;
   icache_release(ip);
   return 0;
 }
