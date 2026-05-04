@@ -911,17 +911,24 @@ static struct ext2_inode_mem *ext2_namei_r(struct ext2_fs *fs, const char *path,
       return NULL;
     }
 
-    /* Copy component to a null-terminated buffer */
-    char comp[256];
+    /* Keep lookup scratch off the kernel stack; this fallback can follow
+     * multiple symlinks when called outside the shared path resolver. */
+    char *comp = (char *)kmalloc(256);
+    if (!comp) {
+      icache_release(ip);
+      return NULL;
+    }
     if (clen > 255) clen = 255;
     memcpy(comp, start, clen);
     comp[clen] = '\0';
 
     uint32_t child_ino;
     if (ext2_dir_lookup(fs, ip, comp, &child_ino) < 0) {
+      kmfree(comp, 256);
       icache_release(ip);
       return NULL;
     }
+    kmfree(comp, 256);
 
     icache_release(ip);
     ip = icache_get(fs, child_ino);
@@ -932,11 +939,23 @@ static struct ext2_inode_mem *ext2_namei_r(struct ext2_fs *fs, const char *path,
 
     /* Follow symlinks in intermediate path components */
     if (ip->type == EXT2_TYPE_SYMLINK && *p != '\0') {
-      char target[256];
+      char *target = (char *)kmalloc(256);
+      char *newpath = (char *)kmalloc(512);
+      if (!target || !newpath) {
+        if (target) kmfree(target, 256);
+        if (newpath) kmfree(newpath, 512);
+        icache_release(ip);
+        return NULL;
+      }
       int tlen = (int)ip->size;
       if (tlen > 255) tlen = 255;
       uint32_t blk = ext2_bmap(fs, ip, 0);
-      if (blk == 0) { icache_release(ip); return NULL; }
+      if (blk == 0) {
+        kmfree(newpath, 512);
+        kmfree(target, 256);
+        icache_release(ip);
+        return NULL;
+      }
       struct bcache_entry *be = bcache_get(fs, blk);
       memcpy(target, be->data, (uint32_t)tlen);
       bcache_release(be);
@@ -944,11 +963,13 @@ static struct ext2_inode_mem *ext2_namei_r(struct ext2_fs *fs, const char *path,
       icache_release(ip);
 
       /* Build new path: prefix + target + "/" + remaining */
-      char newpath[512];
       int prefix_len = (int)(start - path);
       int remaining_len = (int)strlen(p);
-      if (prefix_len + tlen + 1 + remaining_len >= 510)
+      if (prefix_len + tlen + 1 + remaining_len >= 510) {
+        kmfree(newpath, 512);
+        kmfree(target, 256);
         return NULL;
+      }
       int npos = 0;
       if (prefix_len > 0) {
         memcpy(newpath, path, prefix_len);
@@ -963,7 +984,10 @@ static struct ext2_inode_mem *ext2_namei_r(struct ext2_fs *fs, const char *path,
         newpath[npos] = '\0';
       }
 
-      return ext2_namei_r(fs, newpath, symdepth - 1);
+      struct ext2_inode_mem *ret = ext2_namei_r(fs, newpath, symdepth - 1);
+      kmfree(newpath, 512);
+      kmfree(target, 256);
+      return ret;
     }
   }
 

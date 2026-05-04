@@ -116,6 +116,9 @@ static long open_procfs_fd_link(const char *resolved, int flags) {
     struct open_file *src = proc_ofile(current_proc)[oldfd];
     if (!vfs_file_valid(src) || src->is_pipe)
         return (long)-ENXIO;
+    if ((flags & KERN_O_DIRECTORY) &&
+        (src->path[0] == '\0' || !vfs_is_dir(src->path)))
+        return (long)-ENOTDIR;
 
     int newfd = alloc_fd();
     if (newfd < 0)
