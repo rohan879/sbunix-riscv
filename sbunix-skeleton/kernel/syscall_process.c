@@ -906,7 +906,7 @@ long sys_execve_handler(struct trapframe *tf) {
     /* BF: Keep the resolver depth finite; the resolver keeps large scratch
      * buffers on the heap so long symlink targets do not grow stack frames. */
     /* BF: Propagate all negative errors from resolve_symlinks_in_path */
-    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
+    { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 1);
       if (sr < 0) { kfree(kstrbuf); if (kenvbuf) kfree(kenvbuf); return (long)sr; } }
     /* BF: Pass sizeof(tarpath) to prevent buffer overflow; on ENAMETOOLONG
      * skip the tarfs lookup — the binary may still exist on ext2/VFS. */
@@ -1033,7 +1033,7 @@ long sys_execve_handler(struct trapframe *tf) {
                         ret = rr;
                     } else {
                         /* BF: Propagate all negative errors from symlink resolution */
-                        int sr = resolve_symlinks_in_path(interp_resolved, 6, 1);
+                        int sr = resolve_symlinks_in_path(interp_resolved, KSYMLINK_MAX_HOPS, 1);
                         if (sr < 0) {
                             ret = sr;
                         } else {

@@ -12,6 +12,7 @@
  * than truncating to a different path. */
 #define KPATH_MAX     256
 #define KSYMLINK_MAX  255
+#define KSYMLINK_MAX_HOPS 40
 
 /* BF: Changed signature to accept outsize and return error on overflow */
 int  to_tarfs_path(const char *path, char *out, int outsize);

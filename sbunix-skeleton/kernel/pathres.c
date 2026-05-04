@@ -191,95 +191,106 @@ int vfs_is_dir(const char *path) {
     return 0;
 }
 
-/* Follow symlinks in a resolved path (up to 6 levels to prevent loops).
- * BF: Use heap scratch for target expansion so SYMLINK_MAX-sized targets
- * do not consume recursive kernel stack frames. */
-int follow_symlinks(char *resolved, int maxdepth, int bufsiz) {
-    if (maxdepth <= 0) return -40; /* ELOOP */
+static int resolve_link_target(const char *link_path, const char *target,
+                               char *out) {
+    if (target[0] == '/')
+        return resolve_path("/", target, out);
 
-    const char *relpath;
-    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
-    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
-    if (!ops || !ops->readlink) return 0; /* no readlink = not a symlink-capable fs */
+    char *dir = (char *)kmalloc(KPATH_MAX);
+    if (!dir)
+        return -ENOMEM;
 
+    int rlen = strlen(link_path);
+    if (rlen > KPATH_MAX - 1) {
+        kmfree(dir, KPATH_MAX);
+        return -ENAMETOOLONG;
+    }
+    memcpy(dir, link_path, rlen);
+    dir[rlen] = '\0';
+
+    char *last_slash = dir;
+    for (char *p = dir; *p; p++)
+        if (*p == '/') last_slash = p;
+    if (last_slash != dir)
+        *(last_slash + 1) = '\0';
+    else
+        dir[1] = '\0';
+
+    int ret = resolve_path(dir, target, out);
+    kmfree(dir, KPATH_MAX);
+    return ret;
+}
+
+/* BF: Follow symlinks iteratively so a conforming 40-hop chain does not
+ * consume one kernel stack frame per hop.  The remaining budget is shared
+ * across all components in resolve_symlinks_in_path(). */
+static int follow_symlinks_budget(char *resolved, int *remaining, int bufsiz,
+                                  int *followed) {
     char *target = (char *)kmalloc(KSYMLINK_MAX + 1);
-    if (!target)
-        return -ENOMEM;
-
-    int ret = ops->readlink(mnt->fs_data, relpath, target, KSYMLINK_MAX);
-    if (ret == -EINVAL) {
-        kmfree(target, KSYMLINK_MAX + 1);
-        return 0; /* not a symlink, path is final */
-    }
-    if (ret < 0) {
-        kmfree(target, KSYMLINK_MAX + 1);
-        return ret;
-    }
-    target[ret] = '\0';
-
     char *new_resolved = (char *)kmalloc(KPATH_MAX);
-    if (!new_resolved) {
-        kmfree(target, KSYMLINK_MAX + 1);
+    if (!target || !new_resolved) {
+        if (target) kmfree(target, KSYMLINK_MAX + 1);
+        if (new_resolved) kmfree(new_resolved, KPATH_MAX);
         return -ENOMEM;
     }
 
-    int rp_ret; /* BF: Propagate ENAMETOOLONG from resolve_path */
-    if (target[0] == '/') {
-        rp_ret = resolve_path("/", target, new_resolved);
+    if (followed)
+        *followed = 0;
+
+    for (;;) {
+        const char *relpath;
+        struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+        struct vfs_ops *ops = mnt ? mnt->ops : NULL;
+        if (!ops || !ops->readlink) {
+            kmfree(new_resolved, KPATH_MAX);
+            kmfree(target, KSYMLINK_MAX + 1);
+            return 0;
+        }
+
+        int ret = ops->readlink(mnt->fs_data, relpath, target, KSYMLINK_MAX);
+        if (ret == -EINVAL) {
+            kmfree(new_resolved, KPATH_MAX);
+            kmfree(target, KSYMLINK_MAX + 1);
+            return 0;
+        }
+        if (ret < 0) {
+            kmfree(new_resolved, KPATH_MAX);
+            kmfree(target, KSYMLINK_MAX + 1);
+            return ret;
+        }
+        if (*remaining <= 0) {
+            kmfree(new_resolved, KPATH_MAX);
+            kmfree(target, KSYMLINK_MAX + 1);
+            return -ELOOP;
+        }
+
+        target[ret] = '\0';
+        (*remaining)--;
+        if (followed)
+            *followed = 1;
+
+        int rp_ret = resolve_link_target(resolved, target, new_resolved);
         if (rp_ret < 0) {
             kmfree(new_resolved, KPATH_MAX);
             kmfree(target, KSYMLINK_MAX + 1);
             return rp_ret;
         }
-    } else {
-        /* Relative: resolve from symlink's parent directory */
-        char *dir = (char *)kmalloc(KPATH_MAX);
-        if (!dir) {
-            kmfree(new_resolved, KPATH_MAX);
-            kmfree(target, KSYMLINK_MAX + 1);
-            return -ENOMEM;
-        }
-        int rlen = strlen(resolved);
-        if (rlen > KPATH_MAX - 1) {
-            kmfree(dir, KPATH_MAX);
+
+        int nlen = strlen(new_resolved);
+        if (nlen > bufsiz - 1) {
             kmfree(new_resolved, KPATH_MAX);
             kmfree(target, KSYMLINK_MAX + 1);
             return -ENAMETOOLONG;
         }
-        memcpy(dir, resolved, rlen);
-        dir[rlen] = '\0';
-        char *last_slash = dir;
-        for (char *p = dir; *p; p++)
-            if (*p == '/') last_slash = p;
-        if (last_slash != dir)
-            *(last_slash + 1) = '\0';
-        else
-            dir[1] = '\0';
-
-        rp_ret = resolve_path(dir, target, new_resolved);
-        kmfree(dir, KPATH_MAX);
-        if (rp_ret < 0) {
-            kmfree(new_resolved, KPATH_MAX);
-            kmfree(target, KSYMLINK_MAX + 1);
-            return rp_ret; /* BF: Propagate ENAMETOOLONG */
-        }
+        memcpy(resolved, new_resolved, nlen);
+        resolved[nlen] = '\0';
     }
+}
 
-    int nlen = strlen(new_resolved);
-    /* BF: Respect caller's buffer size instead of hardcoded 255 */
-    if (nlen > bufsiz - 1) {
-        kmfree(new_resolved, KPATH_MAX);
-        kmfree(target, KSYMLINK_MAX + 1);
-        return -ENAMETOOLONG;
-    }
-    memcpy(resolved, new_resolved, nlen);
-    resolved[nlen] = '\0';
-
-    kmfree(new_resolved, KPATH_MAX);
-    kmfree(target, KSYMLINK_MAX + 1);
-
-    /* Recursively follow in case target is also a symlink */
-    return follow_symlinks(resolved, maxdepth - 1, bufsiz);
+int follow_symlinks(char *resolved, int maxdepth, int bufsiz) {
+    int remaining = maxdepth;
+    int followed = 0;
+    return follow_symlinks_budget(resolved, &remaining, bufsiz, &followed);
 }
 
 /* Walk a resolved path component-by-component, resolving symlinks at
@@ -288,7 +299,7 @@ int follow_symlinks(char *resolved, int maxdepth, int bufsiz) {
  * fully-resolved path.
  * Returns 0 on success, negative errno on failure (-40 = ELOOP). */
 int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
-    if (maxdepth <= 0) return -40; /* ELOOP */
+    if (maxdepth < 0) return -ELOOP;
 
     int rlen = strlen(resolved);
     if (rlen == 0 || (rlen == 1 && resolved[0] == '/'))
@@ -309,9 +320,11 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
         return -ENOMEM;
     }
     int ret = 0;
+    int remaining_hops = maxdepth;
     memcpy(work, resolved, rlen);
     work[rlen] = '\0';
 
+restart:
     int bi = 0;
     int bmax = KPATH_MAX - 1; /* max usable index */
 
@@ -358,7 +371,9 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
         int old_bi = bi;
         memcpy(before, built, bi + 1);
 
-        int sym_ret = follow_symlinks(built, maxdepth, KPATH_MAX);
+        int followed = 0;
+        int sym_ret = follow_symlinks_budget(built, &remaining_hops,
+                                             KPATH_MAX, &followed);
         /* BF: Propagate all negative errors, not just ELOOP */
         if (sym_ret < 0) { ret = sym_ret; goto out; }
 
@@ -368,7 +383,8 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
         int changed = (bi != old_bi || memcmp(before, built, old_bi + 1) != 0);
 
         /* If this was an intermediate component and it resolved to a
-         * different path, append the remaining components and recurse. */
+         * different path, append the remaining components and restart the
+         * heap-backed walk with the same hop budget. */
         if (!is_last && changed) {
             /* Symlink was resolved; append remaining path */
             int remaining = rlen - wi;
@@ -393,9 +409,9 @@ int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
                 memcpy(resolved, normalized, nlen);
                 resolved[nlen] = '\0';
 
-                /* Recurse to resolve any further symlinks */
-                ret = resolve_symlinks_in_path(resolved, maxdepth - 1, resolve_final);
-                goto out;
+                memcpy(work, normalized, nlen + 1);
+                rlen = nlen;
+                goto restart;
             }
         }
     }
