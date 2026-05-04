@@ -1222,6 +1222,48 @@ static int ext2_ftruncate(void *fs_data, void *private, uint64_t length) {
   return ext2_ftruncate_ino(fs_data, priv->ino, length);
 }
 
+static int ext2_reopen(void *fs_data, void *private, int flags,
+                       void **new_private) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  struct ext2_open_private *old = (struct ext2_open_private *)private;
+  if (!fs || !old)
+    return -ENOENT;
+
+  struct ext2_inode_mem *ip = icache_get(fs, old->ino);
+  if (!ip)
+    return -ENOENT;
+  if ((flags & EXT2_O_CREAT) && (flags & EXT2_O_EXCL)) {
+    icache_release(ip);
+    return -EEXIST;
+  }
+
+  if ((flags & EXT2_O_TRUNC) && ip->type == EXT2_TYPE_FILE) {
+    /* BF: procfd O_TRUNC must operate on the inode referenced by the
+     * open file description, not a possibly replaced pathname. */
+    int ret = ext2_truncate(fs, ip);
+    if (ret < 0) {
+      icache_release(ip);
+      return ret;
+    }
+    icache_writeback(fs, ip);
+    sb_flush_if_dirty(fs);
+    bcache_sync(fs);
+  }
+
+  struct ext2_open_private *priv =
+    (struct ext2_open_private *)kmalloc(sizeof(struct ext2_open_private));
+  if (!priv) {
+    icache_release(ip);
+    return -ENOMEM;
+  }
+  priv->fs = fs;
+  priv->ino = ip->ino;
+  priv->is_dir = (ip->type == EXT2_TYPE_DIR);
+  *new_private = priv;
+  /* Keep the icache reference as this reopened file's open-time pin. */
+  return 0;
+}
+
 static int ext2_close(void *fs_data, void *private) {
   struct ext2_fs *fs = (struct ext2_fs *)fs_data;
   struct ext2_open_private *priv = (struct ext2_open_private *)private;
@@ -2008,6 +2050,7 @@ struct vfs_ops ext2_ops = {
   .read     = ext2_read,
   .write    = ext2_write,
   .ftruncate = ext2_ftruncate,
+  .reopen   = ext2_reopen,
   .close    = ext2_close,
   .stat     = ext2_stat,
   .fstat    = ext2_fstat,

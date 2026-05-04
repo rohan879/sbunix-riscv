@@ -14,6 +14,9 @@ struct vfs_ops {
   int64_t (*write)(void *fs_data, void *private, const char *buf,
                    uint64_t count, int64_t *offset);
   int (*ftruncate)(void *fs_data, void *private, uint64_t length);
+  /* BF: procfd reopen needs a fresh open description for the same object,
+   * not a pathname lookup that can race with unlink/rename/replacement. */
+  int (*reopen)(void *fs_data, void *private, int flags, void **new_private);
   int (*close)(void *fs_data, void *private);
   int (*stat)(void *fs_data, const char *path, uint8_t *st);
   int (*fstat)(void *fs_data, void *private, uint8_t *st);  /* per-fd stat */

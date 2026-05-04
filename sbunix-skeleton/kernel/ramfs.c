@@ -425,6 +425,41 @@ static int ramfs_ftruncate(void *fs_data, void *private, uint64_t length) {
   return 0;
 }
 
+static int ramfs_reopen(void *fs_data, void *private, int flags,
+                        void **new_private) {
+  (void)fs_data;
+  struct ramfs_private *old = (struct ramfs_private *)private;
+  if (!old || !old->inode)
+    return -2; /* -ENOENT */
+  if ((flags & RAMFS_O_CREAT) && (flags & RAMFS_O_EXCL))
+    return -17; /* -EEXIST */
+
+  struct ramfs_inode *ino = old->inode;
+  if ((flags & RAMFS_O_TRUNC) && ino->type == RAMFS_FILE) {
+    /* BF: procfd O_TRUNC must affect the already-open object, even after
+     * its pathname is removed or replaced. */
+    for (int i = 0; i < ino->nblocks; i++) {
+      if (ino->blocks[i]) {
+        kfree(ino->blocks[i]);
+        ino->blocks[i] = NULL;
+      }
+    }
+    ino->nblocks = 0;
+    ino->size = 0;
+    ino->mtime_sec = timekeeping_now_seconds();
+    ino->ctime_sec = ino->mtime_sec;
+  }
+
+  struct ramfs_private *priv =
+    (struct ramfs_private *)kmalloc(sizeof(struct ramfs_private));
+  if (!priv)
+    return -12; /* -ENOMEM */
+  priv->inode = ino;
+  ino->open_count++;
+  *new_private = priv;
+  return 0;
+}
+
 static int ramfs_close(void *fs_data, void *private) {
   (void)fs_data;
   if (private) {
@@ -762,6 +797,7 @@ struct vfs_ops ramfs_ops = {
   .read    = ramfs_read,
   .write   = ramfs_write,
   .ftruncate = ramfs_ftruncate,
+  .reopen  = ramfs_reopen,
   .close   = ramfs_close,
   .stat    = ramfs_stat,
   .fstat   = ramfs_fstat,
