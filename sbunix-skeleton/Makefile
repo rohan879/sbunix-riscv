@@ -276,6 +276,7 @@ $(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/
 	@mkdir -p build/testfs/os-test-expect/signal.expect
 	@printf '0' > build/testfs/os-test-expect/signal.expect/sigaction-exec-flags.posix
 	@printf '0 | POLLIN\nSIGUSR1\n' > build/testfs/os-test-expect/signal.expect/ppoll-block-sleep-write-raise.posix.3
+	@printf '0 | POLLIN\n' > build/testfs/os-test-expect/signal.expect/ppoll-block-sleep-write-raise.posix.4
 	@rm -f build/testfs/os-test-expect/signal.expect/sigaction-exec-flags.unknown.1
 	# Seed testfs with compile-time .out files for skipped tests
 	@mkdir -p build/testfs/var/log/os-test
