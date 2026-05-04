@@ -38,6 +38,99 @@ enum {
   KERN_AT_SYMLINK_FOLLOW = 0x400,
 };
 
+static struct proc *procfs_open_find_pid(pid_t pid) {
+    if (current_proc && current_proc->pid == pid &&
+        current_proc->state != UNUSED)
+        return current_proc;
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        if (p->pid == pid && p->state != UNUSED)
+            return p;
+    }
+    return NULL;
+}
+
+static int parse_uint_component(const char **pp, int *out) {
+    const char *p = *pp;
+    int val = 0;
+    if (*p < '0' || *p > '9')
+        return -1;
+    while (*p >= '0' && *p <= '9') {
+        if (val > 1000000)
+            return -1;
+        val = val * 10 + (*p - '0');
+        p++;
+    }
+    *pp = p;
+    *out = val;
+    return 0;
+}
+
+static int parse_procfs_fd_path(const char *path, pid_t *pid_out, int *fd_out) {
+    const char *p = path;
+    int pid = 0;
+    int fd = 0;
+
+    if (strncmp(p, "/proc/", 6) != 0)
+        return 0;
+    p += 6;
+    if (strncmp(p, "self", 4) == 0 && p[4] == '/') {
+        if (!current_proc)
+            return 0;
+        pid = current_proc->pid;
+        p += 5;
+    } else {
+        if (parse_uint_component(&p, &pid) < 0 || *p != '/')
+            return 0;
+        p++;
+    }
+    if (strncmp(p, "fd/", 3) != 0)
+        return 0;
+    p += 3;
+    if (parse_uint_component(&p, &fd) < 0 || *p != '\0')
+        return 0;
+
+    *pid_out = (pid_t)pid;
+    *fd_out = fd;
+    return 1;
+}
+
+static long open_procfs_fd_link(const char *resolved, int flags) {
+    pid_t pid;
+    int oldfd;
+    int matched = parse_procfs_fd_path(resolved, &pid, &oldfd);
+    if (!matched)
+        return -4096; /* internal: not a proc fd link */
+
+    struct proc *target = procfs_open_find_pid(pid);
+    if (!target)
+        return (long)-ENOENT;
+    if (oldfd < 0 || oldfd >= NOFILE || !proc_ofile(target)[oldfd])
+        return (long)-ENOENT;
+    if (target != current_proc)
+        return (long)-EACCES;
+    if (flags & (KERN_O_CREAT | KERN_O_TRUNC))
+        return (long)-EINVAL;
+    if (flags & KERN_O_NOFOLLOW)
+        return (long)-ELOOP;
+
+    struct open_file *src = proc_ofile(current_proc)[oldfd];
+    if (!vfs_file_valid(src) || src->is_pipe)
+        return (long)-ENXIO;
+
+    int newfd = alloc_fd();
+    if (newfd < 0)
+        return (long)-EMFILE;
+
+    src->refcount++;
+    proc_ofile(current_proc)[newfd] = src;
+    current_proc->fd_flags[newfd] = 0;
+    if (flags & KERN_O_CLOEXEC)
+        current_proc->fd_flags[newfd] |= 1;
+    if (flags & KERN_O_CLOFORK)
+        current_proc->fd_flags[newfd] |= 2;
+    return (long)newfd;
+}
+
 /* Two ranges [s1, s1+l1) and [s2, s2+l2) overlap.
  * l_len=0 means "to EOF" -- treat as infinite extent.
  * RF: Made static -- only used within this module */
@@ -412,6 +505,14 @@ long sys_openat_handler(struct trapframe *tf) {
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at(dirfd, kpath, resolved);
       if (rr < 0) return (long)rr; }
+
+    /* BF: /proc/self/fd/N is a magic link for open(2): it duplicates the
+     * current open file description instead of resolving to a pathname. */
+    {
+        long procfd = open_procfs_fd_link(resolved, flags);
+        if (procfd != -4096)
+            return procfd;
+    }
 
     /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
     {
