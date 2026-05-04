@@ -684,7 +684,18 @@ long sys_openat_handler(struct trapframe *tf) {
      * when the open should have failed (e.g., O_DIRECTORY on a regular
      * file, or O_CREAT on an existing directory). */
     {
-        int is_dir = vfs_is_dir(resolved);
+        uint32_t mode_bits = 0;
+        int stat_ret = vfs_stat_mode_io(resolved, &mode_bits);
+        if (stat_ret < 0 && stat_ret != -ENOENT)
+            return (long)stat_ret;
+        int exists = (stat_ret == 0);
+        int is_dir = exists && ((mode_bits & 0xF000) == 0x4000);
+        /* BF: O_CREAT|O_EXCL rejects any existing final object before
+         * filesystem open hooks run.  Read-only backends such as tarfs and
+         * devfs do not implement create, so the VFS layer must enforce the
+         * existing-object EEXIST rule consistently. */
+        if (exists && (flags & KERN_O_CREAT) && (flags & KERN_O_EXCL))
+            return (long)-EEXIST;
         /* Reject O_DIRECTORY on a non-directory before any side-effects */
         if ((flags & KERN_O_DIRECTORY) && !is_dir)
             return (long)-20; /* -ENOTDIR */

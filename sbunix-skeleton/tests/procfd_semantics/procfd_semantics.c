@@ -198,6 +198,13 @@ static void test_procfd_excl_existing_backends(void) {
   const char *paths[] = { "/bin/cat", "/dev/null" };
 
   for (int i = 0; i < (int)(sizeof(paths) / sizeof(paths[0])); i++) {
+    errno = 0;
+    int direct = open(paths[i], O_RDONLY | O_CREAT | O_EXCL, 0644);
+    check("procfd_semantics: direct excl existing reports EEXIST",
+          direct < 0 && errno == EEXIST);
+    if (direct >= 0)
+      close(direct);
+
     int fd = open(paths[i], O_RDONLY);
     check("procfd_semantics: excl backend setup", fd >= 0);
     if (fd < 0)
@@ -211,6 +218,31 @@ static void test_procfd_excl_existing_backends(void) {
           bad < 0 && errno == EEXIST);
     if (bad >= 0)
       close(bad);
+    close(fd);
+  }
+}
+
+static void test_pseudo_procfd_reopen(void) {
+  const char *paths[] = { "/proc/meminfo", "/sys/kernel/version" };
+
+  for (int i = 0; i < (int)(sizeof(paths) / sizeof(paths[0])); i++) {
+    int fd = open(paths[i], O_RDONLY);
+    check("procfd_semantics: pseudo procfd setup", fd >= 0);
+    if (fd < 0)
+      continue;
+
+    char first = 0;
+    check("procfd_semantics: pseudo source read", read_one(fd, &first) == 1);
+    char procpath[64];
+    snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
+    int reopened = open(procpath, O_RDONLY);
+    check("procfd_semantics: pseudo procfd reopen succeeds", reopened >= 0);
+    if (reopened >= 0) {
+      char again = 0;
+      check("procfd_semantics: pseudo procfd fresh offset",
+            read_one(reopened, &again) == 1 && again == first);
+      close(reopened);
+    }
     close(fd);
   }
 }
@@ -278,6 +310,7 @@ int main(void) {
   test_pipe_reopen();
   test_directory_reopen_flags();
   test_procfd_excl_existing_backends();
+  test_pseudo_procfd_reopen();
   test_devfs_procfd_preserves_state();
   test_common_proc_nodes();
   printf("=== procfd_semantics: %d passed, %d failed ===\n", g_pass, g_fail);
