@@ -127,13 +127,13 @@ static int check_self_fd_link(void) {
     pass = 0;
   } else {
     c = 0;
-    if (read(dupfd, &c, 1) != 1 || c != 'd') {
-      printf("[FAIL] procfs_execfd: fd open did not share offset\n");
+    if (read(dupfd, &c, 1) != 1 || c != 'a') {
+      printf("[FAIL] procfs_execfd: fd open did not use fresh offset\n");
       pass = 0;
     }
     c = 0;
-    if (read(fd, &c, 1) != 1 || c != 'e') {
-      printf("[FAIL] procfs_execfd: original offset not advanced\n");
+    if (read(fd, &c, 1) != 1 || c != 'd') {
+      printf("[FAIL] procfs_execfd: original offset changed\n");
       pass = 0;
     }
     close(dupfd);
@@ -141,11 +141,16 @@ static int check_self_fd_link(void) {
 
   errno = 0;
   dupfd = open(fdpath, O_WRONLY | O_TRUNC);
-  if (dupfd >= 0 || errno != EINVAL) {
-    printf("[FAIL] procfs_execfd: truncate was not rejected errno=%d\n", errno);
+  if (dupfd < 0) {
+    printf("[FAIL] procfs_execfd: truncate reopen errno=%d\n", errno);
     pass = 0;
-    if (dupfd >= 0)
-      close(dupfd);
+  } else {
+    struct stat st_trunc;
+    if (fstat(fd, &st_trunc) < 0 || st_trunc.st_size != 0) {
+      printf("[FAIL] procfs_execfd: truncate did not affect source\n");
+      pass = 0;
+    }
+    close(dupfd);
   }
 
   errno = 0;
@@ -233,12 +238,17 @@ static int check_pipe_fd(void) {
   }
   make_fd_path(path, sizeof(path), "self", pfd[0]);
   errno = 0;
-  fd = open(path, O_RDONLY);
-  if (fd >= 0 || errno != ENXIO) {
-    printf("[FAIL] procfs_execfd: pipe fd open errno=%d\n", errno);
+  fd = open(path, O_WRONLY);
+  if (fd < 0) {
+    printf("[FAIL] procfs_execfd: pipe fd reopen errno=%d\n", errno);
     pass = 0;
-    if (fd >= 0)
-      close(fd);
+  } else {
+    char c = 0;
+    if (write(fd, "q", 1) != 1 || read(pfd[0], &c, 1) != 1 || c != 'q') {
+      printf("[FAIL] procfs_execfd: pipe fd reopen data failed\n");
+      pass = 0;
+    }
+    close(fd);
   }
   close(pfd[0]);
   close(pfd[1]);

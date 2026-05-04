@@ -191,6 +191,22 @@ int vfs_is_dir(const char *path) {
     return 0;
 }
 
+static int vfs_stat_mode(const char *path, uint32_t *mode_out) {
+    const char *relpath;
+    struct mount *mnt = vfs_lookup_mount_entry(path, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
+    if (!ops || !ops->stat)
+        return -ENOENT;
+
+    uint8_t st[128];
+    int ret = ops->stat(mnt->fs_data, relpath, st);
+    if (ret < 0)
+        return ret;
+
+    memcpy(mode_out, st + 16, 4);
+    return 0;
+}
+
 static int resolve_link_target(const char *link_path, const char *target,
                                char *out) {
     if (target[0] == '/')
@@ -412,6 +428,16 @@ restart:
                 memcpy(work, normalized, nlen + 1);
                 rlen = nlen;
                 goto restart;
+            }
+        }
+
+        if (!is_last) {
+            uint32_t mode;
+            int st_ret = vfs_stat_mode(built, &mode);
+            if (st_ret < 0) { ret = st_ret; goto out; }
+            if ((mode & 0xF000) != 0x4000) {
+                ret = -ENOTDIR;
+                goto out;
             }
         }
     }

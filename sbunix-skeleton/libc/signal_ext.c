@@ -213,7 +213,8 @@ int pthread_sigmask(int how, const sigset_t *restrict set,
                     sigset_t *restrict oldset) {
   /* BF: pthread_sigmask returns the error number directly; it does not use
    * the sigprocmask -1/errno convention exposed by the process API. */
-  if (sigprocmask(how, set, oldset) == 0)
-    return 0;
-  return errno;
+  long ret = syscall(SYS_rt_sigprocmask, how, set, oldset, sizeof(sigset_t));
+  if (ret < 0 && ret >= -4095)
+    return (int)-ret;
+  return 0;
 }

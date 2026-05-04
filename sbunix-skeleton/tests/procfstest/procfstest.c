@@ -508,8 +508,8 @@ static void test_proc_fd_entries(void) {
         sr2 = fstat(rfd, &st_fd);
         close(rfd);
     }
-    CHECK("procfs: proc_fd_entries open duplicates descriptor",
-          rfd >= 0 && nr == 1 && buf[0] == 'd');
+    CHECK("procfs: proc_fd_entries open reopens target with fresh offset",
+          rfd >= 0 && nr == 1 && buf[0] == 'f');
     CHECK("procfs: proc_fd_entries fstat matches followed target",
           rfd >= 0 && sr1 == 0 && sr2 == 0 && st_fd.st_size == st_path.st_size);
 

@@ -259,8 +259,10 @@ static int devfs_open(void *fs_data, const char *path, int flags, void **private
   const char *name = path;
   while (*name == '/') name++;
 
-  /* If path is empty or "/", treat as opening /dev directory itself */
-  if (*name == '\0') {
+  /* If path is empty, "/" or "pts", treat it as a devfs directory.  The
+   * synthetic /dev/pts directory must exist so path resolution can reach
+   * /dev/pts/0 after /dev/ptmx activates the slave endpoint. */
+  if (*name == '\0' || strcmp(name, "pts") == 0) {
     /* Allocate private with NULL dev to indicate directory */
     struct devfs_private *priv = (struct devfs_private *)kmalloc(sizeof(struct devfs_private));
     if (!priv) return -12; /* -ENOMEM */
@@ -322,6 +324,32 @@ static int devfs_open(void *fs_data, const char *path, int flags, void **private
     }
   }
   return -2; /* -ENOENT */
+}
+
+static int devfs_reopen(void *fs_data, void *private, int flags,
+                        void **new_private) {
+  (void)fs_data;
+  (void)flags;
+  struct devfs_private *old = (struct devfs_private *)private;
+  if (!old)
+    return -2; /* -ENOENT */
+
+  struct devfs_private *priv =
+    (struct devfs_private *)kmalloc(sizeof(struct devfs_private));
+  if (!priv)
+    return -12; /* -ENOMEM */
+  memcpy(priv, old, sizeof(*priv));
+
+  /* BF: procfd reopen of a pty must attach to the same pty object.  Calling
+   * devfs_open(\"ptmx\") would reset pty0 and lose the original identity. */
+  if (priv->pty) {
+    if (priv->pty_role == PTY_ROLE_MASTER)
+      priv->pty->master_refs++;
+    else if (priv->pty_role == PTY_ROLE_SLAVE)
+      priv->pty->slave_refs++;
+  }
+  *new_private = priv;
+  return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -557,11 +585,11 @@ static int devfs_stat(void *fs_data, const char *path, uint8_t *st) {
   uint32_t nlink = 1;
   int32_t blksz = 4096;
 
-  /* /dev directory itself */
-  if (*name == '\0') {
+  /* /dev and /dev/pts directories */
+  if (*name == '\0' || strcmp(name, "pts") == 0) {
     memset(st, 0, 128);
     uint32_t mode = (uint32_t)(0x4000 | 0755); /* S_IFDIR */
-    uint64_t ino = 100;
+    uint64_t ino = (*name == '\0') ? 100 : 101;
     memcpy(st + 0, &dev, 8);
     memcpy(st + 8, &ino, 8);
     memcpy(st + 16, &mode, 4);
@@ -710,6 +738,7 @@ struct vfs_ops devfs_ops = {
   .read    = devfs_read,
   .write   = devfs_write,
   .ftruncate = NULL,
+  .reopen  = devfs_reopen,
   .close   = devfs_close,
   .stat    = devfs_stat,
   .fstat   = devfs_fstat,
