@@ -87,7 +87,9 @@ REQUIRE_THIRDPARTY_PAYLOADS ?= 0
 
 # MODIFIED from all: build/kernel.elf
 ALL_TARGETS := build/kernel.elf
-ifeq ($(RUN_CI_TESTS),1)
+ifdef BUILD_TESTS
+# BF: BUILD_TESTS=1 make must materialize the separate /test disk so
+# validation and CI do not depend on the qemu target to build it later.
 	ALL_TARGETS += $(TEST_DISK_IMG)
 endif
 

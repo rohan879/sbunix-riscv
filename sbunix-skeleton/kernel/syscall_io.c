@@ -602,16 +602,28 @@ long sys_openat_handler(struct trapframe *tf) {
     /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
     {
         int nofollow = (flags & KERN_O_NOFOLLOW);
-        int symret = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS,
-                                              !nofollow || trailing_slash);
+        struct path_resolution_meta meta;
+        int symret = resolve_symlinks_in_path_meta(resolved,
+                                                   KSYMLINK_MAX_HOPS,
+                                                   !nofollow || trailing_slash,
+                                                   &meta);
         if (symret == -ENOENT && (flags & KERN_O_CREAT) && !nofollow &&
             !trailing_slash) {
-            /* BF: A missing final component under O_CREAT is not an error;
-             * preserve intermediate symlink resolution and let the backend
-             * create the new file. */
-            { int rr = resolve_path_at(dirfd, kpath, resolved);
-              if (rr < 0) return (long)rr; }
-            symret = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
+            if (meta.missing_after_final_symlink &&
+                !(flags & KERN_O_EXCL)) {
+                /* BF: open(O_CREAT) follows a dangling final symlink and
+                 * creates its target.  O_EXCL keeps the symlink itself as
+                 * the existing final object and fails below with EEXIST. */
+                symret = 0;
+            } else {
+                /* BF: A literal missing final component under O_CREAT is not
+                 * an error; preserve intermediate symlink resolution and let
+                 * the backend create the new file. */
+                { int rr = resolve_path_at(dirfd, kpath, resolved);
+                  if (rr < 0) return (long)rr; }
+                symret = resolve_symlinks_in_path(resolved,
+                                                  KSYMLINK_MAX_HOPS, 0);
+            }
         }
         /* BF: Propagate all negative errors, not just ELOOP */
         if (symret < 0)

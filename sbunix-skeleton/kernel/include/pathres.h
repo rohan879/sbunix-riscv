@@ -23,6 +23,15 @@ int  resolve_path(const char *cwd, const char *path, char *out);
 int  resolve_path_at(int dirfd, const char *path, char *out);
 int  vfs_is_dir(const char *path);
 int  follow_symlinks(char *resolved, int maxdepth, int bufsiz);
+
+struct path_resolution_meta {
+  int final_symlink_followed;
+  int missing_after_final_symlink;
+};
+
+int  resolve_symlinks_in_path_meta(char *resolved, int maxdepth,
+                                   int resolve_final,
+                                   struct path_resolution_meta *meta);
 int  resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final);
 
 #endif

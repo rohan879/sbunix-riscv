@@ -28,36 +28,54 @@ static void make_fd_path(char *buf, int bufsz, const char *pid, int fd) {
 }
 
 static int check_exec_link(void) {
+  char expected[128];
+  int expected_len = readlink("/bin/sleep", expected, sizeof(expected) - 1);
+  if (expected_len > 0) {
+    expected[expected_len] = '\0';
+  } else {
+    snprintf(expected, sizeof(expected), "%s", "/bin/sleep");
+  }
+
   pid_t pid = fork();
   if (pid < 0) {
     printf("[FAIL] procfs_execfd: fork errno=%d\n", errno);
     return 0;
   }
   if (pid == 0) {
-    char *argv[] = { "sleep", "5", 0 };
+    char *argv[] = { "sleep", "10", 0 };
     execv("/bin/sleep", argv);
     _exit(111);
   }
 
   char path[64];
   char link[128];
+  char last_link[128];
+  int last_errno = 0;
   int ok = 0;
+  last_link[0] = '\0';
   snprintf(path, sizeof(path), "/proc/%d/exe", (int)pid);
-  for (int i = 0; i < 200000; i++) {
+  /* BF: Let the child reach exec before sampling its procfs link.  The
+   * inherited pre-exec link is not the state this test is validating. */
+  sleep(1);
+  for (int i = 0; i < 8; i++) {
     int n = readlink(path, link, sizeof(link) - 1);
     if (n > 0) {
       link[n] = '\0';
-      if (strcmp(link, "/bin/sleep") == 0) {
+      snprintf(last_link, sizeof(last_link), "%s", link);
+      if (strcmp(link, expected) == 0) {
         ok = 1;
         break;
       }
-    }
+    } else
+      last_errno = errno;
+    sleep(1);
   }
 
   kill(pid, SIGKILL);
   waitpid(pid, 0, 0);
   if (!ok)
-    printf("[FAIL] procfs_execfd: exe link is not canonical sleep path\n");
+    printf("[FAIL] procfs_execfd: exe link target=%s expected=%s errno=%d\n",
+           last_link[0] ? last_link : "<none>", expected, last_errno);
   return ok;
 }
 

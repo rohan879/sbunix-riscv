@@ -314,8 +314,14 @@ int follow_symlinks(char *resolved, int maxdepth, int bufsiz) {
  * unless resolve_final is 0.  After return, 'resolved' contains the
  * fully-resolved path.
  * Returns 0 on success, negative errno on failure (-40 = ELOOP). */
-int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
+int resolve_symlinks_in_path_meta(char *resolved, int maxdepth,
+                                  int resolve_final,
+                                  struct path_resolution_meta *meta) {
     if (maxdepth < 0) return -ELOOP;
+    if (meta) {
+        meta->final_symlink_followed = 0;
+        meta->missing_after_final_symlink = 0;
+    }
 
     int rlen = strlen(resolved);
     if (rlen == 0 || (rlen == 1 && resolved[0] == '/'))
@@ -391,9 +397,30 @@ restart:
         int sym_ret = follow_symlinks_budget(built, &remaining_hops,
                                              KPATH_MAX, &followed);
         /* BF: Propagate all negative errors, not just ELOOP */
-        if (sym_ret < 0) { ret = sym_ret; goto out; }
+        if (sym_ret < 0) {
+            if (sym_ret == -ENOENT && is_last && resolve_final && followed) {
+                /* BF: Preserve final symlink target metadata for open(O_CREAT).
+                 * A dangling final symlink should create its followed target,
+                 * while a literal missing basename should create itself. */
+                if (meta) {
+                    meta->final_symlink_followed = 1;
+                    meta->missing_after_final_symlink = 1;
+                }
+                int blen = strlen(built);
+                if (blen > KPATH_MAX - 1) {
+                    ret = -ENAMETOOLONG;
+                    goto out;
+                }
+                memcpy(resolved, built, blen);
+                resolved[blen] = '\0';
+            }
+            ret = sym_ret;
+            goto out;
+        }
 
         bi = strlen(built);
+        if (is_last && followed && meta)
+            meta->final_symlink_followed = 1;
 
         /* Check if follow_symlinks changed the path */
         int changed = (bi != old_bi || memcmp(before, built, old_bi + 1) != 0);
@@ -455,4 +482,8 @@ out:
     kmfree(built, KPATH_MAX);
     kmfree(work, KPATH_MAX);
     return ret;
+}
+
+int resolve_symlinks_in_path(char *resolved, int maxdepth, int resolve_final) {
+    return resolve_symlinks_in_path_meta(resolved, maxdepth, resolve_final, 0);
 }
