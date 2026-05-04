@@ -424,6 +424,52 @@ static inline void signal_queue_purge_all(struct proc *p, int signum) {
         p->sig_sender[signum].valid = 0;
 }
 
+static inline int signal_default_is_ignore(int signum) {
+    return signum == SIGCHLD || signum == SIGURG ||
+           signum == SIGWINCH || signum == SIGCONT;
+}
+
+static inline void signal_discard_pending(struct proc *p, int signum) {
+    p->sigpending &= ~signal_bit(signum);
+    signal_queue_purge_all(p, signum);
+}
+
+/* Return non-zero when a blocking syscall should return -EINTR so trap
+ * return can deliver a user handler or default stop/terminate action.
+ * Ignored, blocked, and default-ignore signals are consumed or skipped here
+ * so they do not spuriously interrupt sleeps. */
+static inline int signal_pending_interrupts_syscall(struct proc *p,
+                                                    int wait_child) {
+    uint64_t deliverable = signal_deliverable_mask(p);
+    struct kern_sigaction *sa;
+
+    if (!deliverable)
+        return 0;
+    sa = proc_sigactions(p);
+
+    for (int s = 1; s < 65 && deliverable; s++) {
+        if (!(deliverable & signal_bit(s)))
+            continue;
+
+        if (sa[s].handler > 1) {
+            if (wait_child && s == SIGCHLD)
+                continue;
+            return 1;
+        }
+        if (sa[s].handler == 1) {
+            signal_discard_pending(p, s);
+            continue;
+        }
+        if (signal_default_is_ignore(s)) {
+            signal_discard_pending(p, s);
+            continue;
+        }
+        return 1;
+    }
+
+    return 0;
+}
+
 /* BF: Size of user-space siginfo_t for copyin/copyout to user buffers.
  * Must match libc/include/signal.h siginfo_t layout (RV64 LP64):
  *   si_signo(4) + si_errno(4) + si_code(4) + si_pid(4)

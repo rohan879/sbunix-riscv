@@ -41,8 +41,8 @@ int main(void) {
     printf("[FAIL] sigmask_pending: mask restore errno=%d\n", errno);
     return 1;
   }
-  errno = 0;
-  if (pthread_sigmask(99, &block, 0) != EINVAL || errno != EINVAL) {
+  errno = 123;
+  if (pthread_sigmask(99, &block, 0) != EINVAL || errno != 123) {
     printf("[FAIL] sigmask_pending: pthread_sigmask invalid errno=%d\n",
            errno);
     return 1;

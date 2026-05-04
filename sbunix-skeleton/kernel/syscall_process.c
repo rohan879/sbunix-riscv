@@ -747,44 +747,8 @@ static pid_t sys_wait4(pid_t wpid, uint64_t status_uaddr, int options) {
             /* BF: Clear wait4 sleeper flag after waking — process is no
              * longer blocked in wait4. */
             current_proc->waiting_for_child = 0;
-            /* Check for pending signals after waking up:
-             * - User handler (handler > 1): return -EINTR
-             * - SIG_DFL terminating signal: return -EINTR to let deliver_signal kill us
-             * - SIG_IGN / SIG_DFL ignore-class: continue waiting
-             * BF: SIGCHLD with user handler must NOT return EINTR — it's the
-             * signal that woke us to re-check children. Returning EINTR would
-             * prevent wait4 from finding the zombie (or detecting ECHILD when
-             * SA_NOCLDWAIT auto-reaped the child). Let the loop re-check. */
-            {
-                uint64_t deliverable = signal_deliverable_mask(current_proc);
-                struct kern_sigaction *ksa = proc_sigactions(current_proc);
-                for (int s = 1; s < 65 && deliverable; s++) {
-                    if (deliverable & signal_bit(s)) {
-                        if (ksa[s].handler > 1) { /* user handler */
-                            /* BF: SIGCHLD doesn't interrupt wait4 — it's the
-                             * reason we woke up. Let the loop re-scan children.
-                             * The signal will be delivered after wait4 returns. */
-                            if (s == SIGCHLD) continue;
-                            return -4; /* -EINTR */
-                        }
-                        if (ksa[s].handler == 0) { /* SIG_DFL */
-                            /* Ignore-class: SIGCHLD, SIGURG, SIGWINCH (continue waiting) */
-                            if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                                continue;
-                            /* Stop-class: handled by deliver_signal, don't terminate */
-                            if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                                continue;
-                            /* SIGCONT: resume, not terminate */
-                            if (s == SIGCONT)
-                                continue;
-                            /* All other SIG_DFL signals terminate; return so
-                             * deliver_signal can kill the process */
-                            return -4; /* -EINTR */
-                        }
-                        /* SIG_IGN (handler == 1): continue waiting */
-                    }
-                }
-            }
+            if (signal_pending_interrupts_syscall(current_proc, 1))
+                return -EINTR;
         }
     }
 }
@@ -1388,7 +1352,7 @@ long sys_waitid_handler(struct trapframe *tf) {
 
             if (report_exit && !(options & 0x01000000)) { /* WNOWAIT */
                 reap_zombie(p);
-            } else if (report_stop) {
+            } else if (report_stop && !(options & 0x01000000)) {
                 p->stopped_signal = 0;
             }
             return 0;
@@ -1410,28 +1374,8 @@ long sys_waitid_handler(struct trapframe *tf) {
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
             current_proc->waiting_for_child = 0;
-            {
-                uint64_t deliverable = signal_deliverable_mask(current_proc);
-                struct kern_sigaction *ksa = proc_sigactions(current_proc);
-                for (int s = 1; s < 65 && deliverable; s++) {
-                    if (!(deliverable & signal_bit(s)))
-                        continue;
-                    if (ksa[s].handler > 1) {
-                        if (s == SIGCHLD)
-                            continue;
-                        return -4; /* -EINTR */
-                    }
-                    if (ksa[s].handler == 0) {
-                        if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                            continue;
-                        if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                            continue;
-                        if (s == SIGCONT)
-                            continue;
-                        return -4; /* -EINTR */
-                    }
-                }
-            }
+            if (signal_pending_interrupts_syscall(current_proc, 1))
+                return -EINTR;
         }
     }
 }

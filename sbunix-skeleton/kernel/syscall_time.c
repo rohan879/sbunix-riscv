@@ -95,7 +95,7 @@ static long sleep_until_deadline(uint64_t deadline, uint64_t rem_uaddr,
         }
 
         current_proc->waiting_for_uart = 0;
-        if (signal_deliverable_mask(current_proc)) {
+        if (signal_pending_interrupts_syscall(current_proc, 0)) {
             if (write_rem_on_interrupt && rem_uaddr) {
                 uint64_t remaining = deadline > now ? deadline - now : 0;
                 long ret = copyout_ticks_as_timespec(rem_uaddr, remaining);
