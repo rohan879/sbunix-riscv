@@ -896,6 +896,7 @@ long sys_execve_handler(struct trapframe *tf) {
     }
 
     char resolved[KPATH_MAX];
+    char committed_exe_path[KPATH_MAX];
     char tarpath[128];
     { int rr = resolve_path(current_proc->cwd, kpath, resolved);
       if (rr < 0) {
@@ -908,6 +909,7 @@ long sys_execve_handler(struct trapframe *tf) {
     /* BF: Propagate all negative errors from resolve_symlinks_in_path */
     { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 1);
       if (sr < 0) { kfree(kstrbuf); if (kenvbuf) kfree(kenvbuf); return (long)sr; } }
+    memcpy(committed_exe_path, resolved, sizeof(committed_exe_path));
     /* BF: Pass sizeof(tarpath) to prevent buffer overflow; on ENAMETOOLONG
      * skip the tarfs lookup — the binary may still exist on ext2/VFS. */
     int ret = -2; /* default to ENOENT if tarfs path conversion fails */
@@ -1043,6 +1045,9 @@ long sys_execve_handler(struct trapframe *tf) {
                             if (to_tarfs_path(interp_resolved, interp_tarpath,
                                               sizeof(interp_tarpath)) == 0)
                                 ret = exec(interp_tarpath);
+                            if (ret >= 0)
+                                memcpy(committed_exe_path, interp_resolved,
+                                       sizeof(committed_exe_path));
                         }
                     } }
                 }
@@ -1056,6 +1061,11 @@ long sys_execve_handler(struct trapframe *tf) {
         /* Return ENOEXEC if file was found but not executable, else ENOENT */
         return (long)(shebang_file_found ? -8 : -2);
     }
+
+    /* BF: exec() loads tarfs paths such as ./bin/sleep internally, but
+     * procfs must expose the canonical absolute executable path. */
+    memcpy(current_proc->exe_path, committed_exe_path,
+           sizeof(current_proc->exe_path));
 
     /* Snapshot argv image for /proc/<pid>/cmdline (NUL-separated strings). */
     {
