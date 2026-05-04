@@ -278,28 +278,7 @@ void file_locks_release_ofd(struct open_file *ofd) {
 /* ------------------------------------------------------------------ */
 
 static int pending_signal_interrupts_io(void) {
-    uint64_t deliverable = signal_deliverable_mask(current_proc);
-    struct kern_sigaction *ksa = proc_sigactions(current_proc);
-
-    for (int s = 1; s < 65 && deliverable; s++) {
-        if (!(deliverable & signal_bit(s)))
-            continue;
-        if (ksa[s].handler > 1)
-            return 1;
-        if (ksa[s].handler == 0) {
-            /* BF: Blocked pipe writers must leave the sleep loop for signals
-             * that will run a handler or terminate on syscall return. */
-            if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                continue;
-            if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                continue;
-            if (s == SIGCONT)
-                continue;
-            return 1;
-        }
-    }
-
-    return 0;
+    return signal_pending_interrupts_syscall(current_proc, 0);
 }
 
 long sys_write_handler(struct trapframe *tf) {
@@ -364,7 +343,7 @@ long sys_write_handler(struct trapframe *tf) {
             }
             for (struct proc *p = proc; p < &proc[NPROC]; p++) {
                 if (p->state == SLEEPING && p != current_proc &&
-                    p->waiting_for_uart != 2)
+                    p->waiting_for_uart != PROC_WAIT_TIMER)
                     p->state = RUNNABLE;
             }
         }
@@ -426,36 +405,8 @@ long sys_read_handler(struct trapframe *tf) {
                 return (long)-EAGAIN;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
-            /* Check for pending signals after waking up:
-             * - User handler (handler > 1): return -EINTR
-             * - SIG_DFL terminating signal: break out to let deliver_signal kill us
-             * - SIG_IGN / SIG_DFL ignore-class: continue sleeping */
-            {
-                uint64_t deliverable = signal_deliverable_mask(current_proc);
-                struct kern_sigaction *sa = proc_sigactions(current_proc);
-                for (int s = 1; s < 65 && deliverable; s++) {
-                    if (deliverable & signal_bit(s)) {
-                        if (sa[s].handler > 1) /* user handler */
-                            return (long)-4; /* -EINTR */
-                        if (sa[s].handler == 0) { /* SIG_DFL */
-                            /* Ignore-class: SIGCHLD, SIGURG, SIGWINCH (continue sleeping) */
-                            if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                                continue;
-                            /* Stop-class: SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU
-                             * (will be handled by deliver_signal, but shouldn't terminate) */
-                            if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                                continue;
-                            /* SIGCONT: resume, not terminate */
-                            if (s == SIGCONT)
-                                continue;
-                            /* All other SIG_DFL signals terminate; break out so
-                             * deliver_signal can kill the process */
-                            goto pipe_eof;
-                        }
-                        /* SIG_IGN (handler == 1): continue sleeping */
-                    }
-                }
-            }
+            if (pending_signal_interrupts_io())
+                return (long)-EINTR;
         }
         /* Drain all available bytes (up to len) without re-blocking */
         while (read_bytes < len && pipe_avail(pid) > 0) {
@@ -469,7 +420,7 @@ long sys_read_handler(struct trapframe *tf) {
         /* Wake any blocked pipe writers since we freed buffer space */
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == SLEEPING && p != current_proc &&
-                p->waiting_for_uart != 2)
+                p->waiting_for_uart != PROC_WAIT_TIMER)
                 p->state = RUNNABLE;
         }
 pipe_eof:
@@ -1039,28 +990,9 @@ long sys_readv_handler(struct trapframe *tf) {
                 while (pipe_avail(pid) == 0 && pipes[pid].write_open)  {
                     current_proc->state = SLEEPING;
                     swtch(&current_proc->context, &scheduler_context);
-                    /* Check for terminating signals after waking */
-                    {
-                        uint64_t deliverable = signal_deliverable_mask(current_proc);
-                        struct kern_sigaction *ksa = proc_sigactions(current_proc);
-                        for (int s = 1; s < 65 && deliverable; s++) {
-                            if (deliverable & signal_bit(s)) {
-                                if (ksa[s].handler > 1) { /* user handler */
-                                    if (total == 0) total = -4;
-                                    goto readv_out;
-                                }
-                                if (ksa[s].handler == 0) { /* SIG_DFL */
-                                    if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                                        continue;
-                                    if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                                        continue;
-                                    if (s == SIGCONT)
-                                        continue;
-                                    /* Terminating: return to let deliver_signal kill */
-                                    goto readv_out;
-                                }
-                            }
-                        }
+                    if (pending_signal_interrupts_io()) {
+                        if (total == 0) total = -EINTR;
+                        goto readv_out;
                     }
                 }
                 char kchunk[512];

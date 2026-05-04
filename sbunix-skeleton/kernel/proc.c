@@ -142,7 +142,7 @@ found:
   p->pgid = p->pid;
   p->sid = p->pid;
   p->state = SLEEPING;
-  p->waiting_for_uart = 0;
+  p->waiting_for_uart = PROC_WAIT_NONE;
   p->sleep_until = 0;
   p->exit_status = 0;
   p->resources_released = 0;
@@ -223,6 +223,8 @@ found:
   p->alarm_ticks = 0;
   p->killed_by_signal = 0;
   p->stopped_signal = 0;
+  p->stop_reported = 0;
+  p->continued_signal = 0;
 
   /* BF: Initialize alternate signal stack to SS_DISABLE.  Without this,
    * recycled process slots retain stale ss_flags from the previous
@@ -296,8 +298,8 @@ void uart_wakeup(void) {
   for (p = proc; p < &proc[NPROC]; p++) {
     /* BF: Skip wait4 sleepers — UART input is irrelevant for processes
      * blocked in waitpid; waking them causes spurious wakeups. */
-    if (p->state == SLEEPING && p->waiting_for_uart == 1 && !p->waiting_for_child) {
-      p->waiting_for_uart = 0;
+    if (p->state == SLEEPING && p->waiting_for_uart == PROC_WAIT_UART && !p->waiting_for_child) {
+      p->waiting_for_uart = PROC_WAIT_NONE;
       p->state = RUNNABLE;
     }
   }

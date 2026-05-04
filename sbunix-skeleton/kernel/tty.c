@@ -2,6 +2,7 @@
 #include <uart.h>
 #include <proc.h>
 #include <string.h>
+#include <errno.h>
 
 /* ------------------------------------------------------------------ */
 /* TTY state                                                           */
@@ -309,23 +310,25 @@ int tty_read(char *buf, int len) {
     /* ---- Cooked mode: wait for a complete line ---- */
     while (ring_avail(tty0.cooked_r, tty0.cooked_w) == 0 &&
            !tty0.cooked_eof) {
-      /* Check for pending signals */
-      if (signal_deliverable_mask(current_proc))
-        return -4; /* -EINTR */
-      current_proc->waiting_for_uart = 1;
+      /* BF: Only signals that will run an action should interrupt TTY reads;
+       * ignored/default-ignore signals are consumed and the read keeps
+       * waiting for input. */
+      if (signal_pending_interrupts_syscall(current_proc, 0))
+        return -EINTR;
+      current_proc->waiting_for_uart = PROC_WAIT_UART;
       current_proc->state = SLEEPING;
       /* BF: Close the lost-wakeup window.  UART input can arrive after the
        * empty-buffer check but before the process is marked sleeping; recheck
        * after publishing the sleep state so buffered input is consumed now. */
       if (ring_avail(tty0.cooked_r, tty0.cooked_w) != 0 || tty0.cooked_eof) {
-        current_proc->waiting_for_uart = 0;
+        current_proc->waiting_for_uart = PROC_WAIT_NONE;
         current_proc->state = RUNNING;
         break;
       }
       swtch(&current_proc->context, &scheduler_context);
-      /* Re-check for signals after waking */
-      if (signal_deliverable_mask(current_proc))
-        return -4; /* -EINTR */
+      /* Re-check for signals after waking. */
+      if (signal_pending_interrupts_syscall(current_proc, 0))
+        return -EINTR;
     }
 
     /* EOF? */
@@ -348,20 +351,19 @@ int tty_read(char *buf, int len) {
   } else {
     /* ---- Raw mode: return as soon as any data is available ---- */
     while (ring_avail(tty0.raw_r, tty0.raw_w) == 0) {
-      /* Check for pending signals */
-      if (signal_deliverable_mask(current_proc))
-        return -4; /* -EINTR */
-      current_proc->waiting_for_uart = 1;
+      if (signal_pending_interrupts_syscall(current_proc, 0))
+        return -EINTR;
+      current_proc->waiting_for_uart = PROC_WAIT_UART;
       current_proc->state = SLEEPING;
       /* BF: Same lost-wakeup close as cooked mode, but for raw input. */
       if (ring_avail(tty0.raw_r, tty0.raw_w) != 0) {
-        current_proc->waiting_for_uart = 0;
+        current_proc->waiting_for_uart = PROC_WAIT_NONE;
         current_proc->state = RUNNING;
         break;
       }
       swtch(&current_proc->context, &scheduler_context);
-      if (signal_deliverable_mask(current_proc))
-        return -4; /* -EINTR */
+      if (signal_pending_interrupts_syscall(current_proc, 0))
+        return -EINTR;
     }
 
     int n = 0;
