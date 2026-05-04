@@ -82,8 +82,10 @@ static void test_trailing_slash_errors(void) {
                mkdir("/tmp/pathsem-file/", 0755), ENOTDIR);
 
   errno = 0;
-  expect_errno("path_semantics_edges: mkdir missing with slash ENOENT",
-               mkdir("/tmp/pathsem-created/", 0755), ENOENT);
+  check("path_semantics_edges: mkdir missing with slash creates directory",
+        mkdir("/tmp/pathsem-created/", 0755) == 0 &&
+        stat("/tmp/pathsem-created", &st) == 0 && S_ISDIR(st.st_mode));
+  rmdir("/tmp/pathsem-created");
 
   errno = 0;
   expect_errno("path_semantics_edges: unlink regular with slash ENOTDIR",

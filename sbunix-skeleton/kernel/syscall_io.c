@@ -29,6 +29,7 @@ struct file_lock lock_table[MAX_FILE_LOCKS];
 
 enum {
   KERN_O_CREAT = 0100,
+  KERN_O_EXCL = 0200,
   KERN_O_TRUNC = 01000,
   KERN_O_DIRECTORY = 0200000,
   KERN_O_NOFOLLOW = 0400000,
@@ -39,7 +40,6 @@ enum {
 };
 
 #define PROCFS_FD_NOT_LINK    ((long)-4096)
-#define PROCFS_FD_REOPEN_PATH ((long)-4095)
 
 static int path_has_trailing_slash(const char *path) {
     int len = strlen(path);
@@ -96,8 +96,10 @@ static long procfd_reopen_open_file(struct open_file *src, int flags,
     int accmode = flags & 3;
     if (is_dir && (accmode == 1 || accmode == 2))
         return (long)-EISDIR;
+    if (is_dir && (flags & KERN_O_TRUNC))
+        return (long)-EISDIR;
     if (!src->ops->reopen)
-        return PROCFS_FD_REOPEN_PATH;
+        return (long)-ENXIO;
 
     struct open_file *nf = vfs_alloc_file();
     if (!nf)
@@ -196,8 +198,7 @@ static int parse_procfs_fd_path(const char *path, pid_t *pid_out, int *fd_out) {
 }
 
 static long open_procfs_fd_link(const char *resolved, int flags,
-                                int trailing_slash, char *reopen_path,
-                                int reopen_path_size) {
+                                int trailing_slash) {
     pid_t pid;
     int oldfd;
     int matched = parse_procfs_fd_path(resolved, &pid, &oldfd);
@@ -222,6 +223,8 @@ static long open_procfs_fd_link(const char *resolved, int flags,
         int pipeid = src->pipe_id;
         if (trailing_slash || (flags & KERN_O_DIRECTORY))
             return (long)-ENOTDIR;
+        if ((flags & KERN_O_CREAT) && (flags & KERN_O_EXCL))
+            return (long)-EEXIST;
         if (pipeid < 0 || pipeid >= NPIPES || !pipes[pipeid].used)
             return (long)-ENOENT;
 
@@ -252,21 +255,10 @@ static long open_procfs_fd_link(const char *resolved, int flags,
         return (long)newfd;
     }
 
-    /* BF: Reopen the underlying object when the filesystem can clone its
-     * private handle; pathname fallback is only for immutable/simple nodes. */
-    long reopened = procfd_reopen_open_file(src, flags, trailing_slash);
-    if (reopened != PROCFS_FD_REOPEN_PATH)
-        return reopened;
-
-    if (src->path[0] == '\0')
-        return (long)-ENXIO;
-    int plen = strlen(src->path);
-    if (plen > reopen_path_size - 1)
-        return (long)-ENAMETOOLONG;
-    memcpy(reopen_path, src->path, plen);
-    reopen_path[plen] = '\0';
-
-    return PROCFS_FD_REOPEN_PATH;
+    /* BF: Reopen the underlying object through a filesystem clone hook.
+     * Falling back to src->path would lose identity after replacement and
+     * reset stateful devices such as /dev/ptmx. */
+    return procfd_reopen_open_file(src, flags, trailing_slash);
 }
 
 /* Two ranges [s1, s1+l1) and [s2, s2+l2) overlap.
@@ -645,18 +637,13 @@ long sys_openat_handler(struct trapframe *tf) {
     { int rr = resolve_path_at(dirfd, kpath, resolved);
       if (rr < 0) return (long)rr; }
 
-    int procfd_reopen_path = 0;
-    /* /proc/self/fd/N is a magic reopen point.  Regular files continue
-     * through normal open on the saved target path so they get fresh offsets;
-     * pipes are reopened as new pipe endpoints against the same pipe object. */
+    /* /proc/self/fd/N is a magic reopen point.  Regular files and stateful
+     * devices get fresh open descriptions for the same object; pipes are
+     * reopened as new endpoints against the same pipe object. */
     {
-        long procfd = open_procfs_fd_link(resolved, flags, trailing_slash,
-                                          resolved, sizeof(resolved));
-        if (procfd != PROCFS_FD_NOT_LINK &&
-            procfd != PROCFS_FD_REOPEN_PATH)
+        long procfd = open_procfs_fd_link(resolved, flags, trailing_slash);
+        if (procfd != PROCFS_FD_NOT_LINK)
             return procfd;
-        if (procfd == PROCFS_FD_REOPEN_PATH)
-            procfd_reopen_path = 1;
     }
 
     /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
@@ -665,7 +652,7 @@ long sys_openat_handler(struct trapframe *tf) {
         int symret = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS,
                                               !nofollow || trailing_slash);
         if (symret == -ENOENT && (flags & KERN_O_CREAT) && !nofollow &&
-            !trailing_slash && !procfd_reopen_path) {
+            !trailing_slash) {
             /* BF: A missing final component under O_CREAT is not an error;
              * preserve intermediate symlink resolution and let the backend
              * create the new file. */
@@ -1493,8 +1480,12 @@ long sys_unlinkat_handler(struct trapframe *tf) {
         { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
           if (sr < 0) return (long)sr; }
         if (trailing_slash) {
-            int tr = require_resolved_dir(resolved);
-            if (tr < 0) return (long)tr;
+            uint32_t mode_bits;
+            int tr = vfs_stat_mode_io(resolved, &mode_bits);
+            if (tr == 0 && ((mode_bits & 0xF000) != 0x4000))
+                return (long)-ENOTDIR;
+            if (tr < 0 && tr != -ENOENT)
+                return (long)tr;
         }
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1664,8 +1655,15 @@ long sys_mkdirat_handler(struct trapframe *tf) {
         { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
           if (sr < 0) return (long)sr; }
         if (trailing_slash) {
-            int tr = require_resolved_dir(resolved);
-            if (tr < 0) return (long)tr;
+            uint32_t mode_bits;
+            int tr = vfs_stat_mode_io(resolved, &mode_bits);
+            if (tr == 0 && ((mode_bits & 0xF000) != 0x4000))
+                return (long)-ENOTDIR;
+            /* BF: mkdir("missing/") creates the missing final directory;
+             * a trailing slash requires the created object to be a directory,
+             * not that it already exists before mkdirat runs. */
+            if (tr < 0 && tr != -ENOENT)
+                return (long)tr;
         }
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);

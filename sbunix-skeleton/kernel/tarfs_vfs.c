@@ -158,6 +158,22 @@ static int tarfs_close(void *fs_data, void *private) {
   return 0;
 }
 
+static int tarfs_reopen(void *fs_data, void *private, int flags,
+                        void **new_private) {
+  (void)fs_data;
+  if (!private)
+    return -2; /* -ENOENT */
+  if (flags & 01000)
+    return -30; /* -EROFS */
+  struct tarfs_private *priv =
+    (struct tarfs_private *)kmalloc(sizeof(struct tarfs_private));
+  if (!priv)
+    return -12; /* -ENOMEM */
+  memcpy(priv, private, sizeof(struct tarfs_private));
+  *new_private = priv;
+  return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* tarfs_fstat                                                          */
 /* ------------------------------------------------------------------ */
@@ -454,6 +470,7 @@ struct vfs_ops tarfs_ops = {
   .read    = tarfs_read,
   .write   = tarfs_write,
   .ftruncate = NULL,
+  .reopen  = tarfs_reopen,
   .close   = tarfs_close,
   .stat    = tarfs_stat,
   .fstat   = tarfs_fstat,

@@ -157,6 +157,13 @@ static void test_pipe_reopen(void) {
   if (bad >= 0)
     close(bad);
 
+  errno = 0;
+  bad = open(procpath, O_CREAT | O_EXCL | O_RDONLY, 0644);
+  check("procfd_semantics: pipe excl create reports EEXIST",
+        bad < 0 && errno == EEXIST);
+  if (bad >= 0)
+    close(bad);
+
   char slashpath[80];
   snprintf(slashpath, sizeof(slashpath), "%s/", procpath);
   errno = 0;
@@ -168,6 +175,55 @@ static void test_pipe_reopen(void) {
 
   close(pfd[0]);
   close(pfd[1]);
+}
+
+static void test_directory_reopen_flags(void) {
+  int dirfd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY);
+  check("procfd_semantics: directory procfd setup", dirfd >= 0);
+  if (dirfd < 0)
+    return;
+
+  char procpath[64];
+  snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", dirfd);
+  errno = 0;
+  int bad = open(procpath, O_RDONLY | O_TRUNC);
+  check("procfd_semantics: directory procfd trunc reports EISDIR",
+        bad < 0 && errno == EISDIR);
+  if (bad >= 0)
+    close(bad);
+  close(dirfd);
+}
+
+static void test_devfs_procfd_preserves_state(void) {
+  int master = open("/dev/ptmx", O_RDWR);
+  int slave = open("/dev/pts/0", O_RDWR);
+  check("procfd_semantics: devfs pty setup", master >= 0 && slave >= 0);
+  if (master < 0 || slave < 0) {
+    if (master >= 0)
+      close(master);
+    if (slave >= 0)
+      close(slave);
+    return;
+  }
+
+  char procpath[64];
+  snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", master);
+  check("procfd_semantics: devfs pty pending write", write(master, "x", 1) == 1);
+  int reopened = open(procpath, O_RDWR);
+  check("procfd_semantics: devfs pty procfd reopen", reopened >= 0);
+
+  char c = 0;
+  check("procfd_semantics: devfs pty buffer preserved",
+        read_one(slave, &c) == 1 && c == 'x');
+  if (reopened >= 0) {
+    c = 0;
+    check("procfd_semantics: devfs pty reopened writes same slave",
+          write(reopened, "y", 1) == 1 &&
+          read_one(slave, &c) == 1 && c == 'y');
+    close(reopened);
+  }
+  close(slave);
+  close(master);
 }
 
 static void test_common_proc_nodes(void) {
@@ -199,6 +255,8 @@ int main(void) {
   test_regular_reopen_preserves_identity("/tmp/procfd-sem-identity");
   test_regular_reopen_preserves_identity("/mnt/procfd-sem-identity");
   test_pipe_reopen();
+  test_directory_reopen_flags();
+  test_devfs_procfd_preserves_state();
   test_common_proc_nodes();
   printf("=== procfd_semantics: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
