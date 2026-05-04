@@ -389,14 +389,17 @@ long sys_epoll_pwait_handler(struct trapframe *tf) {
         }
         if (has_timeout) {
             current_proc->sleep_until = deadline_ticks;
-            current_proc->waiting_for_uart = 2;
+            /* BF: epoll_pwait has both an fd event condition and a timeout.
+             * Use an event-timed marker so pipe readiness can wake us before
+             * the deadline while the timer still handles pure timeout. */
+            current_proc->waiting_for_uart = PROC_WAIT_EVENT_TIMER;
             timer_reschedule();
         } else {
-            current_proc->waiting_for_uart = 1;
+            current_proc->waiting_for_uart = PROC_WAIT_UART;
         }
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
-        current_proc->waiting_for_uart = 0;
+        current_proc->waiting_for_uart = PROC_WAIT_NONE;
         if (signal_pending_interrupts_syscall(current_proc, 0) ||
             current_proc->signal_handled_epoch != epoch_before) {
             if (has_sigmask) {
@@ -678,10 +681,13 @@ ppoll_wait_again:
          * causing ppoll to return immediately instead of blocking. */
         if (has_timeout && sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
-            current_proc->waiting_for_uart = 2;
+            /* BF: timed fd waits must be woken by either readiness or the
+             * deadline.  PROC_WAIT_TIMER is timer-only and pipe wakeups skip
+             * it, so use the event-timed marker for ppoll. */
+            current_proc->waiting_for_uart = PROC_WAIT_EVENT_TIMER;
             timer_reschedule();
         } else if (!has_timeout) {
-            current_proc->waiting_for_uart = 1; /* block indefinitely */
+            current_proc->waiting_for_uart = PROC_WAIT_UART; /* block indefinitely */
         }
         if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
@@ -689,7 +695,7 @@ ppoll_wait_again:
             /* BF: Clear on ALL post-sleep paths — stale waiting_for_uart
              * value (1 or 2) causes scheduler to mistrack process state
              * in subsequent syscalls. */
-            current_proc->waiting_for_uart = 0;
+            current_proc->waiting_for_uart = PROC_WAIT_NONE;
         }
 
         /* BF: ppoll must return -EINTR when a deliverable signal is pending
@@ -869,10 +875,13 @@ pselect_wait_again:
          * sleep_until_val is 0 so we need waiting_for_uart=1 (indefinite). */
         if (has_timeout && sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
-            current_proc->waiting_for_uart = 2;
+            /* BF: timed fd waits must be woken by either readiness or the
+             * deadline.  PROC_WAIT_TIMER is timer-only and pipe wakeups skip
+             * it, so use the event-timed marker for pselect. */
+            current_proc->waiting_for_uart = PROC_WAIT_EVENT_TIMER;
             timer_reschedule();
         } else if (!has_timeout) {
-            current_proc->waiting_for_uart = 1; /* block indefinitely */
+            current_proc->waiting_for_uart = PROC_WAIT_UART; /* block indefinitely */
         }
         if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
@@ -880,7 +889,7 @@ pselect_wait_again:
             /* BF: Clear on ALL post-sleep paths — stale waiting_for_uart
              * value (1 or 2) causes scheduler to mistrack process state
              * in subsequent syscalls. */
-            current_proc->waiting_for_uart = 0;
+            current_proc->waiting_for_uart = PROC_WAIT_NONE;
         }
 
         /* BF: If a signal handler ran between mask swap and here,

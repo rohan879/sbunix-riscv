@@ -315,13 +315,13 @@ int tty_read(char *buf, int len) {
        * waiting for input. */
       if (signal_pending_interrupts_syscall(current_proc, 0))
         return -EINTR;
-      current_proc->waiting_for_uart = 1;
+      current_proc->waiting_for_uart = PROC_WAIT_UART;
       current_proc->state = SLEEPING;
       /* BF: Close the lost-wakeup window.  UART input can arrive after the
        * empty-buffer check but before the process is marked sleeping; recheck
        * after publishing the sleep state so buffered input is consumed now. */
       if (ring_avail(tty0.cooked_r, tty0.cooked_w) != 0 || tty0.cooked_eof) {
-        current_proc->waiting_for_uart = 0;
+        current_proc->waiting_for_uart = PROC_WAIT_NONE;
         current_proc->state = RUNNING;
         break;
       }
@@ -353,11 +353,11 @@ int tty_read(char *buf, int len) {
     while (ring_avail(tty0.raw_r, tty0.raw_w) == 0) {
       if (signal_pending_interrupts_syscall(current_proc, 0))
         return -EINTR;
-      current_proc->waiting_for_uart = 1;
+      current_proc->waiting_for_uart = PROC_WAIT_UART;
       current_proc->state = SLEEPING;
       /* BF: Same lost-wakeup close as cooked mode, but for raw input. */
       if (ring_avail(tty0.raw_r, tty0.raw_w) != 0) {
-        current_proc->waiting_for_uart = 0;
+        current_proc->waiting_for_uart = PROC_WAIT_NONE;
         current_proc->state = RUNNING;
         break;
       }

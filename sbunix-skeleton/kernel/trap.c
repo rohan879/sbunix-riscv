@@ -111,7 +111,7 @@ void close_ofile(struct proc *p, int fd) {
         pipes[pid].used = 0;
       /* Wake any sleeping pipe readers/writers */
       for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
-        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
+        if (pp->state == SLEEPING && pp->waiting_for_uart != PROC_WAIT_TIMER)
           pp->state = RUNNABLE;
       }
     }
@@ -120,7 +120,7 @@ void close_ofile(struct proc *p, int fd) {
       if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
         pipes[pid].used = 0;
       for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
-        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
+        if (pp->state == SLEEPING && pp->waiting_for_uart != PROC_WAIT_TIMER)
           pp->state = RUNNABLE;
       }
     }
@@ -171,7 +171,9 @@ static uint64_t timer_nearest_deadline(uint64_t now) {
     uint64_t nearest = 0;
 
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-        if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
+        if (p->state == SLEEPING &&
+            (p->waiting_for_uart == PROC_WAIT_TIMER ||
+             p->waiting_for_uart == PROC_WAIT_EVENT_TIMER) &&
             p->sleep_until > 0) {
             if (nearest == 0 || p->sleep_until < nearest)
                 nearest = p->sleep_until;
@@ -272,7 +274,7 @@ static void handle_external_interrupt(void) {
          * timed sleeps (waiting_for_uart==2) or UART-input sleeps (==1,
          * already handled by uart_wakeup above). */
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->state == SLEEPING && p->waiting_for_uart == 0)
+            if (p->state == SLEEPING && p->waiting_for_uart == PROC_WAIT_NONE)
                 p->state = RUNNABLE;
         }
         #ifdef TIMER_DISPLAY
@@ -335,9 +337,11 @@ static void handle_timer_interrupt(void) {
 
     /* Wake processes whose timed sleep has expired */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-        if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
+        if (p->state == SLEEPING &&
+            (p->waiting_for_uart == PROC_WAIT_TIMER ||
+             p->waiting_for_uart == PROC_WAIT_EVENT_TIMER) &&
             now >= p->sleep_until) {
-            p->waiting_for_uart = 0;
+            p->waiting_for_uart = PROC_WAIT_NONE;
             p->state = RUNNABLE;
             woke_deadline = 1;
         }

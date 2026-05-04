@@ -83,18 +83,18 @@ static long sleep_until_deadline(uint64_t deadline, uint64_t rem_uaddr,
                                  int write_rem_on_interrupt) {
     while (r_time() < deadline) {
         current_proc->sleep_until = deadline;
-        current_proc->waiting_for_uart = 2;
+        current_proc->waiting_for_uart = PROC_WAIT_TIMER;
         timer_reschedule();
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
 
         uint64_t now = r_time();
-        if (current_proc->waiting_for_uart != 2) {
-            current_proc->waiting_for_uart = 0;
+        if (current_proc->waiting_for_uart != PROC_WAIT_TIMER) {
+            current_proc->waiting_for_uart = PROC_WAIT_NONE;
             break;
         }
 
-        current_proc->waiting_for_uart = 0;
+        current_proc->waiting_for_uart = PROC_WAIT_NONE;
         if (signal_pending_interrupts_syscall(current_proc, 0)) {
             if (write_rem_on_interrupt && rem_uaddr) {
                 uint64_t remaining = deadline > now ? deadline - now : 0;
@@ -108,7 +108,7 @@ static long sleep_until_deadline(uint64_t deadline, uint64_t rem_uaddr,
         }
     }
 
-    current_proc->waiting_for_uart = 0;
+    current_proc->waiting_for_uart = PROC_WAIT_NONE;
     return 0;
 }
 

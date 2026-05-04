@@ -16,6 +16,12 @@ static void record_usr1(int sig) {
   g_handled_usr1++;
 }
 
+static long elapsed_ms(const struct timespec *start, const struct timespec *end) {
+  long sec = (long)(end->tv_sec - start->tv_sec);
+  long nsec = end->tv_nsec - start->tv_nsec;
+  return sec * 1000 + nsec / 1000000;
+}
+
 static void child_sleep_case(int sig, int block_signal, int ready_fd) {
   if (block_signal) {
     sigset_t set;
@@ -311,6 +317,81 @@ static int run_epoll_pwait_mask_restart_case(void) {
   return ok;
 }
 
+static int run_epoll_pwait_ready_timeout_case(void) {
+  int fds[2];
+  if (pipe(fds) < 0) {
+    printf("[FAIL] signal_ignored_eintr: epoll ready pipe errno=%d\n", errno);
+    return 0;
+  }
+
+  long efd = syscall(SYS_epoll_create1, 0);
+  if (efd < 0) {
+    printf("[FAIL] signal_ignored_eintr: epoll ready create ret=%ld\n", efd);
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+
+  uint8_t event[12];
+  memset(event, 0, sizeof(event));
+  uint32_t events = 0x01; /* EPOLLIN */
+  uint64_t data = 0x507;
+  memcpy(event, &events, 4);
+  memcpy(event + 4, &data, 8);
+  long ctl = syscall(SYS_epoll_ctl, efd, 1, fds[0], event);
+  if (ctl < 0) {
+    printf("[FAIL] signal_ignored_eintr: epoll ready ctl ret=%ld\n", ctl);
+    close((int)efd);
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+
+  pid_t child = fork();
+  if (child < 0) {
+    printf("[FAIL] signal_ignored_eintr: epoll ready fork errno=%d\n", errno);
+    close((int)efd);
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+  if (child == 0) {
+    close(fds[0]);
+    usleep(50000);
+    write(fds[1], "r", 1);
+    close(fds[1]);
+    _exit(0);
+  }
+
+  close(fds[1]);
+  uint8_t out[12];
+  memset(out, 0, sizeof(out));
+  struct timespec start;
+  struct timespec end;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  long ret = syscall(SYS_epoll_pwait, efd, out, 1, 1000, 0, 0);
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  long waited = elapsed_ms(&start, &end);
+
+  uint32_t revents = 0;
+  memcpy(&revents, out, 4);
+  char c = 0;
+  int ok = (ret == 1 && (revents & 0x01) &&
+            read(fds[0], &c, 1) == 1 && c == 'r' && waited < 500);
+
+  int status = 0;
+  waitpid(child, &status, 0);
+  close((int)efd);
+  close(fds[0]);
+
+  if (ok)
+    printf("[PASS] signal_ignored_eintr: epoll_pwait readiness beats timeout\n");
+  else
+    printf("[FAIL] signal_ignored_eintr: epoll ready ret=%ld events=0x%x waited=%ld\n",
+           ret, revents, waited);
+  return ok;
+}
+
 int main(void) {
   int pass = 1;
   sigset_t set;
@@ -334,6 +415,8 @@ int main(void) {
   if (!run_sigtimedwait_restart_case())
     pass = 0;
   if (!run_epoll_pwait_mask_restart_case())
+    pass = 0;
+  if (!run_epoll_pwait_ready_timeout_case())
     pass = 0;
 
   return pass ? 0 : 1;

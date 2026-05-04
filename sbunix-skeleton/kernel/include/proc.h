@@ -84,6 +84,12 @@ enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 /* Maximum open file descriptors per process */
 #define NOFILE 64
 
+/* Sleep wait markers used by timer and ad-hoc wake paths. */
+#define PROC_WAIT_NONE        0
+#define PROC_WAIT_UART        1
+#define PROC_WAIT_TIMER       2
+#define PROC_WAIT_EVENT_TIMER 3
+
 /* Forward declarations */
 struct vm_area;
 struct open_file;
@@ -171,7 +177,7 @@ struct proc {
   struct trapframe *trapframe; // data page for trampoline.S
   struct context context;      // swtch() here to run process
   char name[16];               // Process name (debugging)
-  int waiting_for_uart;        // 1 if sleeping for UART input; 2 if timed sleep
+  int waiting_for_uart;        // PROC_WAIT_* sleep marker
   uint64_t sleep_until;        // for timed sleep: wake when r_time() >= this deadline
   unsigned long alarm_ticks;   // tick count when alarm fires (0 = no alarm)
   int exit_status;             // exit status (for wait4)
