@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
@@ -166,7 +167,7 @@ int rename(const char *oldpath, const char *newpath) {
 }
 
 int access(const char *path, int mode) {
-    return (int)__syscall_ret(syscall(SYS_faccessat, AT_FDCWD, path, mode, 0));
+    return faccessat(AT_FDCWD, path, mode, 0);
 }
 
 int execv(const char *path, char *const argv[]) {
@@ -431,7 +432,41 @@ int creat(const char *path, mode_t mode) {
 }
 
 int faccessat(int dirfd, const char *path, int mode, int flags) {
-    return (int)__syscall_ret(syscall(SYS_faccessat, dirfd, path, mode, flags));
+    struct stat st;
+    mode_t bits;
+    int stat_flags = 0;
+
+    if (mode & ~(R_OK | W_OK | X_OK)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (flags & AT_SYMLINK_NOFOLLOW)
+        stat_flags |= AT_SYMLINK_NOFOLLOW;
+    if (flags & AT_EMPTY_PATH)
+        stat_flags |= AT_EMPTY_PATH;
+    if (fstatat(dirfd, path, &st, stat_flags) < 0)
+        return -1;
+    if (mode == F_OK)
+        return 0;
+
+    bits = st.st_mode;
+    if ((mode & R_OK) && !(bits & (S_IRUSR | S_IRGRP | S_IROTH))) {
+        errno = EACCES;
+        return -1;
+    }
+    if ((mode & W_OK) && !(bits & (S_IWUSR | S_IWGRP | S_IWOTH))) {
+        errno = EACCES;
+        return -1;
+    }
+    if ((mode & X_OK) && !(bits & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+        errno = EACCES;
+        return -1;
+    }
+    return 0;
 }
 
 int fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags) {
@@ -535,28 +570,104 @@ long sysconf(int name) {
     }
 }
 
+static int pathconf_value(int name, long *value) {
+    switch (name) {
+    case _PC_FILESIZEBITS:
+        *value = FILESIZEBITS;
+        return 1;
+    case _PC_NAME_MAX:
+        *value = NAME_MAX;
+        return 1;
+    case _PC_PATH_MAX:
+        *value = PATH_MAX;
+        return 1;
+    case _PC_ALLOC_SIZE_MIN:
+        *value = POSIX_ALLOC_SIZE_MIN;
+        return 1;
+    case _PC_CHOWN_RESTRICTED:
+        *value = _POSIX_CHOWN_RESTRICTED;
+        return 1;
+    case _PC_LINK_MAX:
+        *value = LINK_MAX;
+        return 1;
+    case _PC_MAX_CANON:
+        *value = MAX_CANON;
+        return 1;
+    case _PC_MAX_INPUT:
+        *value = MAX_INPUT;
+        return 1;
+    case _PC_NO_TRUNC:
+        *value = _POSIX_NO_TRUNC;
+        return 1;
+    case _PC_PIPE_BUF:
+        *value = PIPE_BUF;
+        return 1;
+    case _PC_REC_INCR_XFER_SIZE:
+        *value = POSIX_REC_INCR_XFER_SIZE;
+        return 1;
+    case _PC_REC_MAX_XFER_SIZE:
+        *value = POSIX_REC_MAX_XFER_SIZE;
+        return 1;
+    case _PC_REC_MIN_XFER_SIZE:
+        *value = POSIX_REC_MIN_XFER_SIZE;
+        return 1;
+    case _PC_REC_XFER_ALIGN:
+        *value = POSIX_REC_XFER_ALIGN;
+        return 1;
+    case _PC_SYMLINK_MAX:
+        *value = SYMLINK_MAX;
+        return 1;
+    case _PC_TEXTDOMAIN_MAX:
+        *value = TEXTDOMAIN_MAX;
+        return 1;
+    case _PC_VDISABLE:
+        *value = _POSIX_VDISABLE;
+        return 1;
+    case _PC_2_SYMLINKS:
+        *value = 1;
+        return 1;
+    case _PC_ASYNC_IO:
+    case _PC_FALLOC:
+    case _PC_PRIO_IO:
+    case _PC_SYNC_IO:
+    case _PC_TIMESTAMP_RESOLUTION:
+        *value = -1;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 long pathconf(const char *path, int name) {
-    (void)path;
-    if (name == _PC_FILESIZEBITS)
-        return 64;
-    if (name == _PC_NAME_MAX)
-        return 255;
-    if (name == _PC_PATH_MAX)
-        return 4096;
-    errno = EINVAL;
-    return -1;
+    struct stat st;
+    long value;
+    int saved_errno = errno;
+
+    if (!pathconf_value(name, &value)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (stat(path, &st) < 0)
+        return -1;
+    if (value == -1)
+        errno = saved_errno;
+    return value;
 }
 
 long fpathconf(int fd, int name) {
-    (void)fd;
-    if (name == _PC_FILESIZEBITS)
-        return 64;
-    if (name == _PC_NAME_MAX)
-        return 255;
-    if (name == _PC_PATH_MAX)
-        return 4096;
-    errno = EINVAL;
-    return -1;
+    struct stat st;
+    long value;
+    int saved_errno = errno;
+
+    if (!pathconf_value(name, &value)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (fstat(fd, &st) < 0)
+        return -1;
+    if (value == -1)
+        errno = saved_errno;
+    return value;
 }
 
 int chown(const char *path, uid_t owner, gid_t group) {
