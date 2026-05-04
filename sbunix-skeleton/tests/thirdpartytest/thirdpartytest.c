@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -118,6 +119,37 @@ static int ensure_dir(const char *path)
 static int binary_present(const char *path)
 {
   return access(path, X_OK) == 0;
+}
+
+static void test_libc_compat_smoke(void)
+{
+  const char *base = "/mnt/thirdpartytest-libc";
+  const char *path = "/mnt/thirdpartytest-libc/tool";
+
+  unlink(path);
+  rmdir(base);
+
+  CHECK("libc smoke: base dir created", ensure_dir(base) == 0);
+  CHECK("libc smoke: non-executable file created",
+        write_text(path, "tool\n", 0644) == 0);
+
+  errno = 0;
+  CHECK("libc smoke: access X_OK rejects missing execute bit",
+        access(path, X_OK) == -1 && errno == EACCES);
+  CHECK("libc smoke: chmod adds execute bit", chmod(path, 0755) == 0);
+  errno = 0;
+  CHECK("libc smoke: access X_OK accepts executable",
+        faccessat(AT_FDCWD, path, X_OK, 0) == 0);
+
+  errno = 0;
+  CHECK("libc smoke: pathconf NAME_MAX",
+        pathconf(base, _PC_NAME_MAX) == NAME_MAX);
+  errno = 0;
+  CHECK("libc smoke: pathconf PIPE_BUF",
+        pathconf(base, _PC_PIPE_BUF) == PIPE_BUF);
+
+  unlink(path);
+  rmdir(base);
 }
 
 static void test_micropython(void)
@@ -545,6 +577,7 @@ int main(void)
 {
   printf("=== thirdpartytest: vendored workload integration ===\n");
 
+  test_libc_compat_smoke();
   test_micropython();
   test_busybox();
   test_pdpmake();
