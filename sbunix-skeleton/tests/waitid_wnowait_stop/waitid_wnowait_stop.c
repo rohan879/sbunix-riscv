@@ -6,6 +6,34 @@
 #include <time.h>
 #include <unistd.h>
 
+static volatile sig_atomic_t got_chld;
+static volatile sig_atomic_t got_alarm;
+static volatile sig_atomic_t got_cont;
+static volatile sig_atomic_t got_cont_pid;
+static volatile sig_atomic_t got_cont_code;
+
+static void chld_handler(int sig) {
+  (void)sig;
+  got_chld = 1;
+}
+
+static void alarm_handler(int sig) {
+  (void)sig;
+  got_alarm = 1;
+}
+
+static void chld_info_handler(int sig, siginfo_t *info, void *ctx) {
+  (void)sig;
+  (void)ctx;
+  got_chld = 1;
+  if (info) {
+    got_cont_pid = info->si_pid;
+    got_cont_code = info->si_code;
+    if (info->si_code == CLD_CONTINUED)
+      got_cont = 1;
+  }
+}
+
 static void child_loop(void) {
   for (;;) {
     struct timespec ts;
@@ -24,6 +52,127 @@ static int check_stopped(const char *label, siginfo_t *si, pid_t child) {
   }
   printf("[PASS] waitid_wnowait_stop: %s reported stop\n", label);
   return 1;
+}
+
+static int test_waitpid_stop_sigchld_eintr(void) {
+  int fds[2];
+  if (pipe(fds) != 0) {
+    printf("[FAIL] waitid_wnowait_stop: waitpid pipe errno=%d\n", errno);
+    return 0;
+  }
+
+  struct sigaction chld;
+  struct sigaction old_chld;
+  struct sigaction alrm;
+  struct sigaction old_alrm;
+  memset(&chld, 0, sizeof(chld));
+  memset(&alrm, 0, sizeof(alrm));
+  chld.sa_handler = chld_handler;
+  alrm.sa_handler = alarm_handler;
+  sigemptyset(&chld.sa_mask);
+  sigemptyset(&alrm.sa_mask);
+  sigaction(SIGCHLD, &chld, &old_chld);
+  sigaction(SIGALRM, &alrm, &old_alrm);
+  got_chld = 0;
+  got_alarm = 0;
+
+  pid_t child = fork();
+  if (child < 0) {
+    printf("[FAIL] waitid_wnowait_stop: waitpid fork errno=%d\n", errno);
+    close(fds[0]);
+    close(fds[1]);
+    sigaction(SIGCHLD, &old_chld, 0);
+    sigaction(SIGALRM, &old_alrm, 0);
+    return 0;
+  }
+  if (child == 0) {
+    close(fds[0]);
+    char ready = 'r';
+    write(fds[1], &ready, 1);
+    close(fds[1]);
+    usleep(50000);
+    kill(getpid(), SIGSTOP);
+    _exit(0);
+  }
+
+  close(fds[1]);
+  char ready = 0;
+  read(fds[0], &ready, 1);
+  close(fds[0]);
+
+  int status = 0;
+  alarm(2);
+  errno = 0;
+  pid_t got = waitpid(child, &status, 0);
+  alarm(0);
+  int ok = (got == -1 && errno == EINTR && got_chld && !got_alarm);
+  if (ok)
+    printf("[PASS] waitid_wnowait_stop: caught SIGCHLD interrupts unreportable waitpid stop\n");
+  else
+    printf("[FAIL] waitid_wnowait_stop: waitpid got=%d errno=%d chld=%d alarm=%d\n",
+           got, errno, got_chld, got_alarm);
+
+  kill(child, SIGKILL);
+  waitpid(child, &status, 0);
+  sigaction(SIGCHLD, &old_chld, 0);
+  sigaction(SIGALRM, &old_alrm, 0);
+  return ok;
+}
+
+static int test_sigcont_cld_continued(void) {
+  struct sigaction chld;
+  struct sigaction old_chld;
+  memset(&chld, 0, sizeof(chld));
+  chld.sa_sigaction = chld_info_handler;
+  chld.sa_flags = SA_SIGINFO;
+  sigemptyset(&chld.sa_mask);
+  sigaction(SIGCHLD, &chld, &old_chld);
+  got_chld = 0;
+  got_cont = 0;
+  got_cont_pid = 0;
+  got_cont_code = 0;
+
+  pid_t child = fork();
+  if (child < 0) {
+    printf("[FAIL] waitid_wnowait_stop: cont fork errno=%d\n", errno);
+    sigaction(SIGCHLD, &old_chld, 0);
+    return 0;
+  }
+  if (child == 0)
+    child_loop();
+
+  usleep(50000);
+  kill(child, SIGSTOP);
+  siginfo_t si;
+  memset(&si, 0, sizeof(si));
+  if (waitid(P_PID, child, &si, WSTOPPED) < 0) {
+    printf("[FAIL] waitid_wnowait_stop: cont stop wait errno=%d\n", errno);
+    kill(child, SIGKILL);
+    waitpid(child, 0, 0);
+    sigaction(SIGCHLD, &old_chld, 0);
+    return 0;
+  }
+
+  got_chld = 0;
+  got_cont = 0;
+  got_cont_pid = 0;
+  got_cont_code = 0;
+  kill(child, SIGCONT);
+  for (int i = 0; i < 200 && !got_cont; i++)
+    usleep(10000);
+
+  int ok = (got_cont && got_cont_pid == child &&
+            got_cont_code == CLD_CONTINUED);
+  if (ok)
+    printf("[PASS] waitid_wnowait_stop: default SIGCONT reports CLD_CONTINUED\n");
+  else
+    printf("[FAIL] waitid_wnowait_stop: cont pid=%d code=%d got=%d\n",
+           got_cont_pid, got_cont_code, got_cont);
+
+  kill(child, SIGKILL);
+  waitpid(child, 0, 0);
+  sigaction(SIGCHLD, &old_chld, 0);
+  return ok;
 }
 
 int main(void) {
@@ -90,6 +239,11 @@ int main(void) {
            status, errno);
     pass = 0;
   }
+
+  if (!test_waitpid_stop_sigchld_eintr())
+    pass = 0;
+  if (!test_sigcont_cld_continued())
+    pass = 0;
 
   return pass ? 0 : 1;
 }

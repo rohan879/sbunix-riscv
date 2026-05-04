@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <sys/wait.h>
@@ -96,6 +97,68 @@ static int run_sleep_case(const char *name, int sig, int block_signal) {
   return 1;
 }
 
+static int run_ppoll_ignored_case(void) {
+  int fds[2];
+  if (pipe(fds) < 0) {
+    printf("[FAIL] signal_ignored_eintr: ppoll pipe errno=%d\n", errno);
+    return 0;
+  }
+
+  struct sigaction sa;
+  sa.sa_handler = SIG_IGN;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  sa.sa_restorer = 0;
+  if (sigaction(SIGUSR1, &sa, 0) < 0) {
+    printf("[FAIL] signal_ignored_eintr: ppoll sigaction errno=%d\n", errno);
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+
+  pid_t parent = getpid();
+  pid_t child = fork();
+  if (child < 0) {
+    printf("[FAIL] signal_ignored_eintr: ppoll fork errno=%d\n", errno);
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+  if (child == 0) {
+    close(fds[0]);
+    usleep(50000);
+    kill(parent, SIGUSR1);
+    usleep(50000);
+    write(fds[1], "q", 1);
+    close(fds[1]);
+    _exit(0);
+  }
+
+  close(fds[1]);
+  struct pollfd pfd;
+  pfd.fd = fds[0];
+  pfd.events = POLLIN;
+  pfd.revents = 0;
+  struct timespec ts;
+  ts.tv_sec = 1;
+  ts.tv_nsec = 0;
+  errno = 0;
+  int ret = ppoll(&pfd, 1, &ts, 0);
+  char c = 0;
+  int ok = (ret == 1 && (pfd.revents & POLLIN) &&
+            read(fds[0], &c, 1) == 1 && c == 'q');
+  if (ok)
+    printf("[PASS] signal_ignored_eintr: ppoll ignored signal did not return EINTR\n");
+  else
+    printf("[FAIL] signal_ignored_eintr: ppoll ret=%d revents=%d errno=%d\n",
+           ret, pfd.revents, errno);
+
+  close(fds[0]);
+  int status = 0;
+  waitpid(child, &status, 0);
+  return ok;
+}
+
 int main(void) {
   int pass = 1;
   sigset_t set;
@@ -113,6 +176,8 @@ int main(void) {
   if (!run_sleep_case("ignored SIGUSR1", SIGUSR1, 0))
     pass = 0;
   if (!run_sleep_case("blocked SIGUSR2", SIGUSR2, 1))
+    pass = 0;
+  if (!run_ppoll_ignored_case())
     pass = 0;
 
   return pass ? 0 : 1;

@@ -738,6 +738,8 @@ static pid_t sys_wait4(pid_t wpid, uint64_t status_uaddr, int options) {
         if (options & 1) return 0;
         /* Otherwise sleep until a child exits */
         if (current_proc) {
+            if (signal_pending_interrupts_syscall(current_proc, 1))
+                return -EINTR;
             current_proc->waiting_for_uart = 0;
             /* BF: Mark this process as a wait4 sleeper so setpgid can
              * selectively wake only waitpid callers, not pipe/poll/futex. */
@@ -1369,6 +1371,8 @@ long sys_waitid_handler(struct trapframe *tf) {
         }
 
         if (current_proc) {
+            if (signal_pending_interrupts_syscall(current_proc, 1))
+                return -EINTR;
             current_proc->waiting_for_uart = 0;
             current_proc->waiting_for_child = 1;
             current_proc->state = SLEEPING;

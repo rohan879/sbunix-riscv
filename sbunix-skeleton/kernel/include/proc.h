@@ -425,8 +425,7 @@ static inline void signal_queue_purge_all(struct proc *p, int signum) {
 }
 
 static inline int signal_default_is_ignore(int signum) {
-    return signum == SIGCHLD || signum == SIGURG ||
-           signum == SIGWINCH || signum == SIGCONT;
+    return signum == SIGCHLD || signum == SIGURG || signum == SIGWINCH;
 }
 
 static inline void signal_discard_pending(struct proc *p, int signum) {
@@ -452,8 +451,6 @@ static inline int signal_pending_interrupts_syscall(struct proc *p,
             continue;
 
         if (sa[s].handler > 1) {
-            if (wait_child && s == SIGCHLD)
-                continue;
             return 1;
         }
         if (sa[s].handler == 1) {
