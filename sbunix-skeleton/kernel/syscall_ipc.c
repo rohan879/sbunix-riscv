@@ -296,10 +296,46 @@ long sys_epoll_pwait_handler(struct trapframe *tf) {
     uint64_t events_uva = tf->a1;
     int maxevents = (int)tf->a2;
     int timeout_ms = (int)tf->a3;
+    uint64_t sigmask_uaddr = tf->a4;
+    uint64_t sigsetsize = tf->a5;
+
+    if (maxevents <= 0)
+        return (long)-EINVAL;
+
+    current_proc->has_saved_sigmask = 0;
+
+    uint64_t old_mask = current_proc->sigmask;
+    uint64_t epoch_before = current_proc->signal_handled_epoch;
+    int has_sigmask = 0;
+    if (sigmask_uaddr != 0) {
+        if (sigsetsize != sizeof(uint64_t))
+            return (long)-EINVAL;
+        uint64_t new_mask;
+        if (copyin(current_proc->pagetable, &new_mask, sigmask_uaddr, 8) < 0)
+            return (long)-EFAULT;
+        current_proc->sigmask = signal_mask_sanitize(new_mask);
+        has_sigmask = 1;
+    }
+
+    int has_timeout = timeout_ms >= 0;
+    uint64_t deadline_ticks = 0;
+    if (timeout_ms > 0) {
+        uint64_t sec = (uint64_t)timeout_ms / 1000;
+        uint64_t nsec = ((uint64_t)timeout_ms % 1000) * 1000000UL;
+        deadline_ticks = timespec_rel_deadline(sec, nsec);
+    }
+
     struct open_file **ftab = proc_ofile(current_proc);
-    if (epfd < 0 || epfd >= NOFILE || !ftab[epfd]) return (long)-9;
+    if (epfd < 0 || epfd >= NOFILE || !ftab[epfd]) {
+        if (has_sigmask) current_proc->sigmask = old_mask;
+        return (long)-9;
+    }
     struct epoll_private *ep = (struct epoll_private *)ftab[epfd]->private;
-    if (!ep) return (long)-22;
+    if (!ep) {
+        if (has_sigmask) current_proc->sigmask = old_mask;
+        return (long)-22;
+    }
+    int result_ready = 0;
     for (;;) {
         /* Check readiness of each registered fd */
         int nready = 0;
@@ -325,22 +361,58 @@ long sys_epoll_pwait_handler(struct trapframe *tf) {
                 memcpy(kevt + 4, &ep->entries[i].data, 8);
                 if (copyout(current_proc->pagetable,
                             events_uva + (uint64_t)nready * 12,
-                            kevt, 12) < 0)
+                            kevt, 12) < 0) {
+                    if (has_sigmask) current_proc->sigmask = old_mask;
                     return (long)-EFAULT;
+                }
                 nready++;
             }
         }
-        if (nready != 0 || timeout_ms == 0)
-            return (long)nready;
-        if (signal_pending_interrupts_syscall(current_proc, 0))
+        if (nready != 0 || timeout_ms == 0) {
+            result_ready = nready;
+            goto epoll_done;
+        }
+        if (signal_pending_interrupts_syscall(current_proc, 0) ||
+            current_proc->signal_handled_epoch != epoch_before) {
+            if (has_sigmask) {
+                current_proc->saved_sigmask_restore = old_mask;
+                current_proc->has_saved_sigmask = 1;
+            }
+            /* epoll_pwait uses ppoll/pselect-style mask semantics and must
+             * not be restarted after a caught signal, even with SA_RESTART. */
+            current_proc->in_syscall = 0;
             return (long)-EINTR;
+        }
+        if (has_timeout && deadline_ticks <= r_time()) {
+            result_ready = 0;
+            goto epoll_done;
+        }
+        if (has_timeout) {
+            current_proc->sleep_until = deadline_ticks;
+            current_proc->waiting_for_uart = 2;
+            timer_reschedule();
+        } else {
+            current_proc->waiting_for_uart = 1;
+        }
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
-        if (signal_pending_interrupts_syscall(current_proc, 0))
+        current_proc->waiting_for_uart = 0;
+        if (signal_pending_interrupts_syscall(current_proc, 0) ||
+            current_proc->signal_handled_epoch != epoch_before) {
+            if (has_sigmask) {
+                current_proc->saved_sigmask_restore = old_mask;
+                current_proc->has_saved_sigmask = 1;
+            }
+            /* epoll_pwait is a non-restartable signal-wait syscall. */
+            current_proc->in_syscall = 0;
             return (long)-EINTR;
-        if (timeout_ms > 0)
-            return 0;
+        }
     }
+
+epoll_done:
+    if (has_sigmask)
+        current_proc->sigmask = old_mask;
+    return (long)result_ready;
 }
 
 /* ------------------------------------------------------------------ */

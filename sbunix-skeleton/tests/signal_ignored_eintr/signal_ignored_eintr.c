@@ -1,10 +1,20 @@
 #include <errno.h>
 #include <poll.h>
+#include <stdint.h>
 #include <signal.h>
 #include <stdio.h>
+#include <string.h>
+#include <syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+static volatile int g_handled_usr1;
+
+static void record_usr1(int sig) {
+  (void)sig;
+  g_handled_usr1++;
+}
 
 static void child_sleep_case(int sig, int block_signal, int ready_fd) {
   if (block_signal) {
@@ -159,6 +169,148 @@ static int run_ppoll_ignored_case(void) {
   return ok;
 }
 
+static int run_sigtimedwait_restart_case(void) {
+  struct sigaction sa;
+  sa.sa_handler = record_usr1;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  sa.sa_restorer = 0;
+  if (sigaction(SIGUSR1, &sa, 0) < 0) {
+    printf("[FAIL] signal_ignored_eintr: sigtimedwait sigaction errno=%d\n", errno);
+    return 0;
+  }
+
+  pid_t parent = getpid();
+  pid_t child = fork();
+  if (child < 0) {
+    printf("[FAIL] signal_ignored_eintr: sigtimedwait fork errno=%d\n", errno);
+    return 0;
+  }
+  if (child == 0) {
+    usleep(50000);
+    kill(parent, SIGUSR1);
+    _exit(0);
+  }
+
+  sigset_t waitset;
+  sigemptyset(&waitset);
+  sigaddset(&waitset, SIGUSR2);
+  struct timespec ts;
+  ts.tv_sec = 1;
+  ts.tv_nsec = 0;
+  g_handled_usr1 = 0;
+  errno = 0;
+  int ret = sigtimedwait(&waitset, 0, &ts);
+  int ok = (ret < 0 && errno == EINTR && g_handled_usr1 == 1);
+  if (ok)
+    printf("[PASS] signal_ignored_eintr: sigtimedwait SA_RESTART still returns EINTR\n");
+  else
+    printf("[FAIL] signal_ignored_eintr: sigtimedwait ret=%d errno=%d handled=%d\n",
+           ret, errno, g_handled_usr1);
+
+  int status = 0;
+  waitpid(child, &status, 0);
+  return ok;
+}
+
+static int run_epoll_pwait_mask_restart_case(void) {
+  int fds[2];
+  if (pipe(fds) < 0) {
+    printf("[FAIL] signal_ignored_eintr: epoll pipe errno=%d\n", errno);
+    return 0;
+  }
+
+  long efd = syscall(SYS_epoll_create1, 0);
+  if (efd < 0) {
+    printf("[FAIL] signal_ignored_eintr: epoll create ret=%ld\n", efd);
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+
+  uint8_t event[12];
+  memset(event, 0, sizeof(event));
+  uint32_t events = 0x01; /* EPOLLIN */
+  uint64_t data = 0x506;
+  memcpy(event, &events, 4);
+  memcpy(event + 4, &data, 8);
+  long ctl = syscall(SYS_epoll_ctl, efd, 1, fds[0], event);
+  if (ctl < 0) {
+    printf("[FAIL] signal_ignored_eintr: epoll ctl ret=%ld\n", ctl);
+    close((int)efd);
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+
+  struct sigaction sa;
+  sa.sa_handler = record_usr1;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  sa.sa_restorer = 0;
+  if (sigaction(SIGUSR1, &sa, 0) < 0) {
+    printf("[FAIL] signal_ignored_eintr: epoll sigaction errno=%d\n", errno);
+    close((int)efd);
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+
+  sigset_t block;
+  sigset_t oldmask;
+  sigemptyset(&block);
+  sigaddset(&block, SIGUSR1);
+  if (pthread_sigmask(SIG_BLOCK, &block, &oldmask) != 0) {
+    printf("[FAIL] signal_ignored_eintr: epoll pthread_sigmask block\n");
+    close((int)efd);
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+
+  pid_t parent = getpid();
+  pid_t child = fork();
+  if (child < 0) {
+    printf("[FAIL] signal_ignored_eintr: epoll fork errno=%d\n", errno);
+    pthread_sigmask(SIG_SETMASK, &oldmask, 0);
+    close((int)efd);
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+  if (child == 0) {
+    usleep(50000);
+    kill(parent, SIGUSR1);
+    _exit(0);
+  }
+
+  sigset_t empty;
+  sigemptyset(&empty);
+  uint8_t out[12];
+  memset(out, 0, sizeof(out));
+  g_handled_usr1 = 0;
+  long ret = syscall(SYS_epoll_pwait, efd, out, 1, 1000, &empty, sizeof(empty));
+
+  sigset_t curmask;
+  pthread_sigmask(SIG_SETMASK, 0, &curmask);
+  int restored = sigismember(&curmask, SIGUSR1) == 1;
+  pthread_sigmask(SIG_SETMASK, &oldmask, 0);
+
+  int status = 0;
+  waitpid(child, &status, 0);
+  close((int)efd);
+  close(fds[0]);
+  close(fds[1]);
+
+  int ok = (ret == -EINTR && g_handled_usr1 == 1 && restored);
+  if (ok)
+    printf("[PASS] signal_ignored_eintr: epoll_pwait mask SA_RESTART returns EINTR\n");
+  else
+    printf("[FAIL] signal_ignored_eintr: epoll_pwait ret=%ld handled=%d restored=%d\n",
+           ret, g_handled_usr1, restored);
+  return ok;
+}
+
 int main(void) {
   int pass = 1;
   sigset_t set;
@@ -178,6 +330,10 @@ int main(void) {
   if (!run_sleep_case("blocked SIGUSR2", SIGUSR2, 1))
     pass = 0;
   if (!run_ppoll_ignored_case())
+    pass = 0;
+  if (!run_sigtimedwait_restart_case())
+    pass = 0;
+  if (!run_epoll_pwait_mask_restart_case())
     pass = 0;
 
   return pass ? 0 : 1;

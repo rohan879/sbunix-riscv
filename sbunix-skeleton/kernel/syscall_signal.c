@@ -508,8 +508,12 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
 
         /* Check for other signals that should interrupt the wait.  Signals
          * in waitset are consumed above by sigtimedwait itself. */
-        if (signal_pending_interrupts_syscall_except(current_proc, waitset))
+        if (signal_pending_interrupts_syscall_except(current_proc, waitset)) {
+            /* POSIX: sigtimedwait reports EINTR for caught signals outside
+             * the waited set and is not restarted by SA_RESTART. */
+            current_proc->in_syscall = 0;
             return (long)-EINTR;
+        }
     }
 }
 
