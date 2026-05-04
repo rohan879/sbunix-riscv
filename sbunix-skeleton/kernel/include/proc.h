@@ -208,6 +208,8 @@ struct proc {
   uint64_t stack_bottom;         /* lowest allocated stack page */
   int has_execed;                           /* set to 1 after execve (for setpgid) */
   int stopped_signal;                       /* non-zero if stopped by signal (for WUNTRACED) */
+  int stop_reported;                        /* non-zero once stopped state was waited */
+  int continued_signal;                     /* non-zero if continued for WCONTINUED */
   /* Clone/thread sharing state */
   int clone_flags;                          /* flags this proc was created with */
   struct shared_pagetable  *shared_pt;      /* non-NULL if CLONE_VM */
@@ -425,7 +427,8 @@ static inline void signal_queue_purge_all(struct proc *p, int signum) {
 }
 
 static inline int signal_default_is_ignore(int signum) {
-    return signum == SIGCHLD || signum == SIGURG || signum == SIGWINCH;
+    return signum == SIGCHLD || signum == SIGURG || signum == SIGWINCH ||
+           signum == SIGCONT;
 }
 
 static inline void signal_discard_pending(struct proc *p, int signum) {
@@ -437,9 +440,9 @@ static inline void signal_discard_pending(struct proc *p, int signum) {
  * return can deliver a user handler or default stop/terminate action.
  * Ignored, blocked, and default-ignore signals are consumed or skipped here
  * so they do not spuriously interrupt sleeps. */
-static inline int signal_pending_interrupts_syscall(struct proc *p,
-                                                    int wait_child) {
-    uint64_t deliverable = signal_deliverable_mask(p);
+static inline int signal_pending_interrupts_syscall_except(struct proc *p,
+                                                           uint64_t except_mask) {
+    uint64_t deliverable = signal_deliverable_mask(p) & ~except_mask;
     struct kern_sigaction *sa;
 
     if (!deliverable)
@@ -465,6 +468,12 @@ static inline int signal_pending_interrupts_syscall(struct proc *p,
     }
 
     return 0;
+}
+
+static inline int signal_pending_interrupts_syscall(struct proc *p,
+                                                    int wait_child) {
+    (void)wait_child;
+    return signal_pending_interrupts_syscall_except(p, 0);
 }
 
 /* BF: Size of user-space siginfo_t for copyin/copyout to user buffers.

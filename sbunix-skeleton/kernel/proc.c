@@ -223,6 +223,8 @@ found:
   p->alarm_ticks = 0;
   p->killed_by_signal = 0;
   p->stopped_signal = 0;
+  p->stop_reported = 0;
+  p->continued_signal = 0;
 
   /* BF: Initialize alternate signal stack to SS_DISABLE.  Without this,
    * recycled process slots retain stale ss_flags from the previous

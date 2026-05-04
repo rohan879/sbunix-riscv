@@ -300,41 +300,47 @@ long sys_epoll_pwait_handler(struct trapframe *tf) {
     if (epfd < 0 || epfd >= NOFILE || !ftab[epfd]) return (long)-9;
     struct epoll_private *ep = (struct epoll_private *)ftab[epfd]->private;
     if (!ep) return (long)-22;
-    /* Check readiness of each registered fd */
-    int nready = 0;
-    for (int i = 0; i < ep->count && nready < maxevents; i++) {
-        int fd = ep->entries[i].fd;
-        if (fd < 0 || fd >= NOFILE || !ftab[fd]) continue;
-        struct open_file *f = ftab[fd];
-        int ready = 0;
-        if (f->is_pipe && f->pipe_read) {
-            int pid = f->pipe_id;
-            if (pipe_avail(pid) > 0 || pipes[pid].write_open <= 0) ready = 1;
-        } else if (f->is_pipe && f->pipe_write) {
-            int pid = f->pipe_id;
-            if (pipe_avail(pid) < KPIPE_BUF) ready = 1;
-        } else {
-            ready = 1; /* regular files are always ready */
+    for (;;) {
+        /* Check readiness of each registered fd */
+        int nready = 0;
+        for (int i = 0; i < ep->count && nready < maxevents; i++) {
+            int fd = ep->entries[i].fd;
+            if (fd < 0 || fd >= NOFILE || !ftab[fd]) continue;
+            struct open_file *f = ftab[fd];
+            int ready = 0;
+            if (f->is_pipe && f->pipe_read) {
+                int pid = f->pipe_id;
+                if (pipe_avail(pid) > 0 || pipes[pid].write_open <= 0) ready = 1;
+            } else if (f->is_pipe && f->pipe_write) {
+                int pid = f->pipe_id;
+                if (pipe_avail(pid) < KPIPE_BUF) ready = 1;
+            } else {
+                ready = 1; /* regular files are always ready */
+            }
+            if (ready) {
+                uint8_t kevt[12];
+                uint32_t revents = ep->entries[i].events & 0x01; /* EPOLLIN */
+                if (f->is_pipe && f->pipe_write) revents = ep->entries[i].events & 0x04; /* EPOLLOUT */
+                memcpy(kevt, &revents, 4);
+                memcpy(kevt + 4, &ep->entries[i].data, 8);
+                if (copyout(current_proc->pagetable,
+                            events_uva + (uint64_t)nready * 12,
+                            kevt, 12) < 0)
+                    return (long)-EFAULT;
+                nready++;
+            }
         }
-        if (ready) {
-            uint8_t kevt[12];
-            uint32_t revents = ep->entries[i].events & 0x01; /* EPOLLIN */
-            if (f->is_pipe && f->pipe_write) revents = ep->entries[i].events & 0x04; /* EPOLLOUT */
-            memcpy(kevt, &revents, 4);
-            memcpy(kevt + 4, &ep->entries[i].data, 8);
-            if (copyout(current_proc->pagetable, events_uva + (uint64_t)nready * 12, kevt, 12) < 0)
-                return (long)-EFAULT;
-            nready++;
-        }
-    }
-    if (nready == 0 && timeout_ms != 0) {
-        /* Sleep and retry once */
+        if (nready != 0 || timeout_ms == 0)
+            return (long)nready;
+        if (signal_pending_interrupts_syscall(current_proc, 0))
+            return (long)-EINTR;
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
-        /* After wake, re-check (simplified: return 0 if still nothing) */
-        return 0;
+        if (signal_pending_interrupts_syscall(current_proc, 0))
+            return (long)-EINTR;
+        if (timeout_ms > 0)
+            return 0;
     }
-    return (long)nready;
 }
 
 /* ------------------------------------------------------------------ */

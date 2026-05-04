@@ -175,6 +175,81 @@ static int test_sigcont_cld_continued(void) {
   return ok;
 }
 
+static int test_waitpid_wcontinued(void) {
+  pid_t child = fork();
+  if (child < 0) {
+    printf("[FAIL] waitid_wnowait_stop: WCONTINUED fork errno=%d\n", errno);
+    return 0;
+  }
+  if (child == 0)
+    child_loop();
+
+  usleep(50000);
+  kill(child, SIGSTOP);
+  int status = 0;
+  if (waitpid(child, &status, WUNTRACED) != child || !WIFSTOPPED(status)) {
+    printf("[FAIL] waitid_wnowait_stop: WCONTINUED stop status=0x%x errno=%d\n",
+           status, errno);
+    kill(child, SIGKILL);
+    waitpid(child, 0, 0);
+    return 0;
+  }
+
+  kill(child, SIGCONT);
+  status = 0;
+  int ok = (waitpid(child, &status, WCONTINUED) == child &&
+            WIFCONTINUED(status));
+  if (ok)
+    printf("[PASS] waitid_wnowait_stop: waitpid reports WCONTINUED\n");
+  else
+    printf("[FAIL] waitid_wnowait_stop: WCONTINUED status=0x%x errno=%d\n",
+           status, errno);
+
+  kill(child, SIGKILL);
+  waitpid(child, 0, 0);
+  return ok;
+}
+
+static int test_sigcont_running_no_cld(void) {
+  struct sigaction chld;
+  struct sigaction old_chld;
+  memset(&chld, 0, sizeof(chld));
+  chld.sa_sigaction = chld_info_handler;
+  chld.sa_flags = SA_SIGINFO;
+  sigemptyset(&chld.sa_mask);
+  sigaction(SIGCHLD, &chld, &old_chld);
+  got_chld = 0;
+  got_cont = 0;
+  got_cont_pid = 0;
+  got_cont_code = 0;
+
+  pid_t child = fork();
+  if (child < 0) {
+    printf("[FAIL] waitid_wnowait_stop: running cont fork errno=%d\n", errno);
+    sigaction(SIGCHLD, &old_chld, 0);
+    return 0;
+  }
+  if (child == 0)
+    child_loop();
+
+  usleep(50000);
+  kill(child, SIGCONT);
+  for (int i = 0; i < 50 && !got_cont; i++)
+    usleep(10000);
+
+  int ok = !got_cont;
+  if (ok)
+    printf("[PASS] waitid_wnowait_stop: running SIGCONT has no CLD_CONTINUED\n");
+  else
+    printf("[FAIL] waitid_wnowait_stop: running cont pid=%d code=%d\n",
+           got_cont_pid, got_cont_code);
+
+  kill(child, SIGKILL);
+  waitpid(child, 0, 0);
+  sigaction(SIGCHLD, &old_chld, 0);
+  return ok;
+}
+
 int main(void) {
   int pass = 1;
   pid_t child = fork();
@@ -243,6 +318,10 @@ int main(void) {
   if (!test_waitpid_stop_sigchld_eintr())
     pass = 0;
   if (!test_sigcont_cld_continued())
+    pass = 0;
+  if (!test_waitpid_wcontinued())
+    pass = 0;
+  if (!test_sigcont_running_no_cld())
     pass = 0;
 
   return pass ? 0 : 1;

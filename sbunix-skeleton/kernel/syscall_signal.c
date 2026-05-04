@@ -350,7 +350,7 @@ long sys_rt_sigsuspend_handler(struct trapframe *tf) {
      * A signal still blocked by this mask may wake the task, but must not
      * end sigsuspend; the loop will simply go back to sleep. */
     while (1) {
-        if (signal_deliverable_mask(current_proc))
+        if (signal_pending_interrupts_syscall(current_proc, 0))
             break;
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
@@ -506,9 +506,9 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
         if (has_timeout && current_proc->waiting_for_uart == 2)
             current_proc->waiting_for_uart = 0;
 
-        /* Check for other signals that should interrupt the wait */
-        uint64_t other_signals = signal_deliverable_mask(current_proc) & ~waitset;
-        if (other_signals)
+        /* Check for other signals that should interrupt the wait.  Signals
+         * in waitset are consumed above by sigtimedwait itself. */
+        if (signal_pending_interrupts_syscall_except(current_proc, waitset))
             return (long)-EINTR;
     }
 }
