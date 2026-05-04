@@ -157,9 +157,13 @@ run_test sigtest
 run_test sighandtest
 run_test sigsuspend_mask
 run_test sigmask_stop
+run_test signal_ignored_eintr
+run_test waitid_wnowait_stop
 run_test safetyabitest
 run_test dirtest
 run_test procfstest
+run_test procfd_semantics
+run_test path_semantics_edges
 run_test cowtest
 run_test lazytest
 run_test alloc1gb
@@ -179,6 +183,8 @@ run_test envtest
 run_test malloctest
 run_test shelltests
 run_test thirdpartytest
+run_test faccessat_exec
+run_test pathconf_limits
 run_test mremaptest
 run_test mprotecttest
 # TEST: Focused P1 syscall/process edge coverage.
