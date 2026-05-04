@@ -498,17 +498,18 @@ static void test_proc_fd_entries(void) {
     CHECK("procfs: proc_fd_entries O_NOFOLLOW rejects symlink",
           lfd == -1 && nofollow_errno == ELOOP);
 
+    lseek(fd, 1, SEEK_SET);
     int rfd = open(procpath, O_RDONLY);
     char buf[8];
     int nr = -1;
     if (rfd >= 0) {
         memset(buf, 0, sizeof(buf));
-        nr = read(rfd, buf, sizeof(buf));
+        nr = read(rfd, buf, 1);
         sr2 = fstat(rfd, &st_fd);
         close(rfd);
     }
-    CHECK("procfs: proc_fd_entries open follows symlink",
-          rfd >= 0 && nr == 2 && memcmp(buf, "fd", 2) == 0);
+    CHECK("procfs: proc_fd_entries open duplicates descriptor",
+          rfd >= 0 && nr == 1 && buf[0] == 'd');
     CHECK("procfs: proc_fd_entries fstat matches followed target",
           rfd >= 0 && sr1 == 0 && sr2 == 0 && st_fd.st_size == st_path.st_size);
 
