@@ -108,6 +108,15 @@ static int check_self_fd_link(void) {
     pass = 0;
   }
 
+  errno = 0;
+  dupfd = open(fdpath, O_RDONLY | O_DIRECTORY);
+  if (dupfd >= 0 || errno != ENOTDIR) {
+    printf("[FAIL] procfs_execfd: directory open errno=%d\n", errno);
+    pass = 0;
+    if (dupfd >= 0)
+      close(dupfd);
+  }
+
   if (lseek(fd, 3, SEEK_SET) != 3) {
     printf("[FAIL] procfs_execfd: seek setup errno=%d\n", errno);
     pass = 0;

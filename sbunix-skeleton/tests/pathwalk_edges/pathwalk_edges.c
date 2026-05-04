@@ -133,6 +133,7 @@ static int check_link_symlink(void) {
   unlink("/mnt/pw_hard_target");
   unlink("/mnt/pw_hard_symlink");
   unlink("/mnt/pw_hard_copy");
+  unlink("/mnt/pw_hard_follow");
   write_file("/mnt/pw_hard_target", "target");
   if (symlink("/mnt/pw_hard_target", "/mnt/pw_hard_symlink") < 0) {
     printf("[FAIL] pathwalk_edges: symlink setup errno=%d\n", errno);
@@ -157,6 +158,21 @@ static int check_link_symlink(void) {
       pass = 0;
     }
   }
+  if (linkat(AT_FDCWD, "/mnt/pw_hard_symlink", AT_FDCWD,
+             "/mnt/pw_hard_follow", AT_SYMLINK_FOLLOW) < 0) {
+    printf("[FAIL] pathwalk_edges: follow hard link errno=%d\n", errno);
+    pass = 0;
+  } else if (lstat("/mnt/pw_hard_follow", &st) < 0 ||
+             !S_ISREG(st.st_mode)) {
+    printf("[FAIL] pathwalk_edges: follow hard link is not regular errno=%d\n",
+           errno);
+    pass = 0;
+  } else if (read_file("/mnt/pw_hard_follow", buf, sizeof(buf)) != 6 ||
+             strcmp(buf, "target") != 0) {
+    printf("[FAIL] pathwalk_edges: follow hard link content\n");
+    pass = 0;
+  }
+  unlink("/mnt/pw_hard_follow");
   unlink("/mnt/pw_hard_copy");
   unlink("/mnt/pw_hard_symlink");
   unlink("/mnt/pw_hard_target");

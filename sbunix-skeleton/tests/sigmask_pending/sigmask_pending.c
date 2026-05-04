@@ -20,6 +20,7 @@ int main(void) {
   struct sigaction sa;
   sigset_t block;
   sigset_t pending;
+  sigset_t oldmask;
 
   memset(&sa, 0, sizeof(sa));
   sa.sa_handler = usr1_handler;
@@ -31,6 +32,22 @@ int main(void) {
 
   sigemptyset(&block);
   sigaddset(&block, SIGUSR1);
+  sigemptyset(&oldmask);
+  if (pthread_sigmask(SIG_BLOCK, &block, &oldmask) != 0) {
+    printf("[FAIL] sigmask_pending: pthread_sigmask block failed\n");
+    return 1;
+  }
+  if (sigprocmask(SIG_SETMASK, &oldmask, 0) < 0) {
+    printf("[FAIL] sigmask_pending: mask restore errno=%d\n", errno);
+    return 1;
+  }
+  errno = 0;
+  if (pthread_sigmask(99, &block, 0) != EINVAL || errno != EINVAL) {
+    printf("[FAIL] sigmask_pending: pthread_sigmask invalid errno=%d\n",
+           errno);
+    return 1;
+  }
+
   if (sigprocmask(SIG_BLOCK, &block, 0) < 0) {
     printf("[FAIL] sigmask_pending: block errno=%d\n", errno);
     return 1;
