@@ -704,6 +704,8 @@ long sys_openat_handler(struct trapframe *tf) {
             int accmode = flags & 3;
             if (accmode == 1 || accmode == 2) /* O_WRONLY or O_RDWR */
                 return (long)-21; /* -EISDIR */
+            if (flags & KERN_O_TRUNC)
+                return (long)-21; /* -EISDIR */
         }
         /* Reject O_CREAT on an existing directory (POSIX: EISDIR) */
         if (is_dir && (flags & KERN_O_CREAT))

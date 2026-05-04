@@ -178,6 +178,13 @@ static void test_pipe_reopen(void) {
 }
 
 static void test_directory_reopen_flags(void) {
+  errno = 0;
+  int direct = open("/tmp", O_RDONLY | O_TRUNC);
+  check("procfd_semantics: direct directory trunc reports EISDIR",
+        direct < 0 && errno == EISDIR);
+  if (direct >= 0)
+    close(direct);
+
   int dirfd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY);
   check("procfd_semantics: directory procfd setup", dirfd >= 0);
   if (dirfd < 0)
