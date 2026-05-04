@@ -98,6 +98,8 @@ static long procfd_reopen_open_file(struct open_file *src, int flags,
         return (long)-EISDIR;
     if (is_dir && (flags & KERN_O_TRUNC))
         return (long)-EISDIR;
+    if ((flags & KERN_O_CREAT) && (flags & KERN_O_EXCL))
+        return (long)-EEXIST;
     if (!src->ops->reopen)
         return (long)-ENXIO;
 

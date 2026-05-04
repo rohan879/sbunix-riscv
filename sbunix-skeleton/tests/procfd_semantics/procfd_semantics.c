@@ -194,6 +194,27 @@ static void test_directory_reopen_flags(void) {
   close(dirfd);
 }
 
+static void test_procfd_excl_existing_backends(void) {
+  const char *paths[] = { "/bin/cat", "/dev/null" };
+
+  for (int i = 0; i < (int)(sizeof(paths) / sizeof(paths[0])); i++) {
+    int fd = open(paths[i], O_RDONLY);
+    check("procfd_semantics: excl backend setup", fd >= 0);
+    if (fd < 0)
+      continue;
+
+    char procpath[64];
+    snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
+    errno = 0;
+    int bad = open(procpath, O_RDONLY | O_CREAT | O_EXCL, 0644);
+    check("procfd_semantics: excl existing procfd reports EEXIST",
+          bad < 0 && errno == EEXIST);
+    if (bad >= 0)
+      close(bad);
+    close(fd);
+  }
+}
+
 static void test_devfs_procfd_preserves_state(void) {
   int master = open("/dev/ptmx", O_RDWR);
   int slave = open("/dev/pts/0", O_RDWR);
@@ -256,6 +277,7 @@ int main(void) {
   test_regular_reopen_preserves_identity("/mnt/procfd-sem-identity");
   test_pipe_reopen();
   test_directory_reopen_flags();
+  test_procfd_excl_existing_backends();
   test_devfs_procfd_preserves_state();
   test_common_proc_nodes();
   printf("=== procfd_semantics: %d passed, %d failed ===\n", g_pass, g_fail);
