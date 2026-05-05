@@ -866,6 +866,7 @@ void kill_deliver(struct proc *target, int sig) {
                         current_proc ? (int32_t)current_proc->pid : 0,
                         0, K_SI_USER);
         if (sig == SIGCONT) {
+            uint64_t cont_bit = signal_bit(SIGCONT);
             int was_stopped = target->stopped_signal != 0;
             /* SIGCONT: clear stopped state and wake process */
             target->stopped_signal = 0;
@@ -874,8 +875,11 @@ void kill_deliver(struct proc *target, int sig) {
                 target->continued_signal = SIGCONT;
             target->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
                                     signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
-            if (proc_sigactions(target)[SIGCONT].handler <= 1) {
-                target->sigpending &= ~signal_bit(SIGCONT);
+            /* BF: A blocked default SIGCONT remains pending for sigpending();
+             * clear it immediately only when it is currently deliverable. */
+            if (proc_sigactions(target)[SIGCONT].handler <= 1 &&
+                !(target->sigmask & cont_bit)) {
+                target->sigpending &= ~cont_bit;
                 signal_queue_purge_all(target, SIGCONT);
             }
             if (was_stopped && target->parent) {

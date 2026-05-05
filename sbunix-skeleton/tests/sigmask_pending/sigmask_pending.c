@@ -5,14 +5,29 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t usr1_count;
+static volatile sig_atomic_t cont_pending_seen;
+
+static int has_signal(sigset_t set, int sig) {
+  return (set & (1UL << (sig - 1))) != 0;
+}
 
 static void usr1_handler(int sig) {
   (void)sig;
   usr1_count++;
 }
 
-static int has_signal(sigset_t set, int sig) {
-  return (set & (1UL << (sig - 1))) != 0;
+static void usr2_handler(int sig) {
+  sigset_t pending;
+
+  (void)sig;
+  cont_pending_seen = -1;
+  if (kill(getpid(), SIGCONT) < 0)
+    return;
+  sigemptyset(&pending);
+  if (sigpending(&pending) < 0)
+    return;
+  if (has_signal(pending, SIGCONT))
+    cont_pending_seen = 1;
 }
 
 int main(void) {
@@ -109,6 +124,26 @@ int main(void) {
   }
   if (has_signal(pending, SIGUSR1)) {
     printf("[FAIL] sigmask_pending: still pending after delivery\n");
+    pass = 0;
+  }
+
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = usr2_handler;
+  sigemptyset(&sa.sa_mask);
+  sigaddset(&sa.sa_mask, SIGCONT);
+  if (sigaction(SIGUSR2, &sa, 0) < 0) {
+    printf("[FAIL] sigmask_pending: sigaction SIGUSR2 errno=%d\n", errno);
+    return 1;
+  }
+
+  cont_pending_seen = 0;
+  if (raise(SIGUSR2) < 0) {
+    printf("[FAIL] sigmask_pending: raise SIGUSR2 errno=%d\n", errno);
+    return 1;
+  }
+  if (cont_pending_seen != 1) {
+    printf("[FAIL] sigmask_pending: masked SIGCONT pending=%d\n",
+           (int)cont_pending_seen);
     pass = 0;
   }
 
