@@ -160,9 +160,10 @@ static int parse_uint_component(const char **pp, int *out) {
     if (*p < '0' || *p > '9')
         return -1;
     while (*p >= '0' && *p <= '9') {
-        if (val > 1000000)
+        int digit = *p - '0';
+        if (val > (2147483647 - digit) / 10)
             return -1;
-        val = val * 10 + (*p - '0');
+        val = val * 10 + digit;
         p++;
     }
     *pp = p;
@@ -191,7 +192,13 @@ static int parse_procfs_fd_path(const char *path, pid_t *pid_out, int *fd_out) {
     if (strncmp(p, "fd/", 3) != 0)
         return 0;
     p += 3;
-    if (parse_uint_component(&p, &fd) < 0 || *p != '\0')
+    if (parse_uint_component(&p, &fd) < 0)
+        return 0;
+    /* BF: Keep /proc/self/fd/N/ on the procfd reopen path so trailing slash
+     * validation reports ENOTDIR against non-directory targets. */
+    while (*p == '/')
+        p++;
+    if (*p != '\0')
         return 0;
 
     *pid_out = (pid_t)pid;
