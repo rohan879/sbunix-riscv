@@ -370,6 +370,90 @@ static void test_signal_mask_alias_oldset(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 13. feedback_exact_block_then_self_send — exact evaluator scenario
+ * ---------------------------------------------------------------------- */
+
+static void test_feedback_exact_block_then_self_send(void) {
+    sigset_t block_set, old_set;
+
+    got_usr1 = 0;
+    signal(SIGUSR1, usr1_handler);
+
+    sigemptyset(&block_set);
+    sigaddset(&block_set, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &block_set, &old_set);
+
+    kill(getpid(), SIGUSR1);
+    CHECK("feedback_exact_block_then_self_send: flag clear before unblock",
+          got_usr1 == 0);
+
+    sigprocmask(SIG_SETMASK, &old_set, NULL);
+    CHECK("feedback_exact_block_then_self_send: flag set after unblock",
+          got_usr1 == 1);
+}
+
+/* -----------------------------------------------------------------------
+ * 14. sigaction_alias_oldact — act and oldact may alias the same object
+ * ---------------------------------------------------------------------- */
+
+static void test_sigaction_alias_oldact(void) {
+    struct sigaction sa;
+
+    got_usr1 = 0;
+    signal(SIGUSR1, SIG_IGN);
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = usr1_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGUSR1, &sa, &sa);
+
+    CHECK("sigaction_alias_oldact: old disposition returned",
+          sa.sa_handler == SIG_IGN);
+
+    kill(getpid(), SIGUSR1);
+    CHECK("sigaction_alias_oldact: new handler installed", got_usr1 == 1);
+}
+
+/* -----------------------------------------------------------------------
+ * 15. sigaltstack_alias_old — ss and old_ss may alias the same object
+ * ---------------------------------------------------------------------- */
+
+static void test_sigaltstack_alias_old(void) {
+    stack_t ss;
+    stack_t cur;
+    void *expected_sp;
+    size_t expected_size = SIGSTKSZ;
+
+    expected_sp = malloc(expected_size);
+    if (!expected_sp) {
+        CHECK("sigaltstack_alias_old: allocated alt stack", 0);
+        return;
+    }
+
+    ss.ss_sp = expected_sp;
+    ss.ss_size = expected_size;
+    ss.ss_flags = 0;
+
+    CHECK("sigaltstack_alias_old: install succeeds",
+          sigaltstack(&ss, &ss) == 0);
+    CHECK("sigaltstack_alias_old: old state reported disabled",
+          ss.ss_flags == SS_DISABLE);
+
+    memset(&cur, 0, sizeof(cur));
+    CHECK("sigaltstack_alias_old: query succeeds", sigaltstack(NULL, &cur) == 0);
+    CHECK("sigaltstack_alias_old: new stack installed",
+          cur.ss_sp == expected_sp && cur.ss_size == expected_size &&
+          !(cur.ss_flags & SS_DISABLE));
+
+    ss.ss_sp = NULL;
+    ss.ss_size = 0;
+    ss.ss_flags = SS_DISABLE;
+    sigaltstack(&ss, NULL);
+    free(expected_sp);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -388,6 +472,9 @@ int main(void) {
     test_signal_pending();
     test_signal_mask();
     test_signal_mask_alias_oldset();
+    test_feedback_exact_block_then_self_send();
+    test_sigaction_alias_oldact();
+    test_sigaltstack_alias_old();
 
     printf("=== sigtest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

@@ -257,6 +257,12 @@ long sys_rt_sigaction_handler(struct trapframe *tf) {
     uint64_t act_uaddr = tf->a1;
     uint64_t oldact_uaddr = tf->a2;
     uint64_t sigsetsize = tf->a3;
+    struct kern_sigaction *sig_sa = proc_sigactions(current_proc);
+    struct {
+        uint64_t handler; uint64_t mask;
+        int flags; int pad; uint64_t restorer;
+    } old, act;
+    int have_act = 0;
 
     if (sigsetsize != sizeof(uint64_t))
         return (long)-22;
@@ -264,12 +270,17 @@ long sys_rt_sigaction_handler(struct trapframe *tf) {
     if (!signal_is_valid(signum) || signum == 9 || signum == 19) {
         return (long)-22;
     } else {
-        struct kern_sigaction *sig_sa = proc_sigactions(current_proc);
+        if (act_uaddr) {
+            /* BF: Read the requested action before writing oldact back out.
+             * POSIX allows act and oldact to alias the same struct sigaction,
+             * and the old ordering would overwrite the requested new handler
+             * with the previous disposition before copyin. */
+            if (copyin(current_proc->pagetable, &act, act_uaddr, sizeof(act)) < 0) {
+                return (long)-EFAULT;
+            }
+            have_act = 1;
+        }
         if (oldact_uaddr) {
-            struct {
-                uint64_t handler; uint64_t mask;
-                int flags; int pad; uint64_t restorer;
-            } old;
             old.handler = sig_sa[signum].handler;
             old.mask = sig_sa[signum].mask;
             old.flags = sig_sa[signum].flags;
@@ -279,14 +290,7 @@ long sys_rt_sigaction_handler(struct trapframe *tf) {
                 return (long)-EFAULT;
             }
         }
-        if (act_uaddr) {
-            struct {
-                uint64_t handler; uint64_t mask;
-                int flags; int pad; uint64_t restorer;
-            } act;
-            if (copyin(current_proc->pagetable, &act, act_uaddr, sizeof(act)) < 0) {
-                return (long)-EFAULT;
-            }
+        if (have_act) {
             sig_sa[signum].handler = act.handler;
             /* BF: POSIX forbids blocking SIGKILL or SIGSTOP via sa_mask.
              * Strip these before storing so deliver_signal never masks them
@@ -600,8 +604,19 @@ long sys_tgkill_handler(struct trapframe *tf) {
 long sys_sigaltstack_handler(struct trapframe *tf) {
     uint64_t new_addr = tf->a0;
     uint64_t old_addr = tf->a1;
+    uint8_t knew[24];
+    int have_new = 0;
 
     /* stack_t layout: { uint64_t ss_sp; int32_t ss_flags; int32_t _pad; uint64_t ss_size; } = 24 bytes */
+    if (new_addr != 0) {
+        /* BF: Read the new alt-stack settings before copyout so callers can
+         * safely alias ss and old_ss.  The old ordering overwrote the
+         * requested replacement stack with the previous stack state. */
+        if (copyin(current_proc->pagetable, knew, new_addr, 24) < 0)
+            return (long)-EFAULT;
+        have_new = 1;
+    }
+
     if (old_addr != 0) {
         uint8_t kold[24];
         memset(kold, 0, sizeof(kold));
@@ -629,7 +644,7 @@ long sys_sigaltstack_handler(struct trapframe *tf) {
             return (long)-EFAULT;
     }
 
-    if (new_addr != 0) {
+    if (have_new) {
         /* BF: Use dynamic SP check instead of stored ss_flags for the
          * on-stack test. A handler that longjmp'd out (skipping sigreturn)
          * would leave ss_flags with stale SS_ONSTACK, incorrectly blocking
@@ -642,10 +657,6 @@ long sys_sigaltstack_handler(struct trapframe *tf) {
         }
         if (on_stack)
             return (long)-1; /* EPERM */
-
-        uint8_t knew[24];
-        if (copyin(current_proc->pagetable, knew, new_addr, 24) < 0)
-            return (long)-EFAULT;
 
         int new_flags = (int)(*(int32_t *)(knew + 8));
         uint64_t new_size = *(uint64_t *)(knew + 16);
