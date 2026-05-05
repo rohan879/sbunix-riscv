@@ -156,7 +156,8 @@ run_test fdiotest
 run_test sigtest
 run_test sighandtest
 run_test sigsuspend_mask
-# TEST: Keep signal mask, procfs fd, and path-walk edge coverage in run-tests.
+# TEST: Keep signal mask, procfs/procfd, and path-walk edge coverage in run-tests.
+run_test sigmask_abi
 run_test sigmask_pending
 run_test sigmask_stop
 run_test signal_ignored_eintr
@@ -164,6 +165,7 @@ run_test waitid_wnowait_stop
 run_test safetyabitest
 run_test dirtest
 run_test procfstest
+run_test procfs_edges
 run_test procfs_execfd
 run_test procfd_semantics
 run_test pathwalk_edges
@@ -174,6 +176,7 @@ run_test alloc1gb
 run_test brk_enomem
 run_test pgrptest
 run_test symlinktest
+run_test symlink_mutation_edges
 run_test clocktest
 run_test time_semantics
 run_test rtctest

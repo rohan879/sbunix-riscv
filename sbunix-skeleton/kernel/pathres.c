@@ -112,6 +112,14 @@ int copy_user_path_arg(uint64_t uaddr, char *dst, int dstsz, int allow_empty) {
     return 0;
 }
 
+/* BF: Preserve trailing slash intent before path normalization removes it. */
+int path_has_trailing_slash(const char *path) {
+    int len = strlen(path);
+    while (len > 0 && path[len - 1] == '/')
+        len--;
+    return len > 0 && path[len] == '/';
+}
+
 /* Resolve a path against cwd.  Result in out[KPATH_MAX].
  * BF: Empty paths are invalid for path lookup; callers that implement
  * AT_EMPTY_PATH handle that case before calling into the resolver. */
