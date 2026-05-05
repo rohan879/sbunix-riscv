@@ -320,6 +320,8 @@ long sys_rt_sigprocmask_handler(struct trapframe *tf) {
     uint64_t set_uaddr = tf->a1;
     uint64_t oldset_uaddr = tf->a2;
     uint64_t sigsetsize = tf->a3;
+    uint64_t old_mask = current_proc->sigmask;
+    uint64_t newset = 0;
 
     if (!signal_sigsetsize_supported(sigsetsize))
         return (long)-22;
@@ -329,17 +331,23 @@ long sys_rt_sigprocmask_handler(struct trapframe *tf) {
     if (set_uaddr && how != 0 && how != 1 && how != 2)
         return (long)-EINVAL;
 
+    /* BF: Read the requested new mask before copying oldset back to user
+     * memory.  POSIX allows set and oldset to alias the same sigset_t
+     * object; the previous ordering clobbered the caller's requested mask
+     * with the old mask before copyin, so a subsequent self-signal could be
+     * delivered immediately because the block never actually took effect. */
+    if (set_uaddr) {
+        int ret = signal_copyin_user_mask(set_uaddr, sigsetsize, &newset);
+        if (ret < 0)
+            return (long)ret;
+    }
+
     if (oldset_uaddr) {
-        int ret = signal_copyout_user_mask(oldset_uaddr, sigsetsize,
-                                           current_proc->sigmask);
+        int ret = signal_copyout_user_mask(oldset_uaddr, sigsetsize, old_mask);
         if (ret < 0)
             return (long)ret;
     }
     if (set_uaddr) {
-        uint64_t newset = 0;
-        int ret = signal_copyin_user_mask(set_uaddr, sigsetsize, &newset);
-        if (ret < 0)
-            return (long)ret;
         /* BF: POSIX forbids blocking SIGKILL or SIGSTOP.  Strip these from
          * any mask modification.  Also return -EINVAL for invalid how. */
         if (how == 0)       /* SIG_BLOCK */

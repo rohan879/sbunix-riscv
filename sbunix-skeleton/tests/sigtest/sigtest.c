@@ -341,6 +341,35 @@ static void test_signal_mask(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 12. signal_mask_alias_oldset — set and oldset may alias the same object
+ * ---------------------------------------------------------------------- */
+
+static void test_signal_mask_alias_oldset(void) {
+    sigset_t mask_and_old;
+    sigset_t pending;
+
+    got_usr1 = 0;
+    signal(SIGUSR1, usr1_handler);
+
+    sigemptyset(&mask_and_old);
+    sigaddset(&mask_and_old, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &mask_and_old, &mask_and_old);
+
+    kill(getpid(), SIGUSR1);
+    CHECK("signal_mask_alias_oldset: handler not called while blocked",
+          got_usr1 == 0);
+
+    sigemptyset(&pending);
+    sigpending(&pending);
+    CHECK("signal_mask_alias_oldset: SIGUSR1 is pending",
+          sigismember(&pending, SIGUSR1) == 1);
+
+    sigprocmask(SIG_SETMASK, &mask_and_old, NULL);
+    CHECK("signal_mask_alias_oldset: handler called after unblock",
+          got_usr1 == 1);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -358,6 +387,7 @@ int main(void) {
     test_signal_ignore();
     test_signal_pending();
     test_signal_mask();
+    test_signal_mask_alias_oldset();
 
     printf("=== sigtest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
