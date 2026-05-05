@@ -1328,7 +1328,10 @@ long sys_waitid_handler(struct trapframe *tf) {
     if (idtype < 0 || idtype > 2)
         return (long)-22; /* -EINVAL */
 
-    if ((options & (4 | 8 | 16)) == 0)
+    /* BF: Default to WEXITED only when no waitid status class was
+     * requested.  Accept both WSTOPPED's ABI bit and the older in-tree
+     * bit-16 spelling for stopped-child requests. */
+    if ((options & (2 | 4 | 8 | 16)) == 0)
         options |= 4; /* WEXITED by default for existing tests/libc callers */
 
     for (;;) {

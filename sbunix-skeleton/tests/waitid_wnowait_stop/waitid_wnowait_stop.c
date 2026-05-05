@@ -250,6 +250,58 @@ static int test_sigcont_running_no_cld(void) {
   return ok;
 }
 
+static int test_waitid_wstopped_ignores_zombie(void) {
+  pid_t child = fork();
+  if (child < 0) {
+    printf("[FAIL] waitid_wnowait_stop: WSTOPPED zombie fork errno=%d\n",
+           errno);
+    return 0;
+  }
+  if (child == 0)
+    _exit(42);
+
+  siginfo_t si;
+  int ready = 0;
+  for (int i = 0; i < 200; i++) {
+    memset(&si, 0, sizeof(si));
+    if (waitid(P_PID, child, &si, WEXITED | WNOHANG | WNOWAIT) < 0) {
+      printf("[FAIL] waitid_wnowait_stop: WEXITED poll errno=%d\n", errno);
+      waitpid(child, 0, 0);
+      return 0;
+    }
+    if (si.si_pid == child) {
+      ready = 1;
+      break;
+    }
+    usleep(10000);
+  }
+  if (!ready) {
+    printf("[FAIL] waitid_wnowait_stop: child did not exit for WSTOPPED check\n");
+    waitpid(child, 0, 0);
+    return 0;
+  }
+
+  memset(&si, 0, sizeof(si));
+  if (waitid(P_PID, child, &si, WSTOPPED | WNOHANG) < 0) {
+    printf("[FAIL] waitid_wnowait_stop: WSTOPPED zombie errno=%d\n", errno);
+    waitpid(child, 0, 0);
+    return 0;
+  }
+
+  int ok = (si.si_pid == 0);
+  if (ok)
+    printf("[PASS] waitid_wnowait_stop: WSTOPPED ignores zombie exits\n");
+  else
+    printf("[FAIL] waitid_wnowait_stop: WSTOPPED reported zombie pid=%d code=%d\n",
+           si.si_pid, si.si_code);
+
+  if (waitpid(child, 0, 0) != child && ok) {
+    printf("[FAIL] waitid_wnowait_stop: WSTOPPED cleanup errno=%d\n", errno);
+    return 0;
+  }
+  return ok;
+}
+
 int main(void) {
   int pass = 1;
   pid_t child = fork();
@@ -322,6 +374,8 @@ int main(void) {
   if (!test_waitpid_wcontinued())
     pass = 0;
   if (!test_sigcont_running_no_cld())
+    pass = 0;
+  if (!test_waitid_wstopped_ignores_zombie())
     pass = 0;
 
   return pass ? 0 : 1;
