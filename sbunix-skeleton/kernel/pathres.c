@@ -112,6 +112,14 @@ int copy_user_path_arg(uint64_t uaddr, char *dst, int dstsz, int allow_empty) {
     return 0;
 }
 
+/* BF: Preserve trailing slash intent before path normalization removes it. */
+int path_has_trailing_slash(const char *path) {
+    int len = strlen(path);
+    while (len > 0 && path[len - 1] == '/')
+        len--;
+    return len > 0 && path[len] == '/';
+}
+
 /* Resolve a path against cwd.  Result in out[KPATH_MAX].
  * BF: Empty paths are invalid for path lookup; callers that implement
  * AT_EMPTY_PATH handle that case before calling into the resolver. */
@@ -191,7 +199,9 @@ int vfs_is_dir(const char *path) {
     return 0;
 }
 
-static int vfs_stat_mode(const char *path, uint32_t *mode_out) {
+/* BF: Keep path stat/directory checks centralized so syscall modules share
+ * the same trailing-slash and symlink validation primitives. */
+int path_stat_mode(const char *path, uint32_t *mode_out) {
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(path, &relpath);
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -205,6 +215,31 @@ static int vfs_stat_mode(const char *path, uint32_t *mode_out) {
 
     memcpy(mode_out, st + 16, 4);
     return 0;
+}
+
+int path_require_dir(const char *path) {
+    uint32_t mode;
+    int ret = path_stat_mode(path, &mode);
+    if (ret < 0)
+        return ret;
+    return ((mode & 0xF000) == 0x4000) ? 0 : -ENOTDIR;
+}
+
+int path_resolve_trailing_slash_dir_target(char *resolved,
+                                           int allow_missing_leaf) {
+    struct path_resolution_meta meta;
+    int sr = resolve_symlinks_in_path_meta(resolved, KSYMLINK_MAX_HOPS,
+                                           1, &meta);
+    if (sr == -ENOENT && allow_missing_leaf &&
+        !meta.missing_after_final_symlink) {
+        /* BF: mkdir("new/") creates the literal final directory, but an
+         * existing final symlink with "/" must be resolved before deciding
+         * whether the target is a directory. */
+        return 1;
+    }
+    if (sr < 0)
+        return sr;
+    return path_require_dir(resolved);
 }
 
 static int resolve_link_target(const char *link_path, const char *target,
@@ -460,7 +495,7 @@ restart:
 
         if (!is_last) {
             uint32_t mode;
-            int st_ret = vfs_stat_mode(built, &mode);
+            int st_ret = path_stat_mode(built, &mode);
             if (st_ret < 0) { ret = st_ret; goto out; }
             if ((mode & 0xF000) != 0x4000) {
                 ret = -ENOTDIR;

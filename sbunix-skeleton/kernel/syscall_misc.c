@@ -372,6 +372,10 @@ long sys_utimensat_handler(struct trapframe *tf) {
     int dirfd = (int)tf->a0;
     uint64_t path_uva = tf->a1;
     uint64_t times_uaddr = tf->a2;
+    int flags = (int)tf->a3;
+
+    if (flags & ~0x100)
+        return (long)-EINVAL;
 
     /* BF: UTIME_NOW and UTIME_OMIT constants per POSIX */
     #define UTIME_NOW  0x3fffffff
@@ -422,6 +426,7 @@ long sys_utimensat_handler(struct trapframe *tf) {
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(path_uva, kpath, sizeof(kpath), 0);
       if (pr < 0) return (long)pr; }
+    int trailing_slash = path_has_trailing_slash(kpath);
 
     char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
@@ -431,16 +436,33 @@ long sys_utimensat_handler(struct trapframe *tf) {
     /* BF: Propagate all negative errors from resolve_symlinks_in_path,
      * respecting AT_SYMLINK_NOFOLLOW in flags. */
     {
-      int flags = (int)tf->a3;
       int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
-      int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, !nofollow);
+      int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS,
+                                        !nofollow || trailing_slash);
       if (sr < 0) return (long)sr;
+    }
+    if (trailing_slash) {
+        int tr = path_require_dir(resolved);
+        if (tr < 0) return (long)tr;
     }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     if (!ops || !ops->open) return (long)-2; /* ENOENT */
+
+    if (flags & 0x100) {
+        uint32_t mode;
+        int st_ret = path_stat_mode(resolved, &mode);
+        if (st_ret < 0) return (long)st_ret;
+        if ((mode & 0xF000) == 0xA000) {
+            /* BF: With AT_SYMLINK_NOFOLLOW and no trailing slash, utimensat
+             * targets the link itself.  The current filesystems have no raw
+             * symlink-open hook, so treat the timestamp update as a metadata
+             * no-op after validating that the link exists. */
+            return 0;
+        }
+    }
 
     /* Open file to get inode, update timestamps, close */
     void *priv = NULL;
@@ -557,6 +579,10 @@ long sys_fchownat_handler(struct trapframe *tf) {
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
       if (pr < 0) return (long)pr; }
+    int flags = (int)tf->a4;
+    if (flags & ~0x100)
+        return (long)-EINVAL;
+    int trailing_slash = path_has_trailing_slash(kpath);
 
     char resolved[KPATH_MAX];
     { int rr = resolve_path_at((int)tf->a0, kpath, resolved);
@@ -565,10 +591,14 @@ long sys_fchownat_handler(struct trapframe *tf) {
     /* BF: Propagate all negative errors from resolve_symlinks_in_path,
      * respecting AT_SYMLINK_NOFOLLOW in flags. */
     {
-      int flags = (int)tf->a4;
       int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
-      int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, !nofollow);
+      int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS,
+                                        !nofollow || trailing_slash);
       if (sr < 0) return (long)sr;
+    }
+    if (trailing_slash) {
+        int tr = path_require_dir(resolved);
+        if (tr < 0) return (long)tr;
     }
 
     const char *relpath;

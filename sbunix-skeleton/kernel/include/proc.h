@@ -345,6 +345,15 @@ static inline uint64_t signal_deliverable_mask(struct proc *p) {
   return p->sigpending & ~signal_mask_sanitize(p->sigmask);
 }
 
+/* BF: Signal-mask syscalls accept several user ABI sizes, but the kernel
+ * tracks only the low 64 signal bits.  Shared helpers keep every mask-copy
+ * path on the same size, sanitizing, and high-byte zeroing rules. */
+int signal_sigsetsize_supported(uint64_t sigsetsize);
+int signal_copyin_user_mask(uint64_t uaddr, uint64_t sigsetsize,
+                            uint64_t *mask_out);
+int signal_copyout_user_mask(uint64_t uaddr, uint64_t sigsetsize,
+                             uint64_t mask);
+
 /* BF: Signal info codes for kernel use (matching Linux ABI values).
  * Libc defines are unavailable in kernel, so use K_ prefixed literals. */
 #define K_SI_USER       0

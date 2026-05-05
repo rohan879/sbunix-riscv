@@ -308,12 +308,12 @@ long sys_epoll_pwait_handler(struct trapframe *tf) {
     uint64_t epoch_before = current_proc->signal_handled_epoch;
     int has_sigmask = 0;
     if (sigmask_uaddr != 0) {
-        if (sigsetsize != sizeof(uint64_t))
-            return (long)-EINVAL;
         uint64_t new_mask;
-        if (copyin(current_proc->pagetable, &new_mask, sigmask_uaddr, 8) < 0)
-            return (long)-EFAULT;
-        current_proc->sigmask = signal_mask_sanitize(new_mask);
+        int mask_ret = signal_copyin_user_mask(sigmask_uaddr, sigsetsize,
+                                               &new_mask);
+        if (mask_ret < 0)
+            return (long)mask_ret;
+        current_proc->sigmask = new_mask;
         has_sigmask = 1;
     }
 
@@ -591,6 +591,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
     int nfds = (int)tf->a1;
     uint64_t timeout_uaddr = tf->a2;
     uint64_t sigmask_uaddr = tf->a3;
+    uint64_t sigsetsize = tf->a4;
 
     if (nfds < 0 || nfds > NOFILE)
         return (long)-22;
@@ -612,9 +613,11 @@ long sys_ppoll_handler(struct trapframe *tf) {
     uint64_t epoch_before = current_proc->signal_handled_epoch;
     if (sigmask_uaddr != 0) {
         uint64_t new_mask;
-        if (copyin(current_proc->pagetable, &new_mask, sigmask_uaddr, 8) < 0)
-            return (long)-EFAULT;
-        current_proc->sigmask = signal_mask_sanitize(new_mask);
+        int mask_ret = signal_copyin_user_mask(sigmask_uaddr, sigsetsize,
+                                               &new_mask);
+        if (mask_ret < 0)
+            return (long)mask_ret;
+        current_proc->sigmask = new_mask;
     }
 
     /* BF: POSIX requires ppoll to atomically replace the mask and check
@@ -773,13 +776,16 @@ long sys_pselect6_handler(struct trapframe *tf) {
     int has_sigmask = 0;
     if (sigmask_uaddr_raw != 0) {
         uint64_t sig_args[2]; /* {sigmask_ptr, sigsetsize} */
-        if (copyin(current_proc->pagetable, sig_args, sigmask_uaddr_raw, 16) == 0 &&
-            sig_args[0] != 0) {
+        if (copyin(current_proc->pagetable, sig_args, sigmask_uaddr_raw, 16) < 0)
+            return (long)-EFAULT;
+        if (sig_args[0] != 0) {
             uint64_t new_mask;
-            if (copyin(current_proc->pagetable, &new_mask, sig_args[0], 8) == 0) {
-                current_proc->sigmask = signal_mask_sanitize(new_mask);
-                has_sigmask = 1;
-            }
+            int mask_ret = signal_copyin_user_mask(sig_args[0], sig_args[1],
+                                                   &new_mask);
+            if (mask_ret < 0)
+                return (long)mask_ret;
+            current_proc->sigmask = new_mask;
+            has_sigmask = 1;
         }
     }
 

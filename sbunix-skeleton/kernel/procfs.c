@@ -39,6 +39,12 @@ enum procfs_type {
 
 /* Buffer size for rendered content */
 #define PROCFS_BUF 1024
+#define PROCFS_O_ACCMODE 3
+#define PROCFS_O_WRONLY  1
+#define PROCFS_O_RDWR    2
+#define PROCFS_O_CREAT   0100
+#define PROCFS_O_TRUNC   01000
+#define PROCFS_O_NOFOLLOW 0400000
 
 struct procfs_private {
   enum procfs_type type;
@@ -119,6 +125,18 @@ static int parse_procfs_fd_leaf(const char *rest) {
   return parse_pid(rest);
 }
 
+static int procfs_check_read_open_flags(int flags) {
+  int accmode = flags & PROCFS_O_ACCMODE;
+
+  /* BF: procfs has no writable backing store; fail mutating opens before a
+   * pseudo-file private object is allocated or reopened. */
+  if (flags & (PROCFS_O_CREAT | PROCFS_O_TRUNC))
+    return -EROFS;
+  if (accmode == PROCFS_O_WRONLY || accmode == PROCFS_O_RDWR)
+    return -EACCES;
+  return 0;
+}
+
 /* Helper: find a process by PID */
 static struct proc *find_proc(pid_t pid) {
   for (struct proc *p = proc; p < &proc[NPROC]; p++) {
@@ -141,6 +159,46 @@ static int procfs_is_dir(enum procfs_type type) {
 static int procfs_is_link(enum procfs_type type) {
   return type == PROCFS_FDLINK || type == PROCFS_EXE_LINK ||
          type == PROCFS_CWD_LINK;
+}
+
+static int procfs_pid_file_type(const char *name, enum procfs_type *type) {
+  if (strcmp(name, "status") == 0) {
+    *type = PROCFS_STATUS;
+    return 0;
+  }
+  if (strcmp(name, "cmdline") == 0) {
+    *type = PROCFS_CMDLINE;
+    return 0;
+  }
+  if (strcmp(name, "maps") == 0) {
+    *type = PROCFS_MAPS;
+    return 0;
+  }
+  if (strcmp(name, "stat") == 0) {
+    *type = PROCFS_STAT_FILE;
+    return 0;
+  }
+  return -ENOENT;
+}
+
+static int procfs_pid_file_sub(enum procfs_type type) {
+  switch (type) {
+  case PROCFS_STATUS:
+    return 1;
+  case PROCFS_CMDLINE:
+    return 2;
+  case PROCFS_MAPS:
+    return 3;
+  case PROCFS_STAT_FILE:
+    return 5;
+  default:
+    return 0;
+  }
+}
+
+static uint64_t procfs_pid_file_ino(pid_t pid, enum procfs_type type) {
+  /* BF: Keep stat(), fstat(), and getdents64() on one inode numbering scheme. */
+  return (uint64_t)(1000 + pid * 10 + procfs_pid_file_sub(type));
 }
 
 static int procfs_fd_target_len(struct proc *target, int fd) {
@@ -484,14 +542,114 @@ static int procfs_render_meminfo(char *buf, int bufsz) {
   return pos;
 }
 
+static int procfs_render_mounts(char *buf, int bufsz) {
+  int pos = 0;
+  const char *mpath, *fstype;
+
+  for (int i = 0; vfs_get_mount_info(i, &mpath, &fstype) == 0; i++) {
+    const char *rw =
+      (strcmp(fstype, "ext2") == 0 || strcmp(fstype, "ramfs") == 0) ?
+      "rw" : "ro";
+    int before = pos;
+    pos = append_str(buf, bufsz, pos, fstype);
+    if (pos < bufsz) buf[pos++] = ' ';
+    pos = append_str(buf, bufsz, pos, mpath);
+    if (pos < bufsz) buf[pos++] = ' ';
+    pos = append_str(buf, bufsz, pos, fstype);
+    if (pos < bufsz) buf[pos++] = ' ';
+    pos = append_str(buf, bufsz, pos, rw);
+    pos = append_str(buf, bufsz, pos, " 0 0\n");
+    if (pos >= bufsz) {
+      pos = before;
+      break;
+    }
+  }
+  return pos;
+}
+
+static uint64_t procfs_cmdline_size(struct proc *target) {
+  int n;
+
+  if (!target)
+    return 0;
+  n = (int)target->cmdline_len;
+  if (n <= 0) {
+    int nl = strlen(target->name);
+    if (nl >= PROCFS_BUF)
+      nl = PROCFS_BUF - 1;
+    return (uint64_t)(nl + 1);
+  }
+  if (n > PROCFS_BUF)
+    n = PROCFS_BUF;
+  return (uint64_t)n;
+}
+
+static int procfs_rendered_size(enum procfs_type type, struct proc *target,
+                                uint64_t *size_out) {
+  char *tmp;
+
+  if (!size_out)
+    return -EINVAL;
+  *size_out = 0;
+
+  if (type == PROCFS_CMDLINE) {
+    *size_out = procfs_cmdline_size(target);
+    return 0;
+  }
+  if (type == PROCFS_MAPS) {
+    *size_out = target ? procfs_maps_size(target) : 0;
+    return 0;
+  }
+
+  tmp = (char *)kmalloc(PROCFS_BUF);
+  if (!tmp)
+    return -ENOMEM;
+
+  /* BF: path stat cannot reuse an open private buffer, so render into a
+   * bounded heap scratch buffer using the same truncation limit as procfs_open().
+   * Report allocation failure to stat() instead of claiming pseudo-files are empty. */
+  switch (type) {
+  case PROCFS_MOUNTS:
+    *size_out = (uint64_t)procfs_render_mounts(tmp, PROCFS_BUF);
+    break;
+  case PROCFS_CPUINFO:
+    *size_out = (uint64_t)procfs_render_cpuinfo(tmp, PROCFS_BUF);
+    break;
+  case PROCFS_VERSION:
+    *size_out = (uint64_t)procfs_render_version(tmp, PROCFS_BUF);
+    break;
+  case PROCFS_UPTIME:
+    *size_out = (uint64_t)procfs_render_uptime(tmp, PROCFS_BUF);
+    break;
+  case PROCFS_MEMINFO:
+    *size_out = (uint64_t)procfs_render_meminfo(tmp, PROCFS_BUF);
+    break;
+  case PROCFS_STATUS:
+    *size_out = target ? (uint64_t)procfs_render_status(tmp, PROCFS_BUF, target) : 0;
+    break;
+  case PROCFS_STAT_FILE:
+    *size_out = target ? (uint64_t)procfs_render_stat_file(tmp, PROCFS_BUF, target) : 0;
+    break;
+  default:
+    break;
+  }
+  kmfree(tmp, PROCFS_BUF);
+  return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* procfs_open                                                         */
 /* ------------------------------------------------------------------ */
 static int procfs_open(void *fs_data, const char *path, int flags, void **private) {
   (void)fs_data;
   const char *p = path;
-  int nofollow = (flags & 0400000); /* O_NOFOLLOW */
+  int nofollow = (flags & PROCFS_O_NOFOLLOW);
+  int flag_ret;
   while (*p == '/') p++;
+
+  flag_ret = procfs_check_read_open_flags(flags);
+  if (flag_ret < 0)
+    return flag_ret;
 
   struct procfs_private *priv = (struct procfs_private *)kmalloc(sizeof(struct procfs_private));
   if (!priv) return -12; /* -ENOMEM */
@@ -512,25 +670,7 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
   }
   if (strcmp(p, "mounts") == 0) {
     priv->type = PROCFS_MOUNTS;
-    int pos = 0;
-    const char *mpath, *fstype;
-    for (int i = 0; vfs_get_mount_info(i, &mpath, &fstype) == 0; i++) {
-      const char *rw = (strcmp(fstype, "ext2") == 0 || strcmp(fstype, "ramfs") == 0) ? "rw" : "ro";
-      int before = pos;
-      pos = append_str(priv->buf, PROCFS_BUF, pos, fstype);
-      if (pos < PROCFS_BUF) priv->buf[pos++] = ' ';
-      pos = append_str(priv->buf, PROCFS_BUF, pos, mpath);
-      if (pos < PROCFS_BUF) priv->buf[pos++] = ' ';
-      pos = append_str(priv->buf, PROCFS_BUF, pos, fstype);
-      if (pos < PROCFS_BUF) priv->buf[pos++] = ' ';
-      pos = append_str(priv->buf, PROCFS_BUF, pos, rw);
-      pos = append_str(priv->buf, PROCFS_BUF, pos, " 0 0\n");
-      if (pos >= PROCFS_BUF) {
-        pos = before;
-        break;
-      }
-    }
-    priv->len = pos;
+    priv->len = procfs_render_mounts(priv->buf, PROCFS_BUF);
     *private = priv;
     return 0;
   }
@@ -831,8 +971,10 @@ static int procfs_close(void *fs_data, void *private) {
 static int procfs_reopen(void *fs_data, void *private, int flags,
                          void **new_private) {
   (void)fs_data;
-  (void)flags;
   struct procfs_private *old = (struct procfs_private *)private;
+  int flag_ret = procfs_check_read_open_flags(flags);
+  if (flag_ret < 0)
+    return flag_ret;
   if (!old)
     return -2; /* -ENOENT */
 
@@ -873,12 +1015,21 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
     return 0; \
   } while(0)
 
-  #define STAT_FILE(ino_val) do { \
+  #define STAT_FILE(ino_val, size_val) do { \
     uint32_t mode = (uint32_t)(0x8000 | 0444); \
     uint64_t ino = (ino_val); \
+    uint64_t file_size = (uint64_t)(size_val); \
     memcpy(st + 8, &ino, 8); \
     memcpy(st + 16, &mode, 4); \
+    memcpy(st + 48, &file_size, 8); \
     return 0; \
+  } while(0)
+
+  #define STAT_RENDERED_FILE(ino_val, type_val, target_val) do { \
+    uint64_t rendered_size = 0; \
+    int size_ret = procfs_rendered_size((type_val), (target_val), &rendered_size); \
+    if (size_ret < 0) return size_ret; \
+    STAT_FILE((ino_val), rendered_size); \
   } while(0)
 
   #define STAT_LNK(ino_val, size_val) do { \
@@ -892,12 +1043,12 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
   } while(0)
 
   if (*p == '\0') { STAT_DIR(200); }
-  if (strcmp(p, "dmesg") == 0)    { STAT_FILE(201); }
-  if (strcmp(p, "mounts") == 0)   { STAT_FILE(202); }
-  if (strcmp(p, "cpuinfo") == 0)  { STAT_FILE(203); }
-  if (strcmp(p, "version") == 0)  { STAT_FILE(204); }
-  if (strcmp(p, "uptime") == 0)   { STAT_FILE(205); }
-  if (strcmp(p, "meminfo") == 0)  { STAT_FILE(206); }
+  if (strcmp(p, "dmesg") == 0)    { STAT_FILE(201, 0); }
+  if (strcmp(p, "mounts") == 0)   { STAT_RENDERED_FILE(202, PROCFS_MOUNTS, 0); }
+  if (strcmp(p, "cpuinfo") == 0)  { STAT_RENDERED_FILE(203, PROCFS_CPUINFO, 0); }
+  if (strcmp(p, "version") == 0)  { STAT_RENDERED_FILE(204, PROCFS_VERSION, 0); }
+  if (strcmp(p, "uptime") == 0)   { STAT_RENDERED_FILE(205, PROCFS_UPTIME, 0); }
+  if (strcmp(p, "meminfo") == 0)  { STAT_RENDERED_FILE(206, PROCFS_MEMINFO, 0); }
 
   /* /proc/self — symlink to current PID */
   pid_t self_pid = current_proc ? current_proc->pid : 1;
@@ -914,12 +1065,11 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
     struct proc *target = procfs_find_target(self_pid);
     if (!target) return -2;
     if (*p == '\0') { STAT_DIR((uint64_t)(300 + self_pid)); }
-    if (strcmp(p, "status") == 0 || strcmp(p, "cmdline") == 0 ||
-        strcmp(p, "maps") == 0) {
-      STAT_FILE((uint64_t)(1000 + self_pid * 10 + (p[0] == 's' ? (p[1]=='t' ? 1 : 3) : (p[0]=='c' ? 2 : 4))));
-    }
-    if (strcmp(p, "stat") == 0) {
-      STAT_FILE((uint64_t)(1000 + self_pid * 10 + 5));
+    {
+      enum procfs_type type;
+      if (procfs_pid_file_type(p, &type) == 0) {
+        STAT_RENDERED_FILE(procfs_pid_file_ino(self_pid, type), type, target);
+      }
     }
     if (strcmp(p, "exe") == 0) {
       STAT_LNK((uint64_t)(2000 + self_pid * 10 + 1),
@@ -959,15 +1109,11 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
 
   if (strcmp(rest, "fd") == 0) { STAT_DIR((uint64_t)(400 + pid)); }
 
-  if (strcmp(rest, "status") == 0 || strcmp(rest, "cmdline") == 0 ||
-      strcmp(rest, "maps") == 0) {
-    int sub = (rest[0] == 's') ? (rest[1] == 't' ? 1 : 3) :
-              (rest[0] == 'c' ? 2 : 4);
-    STAT_FILE((uint64_t)(1000 + pid * 10 + sub));
-  }
-
-  if (strcmp(rest, "stat") == 0) {
-    STAT_FILE((uint64_t)(1000 + pid * 10 + 5));
+  {
+    enum procfs_type type;
+    if (procfs_pid_file_type(rest, &type) == 0) {
+      STAT_RENDERED_FILE(procfs_pid_file_ino((pid_t)pid, type), type, target);
+    }
   }
 
   if (strcmp(rest, "exe") == 0) {
@@ -990,6 +1136,7 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
 
   #undef STAT_DIR
   #undef STAT_FILE
+  #undef STAT_RENDERED_FILE
   #undef STAT_LNK
 
   return -2; /* -ENOENT */
@@ -1001,6 +1148,8 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
 static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
   (void)fs_data;
   struct procfs_private *priv = (struct procfs_private *)private;
+  if (!priv)
+    return -2;
   memset(st, 0, 128);
   uint64_t dev = 4;
   uint32_t nlink = 1;
@@ -1052,10 +1201,7 @@ static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
   case PROCFS_MAPS:
   case PROCFS_STAT_FILE:
     { struct proc *target = procfs_find_target(priv->pid);
-      uint64_t sub = (priv->type == PROCFS_STATUS) ? 1 :
-                     (priv->type == PROCFS_CMDLINE) ? 2 :
-                     (priv->type == PROCFS_MAPS) ? 3 : 5;
-      uint64_t ino=(uint64_t)(1000+priv->pid*10+sub);
+      uint64_t ino=procfs_pid_file_ino(priv->pid, priv->type);
       uint64_t sz= priv->type == PROCFS_MAPS && target
                  ? procfs_maps_size(target)
                  : (uint64_t)priv->len;
@@ -1086,7 +1232,11 @@ static int procfs_readdir(void *fs_data, void *private, char *ubuf,
     if (seen >= skip) { \
       int nl = strlen(name_str); \
       int rl = (19 + nl + 1 + 7) & ~7; \
-      if (written + (unsigned int)rl > count) goto done; \
+      if (written + (unsigned int)rl > count) { \
+        /* BF: A buffer too small for one record must not consume the dir offset. */ \
+        if (written == 0) return -EINVAL; \
+        goto done; \
+      } \
       char *d = ubuf + written; \
       memset(d, 0, rl); \
       uint64_t _ino = (ino_val); \
@@ -1131,10 +1281,10 @@ static int procfs_readdir(void *fs_data, void *private, char *ubuf,
     uint64_t base = (uint64_t)(300 + priv->pid);
     EMIT_DIRENT(".", base, 4);
     EMIT_DIRENT("..", 200, 4);
-    EMIT_DIRENT("status",  (uint64_t)(1000 + priv->pid * 10 + 1), 8);
-    EMIT_DIRENT("cmdline", (uint64_t)(1000 + priv->pid * 10 + 2), 8);
-    EMIT_DIRENT("maps",    (uint64_t)(1000 + priv->pid * 10 + 3), 8);
-    EMIT_DIRENT("stat",    (uint64_t)(1000 + priv->pid * 10 + 5), 8);
+    EMIT_DIRENT("status",  procfs_pid_file_ino(priv->pid, PROCFS_STATUS), 8);
+    EMIT_DIRENT("cmdline", procfs_pid_file_ino(priv->pid, PROCFS_CMDLINE), 8);
+    EMIT_DIRENT("maps",    procfs_pid_file_ino(priv->pid, PROCFS_MAPS), 8);
+    EMIT_DIRENT("stat",    procfs_pid_file_ino(priv->pid, PROCFS_STAT_FILE), 8);
     EMIT_DIRENT("fd",      (uint64_t)(400 + priv->pid), 4);
     EMIT_DIRENT("exe",     (uint64_t)(2000 + priv->pid * 10 + 1), 10); /* DT_LNK */
     EMIT_DIRENT("cwd",     (uint64_t)(2000 + priv->pid * 10 + 2), 10); /* DT_LNK */
@@ -1245,7 +1395,7 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
   /* BF: /proc/<pid>/fd/<n> directory entries are symlinks; readlink should
    * expose the same stored file path used for dirfd-relative resolution. */
   if (strncmp(rest, "fd/", 3) == 0) {
-    int fd = parse_pid(rest + 3);
+    int fd = parse_procfs_fd_leaf(rest);
     if (fd < 0 || fd >= NOFILE)
       return -2;
     struct open_file **ftable = proc_ofile(target);
