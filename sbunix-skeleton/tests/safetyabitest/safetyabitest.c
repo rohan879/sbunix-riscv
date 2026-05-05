@@ -62,7 +62,9 @@ static void test_rt_sigsetsize_validation(void) {
     sigaddset(&set, SIGUSR1);
     sigset_t oldset = 0;
     struct timespec ts = { .tv_sec = 0, .tv_nsec = 0 };
-    unsigned long bad_size = sizeof(sigset_t) + 8;
+    /* BF: 16-byte sigsets are now supported for raw signal-mask syscalls;
+     * keep this guard on a size that remains outside the accepted ABI set. */
+    unsigned long bad_size = 24;
 
     long r = syscall(SYS_rt_sigprocmask, SIG_BLOCK, &set, &oldset, bad_size);
     check("sigsetsize: rt_sigprocmask rejects bad size", r == -EINVAL);

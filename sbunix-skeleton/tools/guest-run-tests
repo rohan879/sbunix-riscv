@@ -157,6 +157,7 @@ run_test sigtest
 run_test sighandtest
 run_test sigsuspend_mask
 # TEST: Keep signal mask, procfs/procfd, and path-walk edge coverage in run-tests.
+run_test sigmask_abi
 run_test sigmask_pending
 run_test sigmask_stop
 run_test signal_ignored_eintr

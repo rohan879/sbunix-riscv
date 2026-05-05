@@ -12,8 +12,50 @@
 #include <vm.h>
 #include <errno.h>
 
-static int rt_sigsetsize_valid(uint64_t sigsetsize) {
-    return sigsetsize == sizeof(uint64_t);
+int signal_sigsetsize_supported(uint64_t sigsetsize) {
+    return sigsetsize == sizeof(uint64_t) || sigsetsize == 16 ||
+           sigsetsize == 128;
+}
+
+int signal_copyin_user_mask(uint64_t uaddr, uint64_t sigsetsize,
+                            uint64_t *mask_out) {
+    if (!signal_sigsetsize_supported(sigsetsize))
+        return -EINVAL;
+    if (!uaddr || !mask_out)
+        return -EFAULT;
+
+    uint64_t mask = 0;
+    if (copyin(current_proc->pagetable, &mask, uaddr, sizeof(mask)) < 0)
+        return -EFAULT;
+
+    /* BF: User sigsets may be wider than the kernel mask.  Only the low
+     * 64 bits are meaningful here, and KILL/STOP are never blockable. */
+    *mask_out = signal_mask_sanitize(mask);
+    return 0;
+}
+
+int signal_copyout_user_mask(uint64_t uaddr, uint64_t sigsetsize,
+                             uint64_t mask) {
+    if (!signal_sigsetsize_supported(sigsetsize))
+        return -EINVAL;
+    if (!uaddr)
+        return -EFAULT;
+
+    uint64_t low = signal_mask_sanitize(mask);
+    if (copyout(current_proc->pagetable, uaddr, &low, sizeof(low)) < 0)
+        return -EFAULT;
+
+    /* BF: Raw callers can provide 16- or 128-byte sigsets.  Clear the
+     * bytes above the low kernel word so callers never observe stale data. */
+    uint64_t zero = 0;
+    for (uint64_t off = sizeof(low); off < sigsetsize; off += sizeof(zero)) {
+        uint64_t chunk = sigsetsize - off;
+        if (chunk > sizeof(zero))
+            chunk = sizeof(zero);
+        if (copyout(current_proc->pagetable, uaddr + off, &zero, chunk) < 0)
+            return -EFAULT;
+    }
+    return 0;
 }
 
 static int signal_send_allowed(struct proc *target) {
@@ -216,7 +258,7 @@ long sys_rt_sigaction_handler(struct trapframe *tf) {
     uint64_t oldact_uaddr = tf->a2;
     uint64_t sigsetsize = tf->a3;
 
-    if (!rt_sigsetsize_valid(sigsetsize))
+    if (sigsetsize != sizeof(uint64_t))
         return (long)-22;
 
     if (!signal_is_valid(signum) || signum == 9 || signum == 19) {
@@ -279,28 +321,28 @@ long sys_rt_sigprocmask_handler(struct trapframe *tf) {
     uint64_t oldset_uaddr = tf->a2;
     uint64_t sigsetsize = tf->a3;
 
-    if (!rt_sigsetsize_valid(sigsetsize))
+    if (!signal_sigsetsize_supported(sigsetsize))
         return (long)-22;
 
     if (oldset_uaddr) {
-        uint64_t oldmask = current_proc->sigmask;
-        if (copyout(current_proc->pagetable, oldset_uaddr, &oldmask, sizeof(oldmask)) < 0) {
-            return (long)-EFAULT;
-        }
+        int ret = signal_copyout_user_mask(oldset_uaddr, sigsetsize,
+                                           current_proc->sigmask);
+        if (ret < 0)
+            return (long)ret;
     }
     if (set_uaddr) {
         uint64_t newset = 0;
-        if (copyin(current_proc->pagetable, &newset, set_uaddr, sizeof(newset)) < 0) {
-            return (long)-EFAULT;
-        }
+        int ret = signal_copyin_user_mask(set_uaddr, sigsetsize, &newset);
+        if (ret < 0)
+            return (long)ret;
         /* BF: POSIX forbids blocking SIGKILL or SIGSTOP.  Strip these from
          * any mask modification.  Also return -EINVAL for invalid how. */
         if (how == 0)       /* SIG_BLOCK */
-            current_proc->sigmask |= signal_mask_sanitize(newset);
+            current_proc->sigmask = signal_mask_sanitize(current_proc->sigmask | newset);
         else if (how == 1)  /* SIG_UNBLOCK */
-            current_proc->sigmask &= ~newset;
+            current_proc->sigmask = signal_mask_sanitize(current_proc->sigmask & ~newset);
         else if (how == 2)  /* SIG_SETMASK */
-            current_proc->sigmask = signal_mask_sanitize(newset);
+            current_proc->sigmask = newset;
         else
             return (long)-22; /* EINVAL for invalid how */
     }
@@ -335,15 +377,15 @@ long sys_rt_sigreturn_handler(struct trapframe *tf) {
 }
 
 long sys_rt_sigsuspend_handler(struct trapframe *tf) {
-    if (!rt_sigsetsize_valid(tf->a1))
+    if (!signal_sigsetsize_supported(tf->a1))
         return (long)-22;
 
     uint64_t mask;
-    if (copyin(current_proc->pagetable, &mask, tf->a0, sizeof(uint64_t)) < 0)
-        return -EFAULT; // EFAULT
+    int mask_ret = signal_copyin_user_mask(tf->a0, tf->a1, &mask);
+    if (mask_ret < 0)
+        return (long)mask_ret;
     /* POSIX: SIGKILL and SIGSTOP are never blockable, even in temporary
      * sigsuspend masks. */
-    mask = signal_mask_sanitize(mask);
     uint64_t old_mask = current_proc->sigmask;
     current_proc->sigmask = mask;
     /* BF: Suspend until a signal is deliverable under the temporary mask.
@@ -370,12 +412,14 @@ long sys_rt_sigsuspend_handler(struct trapframe *tf) {
 }
 
 long sys_rt_sigpending_handler(struct trapframe *tf) {
-    if (!rt_sigsetsize_valid(tf->a1))
+    if (!signal_sigsetsize_supported(tf->a1))
         return (long)-22;
 
-    uint64_t pending = current_proc->sigpending & current_proc->sigmask;
-    if (copyout(current_proc->pagetable, tf->a0, &pending, sizeof(uint64_t)) < 0)
-        return -EFAULT;
+    uint64_t pending = current_proc->sigpending &
+                       signal_mask_sanitize(current_proc->sigmask);
+    int ret = signal_copyout_user_mask(tf->a0, tf->a1, pending);
+    if (ret < 0)
+        return (long)ret;
     return 0;
 }
 
@@ -387,15 +431,16 @@ long sys_rt_sigtimedwait_handler(struct trapframe *tf) {
     uint64_t timeout_uaddr = tf->a2;
     uint64_t sigsetsize = tf->a3;
 
-    if (!rt_sigsetsize_valid(sigsetsize))
+    if (!signal_sigsetsize_supported(sigsetsize))
         return (long)-22; /* EINVAL */
 
     if (!set_uaddr)
         return (long)-EFAULT; /* EFAULT */
 
     uint64_t waitset;
-    if (copyin(current_proc->pagetable, &waitset, set_uaddr, sizeof(uint64_t)) < 0)
-        return (long)-EFAULT; /* EFAULT */
+    int mask_ret = signal_copyin_user_mask(set_uaddr, sigsetsize, &waitset);
+    if (mask_ret < 0)
+        return (long)mask_ret;
 
     /* Parse timeout if provided */
     int64_t timeout_sec = 0, timeout_nsec = 0;
