@@ -72,6 +72,8 @@ static void cleanup_all(void) {
     unlink("/mnt/sl_unlink_link");
     unlink("/mnt/sl_unlink_target");
     unlink("/mnt/sl_dangle");
+    unlink("/mnt/sl_dangle_create");
+    unlink("/mnt/sl_dangle_create_target");
     unlink("/mnt/sl_rla_dir/child");
     unlink("/mnt/sl_rla_dir/child_target");
     rmdir("/mnt/sl_rla_dir");
@@ -408,6 +410,53 @@ static void test_symlink_dangling(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * symlink_dangling_create -- O_CREAT follows dangling final target
+ * ---------------------------------------------------------------------- */
+
+static void test_symlink_dangling_create(void) {
+    struct stat st;
+    char buf[64];
+
+    unlink("/mnt/sl_dangle_create");
+    unlink("/mnt/sl_dangle_create_target");
+
+    CHECK("symlink: symlink_dangling_create setup",
+          symlink("/mnt/sl_dangle_create_target",
+                  "/mnt/sl_dangle_create") == 0);
+
+    errno = 0;
+    int fd = open("/mnt/sl_dangle_create",
+                  O_WRONLY | O_CREAT | O_EXCL, 0644);
+    CHECK("symlink: symlink_dangling_create excl returns -1", fd == -1);
+    CHECK("symlink: symlink_dangling_create excl errno EEXIST",
+          errno == EEXIST);
+    if (fd >= 0) close(fd);
+    CHECK("symlink: symlink_dangling_create excl target absent",
+          stat("/mnt/sl_dangle_create_target", &st) == -1 &&
+          errno == ENOENT);
+
+    errno = 0;
+    fd = open("/mnt/sl_dangle_create", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK("symlink: symlink_dangling_create open creates target", fd >= 0);
+    if (fd >= 0) {
+        CHECK("symlink: symlink_dangling_create write target",
+              write(fd, "made", 4) == 4);
+        close(fd);
+    }
+
+    memset(buf, 0, sizeof(buf));
+    int n = read_file("/mnt/sl_dangle_create_target", buf, sizeof(buf));
+    CHECK("symlink: symlink_dangling_create target content",
+          n == 4 && memcmp(buf, "made", 4) == 0);
+
+    CHECK("symlink: symlink_dangling_create link preserved",
+          lstat("/mnt/sl_dangle_create", &st) == 0 && S_ISLNK(st.st_mode));
+
+    unlink("/mnt/sl_dangle_create");
+    unlink("/mnt/sl_dangle_create_target");
+}
+
+/* -----------------------------------------------------------------------
  * 13. readlink_intermediate_dir_symlink -- follow dirname symlink only
  * ---------------------------------------------------------------------- */
 
@@ -710,6 +759,7 @@ int main(void) {
     test_realpath_relative_symlink_parent();
     test_symlink_unlink();
     test_symlink_dangling();
+    test_symlink_dangling_create();
     test_readlink_intermediate_dir_symlink();
     test_symlinkat_parent_symlink();
     test_symlink_long_target();

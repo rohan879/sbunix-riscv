@@ -828,6 +828,25 @@ static int procfs_close(void *fs_data, void *private) {
   return 0;
 }
 
+static int procfs_reopen(void *fs_data, void *private, int flags,
+                         void **new_private) {
+  (void)fs_data;
+  (void)flags;
+  struct procfs_private *old = (struct procfs_private *)private;
+  if (!old)
+    return -2; /* -ENOENT */
+
+  struct procfs_private *priv =
+    (struct procfs_private *)kmalloc(sizeof(struct procfs_private));
+  if (!priv)
+    return -12; /* -ENOMEM */
+  /* BF: /proc/self/fd/N must be able to reopen procfs pseudo-files without
+   * falling back to path lookup, while still giving the new fd a fresh offset. */
+  memcpy(priv, old, sizeof(*priv));
+  *new_private = priv;
+  return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* procfs_stat                                                         */
 /* ------------------------------------------------------------------ */
@@ -1293,6 +1312,7 @@ struct vfs_ops procfs_ops = {
   .read     = procfs_read,
   .write    = procfs_write,
   .ftruncate = NULL,
+  .reopen   = procfs_reopen,
   .close    = procfs_close,
   .stat     = procfs_stat,
   .fstat    = procfs_fstat,

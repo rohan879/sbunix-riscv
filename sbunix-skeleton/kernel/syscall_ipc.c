@@ -177,33 +177,22 @@ long sys_futex_handler(struct trapframe *tf) {
         /* If value changed, return EAGAIN */
         if (curval != val)
             return (long)-11; /* EAGAIN */
-        /* Sleep on this address */
-        current_proc->futex_addr = uaddr;
-        current_proc->state = SLEEPING;
-        swtch(&current_proc->context, &scheduler_context);
-        current_proc->futex_addr = 0;
-        /* Check for signal interruption */
-        if (signal_deliverable_mask(current_proc)) {
-            struct kern_sigaction *ksa = proc_sigactions(current_proc);
-            for (int s = 1; s < 65; s++) {
-                uint64_t deliverable = signal_deliverable_mask(current_proc);
-                if (deliverable & signal_bit(s)) {
-                    if (ksa[s].handler > 1) /* user handler */
-                        return (long)-4; /* EINTR */
-                    if (ksa[s].handler == 0) { /* SIG_DFL */
-                        if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                            continue;
-                        if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                            continue;
-                        if (s == SIGCONT)
-                            continue;
-                        /* Terminating: return to let deliver_signal kill */
-                        return (long)-4;
-                    }
-                }
-            }
+        for (;;) {
+            /* Sleep on this address */
+            current_proc->futex_addr = uaddr;
+            current_proc->state = SLEEPING;
+            swtch(&current_proc->context, &scheduler_context);
+            /* BF: FUTEX_WAKE clears futex_addr before making the waiter
+             * runnable. Signal-only wakes leave it set, so ignored/default-
+             * ignore signals must continue waiting instead of returning
+             * false success. */
+            int woke_by_futex = (current_proc->futex_addr == 0);
+            current_proc->futex_addr = 0;
+            if (woke_by_futex)
+                return 0;
+            if (signal_pending_interrupts_syscall(current_proc, 0))
+                return (long)-EINTR;
         }
-        return 0;
     } else if (op == FUTEX_WAKE) {
         /* Wake up to val processes sleeping on uaddr */
         int woken = 0;
@@ -307,45 +296,126 @@ long sys_epoll_pwait_handler(struct trapframe *tf) {
     uint64_t events_uva = tf->a1;
     int maxevents = (int)tf->a2;
     int timeout_ms = (int)tf->a3;
-    struct open_file **ftab = proc_ofile(current_proc);
-    if (epfd < 0 || epfd >= NOFILE || !ftab[epfd]) return (long)-9;
-    struct epoll_private *ep = (struct epoll_private *)ftab[epfd]->private;
-    if (!ep) return (long)-22;
-    /* Check readiness of each registered fd */
-    int nready = 0;
-    for (int i = 0; i < ep->count && nready < maxevents; i++) {
-        int fd = ep->entries[i].fd;
-        if (fd < 0 || fd >= NOFILE || !ftab[fd]) continue;
-        struct open_file *f = ftab[fd];
-        int ready = 0;
-        if (f->is_pipe && f->pipe_read) {
-            int pid = f->pipe_id;
-            if (pipe_avail(pid) > 0 || pipes[pid].write_open <= 0) ready = 1;
-        } else if (f->is_pipe && f->pipe_write) {
-            int pid = f->pipe_id;
-            if (pipe_avail(pid) < KPIPE_BUF) ready = 1;
-        } else {
-            ready = 1; /* regular files are always ready */
-        }
-        if (ready) {
-            uint8_t kevt[12];
-            uint32_t revents = ep->entries[i].events & 0x01; /* EPOLLIN */
-            if (f->is_pipe && f->pipe_write) revents = ep->entries[i].events & 0x04; /* EPOLLOUT */
-            memcpy(kevt, &revents, 4);
-            memcpy(kevt + 4, &ep->entries[i].data, 8);
-            if (copyout(current_proc->pagetable, events_uva + (uint64_t)nready * 12, kevt, 12) < 0)
-                return (long)-EFAULT;
-            nready++;
-        }
+    uint64_t sigmask_uaddr = tf->a4;
+    uint64_t sigsetsize = tf->a5;
+
+    if (maxevents <= 0)
+        return (long)-EINVAL;
+
+    current_proc->has_saved_sigmask = 0;
+
+    uint64_t old_mask = current_proc->sigmask;
+    uint64_t epoch_before = current_proc->signal_handled_epoch;
+    int has_sigmask = 0;
+    if (sigmask_uaddr != 0) {
+        if (sigsetsize != sizeof(uint64_t))
+            return (long)-EINVAL;
+        uint64_t new_mask;
+        if (copyin(current_proc->pagetable, &new_mask, sigmask_uaddr, 8) < 0)
+            return (long)-EFAULT;
+        current_proc->sigmask = signal_mask_sanitize(new_mask);
+        has_sigmask = 1;
     }
-    if (nready == 0 && timeout_ms != 0) {
-        /* Sleep and retry once */
+
+    int has_timeout = timeout_ms >= 0;
+    uint64_t deadline_ticks = 0;
+    if (timeout_ms > 0) {
+        uint64_t sec = (uint64_t)timeout_ms / 1000;
+        uint64_t nsec = ((uint64_t)timeout_ms % 1000) * 1000000UL;
+        deadline_ticks = timespec_rel_deadline(sec, nsec);
+    }
+
+    struct open_file **ftab = proc_ofile(current_proc);
+    if (epfd < 0 || epfd >= NOFILE || !ftab[epfd]) {
+        if (has_sigmask) current_proc->sigmask = old_mask;
+        return (long)-9;
+    }
+    struct epoll_private *ep = (struct epoll_private *)ftab[epfd]->private;
+    if (!ep) {
+        if (has_sigmask) current_proc->sigmask = old_mask;
+        return (long)-22;
+    }
+    int result_ready = 0;
+    for (;;) {
+        /* Check readiness of each registered fd */
+        int nready = 0;
+        for (int i = 0; i < ep->count && nready < maxevents; i++) {
+            int fd = ep->entries[i].fd;
+            if (fd < 0 || fd >= NOFILE || !ftab[fd]) continue;
+            struct open_file *f = ftab[fd];
+            int ready = 0;
+            if (f->is_pipe && f->pipe_read) {
+                int pid = f->pipe_id;
+                if (pipe_avail(pid) > 0 || pipes[pid].write_open <= 0) ready = 1;
+            } else if (f->is_pipe && f->pipe_write) {
+                int pid = f->pipe_id;
+                if (pipe_avail(pid) < KPIPE_BUF) ready = 1;
+            } else {
+                ready = 1; /* regular files are always ready */
+            }
+            if (ready) {
+                uint8_t kevt[12];
+                uint32_t revents = ep->entries[i].events & 0x01; /* EPOLLIN */
+                if (f->is_pipe && f->pipe_write) revents = ep->entries[i].events & 0x04; /* EPOLLOUT */
+                memcpy(kevt, &revents, 4);
+                memcpy(kevt + 4, &ep->entries[i].data, 8);
+                if (copyout(current_proc->pagetable,
+                            events_uva + (uint64_t)nready * 12,
+                            kevt, 12) < 0) {
+                    if (has_sigmask) current_proc->sigmask = old_mask;
+                    return (long)-EFAULT;
+                }
+                nready++;
+            }
+        }
+        if (nready != 0 || timeout_ms == 0) {
+            result_ready = nready;
+            goto epoll_done;
+        }
+        if (signal_pending_interrupts_syscall(current_proc, 0) ||
+            current_proc->signal_handled_epoch != epoch_before) {
+            if (has_sigmask) {
+                current_proc->saved_sigmask_restore = old_mask;
+                current_proc->has_saved_sigmask = 1;
+            }
+            /* epoll_pwait uses ppoll/pselect-style mask semantics and must
+             * not be restarted after a caught signal, even with SA_RESTART. */
+            current_proc->in_syscall = 0;
+            return (long)-EINTR;
+        }
+        if (has_timeout && deadline_ticks <= r_time()) {
+            result_ready = 0;
+            goto epoll_done;
+        }
+        if (has_timeout) {
+            current_proc->sleep_until = deadline_ticks;
+            /* BF: epoll_pwait has both an fd event condition and a timeout.
+             * Use an event-timed marker so pipe readiness can wake us before
+             * the deadline while the timer still handles pure timeout. */
+            current_proc->waiting_for_uart = PROC_WAIT_EVENT_TIMER;
+            timer_reschedule();
+        } else {
+            current_proc->waiting_for_uart = PROC_WAIT_UART;
+        }
         current_proc->state = SLEEPING;
         swtch(&current_proc->context, &scheduler_context);
-        /* After wake, re-check (simplified: return 0 if still nothing) */
-        return 0;
+        current_proc->waiting_for_uart = PROC_WAIT_NONE;
+        if (signal_pending_interrupts_syscall(current_proc, 0) ||
+            current_proc->signal_handled_epoch != epoch_before) {
+            if (has_sigmask) {
+                current_proc->saved_sigmask_restore = old_mask;
+                current_proc->has_saved_sigmask = 1;
+            }
+            /* epoll_pwait is a non-restartable signal-wait syscall. */
+            current_proc->in_syscall = 0;
+            return (long)-EINTR;
+        }
     }
-    return (long)nready;
+
+epoll_done:
+    if (has_sigmask)
+        current_proc->sigmask = old_mask;
+    return (long)result_ready;
 }
 
 /* ------------------------------------------------------------------ */
@@ -551,7 +621,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
      * for deliverable signals.  If a signal was pending but blocked, and
      * the new mask unblocks it, ppoll must return -EINTR immediately
      * without entering the poll loop. */
-    if (signal_deliverable_mask(current_proc)) {
+    if (signal_pending_interrupts_syscall(current_proc, 0)) {
         if (sigmask_uaddr != 0) {
             /* BF: Defer mask restore so deliver_signal (at trap return) can
              * deliver the handler under the ppoll-swapped mask.  sigreturn
@@ -565,7 +635,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
          * in_syscall so deliver_signal does not rewind epc when
          * SA_RESTART is set on the handler. */
         current_proc->in_syscall = 0;
-        return (long)-4; /* EINTR */
+        return (long)-EINTR;
     }
 
     /* Parse timeout */
@@ -603,6 +673,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
     }
 
     /* If none ready and timeout allows blocking */
+ppoll_wait_again:
     if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
         /* BF: When !has_timeout (NULL timeout = infinite wait), use
          * waiting_for_uart=1 to block indefinitely.  Previously
@@ -610,10 +681,13 @@ long sys_ppoll_handler(struct trapframe *tf) {
          * causing ppoll to return immediately instead of blocking. */
         if (has_timeout && sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
-            current_proc->waiting_for_uart = 2;
+            /* BF: timed fd waits must be woken by either readiness or the
+             * deadline.  PROC_WAIT_TIMER is timer-only and pipe wakeups skip
+             * it, so use the event-timed marker for ppoll. */
+            current_proc->waiting_for_uart = PROC_WAIT_EVENT_TIMER;
             timer_reschedule();
         } else if (!has_timeout) {
-            current_proc->waiting_for_uart = 1; /* block indefinitely */
+            current_proc->waiting_for_uart = PROC_WAIT_UART; /* block indefinitely */
         }
         if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
@@ -621,7 +695,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
             /* BF: Clear on ALL post-sleep paths — stale waiting_for_uart
              * value (1 or 2) causes scheduler to mistrack process state
              * in subsequent syscalls. */
-            current_proc->waiting_for_uart = 0;
+            current_proc->waiting_for_uart = PROC_WAIT_NONE;
         }
 
         /* BF: ppoll must return -EINTR when a deliverable signal is pending
@@ -630,7 +704,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
          * Also check epoch: if a signal was handled between the mask swap
          * and entering sleep, we must still return -EINTR even if
          * sigpending is now clear. */
-        if (signal_deliverable_mask(current_proc) ||
+        if (signal_pending_interrupts_syscall(current_proc, 0) ||
             current_proc->signal_handled_epoch != epoch_before) {
             if (sigmask_uaddr != 0) {
                 /* BF: Defer mask restore -- same as early EINTR path above. */
@@ -643,7 +717,7 @@ long sys_ppoll_handler(struct trapframe *tf) {
              * in_syscall so deliver_signal does not rewind epc when
              * SA_RESTART is set on the handler. */
             current_proc->in_syscall = 0;
-            return (long)-4; /* EINTR */
+            return (long)-EINTR;
         }
 
         /* Re-check after wakeup */
@@ -657,6 +731,8 @@ long sys_ppoll_handler(struct trapframe *tf) {
             if (rev)
                 ready++;
         }
+        if (ready == 0 && (!has_timeout || sleep_until_val > r_time()))
+            goto ppoll_wait_again;
     }
 
     /* Restore sigmask */
@@ -776,7 +852,7 @@ long sys_pselect6_handler(struct trapframe *tf) {
     }
 
     /* BF: Check for pending signals before blocking (POSIX atomicity). */
-    if (ready == 0 && signal_deliverable_mask(current_proc)) {
+    if (ready == 0 && signal_pending_interrupts_syscall(current_proc, 0)) {
         if (has_sigmask) {
             current_proc->saved_sigmask_restore = old_mask;
             current_proc->has_saved_sigmask = 1;
@@ -789,19 +865,23 @@ long sys_pselect6_handler(struct trapframe *tf) {
          * in_syscall so deliver_signal does not rewind epc when
          * SA_RESTART is set on the handler. */
         current_proc->in_syscall = 0;
-        return (long)-4; /* EINTR */
+        return (long)-EINTR;
     }
 
     /* Block if none ready and timeout allows */
+pselect_wait_again:
     if (ready == 0 && (!has_timeout || sleep_until_val > r_time())) {
         /* BF: Fix blocking for NULL timeout -- when !has_timeout,
          * sleep_until_val is 0 so we need waiting_for_uart=1 (indefinite). */
         if (has_timeout && sleep_until_val > 0) {
             current_proc->sleep_until = sleep_until_val;
-            current_proc->waiting_for_uart = 2;
+            /* BF: timed fd waits must be woken by either readiness or the
+             * deadline.  PROC_WAIT_TIMER is timer-only and pipe wakeups skip
+             * it, so use the event-timed marker for pselect. */
+            current_proc->waiting_for_uart = PROC_WAIT_EVENT_TIMER;
             timer_reschedule();
         } else if (!has_timeout) {
-            current_proc->waiting_for_uart = 1; /* block indefinitely */
+            current_proc->waiting_for_uart = PROC_WAIT_UART; /* block indefinitely */
         }
         if (current_proc->waiting_for_uart) {
             current_proc->state = SLEEPING;
@@ -809,7 +889,7 @@ long sys_pselect6_handler(struct trapframe *tf) {
             /* BF: Clear on ALL post-sleep paths — stale waiting_for_uart
              * value (1 or 2) causes scheduler to mistrack process state
              * in subsequent syscalls. */
-            current_proc->waiting_for_uart = 0;
+            current_proc->waiting_for_uart = PROC_WAIT_NONE;
         }
 
         /* BF: If a signal handler ran between mask swap and here,
@@ -820,11 +900,11 @@ long sys_pselect6_handler(struct trapframe *tf) {
                 current_proc->has_saved_sigmask = 1;
             }
             current_proc->in_syscall = 0;
-            return (long)-4;  /* EINTR */
+            return (long)-EINTR;
         }
 
         /* BF: Check for signal after wakeup. */
-        if (signal_deliverable_mask(current_proc)) {
+        if (signal_pending_interrupts_syscall(current_proc, 0)) {
             if (has_sigmask) {
                 current_proc->saved_sigmask_restore = old_mask;
                 current_proc->has_saved_sigmask = 1;
@@ -837,7 +917,7 @@ long sys_pselect6_handler(struct trapframe *tf) {
              * in_syscall so deliver_signal does not rewind epc when
              * SA_RESTART is set on the handler. */
             current_proc->in_syscall = 0;
-            return (long)-4; /* EINTR */
+            return (long)-EINTR;
         }
 
         /* Re-check */
@@ -859,6 +939,8 @@ long sys_pselect6_handler(struct trapframe *tf) {
                 if (rev & (KPOLLERR | KPOLLNVAL)) { out_efds |= bit; ready++; }
             }
         }
+        if (ready == 0 && (!has_timeout || sleep_until_val > r_time()))
+            goto pselect_wait_again;
     }
 
     /* Restore sigmask on normal return */

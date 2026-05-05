@@ -111,7 +111,7 @@ void close_ofile(struct proc *p, int fd) {
         pipes[pid].used = 0;
       /* Wake any sleeping pipe readers/writers */
       for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
-        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
+        if (pp->state == SLEEPING && pp->waiting_for_uart != PROC_WAIT_TIMER)
           pp->state = RUNNABLE;
       }
     }
@@ -120,7 +120,7 @@ void close_ofile(struct proc *p, int fd) {
       if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
         pipes[pid].used = 0;
       for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
-        if (pp->state == SLEEPING && pp->waiting_for_uart != 2)
+        if (pp->state == SLEEPING && pp->waiting_for_uart != PROC_WAIT_TIMER)
           pp->state = RUNNABLE;
       }
     }
@@ -171,7 +171,9 @@ static uint64_t timer_nearest_deadline(uint64_t now) {
     uint64_t nearest = 0;
 
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-        if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
+        if (p->state == SLEEPING &&
+            (p->waiting_for_uart == PROC_WAIT_TIMER ||
+             p->waiting_for_uart == PROC_WAIT_EVENT_TIMER) &&
             p->sleep_until > 0) {
             if (nearest == 0 || p->sleep_until < nearest)
                 nearest = p->sleep_until;
@@ -272,7 +274,7 @@ static void handle_external_interrupt(void) {
          * timed sleeps (waiting_for_uart==2) or UART-input sleeps (==1,
          * already handled by uart_wakeup above). */
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->state == SLEEPING && p->waiting_for_uart == 0)
+            if (p->state == SLEEPING && p->waiting_for_uart == PROC_WAIT_NONE)
                 p->state = RUNNABLE;
         }
         #ifdef TIMER_DISPLAY
@@ -335,9 +337,11 @@ static void handle_timer_interrupt(void) {
 
     /* Wake processes whose timed sleep has expired */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-        if (p->state == SLEEPING && p->waiting_for_uart == 2 &&
+        if (p->state == SLEEPING &&
+            (p->waiting_for_uart == PROC_WAIT_TIMER ||
+             p->waiting_for_uart == PROC_WAIT_EVENT_TIMER) &&
             now >= p->sleep_until) {
-            p->waiting_for_uart = 0;
+            p->waiting_for_uart = PROC_WAIT_NONE;
             p->state = RUNNABLE;
             woke_deadline = 1;
         }
@@ -584,14 +588,19 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
 
         /* Continue: resume stopped process (or ignore if running) */
         if (signum == SIGCONT) {
+            int was_stopped = p->stopped_signal != 0;
             p->sigpending &= ~signal_bit(signum);
             signal_queue_purge_all(p, signum);
             p->stopped_signal = 0;
+            p->stop_reported = 0;
             p->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
                                signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
             /* BF: Notify parent with CLD_CONTINUED so SA_SIGINFO handlers
              * on SIGCHLD can detect child continuation. */
-            if (p->parent) {
+            if (was_stopped) {
+                p->continued_signal = SIGCONT;
+            }
+            if (was_stopped && p->parent) {
                 struct kern_sigaction *psa = proc_sigactions(p->parent);
                 if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
                     /* BF: Capture child metadata for parent's SIGCHLD handler.
@@ -613,6 +622,8 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
             signal_queue_purge_all(p, signum);
             p->exit_status = (signum << 8) | 0x7f;
             p->stopped_signal = signum;
+            p->stop_reported = 0;
+            p->continued_signal = 0;
             p->state = SLEEPING;
             p->sigpending &= ~signal_bit(SIGCONT);
             if (p->parent) {
@@ -855,10 +866,34 @@ void kill_deliver(struct proc *target, int sig) {
                         current_proc ? (int32_t)current_proc->pid : 0,
                         0, K_SI_USER);
         if (sig == SIGCONT) {
+            uint64_t cont_bit = signal_bit(SIGCONT);
+            int was_stopped = target->stopped_signal != 0;
             /* SIGCONT: clear stopped state and wake process */
             target->stopped_signal = 0;
+            target->stop_reported = 0;
+            if (was_stopped)
+                target->continued_signal = SIGCONT;
             target->sigpending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
                                     signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
+            /* BF: A blocked default SIGCONT remains pending for sigpending();
+             * clear it immediately only when it is currently deliverable. */
+            if (proc_sigactions(target)[SIGCONT].handler <= 1 &&
+                !(target->sigmask & cont_bit)) {
+                target->sigpending &= ~cont_bit;
+                signal_queue_purge_all(target, SIGCONT);
+            }
+            if (was_stopped && target->parent) {
+                struct kern_sigaction *psa = proc_sigactions(target->parent);
+                if (!(psa[SIGCHLD].flags & 0x00000001)) { /* SA_NOCLDSTOP */
+                    /* BF: Queue continuation only for an actual stopped child;
+                     * a default SIGCONT sent to a running process is ignored. */
+                    sig_set_pending_ex(target->parent, SIGCHLD,
+                                       (int32_t)target->pid, 0,
+                                       K_CLD_CONTINUED, SIGCONT);
+                    if (target->parent->state == SLEEPING)
+                        target->parent->state = RUNNABLE;
+                }
+            }
         }
         /* Stop-class signals: when the target is a different process and
          * the signal will use the default stop action, immediately mark it
@@ -885,6 +920,8 @@ void kill_deliver(struct proc *target, int sig) {
               proc_sigactions(target)[sig].handler == 0))) {
             target->sigpending &= ~signal_bit(sig);
             target->stopped_signal = sig;
+            target->stop_reported = 0;
+            target->continued_signal = 0;
             target->exit_status = (sig << 8) | 0x7f; /* BF: Fix 2 — for WIFSTOPPED/WSTOPSIG */
             target->state = SLEEPING;
             target->sigpending &= ~signal_bit(SIGCONT);

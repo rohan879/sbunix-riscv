@@ -7,9 +7,12 @@
 /* waitpid() / wait() options */
 #define WNOHANG    1  /* do not block if no child has exited */
 #define WUNTRACED  2  /* also return for stopped children */
-#define WCONTINUED 8  /* also return for continued children */
+/* BF: waitid(WSTOPPED) uses the same stopped-child bit as WUNTRACED.
+ * Bit 16 is WTRAPPED, not the normal stopped-child request. */
+#define WSTOPPED   2
 #define WEXITED    4
-#define WSTOPPED   16
+#define WCONTINUED 8  /* also return for continued children */
+#define WTRAPPED   16
 #define WNOWAIT    0x01000000
 
 /* Wait-status inspection macros */

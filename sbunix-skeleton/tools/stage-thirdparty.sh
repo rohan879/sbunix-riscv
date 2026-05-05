@@ -14,9 +14,66 @@ thirdparty_dir=$repo_root/thirdparty
 thirdparty_local_dir=$repo_root/thirdparty-local
 payload_dir=$thirdparty_dir
 stage_thirdparty_local=${STAGE_THIRDPARTY_LOCAL:-0}
+require_thirdparty_payloads=${REQUIRE_THIRDPARTY_PAYLOADS:-0}
 
 if [ "$stage_thirdparty_local" = "1" ] && [ -d "$thirdparty_local_dir" ]; then
   payload_dir=$thirdparty_local_dir
+fi
+
+missing_payload=0
+
+mark_missing_payload() {
+  echo "stage-thirdparty: required payload missing: $1" >&2
+  missing_payload=1
+}
+
+require_input_file() {
+  if [ ! -f "$1" ]; then
+    mark_missing_payload "$1"
+  fi
+}
+
+require_input_dir() {
+  if [ ! -d "$1" ]; then
+    mark_missing_payload "$1"
+  fi
+}
+
+require_staged_file() {
+  if [ ! -f "$1" ]; then
+    mark_missing_payload "$1"
+  fi
+}
+
+require_staged_exec() {
+  if [ ! -x "$1" ]; then
+    mark_missing_payload "$1"
+  fi
+}
+
+if [ "$require_thirdparty_payloads" = "1" ]; then
+  # BF: Validate the selected payload tree before staging so required
+  # third-party coverage fails at build time rather than degrading to skips.
+  if [ ! -f "$payload_dir/bin/micropython" ] &&
+     [ ! -f "$thirdparty_dir/python/ports/unix/build-minimal/micropython" ]; then
+    mark_missing_payload "$payload_dir/bin/micropython"
+  fi
+  require_input_file "$payload_dir/bin/tcc"
+  require_input_file "$payload_dir/bin/pdpmake"
+  require_input_file "$payload_dir/bin/busybox"
+  require_input_dir "$payload_dir/tcc-sysroot/include"
+  require_input_dir "$payload_dir/busybox-root/bin"
+  require_input_file "$payload_dir/busybox-root/bin/cat"
+  require_input_file "$payload_dir/busybox-root/bin/cp"
+  require_input_file "$payload_dir/busybox-root/bin/echo"
+  require_input_file "$payload_dir/busybox-root/bin/ls"
+  require_input_file "$payload_dir/busybox-root/bin/mkdir"
+  require_input_file "$payload_dir/busybox-root/bin/mv"
+  require_input_file "$payload_dir/busybox-root/bin/rm"
+  require_input_file "$payload_dir/busybox-root/bin/rmdir"
+  if [ "$missing_payload" != "0" ]; then
+    exit 1
+  fi
 fi
 
 if [ -f "$repo_root/tools/sourceme.sh" ]; then
@@ -153,3 +210,31 @@ fi
 # ENH: Record the staging mode for debugging serial logs when workloads fail
 # after image creation but before userspace prints a clearer diagnosis.
 printf '%s\n' "$mode" >"$dest_root/usr/lib/.thirdparty-stage-mode"
+if [ "$require_thirdparty_payloads" = "1" ]; then
+  # BF: Re-check the guest-visible result so required mode also catches
+  # broken copies, missing synthesized TCC support files, and bad applet links.
+  require_staged_exec "$dest_root/bin/micropython"
+  require_staged_exec "$dest_root/bin/python"
+  require_staged_exec "$dest_root/bin/tcc"
+  require_staged_exec "$dest_root/bin/pdpmake"
+  require_staged_file "$dest_root/bin/make"
+  require_staged_exec "$dest_root/bin/busybox"
+  require_staged_file "$dest_root/usr/lib/tcc/include/stdio.h"
+  require_staged_file "$dest_root/usr/lib/tcc/lib/crt1.o"
+  require_staged_file "$dest_root/usr/lib/tcc/lib/libc.a"
+  require_staged_file "$dest_root/usr/lib/tcc/lib/libtcc1.a"
+  require_staged_exec "$dest_root/usr/lib/busybox/bin/cat"
+  require_staged_exec "$dest_root/usr/lib/busybox/bin/cp"
+  require_staged_exec "$dest_root/usr/lib/busybox/bin/echo"
+  require_staged_exec "$dest_root/usr/lib/busybox/bin/ls"
+  require_staged_exec "$dest_root/usr/lib/busybox/bin/mkdir"
+  require_staged_exec "$dest_root/usr/lib/busybox/bin/mv"
+  require_staged_exec "$dest_root/usr/lib/busybox/bin/rm"
+  require_staged_exec "$dest_root/usr/lib/busybox/bin/rmdir"
+  if [ "$missing_payload" != "0" ]; then
+    exit 1
+  fi
+  printf '1\n' >"$dest_root/usr/lib/.thirdparty-required"
+else
+  rm -f "$dest_root/usr/lib/.thirdparty-required"
+fi

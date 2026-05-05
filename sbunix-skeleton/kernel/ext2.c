@@ -911,17 +911,24 @@ static struct ext2_inode_mem *ext2_namei_r(struct ext2_fs *fs, const char *path,
       return NULL;
     }
 
-    /* Copy component to a null-terminated buffer */
-    char comp[256];
+    /* Keep lookup scratch off the kernel stack; this fallback can follow
+     * multiple symlinks when called outside the shared path resolver. */
+    char *comp = (char *)kmalloc(256);
+    if (!comp) {
+      icache_release(ip);
+      return NULL;
+    }
     if (clen > 255) clen = 255;
     memcpy(comp, start, clen);
     comp[clen] = '\0';
 
     uint32_t child_ino;
     if (ext2_dir_lookup(fs, ip, comp, &child_ino) < 0) {
+      kmfree(comp, 256);
       icache_release(ip);
       return NULL;
     }
+    kmfree(comp, 256);
 
     icache_release(ip);
     ip = icache_get(fs, child_ino);
@@ -932,11 +939,23 @@ static struct ext2_inode_mem *ext2_namei_r(struct ext2_fs *fs, const char *path,
 
     /* Follow symlinks in intermediate path components */
     if (ip->type == EXT2_TYPE_SYMLINK && *p != '\0') {
-      char target[256];
+      char *target = (char *)kmalloc(256);
+      char *newpath = (char *)kmalloc(512);
+      if (!target || !newpath) {
+        if (target) kmfree(target, 256);
+        if (newpath) kmfree(newpath, 512);
+        icache_release(ip);
+        return NULL;
+      }
       int tlen = (int)ip->size;
       if (tlen > 255) tlen = 255;
       uint32_t blk = ext2_bmap(fs, ip, 0);
-      if (blk == 0) { icache_release(ip); return NULL; }
+      if (blk == 0) {
+        kmfree(newpath, 512);
+        kmfree(target, 256);
+        icache_release(ip);
+        return NULL;
+      }
       struct bcache_entry *be = bcache_get(fs, blk);
       memcpy(target, be->data, (uint32_t)tlen);
       bcache_release(be);
@@ -944,11 +963,13 @@ static struct ext2_inode_mem *ext2_namei_r(struct ext2_fs *fs, const char *path,
       icache_release(ip);
 
       /* Build new path: prefix + target + "/" + remaining */
-      char newpath[512];
       int prefix_len = (int)(start - path);
       int remaining_len = (int)strlen(p);
-      if (prefix_len + tlen + 1 + remaining_len >= 510)
+      if (prefix_len + tlen + 1 + remaining_len >= 510) {
+        kmfree(newpath, 512);
+        kmfree(target, 256);
         return NULL;
+      }
       int npos = 0;
       if (prefix_len > 0) {
         memcpy(newpath, path, prefix_len);
@@ -963,7 +984,10 @@ static struct ext2_inode_mem *ext2_namei_r(struct ext2_fs *fs, const char *path,
         newpath[npos] = '\0';
       }
 
-      return ext2_namei_r(fs, newpath, symdepth - 1);
+      struct ext2_inode_mem *ret = ext2_namei_r(fs, newpath, symdepth - 1);
+      kmfree(newpath, 512);
+      kmfree(target, 256);
+      return ret;
     }
   }
 
@@ -971,7 +995,7 @@ static struct ext2_inode_mem *ext2_namei_r(struct ext2_fs *fs, const char *path,
 }
 
 static struct ext2_inode_mem *ext2_namei(struct ext2_fs *fs, const char *path) {
-  return ext2_namei_r(fs, path, 8);
+  return ext2_namei_r(fs, path, 40);
 }
 
 /* ================================================================== */
@@ -1196,6 +1220,48 @@ static int ext2_ftruncate(void *fs_data, void *private, uint64_t length) {
   if (!priv)
     return -EBADF;
   return ext2_ftruncate_ino(fs_data, priv->ino, length);
+}
+
+static int ext2_reopen(void *fs_data, void *private, int flags,
+                       void **new_private) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  struct ext2_open_private *old = (struct ext2_open_private *)private;
+  if (!fs || !old)
+    return -ENOENT;
+
+  struct ext2_inode_mem *ip = icache_get(fs, old->ino);
+  if (!ip)
+    return -ENOENT;
+  if ((flags & EXT2_O_CREAT) && (flags & EXT2_O_EXCL)) {
+    icache_release(ip);
+    return -EEXIST;
+  }
+
+  if ((flags & EXT2_O_TRUNC) && ip->type == EXT2_TYPE_FILE) {
+    /* BF: procfd O_TRUNC must operate on the inode referenced by the
+     * open file description, not a possibly replaced pathname. */
+    int ret = ext2_truncate(fs, ip);
+    if (ret < 0) {
+      icache_release(ip);
+      return ret;
+    }
+    icache_writeback(fs, ip);
+    sb_flush_if_dirty(fs);
+    bcache_sync(fs);
+  }
+
+  struct ext2_open_private *priv =
+    (struct ext2_open_private *)kmalloc(sizeof(struct ext2_open_private));
+  if (!priv) {
+    icache_release(ip);
+    return -ENOMEM;
+  }
+  priv->fs = fs;
+  priv->ino = ip->ino;
+  priv->is_dir = (ip->type == EXT2_TYPE_DIR);
+  *new_private = priv;
+  /* Keep the icache reference as this reopened file's open-time pin. */
+  return 0;
 }
 
 static int ext2_close(void *fs_data, void *private) {
@@ -1984,6 +2050,7 @@ struct vfs_ops ext2_ops = {
   .read     = ext2_read,
   .write    = ext2_write,
   .ftruncate = ext2_ftruncate,
+  .reopen   = ext2_reopen,
   .close    = ext2_close,
   .stat     = ext2_stat,
   .fstat    = ext2_fstat,
@@ -2245,6 +2312,18 @@ int ext2_fchmod_ino(void *fs_data, uint32_t ino, uint32_t mode) {
   ip->mode = mode & 07777;
   ip->dirty = 1;
   icache_writeback(fs, ip);
+  icache_release(ip);
+  return 0;
+}
+
+int ext2_lookup_inode(void *fs_data, const char *path, uint32_t *ino_out,
+                      uint16_t *type_out) {
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted) return -EROFS;
+  struct ext2_inode_mem *ip = ext2_namei(fs, path);
+  if (!ip) return -ENOENT;
+  if (ino_out) *ino_out = ip->ino;
+  if (type_out) *type_out = ip->type;
   icache_release(ip);
   return 0;
 }

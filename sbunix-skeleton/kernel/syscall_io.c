@@ -29,6 +29,7 @@ struct file_lock lock_table[MAX_FILE_LOCKS];
 
 enum {
   KERN_O_CREAT = 0100,
+  KERN_O_EXCL = 0200,
   KERN_O_TRUNC = 01000,
   KERN_O_DIRECTORY = 0200000,
   KERN_O_NOFOLLOW = 0400000,
@@ -37,6 +38,230 @@ enum {
   KERN_AT_REMOVEDIR = 0x200,
   KERN_AT_SYMLINK_FOLLOW = 0x400,
 };
+
+#define PROCFS_FD_NOT_LINK    ((long)-4096)
+
+static int path_has_trailing_slash(const char *path) {
+    int len = strlen(path);
+    while (len > 0 && path[len - 1] == '/')
+        len--;
+    return len > 0 && path[len] == '/';
+}
+
+static int vfs_stat_mode_io(const char *path, uint32_t *mode_out) {
+    const char *relpath;
+    struct mount *mnt = vfs_lookup_mount_entry(path, &relpath);
+    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
+    if (!ops || !ops->stat)
+        return -ENOENT;
+
+    uint8_t st[128];
+    int ret = ops->stat(mnt->fs_data, relpath, st);
+    if (ret < 0)
+        return ret;
+    memcpy(mode_out, st + 16, 4);
+    return 0;
+}
+
+static int require_resolved_dir(const char *path) {
+    uint32_t mode;
+    int ret = vfs_stat_mode_io(path, &mode);
+    if (ret < 0)
+        return ret;
+    return ((mode & 0xF000) == 0x4000) ? 0 : -ENOTDIR;
+}
+
+static void set_open_fd_flags(int fd, int flags);
+
+static int open_file_mode(struct open_file *f, uint32_t *mode_out) {
+    if (!f || f->is_pipe || !f->ops || !f->ops->fstat)
+        return -ENOTDIR;
+    uint8_t st[128];
+    int ret = f->ops->fstat(f->fs_data, f->private, st);
+    if (ret < 0)
+        return ret;
+    memcpy(mode_out, st + 16, 4);
+    return 0;
+}
+
+static long procfd_reopen_open_file(struct open_file *src, int flags,
+                                    int trailing_slash) {
+    uint32_t mode;
+    int ret = open_file_mode(src, &mode);
+    if (ret < 0)
+        return (long)ret;
+    int is_dir = ((mode & 0xF000) == 0x4000);
+    if ((trailing_slash || (flags & KERN_O_DIRECTORY)) && !is_dir)
+        return (long)-ENOTDIR;
+    int accmode = flags & 3;
+    if (is_dir && (accmode == 1 || accmode == 2))
+        return (long)-EISDIR;
+    if (is_dir && (flags & KERN_O_TRUNC))
+        return (long)-EISDIR;
+    if ((flags & KERN_O_CREAT) && (flags & KERN_O_EXCL))
+        return (long)-EEXIST;
+    if (!src->ops->reopen)
+        return (long)-ENXIO;
+
+    struct open_file *nf = vfs_alloc_file();
+    if (!nf)
+        return (long)-EMFILE;
+    int newfd = alloc_fd();
+    if (newfd < 0) {
+        vfs_free_file(nf);
+        return (long)-EMFILE;
+    }
+
+    void *priv = NULL;
+    ret = src->ops->reopen(src->fs_data, src->private, flags, &priv);
+    if (ret < 0) {
+        vfs_free_file(nf);
+        return (long)ret;
+    }
+
+    nf->ops = src->ops;
+    nf->fs_data = src->fs_data;
+    nf->private = priv;
+    nf->offset = 0;
+    nf->flags = flags;
+    nf->is_pipe = 0;
+    int plen = strlen(src->path);
+    if (plen > 255)
+        plen = 255;
+    memcpy(nf->path, src->path, plen);
+    nf->path[plen] = '\0';
+    proc_ofile(current_proc)[newfd] = nf;
+    set_open_fd_flags(newfd, flags);
+    return (long)newfd;
+}
+
+static void set_open_fd_flags(int fd, int flags) {
+    current_proc->fd_flags[fd] = 0;
+    if (flags & KERN_O_CLOEXEC)
+        current_proc->fd_flags[fd] |= 1;
+    if (flags & KERN_O_CLOFORK)
+        current_proc->fd_flags[fd] |= 2;
+}
+
+static struct proc *procfs_open_find_pid(pid_t pid) {
+    if (current_proc && current_proc->pid == pid &&
+        current_proc->state != UNUSED)
+        return current_proc;
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        if (p->pid == pid && p->state != UNUSED)
+            return p;
+    }
+    return NULL;
+}
+
+static int parse_uint_component(const char **pp, int *out) {
+    const char *p = *pp;
+    int val = 0;
+    if (*p < '0' || *p > '9')
+        return -1;
+    while (*p >= '0' && *p <= '9') {
+        if (val > 1000000)
+            return -1;
+        val = val * 10 + (*p - '0');
+        p++;
+    }
+    *pp = p;
+    *out = val;
+    return 0;
+}
+
+static int parse_procfs_fd_path(const char *path, pid_t *pid_out, int *fd_out) {
+    const char *p = path;
+    int pid = 0;
+    int fd = 0;
+
+    if (strncmp(p, "/proc/", 6) != 0)
+        return 0;
+    p += 6;
+    if (strncmp(p, "self", 4) == 0 && p[4] == '/') {
+        if (!current_proc)
+            return 0;
+        pid = current_proc->pid;
+        p += 5;
+    } else {
+        if (parse_uint_component(&p, &pid) < 0 || *p != '/')
+            return 0;
+        p++;
+    }
+    if (strncmp(p, "fd/", 3) != 0)
+        return 0;
+    p += 3;
+    if (parse_uint_component(&p, &fd) < 0 || *p != '\0')
+        return 0;
+
+    *pid_out = (pid_t)pid;
+    *fd_out = fd;
+    return 1;
+}
+
+static long open_procfs_fd_link(const char *resolved, int flags,
+                                int trailing_slash) {
+    pid_t pid;
+    int oldfd;
+    int matched = parse_procfs_fd_path(resolved, &pid, &oldfd);
+    if (!matched)
+        return PROCFS_FD_NOT_LINK;
+
+    struct proc *target = procfs_open_find_pid(pid);
+    if (!target)
+        return (long)-ENOENT;
+    if (oldfd < 0 || oldfd >= NOFILE || !proc_ofile(target)[oldfd])
+        return (long)-ENOENT;
+    if (target != current_proc)
+        return (long)-EACCES;
+    if ((flags & KERN_O_NOFOLLOW) && !trailing_slash)
+        return (long)-ELOOP;
+
+    struct open_file *src = proc_ofile(current_proc)[oldfd];
+    if (!vfs_file_valid(src))
+        return (long)-ENOENT;
+
+    if (src->is_pipe) {
+        int pipeid = src->pipe_id;
+        if (trailing_slash || (flags & KERN_O_DIRECTORY))
+            return (long)-ENOTDIR;
+        if ((flags & KERN_O_CREAT) && (flags & KERN_O_EXCL))
+            return (long)-EEXIST;
+        if (pipeid < 0 || pipeid >= NPIPES || !pipes[pipeid].used)
+            return (long)-ENOENT;
+
+        int accmode = flags & 3;
+        int wants_read = (accmode == 0 || accmode == 2);
+        int wants_write = (accmode == 1 || accmode == 2);
+        struct open_file *nf = vfs_alloc_file();
+        if (!nf)
+            return (long)-EMFILE;
+        int newfd = alloc_fd();
+        if (newfd < 0) {
+            vfs_free_file(nf);
+            return (long)-EMFILE;
+        }
+
+        nf->is_pipe = 1;
+        nf->pipe_read = wants_read;
+        nf->pipe_write = wants_write;
+        nf->pipe_id = pipeid;
+        nf->ops = NULL;
+        nf->flags = flags;
+        if (wants_read)
+            pipes[pipeid].read_open++;
+        if (wants_write)
+            pipes[pipeid].write_open++;
+        proc_ofile(current_proc)[newfd] = nf;
+        set_open_fd_flags(newfd, flags);
+        return (long)newfd;
+    }
+
+    /* BF: Reopen the underlying object through a filesystem clone hook.
+     * Falling back to src->path would lose identity after replacement and
+     * reset stateful devices such as /dev/ptmx. */
+    return procfd_reopen_open_file(src, flags, trailing_slash);
+}
 
 /* Two ranges [s1, s1+l1) and [s2, s2+l2) overlap.
  * l_len=0 means "to EOF" -- treat as infinite extent.
@@ -182,28 +407,7 @@ void file_locks_release_ofd(struct open_file *ofd) {
 /* ------------------------------------------------------------------ */
 
 static int pending_signal_interrupts_io(void) {
-    uint64_t deliverable = signal_deliverable_mask(current_proc);
-    struct kern_sigaction *ksa = proc_sigactions(current_proc);
-
-    for (int s = 1; s < 65 && deliverable; s++) {
-        if (!(deliverable & signal_bit(s)))
-            continue;
-        if (ksa[s].handler > 1)
-            return 1;
-        if (ksa[s].handler == 0) {
-            /* BF: Blocked pipe writers must leave the sleep loop for signals
-             * that will run a handler or terminate on syscall return. */
-            if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                continue;
-            if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                continue;
-            if (s == SIGCONT)
-                continue;
-            return 1;
-        }
-    }
-
-    return 0;
+    return signal_pending_interrupts_syscall(current_proc, 0);
 }
 
 long sys_write_handler(struct trapframe *tf) {
@@ -268,7 +472,7 @@ long sys_write_handler(struct trapframe *tf) {
             }
             for (struct proc *p = proc; p < &proc[NPROC]; p++) {
                 if (p->state == SLEEPING && p != current_proc &&
-                    p->waiting_for_uart != 2)
+                    p->waiting_for_uart != PROC_WAIT_TIMER)
                     p->state = RUNNABLE;
             }
         }
@@ -330,36 +534,8 @@ long sys_read_handler(struct trapframe *tf) {
                 return (long)-EAGAIN;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
-            /* Check for pending signals after waking up:
-             * - User handler (handler > 1): return -EINTR
-             * - SIG_DFL terminating signal: break out to let deliver_signal kill us
-             * - SIG_IGN / SIG_DFL ignore-class: continue sleeping */
-            {
-                uint64_t deliverable = signal_deliverable_mask(current_proc);
-                struct kern_sigaction *sa = proc_sigactions(current_proc);
-                for (int s = 1; s < 65 && deliverable; s++) {
-                    if (deliverable & signal_bit(s)) {
-                        if (sa[s].handler > 1) /* user handler */
-                            return (long)-4; /* -EINTR */
-                        if (sa[s].handler == 0) { /* SIG_DFL */
-                            /* Ignore-class: SIGCHLD, SIGURG, SIGWINCH (continue sleeping) */
-                            if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                                continue;
-                            /* Stop-class: SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU
-                             * (will be handled by deliver_signal, but shouldn't terminate) */
-                            if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                                continue;
-                            /* SIGCONT: resume, not terminate */
-                            if (s == SIGCONT)
-                                continue;
-                            /* All other SIG_DFL signals terminate; break out so
-                             * deliver_signal can kill the process */
-                            goto pipe_eof;
-                        }
-                        /* SIG_IGN (handler == 1): continue sleeping */
-                    }
-                }
-            }
+            if (pending_signal_interrupts_io())
+                return (long)-EINTR;
         }
         /* Drain all available bytes (up to len) without re-blocking */
         while (read_bytes < len && pipe_avail(pid) > 0) {
@@ -373,7 +549,7 @@ long sys_read_handler(struct trapframe *tf) {
         /* Wake any blocked pipe writers since we freed buffer space */
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
             if (p->state == SLEEPING && p != current_proc &&
-                p->waiting_for_uart != 2)
+                p->waiting_for_uart != PROC_WAIT_TIMER)
                 p->state = RUNNABLE;
         }
 pipe_eof:
@@ -407,27 +583,56 @@ long sys_openat_handler(struct trapframe *tf) {
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
       if (pr < 0) return (long)pr; }
+    int trailing_slash = path_has_trailing_slash(kpath);
 
     char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at(dirfd, kpath, resolved);
       if (rr < 0) return (long)rr; }
 
+    /* /proc/self/fd/N is a magic reopen point.  Regular files and stateful
+     * devices get fresh open descriptions for the same object; pipes are
+     * reopened as new endpoints against the same pipe object. */
+    {
+        long procfd = open_procfs_fd_link(resolved, flags, trailing_slash);
+        if (procfd != PROCFS_FD_NOT_LINK)
+            return procfd;
+    }
+
     /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */
     {
         int nofollow = (flags & KERN_O_NOFOLLOW);
-        int symret = resolve_symlinks_in_path(resolved, 6, !nofollow);
-        if (symret == -ENOENT && (flags & KERN_O_CREAT) && !nofollow) {
-            /* BF: A missing final component under O_CREAT is not an error;
-             * preserve intermediate symlink resolution and let the backend
-             * create the new file. */
-            { int rr = resolve_path_at(dirfd, kpath, resolved);
-              if (rr < 0) return (long)rr; }
-            symret = resolve_symlinks_in_path(resolved, 6, 0);
+        struct path_resolution_meta meta;
+        int symret = resolve_symlinks_in_path_meta(resolved,
+                                                   KSYMLINK_MAX_HOPS,
+                                                   !nofollow || trailing_slash,
+                                                   &meta);
+        if (symret == -ENOENT && (flags & KERN_O_CREAT) && !nofollow &&
+            !trailing_slash) {
+            if (meta.missing_after_final_symlink &&
+                !(flags & KERN_O_EXCL)) {
+                /* BF: open(O_CREAT) follows a dangling final symlink and
+                 * creates its target.  O_EXCL keeps the symlink itself as
+                 * the existing final object and fails below with EEXIST. */
+                symret = 0;
+            } else {
+                /* BF: A literal missing final component under O_CREAT is not
+                 * an error; preserve intermediate symlink resolution and let
+                 * the backend create the new file. */
+                { int rr = resolve_path_at(dirfd, kpath, resolved);
+                  if (rr < 0) return (long)rr; }
+                symret = resolve_symlinks_in_path(resolved,
+                                                  KSYMLINK_MAX_HOPS, 0);
+            }
         }
         /* BF: Propagate all negative errors, not just ELOOP */
         if (symret < 0)
             return (long)symret;
+    }
+    if (trailing_slash) {
+        int ret = require_resolved_dir(resolved);
+        if (ret < 0)
+            return (long)ret;
     }
 
     const char *relpath;
@@ -442,7 +647,18 @@ long sys_openat_handler(struct trapframe *tf) {
      * when the open should have failed (e.g., O_DIRECTORY on a regular
      * file, or O_CREAT on an existing directory). */
     {
-        int is_dir = vfs_is_dir(resolved);
+        uint32_t mode_bits = 0;
+        int stat_ret = vfs_stat_mode_io(resolved, &mode_bits);
+        if (stat_ret < 0 && stat_ret != -ENOENT)
+            return (long)stat_ret;
+        int exists = (stat_ret == 0);
+        int is_dir = exists && ((mode_bits & 0xF000) == 0x4000);
+        /* BF: O_CREAT|O_EXCL rejects any existing final object before
+         * filesystem open hooks run.  Read-only backends such as tarfs and
+         * devfs do not implement create, so the VFS layer must enforce the
+         * existing-object EEXIST rule consistently. */
+        if (exists && (flags & KERN_O_CREAT) && (flags & KERN_O_EXCL))
+            return (long)-EEXIST;
         /* Reject O_DIRECTORY on a non-directory before any side-effects */
         if ((flags & KERN_O_DIRECTORY) && !is_dir)
             return (long)-20; /* -ENOTDIR */
@@ -450,6 +666,8 @@ long sys_openat_handler(struct trapframe *tf) {
         if (is_dir) {
             int accmode = flags & 3;
             if (accmode == 1 || accmode == 2) /* O_WRONLY or O_RDWR */
+                return (long)-21; /* -EISDIR */
+            if (flags & KERN_O_TRUNC)
                 return (long)-21; /* -EISDIR */
         }
         /* Reject O_CREAT on an existing directory (POSIX: EISDIR) */
@@ -568,7 +786,7 @@ long sys_chdir_handler(struct trapframe *tf) {
     { int rr = resolve_path(current_proc->cwd, kpath, resolved);
       if (rr < 0) return (long)rr; }
     /* BF: Propagate all negative errors from resolve_symlinks_in_path */
-    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
+    { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 1);
       if (sr < 0) return (long)sr; }
     /* Check if path exists by trying stat */
     const char *relpath;
@@ -706,6 +924,7 @@ long sys_newfstatat_handler(struct trapframe *tf) {
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 1);
       if (pr < 0) return (long)pr; }
+    int trailing_slash = path_has_trailing_slash(kpath);
     /* BF: AT_EMPTY_PATH stats the dirfd argument directly when the supplied
      * path is a valid empty string. */
     if ((at_flags & 0x1000) && kpath[0] == '\0') {
@@ -719,10 +938,16 @@ long sys_newfstatat_handler(struct trapframe *tf) {
     /* Resolve symlinks: intermediate always, final unless AT_SYMLINK_NOFOLLOW */
     {
         int nofollow = (at_flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
-        int symret = resolve_symlinks_in_path(resolved, 6, !nofollow);
+        int symret = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS,
+                                              !nofollow || trailing_slash);
         /* BF: Propagate all negative errors, not just ELOOP */
         if (symret < 0)
             return (long)symret;
+    }
+    if (trailing_slash) {
+        int ret = require_resolved_dir(resolved);
+        if (ret < 0)
+            return (long)ret;
     }
 
     const char *relpath;
@@ -935,28 +1160,9 @@ long sys_readv_handler(struct trapframe *tf) {
                 while (pipe_avail(pid) == 0 && pipes[pid].write_open)  {
                     current_proc->state = SLEEPING;
                     swtch(&current_proc->context, &scheduler_context);
-                    /* Check for terminating signals after waking */
-                    {
-                        uint64_t deliverable = signal_deliverable_mask(current_proc);
-                        struct kern_sigaction *ksa = proc_sigactions(current_proc);
-                        for (int s = 1; s < 65 && deliverable; s++) {
-                            if (deliverable & signal_bit(s)) {
-                                if (ksa[s].handler > 1) { /* user handler */
-                                    if (total == 0) total = -4;
-                                    goto readv_out;
-                                }
-                                if (ksa[s].handler == 0) { /* SIG_DFL */
-                                    if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                                        continue;
-                                    if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                                        continue;
-                                    if (s == SIGCONT)
-                                        continue;
-                                    /* Terminating: return to let deliver_signal kill */
-                                    goto readv_out;
-                                }
-                            }
-                        }
+                    if (pending_signal_interrupts_io()) {
+                        if (total == 0) total = -EINTR;
+                        goto readv_out;
                     }
                 }
                 char kchunk[512];
@@ -1182,6 +1388,7 @@ long sys_faccessat_handler(struct trapframe *tf) {
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
       if (pr < 0) return (long)pr; }
+    int trailing_slash = path_has_trailing_slash(kpath);
 
     char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
@@ -1192,8 +1399,14 @@ long sys_faccessat_handler(struct trapframe *tf) {
     {
       int flags = (int)tf->a3;
       int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
-      int sr = resolve_symlinks_in_path(resolved, 6, !nofollow);
+      int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS,
+                                        !nofollow || trailing_slash);
       if (sr < 0) return (long)sr;
+    }
+    if (trailing_slash) {
+        int ret = require_resolved_dir(resolved);
+        if (ret < 0)
+            return (long)ret;
     }
 
     const char *relpath;
@@ -1216,14 +1429,23 @@ long sys_unlinkat_handler(struct trapframe *tf) {
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
       if (pr < 0) return (long)pr; }
+    int trailing_slash = path_has_trailing_slash(kpath);
     {
         char resolved[KPATH_MAX];
         /* BF: Propagate dirfd resolution errors before VFS dispatch. */
         { int rr = resolve_path_at(dirfd, kpath, resolved);
           if (rr < 0) return (long)rr; }
         /* BF: Propagate all negative errors from resolve_symlinks_in_path */
-        { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+        { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
           if (sr < 0) return (long)sr; }
+        if (trailing_slash) {
+            uint32_t mode_bits;
+            int tr = vfs_stat_mode_io(resolved, &mode_bits);
+            if (tr == 0 && ((mode_bits & 0xF000) != 0x4000))
+                return (long)-ENOTDIR;
+            if (tr < 0 && tr != -ENOENT)
+                return (long)tr;
+        }
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
         struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -1257,6 +1479,8 @@ long sys_linkat_handler(struct trapframe *tf) {
       if (pr < 0) return (long)pr; }
     { int pr = copy_user_path_arg(tf->a3, knew, sizeof(knew), 0);
       if (pr < 0) return (long)pr; }
+    int old_trailing = path_has_trailing_slash(kold);
+    int new_trailing = path_has_trailing_slash(knew);
 
     char old_resolved[KPATH_MAX], new_resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
@@ -1269,11 +1493,20 @@ long sys_linkat_handler(struct trapframe *tf) {
      * literal ext2 entry instead of resolving through the symlinked parent. */
     /* BF: AT_SYMLINK_FOLLOW switches only the old final component from
      * no-follow to follow; the new link name itself must remain literal. */
-    { int sr = resolve_symlinks_in_path(old_resolved, 6,
-                                        !!(flags & KERN_AT_SYMLINK_FOLLOW));
+    { int sr = resolve_symlinks_in_path(old_resolved, KSYMLINK_MAX_HOPS,
+                                        !!(flags & KERN_AT_SYMLINK_FOLLOW) ||
+                                        old_trailing);
       if (sr < 0) return (long)sr; }
-    { int sr = resolve_symlinks_in_path(new_resolved, 6, 0);
+    { int sr = resolve_symlinks_in_path(new_resolved, KSYMLINK_MAX_HOPS, 0);
       if (sr < 0) return (long)sr; }
+    if (old_trailing) {
+        int tr = require_resolved_dir(old_resolved);
+        if (tr < 0) return (long)tr;
+    }
+    if (new_trailing) {
+        int tr = require_resolved_dir(new_resolved);
+        if (tr < 0) return (long)tr;
+    }
 
     /* Both paths must be on the same filesystem. */
     const char *old_rel, *new_rel;
@@ -1296,13 +1529,13 @@ long sys_linkat_handler(struct trapframe *tf) {
             return (long)-EPERM;
     }
     if (ext2_is_ops(old_ops)) {
-        /* ext2: use inode-based hard link */
-        void *priv = NULL;
-        if (old_ops->open(old_mnt->fs_data, old_rel, 0, &priv) < 0)
-            return (long)-2; /* ENOENT */
-        struct ext2_open_private *ep = (struct ext2_open_private *)priv;
-        uint32_t src_ino = ep->ino;
-        if (old_ops->close) old_ops->close(old_mnt->fs_data, priv);
+        /* BF: Hard-link the resolved ext2 inode directly.  Opening the
+         * source rejects symlink inodes, but linkat without
+         * AT_SYMLINK_FOLLOW must preserve the symlink itself. */
+        uint32_t src_ino = 0;
+        int lret = ext2_lookup_inode(old_mnt->fs_data, old_rel, &src_ino, NULL);
+        if (lret < 0)
+            return (long)lret;
         int ret = ext2_hardlink(new_mnt->fs_data, new_rel, src_ino);
         return (long)ret;
     } else if (old_ops && old_ops->link) {
@@ -1324,6 +1557,8 @@ long sys_renameat2_handler(struct trapframe *tf) {
       if (pr < 0) return (long)pr; }
     { int pr = copy_user_path_arg(tf->a3, knew, sizeof(knew), 0);
       if (pr < 0) return (long)pr; }
+    int old_trailing = path_has_trailing_slash(kold);
+    int new_trailing = path_has_trailing_slash(knew);
 
     char old_resolved[KPATH_MAX], new_resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
@@ -1334,10 +1569,18 @@ long sys_renameat2_handler(struct trapframe *tf) {
     /* BF: renameat2 follows symlinked parent directories but must leave the
      * source and destination basenames unresolved so renaming a symlink still
      * acts on the link itself rather than the target. */
-    { int sr = resolve_symlinks_in_path(old_resolved, 6, 0);
+    { int sr = resolve_symlinks_in_path(old_resolved, KSYMLINK_MAX_HOPS, 0);
       if (sr < 0) return (long)sr; }
-    { int sr = resolve_symlinks_in_path(new_resolved, 6, 0);
+    { int sr = resolve_symlinks_in_path(new_resolved, KSYMLINK_MAX_HOPS, 0);
       if (sr < 0) return (long)sr; }
+    if (old_trailing) {
+        int tr = require_resolved_dir(old_resolved);
+        if (tr < 0) return (long)tr;
+    }
+    if (new_trailing) {
+        int tr = require_resolved_dir(new_resolved);
+        if (tr < 0) return (long)tr;
+    }
 
     const char *old_relpath, *new_relpath;
     struct mount *old_mnt = vfs_lookup_mount_entry(old_resolved, &old_relpath);
@@ -1361,14 +1604,26 @@ long sys_mkdirat_handler(struct trapframe *tf) {
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
       if (pr < 0) return (long)pr; }
+    int trailing_slash = path_has_trailing_slash(kpath);
     {
         char resolved[KPATH_MAX];
         /* BF: Propagate dirfd resolution errors before VFS dispatch. */
         { int rr = resolve_path_at(dirfd, kpath, resolved);
           if (rr < 0) return (long)rr; }
         /* BF: Propagate all negative errors from resolve_symlinks_in_path */
-        { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+        { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
           if (sr < 0) return (long)sr; }
+        if (trailing_slash) {
+            uint32_t mode_bits;
+            int tr = vfs_stat_mode_io(resolved, &mode_bits);
+            if (tr == 0 && ((mode_bits & 0xF000) != 0x4000))
+                return (long)-ENOTDIR;
+            /* BF: mkdir("missing/") creates the missing final directory;
+             * a trailing slash requires the created object to be a directory,
+             * not that it already exists before mkdirat runs. */
+            if (tr < 0 && tr != -ENOENT)
+                return (long)tr;
+        }
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
         struct vfs_ops *ops = mnt ? mnt->ops : NULL;
@@ -1388,6 +1643,7 @@ long sys_mknodat_handler(struct trapframe *tf) {
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
       if (pr < 0) return (long)pr; }
+    int trailing_slash = path_has_trailing_slash(kpath);
     {
         char resolved[KPATH_MAX];
         /* BF: Propagate dirfd resolution errors before VFS dispatch. */
@@ -1395,8 +1651,12 @@ long sys_mknodat_handler(struct trapframe *tf) {
           if (rr < 0) return (long)rr; }
 
         /* BF: mknodat must resolve intermediate symlinked directories. */
-        { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+        { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
           if (sr < 0) return (long)sr; }
+        if (trailing_slash) {
+            int tr = require_resolved_dir(resolved);
+            if (tr < 0) return (long)tr;
+        }
 
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1422,6 +1682,7 @@ long sys_readlinkat_handler(struct trapframe *tf) {
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
       if (pr < 0) return (long)pr; }
+    int trailing_slash = path_has_trailing_slash(kpath);
 
     int bufsiz = (int)tf->a3;
     if (bufsiz <= 0)
@@ -1434,8 +1695,13 @@ long sys_readlinkat_handler(struct trapframe *tf) {
     /* BF: readlinkat must resolve intermediate symlinks but leave the final
      * path component untouched.  Without this, readlink("dirlink/child")
      * fails when dirlink is itself a symlink to a directory. */
-    { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+    { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS,
+                                        trailing_slash);
       if (sr < 0) return (long)sr; }
+    if (trailing_slash) {
+        int tr = require_resolved_dir(resolved);
+        if (tr < 0) return (long)tr;
+    }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1475,6 +1741,7 @@ long sys_symlinkat_handler(struct trapframe *tf) {
       if (pr < 0) { kmfree(ktarget, KSYMLINK_MAX + 1); return (long)pr; } }
     { int pr = copy_user_path_arg(tf->a2, klinkpath, sizeof(klinkpath), 0);
       if (pr < 0) { kmfree(ktarget, KSYMLINK_MAX + 1); return (long)pr; } }
+    int trailing_slash = path_has_trailing_slash(klinkpath);
 
     char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
@@ -1488,11 +1755,18 @@ long sys_symlinkat_handler(struct trapframe *tf) {
      * preserving the final component (the new link path itself).  Without
      * this, creating a link under a symlinked parent directory stores the
      * entry at the literal path instead of the resolved target directory. */
-    { int sr = resolve_symlinks_in_path(resolved, 6, 0);
+    { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
       if (sr < 0) {
           kmfree(ktarget, KSYMLINK_MAX + 1);
           return (long)sr;
       } }
+    if (trailing_slash) {
+        int tr = require_resolved_dir(resolved);
+        if (tr < 0) {
+            kmfree(ktarget, KSYMLINK_MAX + 1);
+            return (long)tr;
+        }
+    }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1529,6 +1803,7 @@ long sys_fchmodat_handler(struct trapframe *tf) {
     char kpath[KPATH_MAX];
     { int pr = copy_user_path_arg(tf->a1, kpath, sizeof(kpath), 0);
       if (pr < 0) return (long)pr; }
+    int trailing_slash = path_has_trailing_slash(kpath);
 
     /* Resolve path and verify it exists via stat */
     char resolved[KPATH_MAX];
@@ -1541,8 +1816,13 @@ long sys_fchmodat_handler(struct trapframe *tf) {
     {
       int flags = (int)tf->a3;
       int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
-      int sr = resolve_symlinks_in_path(resolved, 6, !nofollow);
+      int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS,
+                                        !nofollow || trailing_slash);
       if (sr < 0) return (long)sr;
+    }
+    if (trailing_slash) {
+        int tr = require_resolved_dir(resolved);
+        if (tr < 0) return (long)tr;
     }
 
     const char *relpath;

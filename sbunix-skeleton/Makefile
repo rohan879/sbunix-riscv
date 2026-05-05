@@ -79,12 +79,17 @@ SKIP_BOOT_TESTS ?= 0
 # instead of embedding every utility and TCC support archive in kernel tarfs.
 SLIM_TEST_ROOTFS ?= $(if $(BUILD_TESTS),1,0)
 STAGE_THIRDPARTY_LOCAL ?= 0
+# BF: Required third-party mode turns missing vendored workload payloads into
+# build failures instead of allowing guest tests to skip the coverage silently.
+REQUIRE_THIRDPARTY_PAYLOADS ?= 0
 
 -include Makefile.local
 
 # MODIFIED from all: build/kernel.elf
 ALL_TARGETS := build/kernel.elf
-ifeq ($(RUN_CI_TESTS),1)
+ifdef BUILD_TESTS
+# BF: BUILD_TESTS=1 make must materialize the separate /test disk so
+# validation and CI do not depend on the qemu target to build it later.
 	ALL_TARGETS += $(TEST_DISK_IMG)
 endif
 
@@ -184,7 +189,7 @@ endif
 ifneq ($(wildcard $(THIRDPARTY_MICROPYTHON_BIN)),)
 THIRDPARTY_STAGE_INPUTS += $(THIRDPARTY_MICROPYTHON_BIN)
 endif
-ROOTFS_BUILD_MODE := BUILD_TESTS=$(if $(BUILD_TESTS),1,0) RUN_CI_TESTS=$(RUN_CI_TESTS) SKIP_BOOT_PRIORITY_TESTS=$(SKIP_BOOT_PRIORITY_TESTS) SKIP_BOOT_TESTS=$(SKIP_BOOT_TESTS)
+ROOTFS_BUILD_MODE := BUILD_TESTS=$(if $(BUILD_TESTS),1,0) RUN_CI_TESTS=$(RUN_CI_TESTS) SKIP_BOOT_PRIORITY_TESTS=$(SKIP_BOOT_PRIORITY_TESTS) SKIP_BOOT_TESTS=$(SKIP_BOOT_TESTS) STAGE_THIRDPARTY_LOCAL=$(STAGE_THIRDPARTY_LOCAL) REQUIRE_THIRDPARTY_PAYLOADS=$(REQUIRE_THIRDPARTY_PAYLOADS)
 build/testfs-core/.dirs:
 	@mkdir -p build/testfs-core/bin
 	@touch $@
@@ -251,7 +256,7 @@ build/tarfs-rootfs/.prepared: build/rootfs/.prepared tools/slim-test-rootfs.sh t
 	rm -rf build/tarfs-rootfs
 	mkdir -p build/tarfs-rootfs
 	cp -a build/rootfs/. build/tarfs-rootfs/
-	STAGE_THIRDPARTY_LOCAL=$(STAGE_THIRDPARTY_LOCAL) tools/stage-thirdparty.sh build/tarfs-rootfs rootfs
+	STAGE_THIRDPARTY_LOCAL=$(STAGE_THIRDPARTY_LOCAL) REQUIRE_THIRDPARTY_PAYLOADS=$(REQUIRE_THIRDPARTY_PAYLOADS) tools/stage-thirdparty.sh build/tarfs-rootfs rootfs
 ifeq ($(SLIM_TEST_ROOTFS),1)
 	tools/slim-test-rootfs.sh build/tarfs-rootfs build/testfs build/testfs-core
 endif
@@ -275,6 +280,8 @@ $(OS_TEST_MARKER): build/libc/crt.S.o build/libc.a build/rootfs/.prepared build/
 	@# contains "0" and could match first due to readdir ordering.
 	@mkdir -p build/testfs/os-test-expect/signal.expect
 	@printf '0' > build/testfs/os-test-expect/signal.expect/sigaction-exec-flags.posix
+	@printf '0 | POLLIN\nSIGUSR1\n' > build/testfs/os-test-expect/signal.expect/ppoll-block-sleep-write-raise.posix.3
+	@printf '0 | POLLIN\n' > build/testfs/os-test-expect/signal.expect/ppoll-block-sleep-write-raise.posix.4
 	@rm -f build/testfs/os-test-expect/signal.expect/sigaction-exec-flags.unknown.1
 	# Seed testfs with compile-time .out files for skipped tests
 	@mkdir -p build/testfs/var/log/os-test
@@ -327,7 +334,7 @@ build/kernel.elf: $(KERN_ALL) build/tarfs.o
 thirdparty: build/libc/crt.S.o build/libc.a
 	$(MAKE) build/rootfs/.prepared
 	$(MAKE) -C thirdparty install
-	STAGE_THIRDPARTY_LOCAL=$(STAGE_THIRDPARTY_LOCAL) tools/stage-thirdparty.sh build/rootfs rootfs
+	STAGE_THIRDPARTY_LOCAL=$(STAGE_THIRDPARTY_LOCAL) REQUIRE_THIRDPARTY_PAYLOADS=$(REQUIRE_THIRDPARTY_PAYLOADS) tools/stage-thirdparty.sh build/rootfs rootfs
 	@rm -f build/tarfs-rootfs/.prepared build/tarfs.o
 	$(MAKE) build/kernel.elf
 

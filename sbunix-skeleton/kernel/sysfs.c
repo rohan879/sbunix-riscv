@@ -304,6 +304,25 @@ static int sysfs_close(void *fs_data, void *private) {
   return 0;
 }
 
+static int sysfs_reopen(void *fs_data, void *private, int flags,
+                        void **new_private) {
+  (void)fs_data;
+  (void)flags;
+  struct sysfs_private *old = (struct sysfs_private *)private;
+  if (!old)
+    return -2; /* -ENOENT */
+
+  struct sysfs_private *priv =
+    (struct sysfs_private *)kmalloc(sizeof(struct sysfs_private));
+  if (!priv)
+    return -12; /* -ENOMEM */
+  /* BF: procfd reopen of sysfs pseudo-files should clone the resolved
+   * virtual node and reset the open-file offset, not fail with ENXIO. */
+  memcpy(priv, old, sizeof(*priv));
+  *new_private = priv;
+  return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* sysfs_stat                                                          */
 /* ------------------------------------------------------------------ */
@@ -565,6 +584,7 @@ struct vfs_ops sysfs_ops = {
   .read    = sysfs_read,
   .write   = sysfs_write,
   .ftruncate = NULL,
+  .reopen  = sysfs_reopen,
   .close   = sysfs_close,
   .stat    = sysfs_stat,
   .fstat   = sysfs_fstat,

@@ -305,9 +305,9 @@ long sys_mount_handler(struct trapframe *tf) {
       if (rr < 0) return (long)rr; }
 
     /* BF: mount must resolve symlinks for both source and target */
-    { int sr = resolve_symlinks_in_path(source_resolved, 6, 1);
+    { int sr = resolve_symlinks_in_path(source_resolved, KSYMLINK_MAX_HOPS, 1);
       if (sr < 0) return (long)sr; }
-    { int sr = resolve_symlinks_in_path(target_resolved, 6, 1);
+    { int sr = resolve_symlinks_in_path(target_resolved, KSYMLINK_MAX_HOPS, 1);
       if (sr < 0) return (long)sr; }
 
     /* Only ext2 supported */
@@ -341,7 +341,7 @@ long sys_umount2_handler(struct trapframe *tf) {
       if (rr < 0) return (long)rr; }
 
     /* BF: umount2 must resolve symlinks in the target path */
-    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
+    { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 1);
       if (sr < 0) return (long)sr; }
 
     return (long)vfs_unregister_mount(resolved);
@@ -433,7 +433,7 @@ long sys_utimensat_handler(struct trapframe *tf) {
     {
       int flags = (int)tf->a3;
       int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
-      int sr = resolve_symlinks_in_path(resolved, 6, !nofollow);
+      int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, !nofollow);
       if (sr < 0) return (long)sr;
     }
 
@@ -485,7 +485,7 @@ long sys_statfs_handler(struct trapframe *tf) {
       if (rr < 0) return (long)rr; }
 
     /* BF: statfs must resolve symlinks in the target path */
-    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
+    { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 1);
       if (sr < 0) return (long)sr; }
 
     /* Fill in basic statfs structure */
@@ -567,7 +567,7 @@ long sys_fchownat_handler(struct trapframe *tf) {
     {
       int flags = (int)tf->a4;
       int nofollow = (flags & 0x100); /* AT_SYMLINK_NOFOLLOW = 0x100 */
-      int sr = resolve_symlinks_in_path(resolved, 6, !nofollow);
+      int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, !nofollow);
       if (sr < 0) return (long)sr;
     }
 

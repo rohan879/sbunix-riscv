@@ -211,5 +211,10 @@ int pthread_kill(pthread_t thread, int sig) {
 
 int pthread_sigmask(int how, const sigset_t *restrict set,
                     sigset_t *restrict oldset) {
-  return sigprocmask(how, set, oldset);
+  /* BF: pthread_sigmask returns the error number directly; it does not use
+   * the sigprocmask -1/errno convention exposed by the process API. */
+  long ret = syscall(SYS_rt_sigprocmask, how, set, oldset, sizeof(sigset_t));
+  if (ret < 0 && ret >= -4095)
+    return (int)-ret;
+  return 0;
 }

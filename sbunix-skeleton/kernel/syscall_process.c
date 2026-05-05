@@ -285,7 +285,7 @@ static struct proc *find_initproc(void) {
 static void wake_exit_waiters(struct proc *exiting) {
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
         if (p->state == SLEEPING && p != exiting &&
-            p->waiting_for_uart == 0)
+            p->waiting_for_uart == PROC_WAIT_NONE)
             p->state = RUNNABLE;
     }
 }
@@ -335,6 +335,8 @@ void proc_exit_current(int status, int terminate_signal) {
     p->exit_status = status;
     p->killed_by_signal = terminate_signal;
     p->stopped_signal = 0;
+    p->stop_reported = 0;
+    p->continued_signal = 0;
     p->pending_terminate = 0;
     p->terminate_signal = 0;
 
@@ -374,6 +376,8 @@ void proc_force_terminate_wake(struct proc *target, int sig) {
     target->exit_status = 128 + sig;
     target->killed_by_signal = sig;
     target->stopped_signal = 0;
+    target->stop_reported = 0;
+    target->continued_signal = 0;
     sig_set_pending(target, sig,
                     current_proc ? (int32_t)current_proc->pid : 0,
                     0, K_SI_USER);
@@ -406,6 +410,8 @@ static void reap_zombie(struct proc *p) {
     p->exit_status = 0;
     p->killed_by_signal = 0;
     p->stopped_signal = 0;
+    p->stop_reported = 0;
+    p->continued_signal = 0;
     p->resources_released = 0;
     p->pending_terminate = 0;
     p->terminate_signal = 0;
@@ -720,7 +726,7 @@ static pid_t sys_wait4(pid_t wpid, uint64_t status_uaddr, int options) {
                 return pid;
             }
             /* WUNTRACED: report stopped children */
-            if ((options & 2) && p->stopped_signal) {
+            if ((options & 2) && p->stopped_signal && !p->stop_reported) {
                 pid_t pid = p->pid;
                 int kwstatus = (p->stopped_signal << 8) | 0x7f;
                 if (status_uaddr) {
@@ -728,8 +734,20 @@ static pid_t sys_wait4(pid_t wpid, uint64_t status_uaddr, int options) {
                                 &kwstatus, sizeof(kwstatus)) < 0)
                         return (pid_t)-EFAULT;
                 }
-                /* Clear stopped_signal so we don't report it again */
-                p->stopped_signal = 0;
+                /* BF: Keep actual stopped state for SIGCONT, but mark this
+                 * wait-visible stop as consumed. */
+                p->stop_reported = 1;
+                return pid;
+            }
+            if ((options & 8) && p->continued_signal) {
+                pid_t pid = p->pid;
+                int kwstatus = 0xffff;
+                if (status_uaddr) {
+                    if (copyout(current_proc->pagetable, status_uaddr,
+                                &kwstatus, sizeof(kwstatus)) < 0)
+                        return (pid_t)-EFAULT;
+                }
+                p->continued_signal = 0;
                 return pid;
             }
         }
@@ -738,7 +756,9 @@ static pid_t sys_wait4(pid_t wpid, uint64_t status_uaddr, int options) {
         if (options & 1) return 0;
         /* Otherwise sleep until a child exits */
         if (current_proc) {
-            current_proc->waiting_for_uart = 0;
+            if (signal_pending_interrupts_syscall(current_proc, 1))
+                return -EINTR;
+            current_proc->waiting_for_uart = PROC_WAIT_NONE;
             /* BF: Mark this process as a wait4 sleeper so setpgid can
              * selectively wake only waitpid callers, not pipe/poll/futex. */
             current_proc->waiting_for_child = 1;
@@ -747,44 +767,9 @@ static pid_t sys_wait4(pid_t wpid, uint64_t status_uaddr, int options) {
             /* BF: Clear wait4 sleeper flag after waking — process is no
              * longer blocked in wait4. */
             current_proc->waiting_for_child = 0;
-            /* Check for pending signals after waking up:
-             * - User handler (handler > 1): return -EINTR
-             * - SIG_DFL terminating signal: return -EINTR to let deliver_signal kill us
-             * - SIG_IGN / SIG_DFL ignore-class: continue waiting
-             * BF: SIGCHLD with user handler must NOT return EINTR — it's the
-             * signal that woke us to re-check children. Returning EINTR would
-             * prevent wait4 from finding the zombie (or detecting ECHILD when
-             * SA_NOCLDWAIT auto-reaped the child). Let the loop re-check. */
-            {
-                uint64_t deliverable = signal_deliverable_mask(current_proc);
-                struct kern_sigaction *ksa = proc_sigactions(current_proc);
-                for (int s = 1; s < 65 && deliverable; s++) {
-                    if (deliverable & signal_bit(s)) {
-                        if (ksa[s].handler > 1) { /* user handler */
-                            /* BF: SIGCHLD doesn't interrupt wait4 — it's the
-                             * reason we woke up. Let the loop re-scan children.
-                             * The signal will be delivered after wait4 returns. */
-                            if (s == SIGCHLD) continue;
-                            return -4; /* -EINTR */
-                        }
-                        if (ksa[s].handler == 0) { /* SIG_DFL */
-                            /* Ignore-class: SIGCHLD, SIGURG, SIGWINCH (continue waiting) */
-                            if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                                continue;
-                            /* Stop-class: handled by deliver_signal, don't terminate */
-                            if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                                continue;
-                            /* SIGCONT: resume, not terminate */
-                            if (s == SIGCONT)
-                                continue;
-                            /* All other SIG_DFL signals terminate; return so
-                             * deliver_signal can kill the process */
-                            return -4; /* -EINTR */
-                        }
-                        /* SIG_IGN (handler == 1): continue waiting */
-                    }
-                }
-            }
+            /* BF: Re-scan child states before converting a caught SIGCHLD
+             * wakeup into EINTR; the signal may correspond to a reportable
+             * exit/stop/continue event. */
         }
     }
 }
@@ -896,6 +881,7 @@ long sys_execve_handler(struct trapframe *tf) {
     }
 
     char resolved[KPATH_MAX];
+    char committed_exe_path[KPATH_MAX];
     char tarpath[128];
     { int rr = resolve_path(current_proc->cwd, kpath, resolved);
       if (rr < 0) {
@@ -906,8 +892,9 @@ long sys_execve_handler(struct trapframe *tf) {
     /* BF: Keep the resolver depth finite; the resolver keeps large scratch
      * buffers on the heap so long symlink targets do not grow stack frames. */
     /* BF: Propagate all negative errors from resolve_symlinks_in_path */
-    { int sr = resolve_symlinks_in_path(resolved, 6, 1);
+    { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 1);
       if (sr < 0) { kfree(kstrbuf); if (kenvbuf) kfree(kenvbuf); return (long)sr; } }
+    memcpy(committed_exe_path, resolved, sizeof(committed_exe_path));
     /* BF: Pass sizeof(tarpath) to prevent buffer overflow; on ENAMETOOLONG
      * skip the tarfs lookup — the binary may still exist on ext2/VFS. */
     int ret = -2; /* default to ENOENT if tarfs path conversion fails */
@@ -1033,7 +1020,7 @@ long sys_execve_handler(struct trapframe *tf) {
                         ret = rr;
                     } else {
                         /* BF: Propagate all negative errors from symlink resolution */
-                        int sr = resolve_symlinks_in_path(interp_resolved, 6, 1);
+                        int sr = resolve_symlinks_in_path(interp_resolved, KSYMLINK_MAX_HOPS, 1);
                         if (sr < 0) {
                             ret = sr;
                         } else {
@@ -1043,6 +1030,9 @@ long sys_execve_handler(struct trapframe *tf) {
                             if (to_tarfs_path(interp_resolved, interp_tarpath,
                                               sizeof(interp_tarpath)) == 0)
                                 ret = exec(interp_tarpath);
+                            if (ret >= 0)
+                                memcpy(committed_exe_path, interp_resolved,
+                                       sizeof(committed_exe_path));
                         }
                     } }
                 }
@@ -1056,6 +1046,11 @@ long sys_execve_handler(struct trapframe *tf) {
         /* Return ENOEXEC if file was found but not executable, else ENOENT */
         return (long)(shebang_file_found ? -8 : -2);
     }
+
+    /* BF: exec() loads tarfs paths such as ./bin/sleep internally, but
+     * procfs must expose the canonical absolute executable path. */
+    memcpy(current_proc->exe_path, committed_exe_path,
+           sizeof(current_proc->exe_path));
 
     /* Snapshot argv image for /proc/<pid>/cmdline (NUL-separated strings). */
     {
@@ -1333,7 +1328,10 @@ long sys_waitid_handler(struct trapframe *tf) {
     if (idtype < 0 || idtype > 2)
         return (long)-22; /* -EINVAL */
 
-    if ((options & (4 | 16)) == 0)
+    /* BF: Default to WEXITED only when no waitid status class was
+     * requested.  Accept both WSTOPPED's ABI bit and the older in-tree
+     * bit-16 spelling for stopped-child requests. */
+    if ((options & (2 | 4 | 8 | 16)) == 0)
         options |= 4; /* WEXITED by default for existing tests/libc callers */
 
     for (;;) {
@@ -1342,6 +1340,7 @@ long sys_waitid_handler(struct trapframe *tf) {
             uint8_t kinfo[K_SIGINFO_SIZE];
             int report_exit = 0;
             int report_stop = 0;
+            int report_cont = 0;
 
             if (p->state == UNUSED || p->parent != current_proc)
                 continue;
@@ -1353,8 +1352,10 @@ long sys_waitid_handler(struct trapframe *tf) {
 
             found_child = 1;
             report_exit = (options & 4) && p->state == ZOMBIE;
-            report_stop = (options & (2 | 16)) && p->stopped_signal;
-            if (!report_exit && !report_stop)
+            report_stop = (options & (2 | 16)) && p->stopped_signal &&
+                          !p->stop_reported;
+            report_cont = (options & 8) && p->continued_signal;
+            if (!report_exit && !report_stop && !report_cont)
                 continue;
 
             memset(kinfo, 0, sizeof(kinfo));
@@ -1366,10 +1367,14 @@ long sys_waitid_handler(struct trapframe *tf) {
                 *(int32_t *)(kinfo + 20) = p->killed_by_signal
                                                ? (p->killed_by_signal & 0x7f)
                                                : (p->exit_status & 0xff);
-            } else {
+            } else if (report_stop) {
                 *(int32_t *)(kinfo + 8) = K_CLD_STOPPED;
                 *(int32_t *)(kinfo + 12) = (int32_t)p->pid;
                 *(int32_t *)(kinfo + 20) = p->stopped_signal;
+            } else {
+                *(int32_t *)(kinfo + 8) = K_CLD_CONTINUED;
+                *(int32_t *)(kinfo + 12) = (int32_t)p->pid;
+                *(int32_t *)(kinfo + 20) = p->continued_signal;
             }
 
             if (info_uaddr &&
@@ -1378,8 +1383,10 @@ long sys_waitid_handler(struct trapframe *tf) {
 
             if (report_exit && !(options & 0x01000000)) { /* WNOWAIT */
                 reap_zombie(p);
-            } else if (report_stop) {
-                p->stopped_signal = 0;
+            } else if (report_stop && !(options & 0x01000000)) {
+                p->stop_reported = 1;
+            } else if (report_cont && !(options & 0x01000000)) {
+                p->continued_signal = 0;
             }
             return 0;
         }
@@ -1395,33 +1402,15 @@ long sys_waitid_handler(struct trapframe *tf) {
         }
 
         if (current_proc) {
-            current_proc->waiting_for_uart = 0;
+            if (signal_pending_interrupts_syscall(current_proc, 1))
+                return -EINTR;
+            current_proc->waiting_for_uart = PROC_WAIT_NONE;
             current_proc->waiting_for_child = 1;
             current_proc->state = SLEEPING;
             swtch(&current_proc->context, &scheduler_context);
             current_proc->waiting_for_child = 0;
-            {
-                uint64_t deliverable = signal_deliverable_mask(current_proc);
-                struct kern_sigaction *ksa = proc_sigactions(current_proc);
-                for (int s = 1; s < 65 && deliverable; s++) {
-                    if (!(deliverable & signal_bit(s)))
-                        continue;
-                    if (ksa[s].handler > 1) {
-                        if (s == SIGCHLD)
-                            continue;
-                        return -4; /* -EINTR */
-                    }
-                    if (ksa[s].handler == 0) {
-                        if (s == SIGCHLD || s == SIGURG || s == SIGWINCH)
-                            continue;
-                        if (s == SIGSTOP || s == SIGTSTP || s == SIGTTIN || s == SIGTTOU)
-                            continue;
-                        if (s == SIGCONT)
-                            continue;
-                        return -4; /* -EINTR */
-                    }
-                }
-            }
+            /* BF: Loop back to prefer a reportable child event over EINTR
+             * from the SIGCHLD that woke this wait. */
         }
     }
 }
