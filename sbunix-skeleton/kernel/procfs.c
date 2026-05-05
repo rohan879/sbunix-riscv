@@ -1018,18 +1018,18 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
   #define STAT_FILE(ino_val, size_val) do { \
     uint32_t mode = (uint32_t)(0x8000 | 0444); \
     uint64_t ino = (ino_val); \
-    uint64_t sz = (uint64_t)(size_val); \
+    uint64_t file_size = (uint64_t)(size_val); \
     memcpy(st + 8, &ino, 8); \
     memcpy(st + 16, &mode, 4); \
-    memcpy(st + 48, &sz, 8); \
+    memcpy(st + 48, &file_size, 8); \
     return 0; \
   } while(0)
 
   #define STAT_RENDERED_FILE(ino_val, type_val, target_val) do { \
-    uint64_t sz = 0; \
-    int size_ret = procfs_rendered_size((type_val), (target_val), &sz); \
+    uint64_t rendered_size = 0; \
+    int size_ret = procfs_rendered_size((type_val), (target_val), &rendered_size); \
     if (size_ret < 0) return size_ret; \
-    STAT_FILE((ino_val), sz); \
+    STAT_FILE((ino_val), rendered_size); \
   } while(0)
 
   #define STAT_LNK(ino_val, size_val) do { \
