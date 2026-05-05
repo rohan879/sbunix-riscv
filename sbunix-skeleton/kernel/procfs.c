@@ -584,49 +584,57 @@ static uint64_t procfs_cmdline_size(struct proc *target) {
   return (uint64_t)n;
 }
 
-static uint64_t procfs_rendered_size(enum procfs_type type,
-                                     struct proc *target) {
-  char *tmp = (char *)kmalloc(PROCFS_BUF);
-  uint64_t size = 0;
+static int procfs_rendered_size(enum procfs_type type, struct proc *target,
+                                uint64_t *size_out) {
+  char *tmp;
 
-  if (!tmp)
+  if (!size_out)
+    return -EINVAL;
+  *size_out = 0;
+
+  if (type == PROCFS_CMDLINE) {
+    *size_out = procfs_cmdline_size(target);
     return 0;
+  }
+  if (type == PROCFS_MAPS) {
+    *size_out = target ? procfs_maps_size(target) : 0;
+    return 0;
+  }
+
+  tmp = (char *)kmalloc(PROCFS_BUF);
+  if (!tmp)
+    return -ENOMEM;
 
   /* BF: path stat cannot reuse an open private buffer, so render into a
-   * bounded heap scratch buffer using the same truncation limit as procfs_open(). */
+   * bounded heap scratch buffer using the same truncation limit as procfs_open().
+   * Report allocation failure to stat() instead of claiming pseudo-files are empty. */
   switch (type) {
   case PROCFS_MOUNTS:
-    size = (uint64_t)procfs_render_mounts(tmp, PROCFS_BUF);
+    *size_out = (uint64_t)procfs_render_mounts(tmp, PROCFS_BUF);
     break;
   case PROCFS_CPUINFO:
-    size = (uint64_t)procfs_render_cpuinfo(tmp, PROCFS_BUF);
+    *size_out = (uint64_t)procfs_render_cpuinfo(tmp, PROCFS_BUF);
     break;
   case PROCFS_VERSION:
-    size = (uint64_t)procfs_render_version(tmp, PROCFS_BUF);
+    *size_out = (uint64_t)procfs_render_version(tmp, PROCFS_BUF);
     break;
   case PROCFS_UPTIME:
-    size = (uint64_t)procfs_render_uptime(tmp, PROCFS_BUF);
+    *size_out = (uint64_t)procfs_render_uptime(tmp, PROCFS_BUF);
     break;
   case PROCFS_MEMINFO:
-    size = (uint64_t)procfs_render_meminfo(tmp, PROCFS_BUF);
+    *size_out = (uint64_t)procfs_render_meminfo(tmp, PROCFS_BUF);
     break;
   case PROCFS_STATUS:
-    size = target ? (uint64_t)procfs_render_status(tmp, PROCFS_BUF, target) : 0;
-    break;
-  case PROCFS_CMDLINE:
-    size = procfs_cmdline_size(target);
-    break;
-  case PROCFS_MAPS:
-    size = target ? procfs_maps_size(target) : 0;
+    *size_out = target ? (uint64_t)procfs_render_status(tmp, PROCFS_BUF, target) : 0;
     break;
   case PROCFS_STAT_FILE:
-    size = target ? (uint64_t)procfs_render_stat_file(tmp, PROCFS_BUF, target) : 0;
+    *size_out = target ? (uint64_t)procfs_render_stat_file(tmp, PROCFS_BUF, target) : 0;
     break;
   default:
     break;
   }
   kmfree(tmp, PROCFS_BUF);
-  return size;
+  return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1017,6 +1025,13 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
     return 0; \
   } while(0)
 
+  #define STAT_RENDERED_FILE(ino_val, type_val, target_val) do { \
+    uint64_t sz = 0; \
+    int size_ret = procfs_rendered_size((type_val), (target_val), &sz); \
+    if (size_ret < 0) return size_ret; \
+    STAT_FILE((ino_val), sz); \
+  } while(0)
+
   #define STAT_LNK(ino_val, size_val) do { \
     uint32_t mode = (uint32_t)(0xA000 | 0777); \
     uint64_t ino = (ino_val); \
@@ -1029,11 +1044,11 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
 
   if (*p == '\0') { STAT_DIR(200); }
   if (strcmp(p, "dmesg") == 0)    { STAT_FILE(201, 0); }
-  if (strcmp(p, "mounts") == 0)   { STAT_FILE(202, procfs_rendered_size(PROCFS_MOUNTS, 0)); }
-  if (strcmp(p, "cpuinfo") == 0)  { STAT_FILE(203, procfs_rendered_size(PROCFS_CPUINFO, 0)); }
-  if (strcmp(p, "version") == 0)  { STAT_FILE(204, procfs_rendered_size(PROCFS_VERSION, 0)); }
-  if (strcmp(p, "uptime") == 0)   { STAT_FILE(205, procfs_rendered_size(PROCFS_UPTIME, 0)); }
-  if (strcmp(p, "meminfo") == 0)  { STAT_FILE(206, procfs_rendered_size(PROCFS_MEMINFO, 0)); }
+  if (strcmp(p, "mounts") == 0)   { STAT_RENDERED_FILE(202, PROCFS_MOUNTS, 0); }
+  if (strcmp(p, "cpuinfo") == 0)  { STAT_RENDERED_FILE(203, PROCFS_CPUINFO, 0); }
+  if (strcmp(p, "version") == 0)  { STAT_RENDERED_FILE(204, PROCFS_VERSION, 0); }
+  if (strcmp(p, "uptime") == 0)   { STAT_RENDERED_FILE(205, PROCFS_UPTIME, 0); }
+  if (strcmp(p, "meminfo") == 0)  { STAT_RENDERED_FILE(206, PROCFS_MEMINFO, 0); }
 
   /* /proc/self — symlink to current PID */
   pid_t self_pid = current_proc ? current_proc->pid : 1;
@@ -1053,8 +1068,7 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
     {
       enum procfs_type type;
       if (procfs_pid_file_type(p, &type) == 0) {
-        STAT_FILE(procfs_pid_file_ino(self_pid, type),
-                  procfs_rendered_size(type, target));
+        STAT_RENDERED_FILE(procfs_pid_file_ino(self_pid, type), type, target);
       }
     }
     if (strcmp(p, "exe") == 0) {
@@ -1098,8 +1112,7 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
   {
     enum procfs_type type;
     if (procfs_pid_file_type(rest, &type) == 0) {
-      STAT_FILE(procfs_pid_file_ino((pid_t)pid, type),
-                procfs_rendered_size(type, target));
+      STAT_RENDERED_FILE(procfs_pid_file_ino((pid_t)pid, type), type, target);
     }
   }
 
@@ -1123,6 +1136,7 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
 
   #undef STAT_DIR
   #undef STAT_FILE
+  #undef STAT_RENDERED_FILE
   #undef STAT_LNK
 
   return -2; /* -ENOENT */

@@ -35,6 +35,15 @@ static int bytes_are_zero(const unsigned char *buf, unsigned long start,
   return 1;
 }
 
+static int bytes_are_value(const unsigned char *buf, unsigned long end,
+                           unsigned char val) {
+  for (unsigned long i = 0; i < end; i++) {
+    if (buf[i] != val)
+      return 0;
+  }
+  return 1;
+}
+
 static uint64_t load_low_word(const unsigned char *buf) {
   uint64_t low = 0;
   memcpy(&low, buf, sizeof(low));
@@ -130,6 +139,31 @@ static void test_bad_raw_size(sigset_t saved) {
   reset_mask(saved);
 }
 
+static void test_invalid_how_keeps_oldset(sigset_t saved) {
+  unsigned char in[16];
+  unsigned char old[16];
+  unsigned char cur[16];
+  sigset_t empty = 0;
+  long r;
+
+  reset_mask(empty);
+  memset(in, 0, sizeof(in));
+  memset(old, 0x9b, sizeof(old));
+  store_low_word(in, sig_bit(SIGUSR1));
+
+  r = syscall(SYS_rt_sigprocmask, 99, in, old, sizeof(old));
+  check("raw rt_sigprocmask rejects invalid how", r == -EINVAL);
+  check("raw rt_sigprocmask invalid how leaves oldset untouched",
+        bytes_are_value(old, sizeof(old), 0x9b));
+
+  memset(cur, 0xee, sizeof(cur));
+  r = syscall(SYS_rt_sigprocmask, SIG_SETMASK, 0, cur, sizeof(cur));
+  check("raw rt_sigprocmask invalid how leaves mask unchanged",
+        r == 0 && load_low_word(cur) == 0);
+
+  reset_mask(saved);
+}
+
 static void test_pending_wide_output(sigset_t saved) {
   struct sigaction sa;
   unsigned char block[SIGSET_BYTES_MAX];
@@ -193,6 +227,7 @@ int main(void) {
   test_raw_sigprocmask_size(16, saved);
   test_raw_sigprocmask_size(128, saved);
   test_bad_raw_size(saved);
+  test_invalid_how_keeps_oldset(saved);
   test_pending_wide_output(saved);
 
   reset_mask(saved);

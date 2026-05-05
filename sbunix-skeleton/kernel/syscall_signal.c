@@ -324,6 +324,11 @@ long sys_rt_sigprocmask_handler(struct trapframe *tf) {
     if (!signal_sigsetsize_supported(sigsetsize))
         return (long)-22;
 
+    /* BF: Reject an invalid mask operation before copying oldset back out;
+     * failing rt_sigprocmask calls must not partially mutate user buffers. */
+    if (set_uaddr && how != 0 && how != 1 && how != 2)
+        return (long)-EINVAL;
+
     if (oldset_uaddr) {
         int ret = signal_copyout_user_mask(oldset_uaddr, sigsetsize,
                                            current_proc->sigmask);
@@ -343,8 +348,6 @@ long sys_rt_sigprocmask_handler(struct trapframe *tf) {
             current_proc->sigmask = signal_mask_sanitize(current_proc->sigmask & ~newset);
         else if (how == 2)  /* SIG_SETMASK */
             current_proc->sigmask = newset;
-        else
-            return (long)-22; /* EINVAL for invalid how */
     }
     return (long)0;
 }

@@ -20,6 +20,10 @@ int  to_tarfs_path(const char *path, char *out, int outsize);
 int  normalize_path(const char *in, char *out);
 int  copy_user_path_arg(uint64_t uaddr, char *dst, int dstsz, int allow_empty);
 int  path_has_trailing_slash(const char *path);
+int  path_stat_mode(const char *path, uint32_t *mode_out);
+int  path_require_dir(const char *path);
+int  path_resolve_trailing_slash_dir_target(char *resolved,
+                                            int allow_missing_leaf);
 int  resolve_path(const char *cwd, const char *path, char *out);
 int  resolve_path_at(int dirfd, const char *path, char *out);
 int  vfs_is_dir(const char *path);

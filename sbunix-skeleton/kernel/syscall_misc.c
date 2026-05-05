@@ -17,29 +17,6 @@
 #include <tty.h>
 #include <errno.h>
 
-static int vfs_stat_mode_misc(const char *path, uint32_t *mode_out) {
-    const char *relpath;
-    struct mount *mnt = vfs_lookup_mount_entry(path, &relpath);
-    struct vfs_ops *ops = mnt ? mnt->ops : NULL;
-    if (!ops || !ops->stat)
-        return -ENOENT;
-
-    uint8_t st[128];
-    int ret = ops->stat(mnt->fs_data, relpath, st);
-    if (ret < 0)
-        return ret;
-    memcpy(mode_out, st + 16, 4);
-    return 0;
-}
-
-static int require_resolved_dir_misc(const char *path) {
-    uint32_t mode;
-    int ret = vfs_stat_mode_misc(path, &mode);
-    if (ret < 0)
-        return ret;
-    return ((mode & 0xF000) == 0x4000) ? 0 : -ENOTDIR;
-}
-
 long sys_ioctl_handler(struct trapframe *tf) {
     int fd = (int)tf->a0;
     unsigned long request = tf->a1;
@@ -465,7 +442,7 @@ long sys_utimensat_handler(struct trapframe *tf) {
       if (sr < 0) return (long)sr;
     }
     if (trailing_slash) {
-        int tr = require_resolved_dir_misc(resolved);
+        int tr = path_require_dir(resolved);
         if (tr < 0) return (long)tr;
     }
 
@@ -476,7 +453,7 @@ long sys_utimensat_handler(struct trapframe *tf) {
 
     if (flags & 0x100) {
         uint32_t mode;
-        int st_ret = vfs_stat_mode_misc(resolved, &mode);
+        int st_ret = path_stat_mode(resolved, &mode);
         if (st_ret < 0) return (long)st_ret;
         if ((mode & 0xF000) == 0xA000) {
             /* BF: With AT_SYMLINK_NOFOLLOW and no trailing slash, utimensat
@@ -620,7 +597,7 @@ long sys_fchownat_handler(struct trapframe *tf) {
       if (sr < 0) return (long)sr;
     }
     if (trailing_slash) {
-        int tr = require_resolved_dir_misc(resolved);
+        int tr = path_require_dir(resolved);
         if (tr < 0) return (long)tr;
     }
 
