@@ -41,13 +41,6 @@ enum {
 
 #define PROCFS_FD_NOT_LINK    ((long)-4096)
 
-static int path_has_trailing_slash(const char *path) {
-    int len = strlen(path);
-    while (len > 0 && path[len - 1] == '/')
-        len--;
-    return len > 0 && path[len] == '/';
-}
-
 static int vfs_stat_mode_io(const char *path, uint32_t *mode_out) {
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(path, &relpath);
@@ -69,6 +62,23 @@ static int require_resolved_dir(const char *path) {
     if (ret < 0)
         return ret;
     return ((mode & 0xF000) == 0x4000) ? 0 : -ENOTDIR;
+}
+
+static int resolve_trailing_slash_dir_target(char *resolved,
+                                             int allow_missing_leaf) {
+    struct path_resolution_meta meta;
+    int sr = resolve_symlinks_in_path_meta(resolved, KSYMLINK_MAX_HOPS,
+                                           1, &meta);
+    if (sr == -ENOENT && allow_missing_leaf &&
+        !meta.missing_after_final_symlink) {
+        /* BF: mkdir("new/") creates the literal final directory, but an
+         * existing final symlink with "/" must be resolved before deciding
+         * whether the target is a directory. */
+        return 1;
+    }
+    if (sr < 0)
+        return sr;
+    return require_resolved_dir(resolved);
 }
 
 static void set_open_fd_flags(int fd, int flags);
@@ -1497,14 +1507,15 @@ long sys_linkat_handler(struct trapframe *tf) {
                                         !!(flags & KERN_AT_SYMLINK_FOLLOW) ||
                                         old_trailing);
       if (sr < 0) return (long)sr; }
-    { int sr = resolve_symlinks_in_path(new_resolved, KSYMLINK_MAX_HOPS, 0);
-      if (sr < 0) return (long)sr; }
+    if (new_trailing) {
+        int sr = resolve_trailing_slash_dir_target(new_resolved, 0);
+        if (sr < 0) return (long)sr;
+    } else {
+        int sr = resolve_symlinks_in_path(new_resolved, KSYMLINK_MAX_HOPS, 0);
+        if (sr < 0) return (long)sr;
+    }
     if (old_trailing) {
         int tr = require_resolved_dir(old_resolved);
-        if (tr < 0) return (long)tr;
-    }
-    if (new_trailing) {
-        int tr = require_resolved_dir(new_resolved);
         if (tr < 0) return (long)tr;
     }
 
@@ -1610,19 +1621,20 @@ long sys_mkdirat_handler(struct trapframe *tf) {
         /* BF: Propagate dirfd resolution errors before VFS dispatch. */
         { int rr = resolve_path_at(dirfd, kpath, resolved);
           if (rr < 0) return (long)rr; }
-        /* BF: Propagate all negative errors from resolve_symlinks_in_path */
-        { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
-          if (sr < 0) return (long)sr; }
         if (trailing_slash) {
-            uint32_t mode_bits;
-            int tr = vfs_stat_mode_io(resolved, &mode_bits);
-            if (tr == 0 && ((mode_bits & 0xF000) != 0x4000))
-                return (long)-ENOTDIR;
-            /* BF: mkdir("missing/") creates the missing final directory;
-             * a trailing slash requires the created object to be a directory,
-             * not that it already exists before mkdirat runs. */
-            if (tr < 0 && tr != -ENOENT)
-                return (long)tr;
+            int sr = resolve_trailing_slash_dir_target(resolved, 1);
+            if (sr < 0) return (long)sr;
+            if (sr > 0) {
+                { int rr = resolve_path_at(dirfd, kpath, resolved);
+                  if (rr < 0) return (long)rr; }
+                { int pr = resolve_symlinks_in_path(resolved,
+                                                    KSYMLINK_MAX_HOPS, 0);
+                  if (pr < 0) return (long)pr; }
+            }
+        } else {
+            /* BF: Propagate all negative errors from resolve_symlinks_in_path */
+            { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
+              if (sr < 0) return (long)sr; }
         }
         const char *relpath;
         struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
@@ -1650,12 +1662,13 @@ long sys_mknodat_handler(struct trapframe *tf) {
         { int rr = resolve_path_at(dirfd, kpath, resolved);
           if (rr < 0) return (long)rr; }
 
-        /* BF: mknodat must resolve intermediate symlinked directories. */
-        { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
-          if (sr < 0) return (long)sr; }
         if (trailing_slash) {
-            int tr = require_resolved_dir(resolved);
-            if (tr < 0) return (long)tr;
+            int sr = resolve_trailing_slash_dir_target(resolved, 0);
+            if (sr < 0) return (long)sr;
+        } else {
+            /* BF: mknodat must resolve intermediate symlinked directories. */
+            { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
+              if (sr < 0) return (long)sr; }
         }
 
         const char *relpath;
@@ -1755,17 +1768,18 @@ long sys_symlinkat_handler(struct trapframe *tf) {
      * preserving the final component (the new link path itself).  Without
      * this, creating a link under a symlinked parent directory stores the
      * entry at the literal path instead of the resolved target directory. */
-    { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
-      if (sr < 0) {
-          kmfree(ktarget, KSYMLINK_MAX + 1);
-          return (long)sr;
-      } }
     if (trailing_slash) {
-        int tr = require_resolved_dir(resolved);
-        if (tr < 0) {
+        int sr = resolve_trailing_slash_dir_target(resolved, 0);
+        if (sr < 0) {
             kmfree(ktarget, KSYMLINK_MAX + 1);
-            return (long)tr;
+            return (long)sr;
         }
+    } else {
+        { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
+          if (sr < 0) {
+              kmfree(ktarget, KSYMLINK_MAX + 1);
+              return (long)sr;
+          } }
     }
 
     const char *relpath;
