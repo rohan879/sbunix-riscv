@@ -84,6 +84,11 @@ static void cleanup_all(void) {
   unlink("/tmp/sme_rename_dest_src");
   unlink("/tmp/sme_rename_destlink");
   rmdir("/tmp/sme_rename_destdir");
+  unlink("/tmp/sme_rename_cross_file");
+  unlink("/tmp/sme_rename_cross_existing");
+  unlink("/tmp/sme_rename_cross_link");
+  unlink("/tmp/sme_rename_cross_src_link");
+  rmdir("/tmp/sme_rename_cross_dir");
   cleanup_chain("sme40_", 41);
   cleanup_chain("sme41_", 42);
 }
@@ -360,6 +365,75 @@ static void test_rename_source_trailing_slash(void) {
   rmdir("/tmp/sme_rename_destdir");
 }
 
+static void test_ramfs_rename_cross_type_replacements(void) {
+  char buf[32];
+  struct stat st;
+
+  unlink("/tmp/sme_rename_cross_file");
+  unlink("/tmp/sme_rename_cross_existing");
+  unlink("/tmp/sme_rename_cross_link");
+  unlink("/tmp/sme_rename_cross_src_link");
+  rmdir("/tmp/sme_rename_cross_dir");
+
+  check("symlink_mutation_edges: rename cross dir setup",
+        mkdir("/tmp/sme_rename_cross_dir", 0755) == 0);
+  check("symlink_mutation_edges: rename cross file setup",
+        write_file("/tmp/sme_rename_cross_file", "f") == 0);
+
+  errno = 0;
+  expect_errno("symlink_mutation_edges: ramfs file over dir EISDIR",
+               rename("/tmp/sme_rename_cross_file",
+                      "/tmp/sme_rename_cross_dir"), EISDIR);
+  check("symlink_mutation_edges: ramfs file over dir source preserved",
+        read_file("/tmp/sme_rename_cross_file", buf, sizeof(buf)) == 1 &&
+        strcmp(buf, "f") == 0);
+  check("symlink_mutation_edges: ramfs file over dir target preserved",
+        stat("/tmp/sme_rename_cross_dir", &st) == 0 && S_ISDIR(st.st_mode));
+
+  check("symlink_mutation_edges: rename cross existing file setup",
+        write_file("/tmp/sme_rename_cross_existing", "x") == 0);
+  errno = 0;
+  expect_errno("symlink_mutation_edges: ramfs dir over file ENOTDIR",
+               rename("/tmp/sme_rename_cross_dir",
+                      "/tmp/sme_rename_cross_existing"), ENOTDIR);
+  check("symlink_mutation_edges: ramfs dir over file source preserved",
+        stat("/tmp/sme_rename_cross_dir", &st) == 0 && S_ISDIR(st.st_mode));
+  check("symlink_mutation_edges: ramfs dir over file target preserved",
+        read_file("/tmp/sme_rename_cross_existing", buf, sizeof(buf)) == 1 &&
+        strcmp(buf, "x") == 0);
+
+  check("symlink_mutation_edges: rename cross existing link setup",
+        symlink("/tmp/sme_rename_cross_file",
+                "/tmp/sme_rename_cross_link") == 0);
+  errno = 0;
+  expect_errno("symlink_mutation_edges: ramfs dir over link ENOTDIR",
+               rename("/tmp/sme_rename_cross_dir",
+                      "/tmp/sme_rename_cross_link"), ENOTDIR);
+  check("symlink_mutation_edges: ramfs dir over link source preserved",
+        stat("/tmp/sme_rename_cross_dir", &st) == 0 && S_ISDIR(st.st_mode));
+  check("symlink_mutation_edges: ramfs dir over link target preserved",
+        lstat("/tmp/sme_rename_cross_link", &st) == 0 && S_ISLNK(st.st_mode));
+
+  check("symlink_mutation_edges: rename cross source link setup",
+        symlink("/tmp/sme_rename_cross_file",
+                "/tmp/sme_rename_cross_src_link") == 0);
+  errno = 0;
+  expect_errno("symlink_mutation_edges: ramfs link over dir EISDIR",
+               rename("/tmp/sme_rename_cross_src_link",
+                      "/tmp/sme_rename_cross_dir"), EISDIR);
+  check("symlink_mutation_edges: ramfs link over dir source preserved",
+        lstat("/tmp/sme_rename_cross_src_link", &st) == 0 &&
+        S_ISLNK(st.st_mode));
+  check("symlink_mutation_edges: ramfs link over dir target preserved",
+        stat("/tmp/sme_rename_cross_dir", &st) == 0 && S_ISDIR(st.st_mode));
+
+  unlink("/tmp/sme_rename_cross_src_link");
+  unlink("/tmp/sme_rename_cross_link");
+  unlink("/tmp/sme_rename_cross_existing");
+  unlink("/tmp/sme_rename_cross_file");
+  rmdir("/tmp/sme_rename_cross_dir");
+}
+
 static void chain_path(char *buf, int bufsz, const char *prefix, int idx) {
   snprintf(buf, bufsz, "/tmp/%s%d", prefix, idx);
 }
@@ -415,6 +489,7 @@ int main(void) {
   test_trailing_slash_directory_target();
   test_relative_dangling_link_flags();
   test_rename_source_trailing_slash();
+  test_ramfs_rename_cross_type_replacements();
   test_hop_limits();
   cleanup_all();
 

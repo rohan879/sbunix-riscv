@@ -314,6 +314,65 @@ static void test_proc_status_ids_creds(void) {
     waitpid(child, NULL, 0);
 }
 
+static void test_proc_status_open_before_mutation(void) {
+    enum { TEST_UID = 124, TEST_GID = 46 };
+    int result[2];
+
+    if (pipe(result) != 0) {
+        CHECK("procfs: proc_status_open_before_mutation pipe", 0);
+        return;
+    }
+
+    pid_t child = fork();
+    if (child == 0) {
+        char c = '0';
+        char buf[2048];
+        int fd;
+        int n = -1;
+        int ok = 0;
+
+        close(result[0]);
+        fd = open("/proc/self/status", O_RDONLY);
+        if (fd >= 0 &&
+            setsid() >= 0 &&
+            setgid(TEST_GID) == 0 &&
+            setuid(TEST_UID) == 0) {
+            pid_t pgid = getpgid(0);
+            pid_t sid = getsid(0);
+
+            n = read(fd, buf, sizeof(buf) - 1);
+            if (n > 0) {
+                buf[n] = '\0';
+                ok = status_scalar_equals(buf, "Pgid:", (int)pgid) &&
+                     status_scalar_equals(buf, "Sid:", (int)sid) &&
+                     status_quad_equals(buf, "Uid:", TEST_UID) &&
+                     status_quad_equals(buf, "Gid:", TEST_GID);
+            }
+        }
+        if (fd >= 0)
+            close(fd);
+        c = ok ? '1' : '0';
+        write(result[1], &c, 1);
+        close(result[1]);
+        _exit(ok ? 0 : 1);
+    }
+
+    close(result[1]);
+
+    if (child < 0) {
+        CHECK("procfs: proc_status_open_before_mutation fork", 0);
+        close(result[0]);
+        return;
+    }
+
+    char c = '0';
+    int rn = read(result[0], &c, 1);
+    close(result[0]);
+    CHECK("procfs: proc_status_open_before_mutation refreshed",
+          rn == 1 && c == '1');
+    waitpid(child, NULL, 0);
+}
+
 /* -----------------------------------------------------------------------
  * 4. proc_self_stat -- first field is PID number
  * ---------------------------------------------------------------------- */
@@ -839,6 +898,7 @@ int main(void) {
     test_proc_self_readlink();
     test_proc_self_status();
     test_proc_status_ids_creds();
+    test_proc_status_open_before_mutation();
     test_proc_self_stat();
     test_proc_self_exe();
     test_proc_self_cwd();

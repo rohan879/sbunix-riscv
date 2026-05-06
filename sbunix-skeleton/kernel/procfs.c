@@ -952,6 +952,12 @@ static int64_t procfs_read(void *fs_data, void *private, char *buf,
   if (priv->type == PROCFS_MEMINFO && *offset == 0) {
     priv->len = procfs_render_meminfo(priv->buf, PROCFS_BUF);
   }
+  if (priv->type == PROCFS_STATUS && *offset == 0) {
+    struct proc *target = procfs_find_target(priv->pid);
+    if (!target)
+      return -ENOENT;
+    priv->len = procfs_render_status(priv->buf, PROCFS_BUF, target);
+  }
 
   if (priv->type == PROCFS_MAPS)
     return procfs_read_maps(priv, buf, count, offset);
