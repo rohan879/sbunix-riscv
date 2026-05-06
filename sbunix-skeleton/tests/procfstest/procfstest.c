@@ -164,6 +164,14 @@ static int status_quad_equals(const char *buf, const char *label, int value) {
     return *p == '\n' || *p == '\0';
 }
 
+static int status_has_all_labels(const char *buf, const char *labels[], int nlabels) {
+    for (int i = 0; i < nlabels; i++) {
+        if (find_status_line(buf, labels[i]) == NULL)
+            return 0;
+    }
+    return 1;
+}
+
 static int split_fields(char *line, char *fields[], int max_fields) {
     int n = 0;
     char *p = line;
@@ -235,10 +243,63 @@ static void test_proc_self_status(void) {
     int n = read_file("/proc/self/status", buf, sizeof(buf));
     CHECK("procfs: proc_self_status readable", n > 0);
     if (n > 0) {
+        const char *labels[] = {
+            "Name:",
+            "Umask:",
+            "State:",
+            "Tgid:",
+            "Ngid:",
+            "Pid:",
+            "PPid:",
+            "Pgid:",
+            "Sid:",
+            "TracerPid:",
+            "Uid:",
+            "Gid:",
+            "FDSize:",
+            "Groups:",
+            "NStgid:",
+            "NSpid:",
+            "NSpgid:",
+            "NSsid:",
+            "Kthread:",
+            "VmSize:",
+            "Threads:",
+            "SigQ:",
+            "SigPnd:",
+            "ShdPnd:",
+            "SigBlk:",
+            "SigIgn:",
+            "SigCgt:",
+        };
+        pid_t mypid = getpid();
+        pid_t pgid = getpgid(0);
+        pid_t sid = getsid(0);
+
         CHECK("procfs: proc_self_status contains Name:",
               strstr(buf, "Name:") != NULL);
         CHECK("procfs: proc_self_status contains Pid:",
               strstr(buf, "Pid:") != NULL);
+        CHECK("procfs: proc_self_status has status field set",
+              status_has_all_labels(buf, labels,
+                                    (int)(sizeof(labels) / sizeof(labels[0]))));
+        CHECK("procfs: proc_self_status Tgid is pid",
+              status_scalar_equals(buf, "Tgid:", (int)mypid));
+        CHECK("procfs: proc_self_status Pgid is current group",
+              status_scalar_equals(buf, "Pgid:", (int)pgid));
+        CHECK("procfs: proc_self_status Sid is current session",
+              status_scalar_equals(buf, "Sid:", (int)sid));
+        CHECK("procfs: proc_self_status namespace ids match",
+              status_scalar_equals(buf, "NStgid:", (int)mypid) &&
+              status_scalar_equals(buf, "NSpid:", (int)mypid) &&
+              status_scalar_equals(buf, "NSpgid:", (int)pgid) &&
+              status_scalar_equals(buf, "NSsid:", (int)sid));
+        CHECK("procfs: proc_self_status fixed fields sane",
+              status_scalar_equals(buf, "TracerPid:", 0) &&
+              status_scalar_equals(buf, "Kthread:", 0) &&
+              status_scalar_equals(buf, "Threads:", 1) &&
+              status_scalar_equals(buf, "FDSize:", 64) &&
+              status_scalar_equals(buf, "Groups:", (int)getgid()));
     }
 }
 

@@ -104,6 +104,15 @@ static int append_hex_min(char *buf, int bufsz, int pos, uint64_t v) {
   return append_str(buf, bufsz, pos, tmp);
 }
 
+static int append_octal4(char *buf, int bufsz, int pos, unsigned int v) {
+  v &= 0777;
+  for (int shift = 9; shift >= 0; shift -= 3) {
+    if (pos < bufsz)
+      buf[pos++] = (char)('0' + ((v >> shift) & 7));
+  }
+  return pos;
+}
+
 /* Helper: parse a decimal PID from a string. Returns -1 on failure. */
 static int parse_pid(const char *s) {
   if (!s || !*s) return -1;
@@ -279,6 +288,17 @@ static uint64_t procfs_vmsize_bytes(struct proc *p) {
   return total;
 }
 
+static int procfs_sigqueue_count(struct proc *p) {
+  int count = 0;
+
+  for (int i = 0; i < NSIGQUEUE; i++) {
+    if (p->sigqueue_buf[i].valid)
+      count++;
+  }
+
+  return count;
+}
+
 /* Render /proc/<pid>/status */
 static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   int pos = 0;
@@ -288,9 +308,19 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   pos = append_str(buf, bufsz, pos, p->name);
   if (pos < bufsz) buf[pos++] = '\n';
 
+  pos = append_str(buf, bufsz, pos, "Umask:\t");
+  pos = append_octal4(buf, bufsz, pos, p->umask_val);
+  if (pos < bufsz) buf[pos++] = '\n';
+
   pos = append_str(buf, bufsz, pos, "State:\t");
   pos = append_str(buf, bufsz, pos, state_name(p->state));
   if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "Tgid:\t");
+  pos = append_int(buf, bufsz, pos, p->pid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "Ngid:\t0\n");
 
   pos = append_str(buf, bufsz, pos, "Pid:\t");
   pos = append_int(buf, bufsz, pos, p->pid);
@@ -300,8 +330,8 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   pos = append_int(buf, bufsz, pos, ppid);
   if (pos < bufsz) buf[pos++] = '\n';
 
-  /* BF: Report tracked process identity so proc status matches job-control
-   * and credential syscalls instead of hard-coded root values. */
+  /* BF: Report job-control identity from the process table so userspace
+   * process scanners can correlate pipelines and sessions from procfs. */
   pos = append_str(buf, bufsz, pos, "Pgid:\t");
   pos = append_int(buf, bufsz, pos, p->pgid);
   if (pos < bufsz) buf[pos++] = '\n';
@@ -309,6 +339,8 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   pos = append_str(buf, bufsz, pos, "Sid:\t");
   pos = append_int(buf, bufsz, pos, p->sid);
   if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "TracerPid:\t0\n");
 
   pos = append_str(buf, bufsz, pos, "Uid:\t");
   pos = append_int(buf, bufsz, pos, p->uid);
@@ -330,12 +362,52 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   pos = append_int(buf, bufsz, pos, p->gid);
   if (pos < bufsz) buf[pos++] = '\n';
 
+  pos = append_str(buf, bufsz, pos, "FDSize:\t");
+  pos = append_int(buf, bufsz, pos, NOFILE);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "Groups:\t");
+  pos = append_int(buf, bufsz, pos, p->gid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  /* ENH: SBUnix has one PID namespace, so namespace identifiers are the
+   * tracked process IDs.  Linux-style labels keep common proc parsers happy. */
+  pos = append_str(buf, bufsz, pos, "NStgid:\t");
+  pos = append_int(buf, bufsz, pos, p->pid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "NSpid:\t");
+  pos = append_int(buf, bufsz, pos, p->pid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "NSpgid:\t");
+  pos = append_int(buf, bufsz, pos, p->pgid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "NSsid:\t");
+  pos = append_int(buf, bufsz, pos, p->sid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "Kthread:\t0\n");
+
   pos = append_str(buf, bufsz, pos, "VmSize:\t");
   pos = append_int(buf, bufsz, pos, (long)(procfs_vmsize_bytes(p) / 1024));
   pos = append_str(buf, bufsz, pos, " kB\n");
 
+  pos = append_str(buf, bufsz, pos, "Threads:\t1\n");
+
+  pos = append_str(buf, bufsz, pos, "SigQ:\t");
+  pos = append_int(buf, bufsz, pos, procfs_sigqueue_count(p));
+  if (pos < bufsz) buf[pos++] = '/';
+  pos = append_int(buf, bufsz, pos, NSIGQUEUE);
+  if (pos < bufsz) buf[pos++] = '\n';
+
   pos = append_str(buf, bufsz, pos, "SigPnd:\t");
   pos = append_hex16(buf, bufsz, pos, p->sigpending);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "ShdPnd:\t");
+  pos = append_hex16(buf, bufsz, pos, 0);
   if (pos < bufsz) buf[pos++] = '\n';
 
   pos = append_str(buf, bufsz, pos, "SigBlk:\t");
