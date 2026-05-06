@@ -74,6 +74,16 @@ static void cleanup_all(void) {
   unlink("/tmp/sme_parent/child");
   unlink("/tmp/sme_parent/missing-relative");
   rmdir("/tmp/sme_parent");
+  unlink("/tmp/sme_rename_dirlink");
+  unlink("/tmp/sme_rename_moved/child");
+  rmdir("/tmp/sme_rename_moved");
+  unlink("/tmp/sme_rename_dir/child");
+  rmdir("/tmp/sme_rename_dir");
+  unlink("/tmp/sme_rename_filelink");
+  unlink("/tmp/sme_rename_file");
+  unlink("/tmp/sme_rename_dest_src");
+  unlink("/tmp/sme_rename_destlink");
+  rmdir("/tmp/sme_rename_destdir");
   cleanup_chain("sme40_", 41);
   cleanup_chain("sme41_", 42);
 }
@@ -276,6 +286,80 @@ static void test_relative_dangling_link_flags(void) {
   rmdir("/tmp/sme_parent");
 }
 
+static void test_rename_source_trailing_slash(void) {
+  char buf[32];
+  struct stat st;
+
+  unlink("/tmp/sme_rename_dirlink");
+  unlink("/tmp/sme_rename_moved/child");
+  rmdir("/tmp/sme_rename_moved");
+  unlink("/tmp/sme_rename_dir/child");
+  rmdir("/tmp/sme_rename_dir");
+  unlink("/tmp/sme_rename_filelink");
+  unlink("/tmp/sme_rename_file");
+  unlink("/tmp/sme_rename_dest_src");
+  unlink("/tmp/sme_rename_destlink");
+  rmdir("/tmp/sme_rename_destdir");
+
+  check("symlink_mutation_edges: rename source dir setup",
+        mkdir("/tmp/sme_rename_dir", 0755) == 0);
+  check("symlink_mutation_edges: rename source dir child",
+        write_file("/tmp/sme_rename_dir/child", "d") == 0);
+  check("symlink_mutation_edges: rename source dir link",
+        symlink("/tmp/sme_rename_dir", "/tmp/sme_rename_dirlink") == 0);
+  check("symlink_mutation_edges: rename source slash follows dir",
+        renameat(AT_FDCWD, "/tmp/sme_rename_dirlink/", AT_FDCWD,
+                 "/tmp/sme_rename_moved") == 0);
+  check("symlink_mutation_edges: rename moved target directory",
+        read_file("/tmp/sme_rename_moved/child", buf, sizeof(buf)) == 1 &&
+        strcmp(buf, "d") == 0);
+  errno = 0;
+  check("symlink_mutation_edges: rename source link preserved",
+        lstat("/tmp/sme_rename_dirlink", &st) == 0 && S_ISLNK(st.st_mode));
+  errno = 0;
+  expect_errno("symlink_mutation_edges: rename old target gone",
+               stat("/tmp/sme_rename_dir", &st), ENOENT);
+
+  check("symlink_mutation_edges: rename source file setup",
+        write_file("/tmp/sme_rename_file", "f") == 0);
+  check("symlink_mutation_edges: rename source file link",
+        symlink("/tmp/sme_rename_file", "/tmp/sme_rename_filelink") == 0);
+  errno = 0;
+  expect_errno("symlink_mutation_edges: rename file link slash ENOTDIR",
+               renameat(AT_FDCWD, "/tmp/sme_rename_filelink/", AT_FDCWD,
+                        "/tmp/sme_rename_file_moved"), ENOTDIR);
+  check("symlink_mutation_edges: rename file link preserved",
+        lstat("/tmp/sme_rename_filelink", &st) == 0 && S_ISLNK(st.st_mode));
+  check("symlink_mutation_edges: rename file target preserved",
+        read_file("/tmp/sme_rename_file", buf, sizeof(buf)) == 1 &&
+        strcmp(buf, "f") == 0);
+
+  check("symlink_mutation_edges: rename dest dir setup",
+        mkdir("/tmp/sme_rename_destdir", 0755) == 0);
+  check("symlink_mutation_edges: rename dest source setup",
+        write_file("/tmp/sme_rename_dest_src", "s") == 0);
+  check("symlink_mutation_edges: rename dest dir link",
+        symlink("/tmp/sme_rename_destdir", "/tmp/sme_rename_destlink") == 0);
+  errno = 0;
+  expect_errno("symlink_mutation_edges: rename dest slash link ENOTDIR",
+               renameat(AT_FDCWD, "/tmp/sme_rename_dest_src", AT_FDCWD,
+                        "/tmp/sme_rename_destlink/"), ENOTDIR);
+  check("symlink_mutation_edges: rename dest preserved source",
+        read_file("/tmp/sme_rename_dest_src", buf, sizeof(buf)) == 1 &&
+        strcmp(buf, "s") == 0);
+  check("symlink_mutation_edges: rename dest link preserved",
+        lstat("/tmp/sme_rename_destlink", &st) == 0 && S_ISLNK(st.st_mode));
+
+  unlink("/tmp/sme_rename_dirlink");
+  unlink("/tmp/sme_rename_moved/child");
+  rmdir("/tmp/sme_rename_moved");
+  unlink("/tmp/sme_rename_filelink");
+  unlink("/tmp/sme_rename_file");
+  unlink("/tmp/sme_rename_dest_src");
+  unlink("/tmp/sme_rename_destlink");
+  rmdir("/tmp/sme_rename_destdir");
+}
+
 static void chain_path(char *buf, int bufsz, const char *prefix, int idx) {
   snprintf(buf, bufsz, "/tmp/%s%d", prefix, idx);
 }
@@ -330,6 +414,7 @@ int main(void) {
   test_link_rename_unlink_symlink_itself();
   test_trailing_slash_directory_target();
   test_relative_dangling_link_flags();
+  test_rename_source_trailing_slash();
   test_hop_limits();
   cleanup_all();
 
