@@ -81,6 +81,7 @@ static void cleanup_all(void) {
   rmdir("/tmp/sme_rename_dir");
   unlink("/tmp/sme_rename_filelink");
   unlink("/tmp/sme_rename_file");
+  unlink("/tmp/sme_rename_file_moved");
   unlink("/tmp/sme_rename_dest_src");
   unlink("/tmp/sme_rename_destlink");
   rmdir("/tmp/sme_rename_destdir");
@@ -302,6 +303,7 @@ static void test_rename_source_trailing_slash(void) {
   rmdir("/tmp/sme_rename_dir");
   unlink("/tmp/sme_rename_filelink");
   unlink("/tmp/sme_rename_file");
+  unlink("/tmp/sme_rename_file_moved");
   unlink("/tmp/sme_rename_dest_src");
   unlink("/tmp/sme_rename_destlink");
   rmdir("/tmp/sme_rename_destdir");
@@ -360,6 +362,7 @@ static void test_rename_source_trailing_slash(void) {
   rmdir("/tmp/sme_rename_moved");
   unlink("/tmp/sme_rename_filelink");
   unlink("/tmp/sme_rename_file");
+  unlink("/tmp/sme_rename_file_moved");
   unlink("/tmp/sme_rename_dest_src");
   unlink("/tmp/sme_rename_destlink");
   rmdir("/tmp/sme_rename_destdir");

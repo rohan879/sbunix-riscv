@@ -251,7 +251,13 @@ static void test_proc_status_ids_creds(void) {
     int ready[2];
     int release[2];
 
-    if (pipe(ready) != 0 || pipe(release) != 0) {
+    if (pipe(ready) != 0) {
+        CHECK("procfs: proc_status_ids_creds pipe", 0);
+        return;
+    }
+    if (pipe(release) != 0) {
+        close(ready[0]);
+        close(ready[1]);
         CHECK("procfs: proc_status_ids_creds pipe", 0);
         return;
     }
