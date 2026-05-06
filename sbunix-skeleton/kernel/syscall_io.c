@@ -1544,17 +1544,19 @@ long sys_renameat2_handler(struct trapframe *tf) {
       if (rr < 0) return (long)rr; }
     { int rr = resolve_path_at(newdirfd, knew, new_resolved);
       if (rr < 0) return (long)rr; }
-    /* BF: renameat2 follows symlinked parent directories but must leave the
-     * source and destination basenames unresolved so renaming a symlink still
-     * acts on the link itself rather than the target. */
-    { int sr = resolve_symlinks_in_path(old_resolved, KSYMLINK_MAX_HOPS, 0);
-      if (sr < 0) return (long)sr; }
+    /* BF: renameat2 normally leaves source/destination basenames unresolved
+     * so renaming a symlink acts on the link itself.  A trailing slash on the
+     * source is different: POSIX pathname rules require resolving the final
+     * symlink and then requiring that the target is a directory. */
+    if (old_trailing) {
+        int sr = path_resolve_trailing_slash_dir_target(old_resolved, 0);
+        if (sr < 0) return (long)sr;
+    } else {
+        int sr = resolve_symlinks_in_path(old_resolved, KSYMLINK_MAX_HOPS, 0);
+        if (sr < 0) return (long)sr;
+    }
     { int sr = resolve_symlinks_in_path(new_resolved, KSYMLINK_MAX_HOPS, 0);
       if (sr < 0) return (long)sr; }
-    if (old_trailing) {
-        int tr = path_require_dir(old_resolved);
-        if (tr < 0) return (long)tr;
-    }
     if (new_trailing) {
         int tr = path_require_dir(new_resolved);
         if (tr < 0) return (long)tr;

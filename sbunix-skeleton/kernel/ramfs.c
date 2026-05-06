@@ -681,6 +681,10 @@ static int ramfs_rename(void *fs_data, const char *oldpath,
     /* BF: Same-inode rename (e.g. rename("a","a")) is a no-op per POSIX */
     if (existing == ino)
       return 0;
+    if (ino->type == RAMFS_DIR && existing->type != RAMFS_DIR)
+      return -20; /* -ENOTDIR */
+    if (ino->type != RAMFS_DIR && existing->type == RAMFS_DIR)
+      return -21; /* -EISDIR */
     if (existing->type == RAMFS_DIR && existing->nchildren > 0)
       return -39; /* -ENOTEMPTY */
     ramfs_dir_remove(new_parent, new_base);

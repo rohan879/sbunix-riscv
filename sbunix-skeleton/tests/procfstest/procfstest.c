@@ -123,6 +123,47 @@ static unsigned long proc_status_vmsize_kb(const char *buf) {
     return simple_atoul(p);
 }
 
+static const char *find_status_line(const char *buf, const char *label) {
+    int len = strlen(label);
+    const char *p = buf;
+
+    while (*p) {
+        if (strncmp(p, label, len) == 0)
+            return p + len;
+        while (*p && *p != '\n')
+            p++;
+        if (*p == '\n')
+            p++;
+    }
+    return NULL;
+}
+
+static int status_scalar_equals(const char *buf, const char *label, int value) {
+    const char *p = find_status_line(buf, label);
+
+    if (!p)
+        return 0;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return simple_atoi(p) == value;
+}
+
+static int status_quad_equals(const char *buf, const char *label, int value) {
+    const char *p = find_status_line(buf, label);
+
+    if (!p)
+        return 0;
+    for (int i = 0; i < 4; i++) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (simple_atoi(p) != value)
+            return 0;
+        while (*p >= '0' && *p <= '9')
+            p++;
+    }
+    return *p == '\n' || *p == '\0';
+}
+
 static int split_fields(char *line, char *fields[], int max_fields) {
     int n = 0;
     char *p = line;
@@ -199,6 +240,143 @@ static void test_proc_self_status(void) {
         CHECK("procfs: proc_self_status contains Pid:",
               strstr(buf, "Pid:") != NULL);
     }
+}
+
+/* -----------------------------------------------------------------------
+ * 3b. proc_status_ids_creds -- status reports pgid/sid and tracked creds
+ * ---------------------------------------------------------------------- */
+
+static void test_proc_status_ids_creds(void) {
+    enum { TEST_UID = 123, TEST_GID = 45 };
+    int ready[2];
+    int release[2];
+
+    if (pipe(ready) != 0) {
+        CHECK("procfs: proc_status_ids_creds pipe", 0);
+        return;
+    }
+    if (pipe(release) != 0) {
+        close(ready[0]);
+        close(ready[1]);
+        CHECK("procfs: proc_status_ids_creds pipe", 0);
+        return;
+    }
+
+    pid_t child = fork();
+    if (child == 0) {
+        char c = '0';
+        int ok;
+
+        close(ready[0]);
+        close(release[1]);
+        ok = setsid() >= 0 && setuid(TEST_UID) == 0 && setgid(TEST_GID) == 0;
+        c = ok ? '1' : '0';
+        write(ready[1], &c, 1);
+        close(ready[1]);
+        read(release[0], &c, 1);
+        close(release[0]);
+        _exit(ok ? 0 : 1);
+    }
+
+    close(ready[1]);
+    close(release[0]);
+
+    if (child < 0) {
+        CHECK("procfs: proc_status_ids_creds fork", 0);
+        close(ready[0]);
+        close(release[1]);
+        return;
+    }
+
+    char c = '0';
+    int rn = read(ready[0], &c, 1);
+    close(ready[0]);
+    CHECK("procfs: proc_status_ids_creds child setup", rn == 1 && c == '1');
+
+    if (rn == 1 && c == '1') {
+        char path[64];
+        char buf[2048];
+        int n;
+        pid_t pgid = getpgid(child);
+        pid_t sid = getsid(child);
+
+        snprintf(path, sizeof(path), "/proc/%d/status", (int)child);
+        n = read_file(path, buf, sizeof(buf));
+        CHECK("procfs: proc_status_ids_creds readable", n > 0);
+        if (n > 0) {
+            CHECK("procfs: proc_status_ids_creds has Pgid",
+                  status_scalar_equals(buf, "Pgid:", (int)pgid));
+            CHECK("procfs: proc_status_ids_creds has Sid",
+                  status_scalar_equals(buf, "Sid:", (int)sid));
+            CHECK("procfs: proc_status_ids_creds has Uid values",
+                  status_quad_equals(buf, "Uid:", TEST_UID));
+            CHECK("procfs: proc_status_ids_creds has Gid values",
+                  status_quad_equals(buf, "Gid:", TEST_GID));
+        }
+    }
+
+    write(release[1], "x", 1);
+    close(release[1]);
+    waitpid(child, NULL, 0);
+}
+
+static void test_proc_status_open_before_mutation(void) {
+    enum { TEST_UID = 124, TEST_GID = 46 };
+    int result[2];
+
+    if (pipe(result) != 0) {
+        CHECK("procfs: proc_status_open_before_mutation pipe", 0);
+        return;
+    }
+
+    pid_t child = fork();
+    if (child == 0) {
+        char c = '0';
+        char buf[2048];
+        int fd;
+        int n = -1;
+        int ok = 0;
+
+        close(result[0]);
+        fd = open("/proc/self/status", O_RDONLY);
+        if (fd >= 0 &&
+            setsid() >= 0 &&
+            setgid(TEST_GID) == 0 &&
+            setuid(TEST_UID) == 0) {
+            pid_t pgid = getpgid(0);
+            pid_t sid = getsid(0);
+
+            n = read(fd, buf, sizeof(buf) - 1);
+            if (n > 0) {
+                buf[n] = '\0';
+                ok = status_scalar_equals(buf, "Pgid:", (int)pgid) &&
+                     status_scalar_equals(buf, "Sid:", (int)sid) &&
+                     status_quad_equals(buf, "Uid:", TEST_UID) &&
+                     status_quad_equals(buf, "Gid:", TEST_GID);
+            }
+        }
+        if (fd >= 0)
+            close(fd);
+        c = ok ? '1' : '0';
+        write(result[1], &c, 1);
+        close(result[1]);
+        _exit(ok ? 0 : 1);
+    }
+
+    close(result[1]);
+
+    if (child < 0) {
+        CHECK("procfs: proc_status_open_before_mutation fork", 0);
+        close(result[0]);
+        return;
+    }
+
+    char c = '0';
+    int rn = read(result[0], &c, 1);
+    close(result[0]);
+    CHECK("procfs: proc_status_open_before_mutation refreshed",
+          rn == 1 && c == '1');
+    waitpid(child, NULL, 0);
 }
 
 /* -----------------------------------------------------------------------
@@ -725,6 +903,8 @@ int main(void) {
     test_proc_self_exists();
     test_proc_self_readlink();
     test_proc_self_status();
+    test_proc_status_ids_creds();
+    test_proc_status_open_before_mutation();
     test_proc_self_stat();
     test_proc_self_exe();
     test_proc_self_cwd();

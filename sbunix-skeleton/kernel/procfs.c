@@ -300,8 +300,35 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   pos = append_int(buf, bufsz, pos, ppid);
   if (pos < bufsz) buf[pos++] = '\n';
 
-  pos = append_str(buf, bufsz, pos, "Uid:\t0\t0\t0\t0\n");
-  pos = append_str(buf, bufsz, pos, "Gid:\t0\t0\t0\t0\n");
+  /* BF: Report tracked process identity so proc status matches job-control
+   * and credential syscalls instead of hard-coded root values. */
+  pos = append_str(buf, bufsz, pos, "Pgid:\t");
+  pos = append_int(buf, bufsz, pos, p->pgid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "Sid:\t");
+  pos = append_int(buf, bufsz, pos, p->sid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "Uid:\t");
+  pos = append_int(buf, bufsz, pos, p->uid);
+  if (pos < bufsz) buf[pos++] = '\t';
+  pos = append_int(buf, bufsz, pos, p->uid);
+  if (pos < bufsz) buf[pos++] = '\t';
+  pos = append_int(buf, bufsz, pos, p->uid);
+  if (pos < bufsz) buf[pos++] = '\t';
+  pos = append_int(buf, bufsz, pos, p->uid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "Gid:\t");
+  pos = append_int(buf, bufsz, pos, p->gid);
+  if (pos < bufsz) buf[pos++] = '\t';
+  pos = append_int(buf, bufsz, pos, p->gid);
+  if (pos < bufsz) buf[pos++] = '\t';
+  pos = append_int(buf, bufsz, pos, p->gid);
+  if (pos < bufsz) buf[pos++] = '\t';
+  pos = append_int(buf, bufsz, pos, p->gid);
+  if (pos < bufsz) buf[pos++] = '\n';
 
   pos = append_str(buf, bufsz, pos, "VmSize:\t");
   pos = append_int(buf, bufsz, pos, (long)(procfs_vmsize_bytes(p) / 1024));
@@ -924,6 +951,12 @@ static int64_t procfs_read(void *fs_data, void *private, char *buf,
   }
   if (priv->type == PROCFS_MEMINFO && *offset == 0) {
     priv->len = procfs_render_meminfo(priv->buf, PROCFS_BUF);
+  }
+  if (priv->type == PROCFS_STATUS && *offset == 0) {
+    struct proc *target = procfs_find_target(priv->pid);
+    if (!target)
+      return -ENOENT;
+    priv->len = procfs_render_status(priv->buf, PROCFS_BUF, target);
   }
 
   if (priv->type == PROCFS_MAPS)
