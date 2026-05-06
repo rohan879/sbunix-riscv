@@ -623,7 +623,8 @@ long sys_setuid_handler(struct trapframe *tf) {
 }
 
 long sys_setgid_handler(struct trapframe *tf) {
-    (void)tf;
+    /* BF: Track GID mutations for getgid/getegid and proc status output. */
+    current_proc->gid = (int)tf->a0;
     return (long)0;
 }
 
