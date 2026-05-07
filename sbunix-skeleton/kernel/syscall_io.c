@@ -1801,30 +1801,33 @@ out:
     return (long)ret;
 }
 
+static int path_basename_has_newline(const char *path) {
+    const char *base = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/')
+            base = p + 1;
+    }
+    for (const char *p = base; *p; p++) {
+        if (*p == '\n')
+            return 1;
+    }
+    return 0;
+}
+
 long sys_symlinkat_handler(struct trapframe *tf) {
     char *ktarget;
     char klinkpath[KPATH_MAX];
 
-    ktarget = (char *)kmalloc(KSYMLINK_MAX + 1);
-    if (!ktarget)
-        return (long)-ENOMEM;
-
-    /* BF: Match the advertised SYMLINK_MAX capacity and distinguish a
-     * too-long target from an invalid user pointer.  The target is stored
-     * opaquely, but empty target strings still fail with ENOENT. */
-    { int pr = copy_user_path_arg(tf->a0, ktarget, KSYMLINK_MAX + 1, 0);
-      if (pr < 0) { kmfree(ktarget, KSYMLINK_MAX + 1); return (long)pr; } }
     { int pr = copy_user_path_arg(tf->a2, klinkpath, sizeof(klinkpath), 0);
-      if (pr < 0) { kmfree(ktarget, KSYMLINK_MAX + 1); return (long)pr; } }
+      if (pr < 0) return (long)pr; }
+    if (path_basename_has_newline(klinkpath))
+        return (long)-EILSEQ;
     int trailing_slash = path_has_trailing_slash(klinkpath);
 
     char resolved[KPATH_MAX];
     /* BF: Propagate dirfd resolution errors before VFS dispatch. */
     { int rr = resolve_path_at((int)tf->a1, klinkpath, resolved);
-      if (rr < 0) {
-          kmfree(ktarget, KSYMLINK_MAX + 1);
-          return (long)rr;
-      } }
+      if (rr < 0) return (long)rr; }
 
     /* BF: symlinkat must resolve intermediate symlinked directories while
      * preserving the final component (the new link path itself).  Without
@@ -1832,22 +1835,36 @@ long sys_symlinkat_handler(struct trapframe *tf) {
      * entry at the literal path instead of the resolved target directory. */
     if (trailing_slash) {
         int sr = path_resolve_trailing_slash_dir_target(resolved, 0);
-        if (sr < 0) {
-            kmfree(ktarget, KSYMLINK_MAX + 1);
+        if (sr < 0)
             return (long)sr;
-        }
     } else {
         { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
-          if (sr < 0) {
-              kmfree(ktarget, KSYMLINK_MAX + 1);
-              return (long)sr;
-          } }
+          if (sr < 0) return (long)sr; }
     }
 
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     int ret = -30; /* EROFS */
+    if (ops && ops->stat) {
+        uint8_t st[128];
+        ret = ops->stat(mnt->fs_data, relpath, st);
+        if (ret == 0)
+            return (long)-EEXIST;
+        if (ret < 0 && ret != -ENOENT)
+            return (long)(int64_t)ret;
+    }
+
+    ktarget = (char *)kmalloc(KSYMLINK_MAX + 1);
+    if (!ktarget)
+        return (long)-ENOMEM;
+
+    /* ENH: POSIX Issue 8 treats symlink target text as opaque; empty target
+     * strings are allowed and readlink() reports length zero.  Copy this only
+     * after path2 existence checks so an existing destination reports EEXIST
+     * and remains untouched even if target text is otherwise invalid. */
+    { int pr = copy_user_path_arg(tf->a0, ktarget, KSYMLINK_MAX + 1, 1);
+      if (pr < 0) { kmfree(ktarget, KSYMLINK_MAX + 1); return (long)pr; } }
     if (ops && ops->symlink)
         ret = ops->symlink(mnt->fs_data, ktarget, relpath);
     kmfree(ktarget, KSYMLINK_MAX + 1);
@@ -1912,6 +1929,9 @@ long sys_fchmodat_handler(struct trapframe *tf) {
     } else {
         return (long)-2; /* ENOENT */
     }
+    if (ops->chmod)
+        return (long)ops->chmod(mnt->fs_data, relpath, (uint32_t)tf->a2,
+                                (int)tf->a3);
     /* ext2: actually set the mode on disk */
     if (ext2_is_ops(ops) && ops->open) {
         void *priv = NULL;

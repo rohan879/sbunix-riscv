@@ -2,6 +2,7 @@
 #define _PROC_H
 
 #include <riscv.h>
+#include <kalloc.h>
 #include <string.h>
 #include <vfs.h>
 #include <user_clock.h>
@@ -196,6 +197,10 @@ struct proc {
   char exe_path[256];          // path of executable (set by exec)
   char cmdline[256];           // NUL-separated argv image for /proc/<pid>/cmdline
   uint16_t cmdline_len;        // valid bytes in cmdline[]
+  /* ENH: /proc/<pid>/environ exposes the exec-time envp byte image.
+   * Keep a full page because execve already caps copied env strings there. */
+  char environ[PAGE_SIZE];
+  uint16_t environ_len;
   unsigned int umask_val;       // file creation mask
   struct open_file *ofile[NOFILE]; // open file descriptors (VFS)
   uint8_t fd_flags[NOFILE]; /* Per-fd flags: FD_CLOEXEC=1, FD_CLOFORK=2 */

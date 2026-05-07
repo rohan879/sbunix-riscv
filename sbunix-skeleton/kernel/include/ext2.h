@@ -136,6 +136,8 @@ struct ext2_inode_mem {
   uint32_t indirect;
   uint32_t mode;
   uint32_t rdev;
+  uint32_t uid;
+  uint32_t gid;
   uint64_t ctime;
   uint64_t mtime;
 };

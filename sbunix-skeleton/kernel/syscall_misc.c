@@ -455,12 +455,35 @@ long sys_utimensat_handler(struct trapframe *tf) {
         uint32_t mode;
         int st_ret = path_stat_mode(resolved, &mode);
         if (st_ret < 0) return (long)st_ret;
-        if ((mode & 0xF000) == 0xA000) {
-            /* BF: With AT_SYMLINK_NOFOLLOW and no trailing slash, utimensat
-             * targets the link itself.  The current filesystems have no raw
-             * symlink-open hook, so treat the timestamp update as a metadata
-             * no-op after validating that the link exists. */
-            return 0;
+        (void)mode;
+    }
+
+    {
+        int set_atime = 1;
+        int set_mtime = 1;
+        uint64_t atime_sec = (uint64_t)now_sec;
+        uint64_t mtime_sec = (uint64_t)now_sec;
+
+        if (has_times) {
+            if (ktimes[0].nsec == UTIME_OMIT) {
+                set_atime = 0;
+            } else if (ktimes[0].nsec == UTIME_NOW) {
+                atime_sec = (uint64_t)now_sec;
+            } else {
+                atime_sec = (uint64_t)ktimes[0].sec;
+            }
+            if (ktimes[1].nsec == UTIME_OMIT) {
+                set_mtime = 0;
+            } else if (ktimes[1].nsec == UTIME_NOW) {
+                mtime_sec = (uint64_t)now_sec;
+            } else {
+                mtime_sec = (uint64_t)ktimes[1].sec;
+            }
+        }
+        if (ops->utimens) {
+            return (long)ops->utimens(mnt->fs_data, relpath, atime_sec,
+                                      mtime_sec, set_atime, set_mtime,
+                                      flags);
         }
     }
 
@@ -611,6 +634,10 @@ long sys_fchownat_handler(struct trapframe *tf) {
             return (long)(int64_t)ret;
     } else {
         return (long)-ENOENT;
+    }
+    if (ops->chown) {
+        return (long)ops->chown(mnt->fs_data, relpath, (int)tf->a2,
+                                (int)tf->a3, flags);
     }
     return (long)0;
 }
