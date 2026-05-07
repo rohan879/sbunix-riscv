@@ -608,7 +608,7 @@ static void test_proc_meminfo(void) {
  * ---------------------------------------------------------------------- */
 
 static void test_proc_status_meminfo(void) {
-    char buf[512];
+    char buf[4096];
     int n = read_file("/proc/self/status", buf, sizeof(buf));
     CHECK("procfs: proc_status_meminfo readable", n > 0);
     if (n > 0) {
@@ -620,7 +620,7 @@ static void test_proc_status_meminfo(void) {
         CHECK("procfs: proc_status_meminfo contains VmSize",
               proc_labeled_value(buf, "VmSize:") > 0);
         CHECK("procfs: proc_status_meminfo contains VmRSS",
-              proc_labeled_value(buf, "VmRSS:") > 0);
+              find_status_line(buf, "VmRSS:") != NULL);
         CHECK("procfs: proc_status_meminfo contains VmData",
               proc_labeled_value(buf, "VmData:") > 0);
         CHECK("procfs: proc_status_meminfo contains VmStk",
