@@ -556,6 +556,6 @@ void            uart_wakeup(void);
 extern struct proc *current_proc;
 extern struct proc proc[NPROC];
 extern struct context scheduler_context;
-extern int nextpid;  /* Most recently allocated PID is exposed through procfs. */
+extern int nextpid;  /* Next PID to allocate; procfs reports nextpid - 1. */
 
 #endif
