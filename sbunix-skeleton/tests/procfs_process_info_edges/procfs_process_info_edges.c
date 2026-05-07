@@ -9,6 +9,8 @@
 static int g_pass;
 static int g_fail;
 
+#define LONG_ENV_LEN 1500
+
 static void check(const char *name, int ok) {
   if (ok) {
     g_pass++;
@@ -113,6 +115,37 @@ static int environ_child(void) {
   return ok ? 0 : 1;
 }
 
+static void fill_long_env(char *buf) {
+  static const char prefix[] = "LONG_ENV=";
+  int pos = (int)sizeof(prefix) - 1;
+
+  memcpy(buf, prefix, pos);
+  while (pos < LONG_ENV_LEN) {
+    buf[pos] = (char)('a' + (pos % 26));
+    pos++;
+  }
+  buf[LONG_ENV_LEN] = '\0';
+}
+
+static int environ_long_child(void) {
+  static char expected[LONG_ENV_LEN + 1];
+  static char buf[LONG_ENV_LEN + 64];
+  struct stat st;
+  int n;
+
+  fill_long_env(expected);
+  n = read_all("/proc/self/environ", buf, sizeof(buf), 113);
+  check("procfs_process_info_edges: long environ stat size",
+        stat("/proc/self/environ", &st) == 0 &&
+        st.st_size == (long)sizeof(expected));
+  check("procfs_process_info_edges: long environ full read",
+        n == (int)sizeof(expected) &&
+        memcmp(buf, expected, sizeof(expected)) == 0);
+  check("procfs_process_info_edges: long environ EOF no implicit NUL",
+        n >= 0 && n < (int)sizeof(buf) && buf[n] == 'Z');
+  return g_fail == 0 ? 0 : 1;
+}
+
 static void test_stat_statm_comm_root(void) {
   char buf[512];
   struct stat st;
@@ -169,13 +202,37 @@ static void test_environ_exec_snapshot(const char *self_path) {
   }
 }
 
+static void test_long_environ_exec_snapshot(const char *self_path) {
+  static char long_env[LONG_ENV_LEN + 1];
+  char *argv[] = { (char *)self_path, (char *)"--env-long-child", 0 };
+  char *envp[] = { long_env, 0 };
+  int status = 0;
+  int pid;
+
+  fill_long_env(long_env);
+  pid = fork();
+  check("procfs_process_info_edges: fork for long environ child", pid >= 0);
+  if (pid == 0) {
+    execve(self_path, argv, envp);
+    _exit(127);
+  }
+  if (pid > 0) {
+    int waited = waitpid(pid, &status, 0);
+    check("procfs_process_info_edges: long environ child exits cleanly",
+          waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  }
+}
+
 int main(int argc, char **argv) {
   printf("=== procfs_process_info_edges ===\n");
   if (argc > 1 && strcmp(argv[1], "--env-child") == 0)
     return environ_child();
+  if (argc > 1 && strcmp(argv[1], "--env-long-child") == 0)
+    return environ_long_child();
 
   test_stat_statm_comm_root();
   test_environ_exec_snapshot(argv[0]);
+  test_long_environ_exec_snapshot(argv[0]);
 
   printf("=== procfs_process_info_edges: %d passed, %d failed ===\n",
          g_pass, g_fail);

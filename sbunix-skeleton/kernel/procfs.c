@@ -949,7 +949,7 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
       priv->len = procfs_render_comm(priv->buf, PROCFS_BUF, target);
     } else if (strcmp(rest, "environ") == 0) {
       priv->type = PROCFS_ENVIRON;
-      priv->len = procfs_render_environ(priv->buf, PROCFS_BUF, target);
+      priv->len = (int)target->environ_len;
     } else if (strcmp(rest, "fd") == 0) {
       priv->type = PROCFS_FDDIR;
     } else if (strcmp(rest, "fdinfo") == 0) {
@@ -1090,7 +1090,7 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
 
   if (strcmp(rest, "environ") == 0) {
     priv->type = PROCFS_ENVIRON;
-    priv->len = procfs_render_environ(priv->buf, PROCFS_BUF, target);
+    priv->len = (int)target->environ_len;
     *private = priv;
     return 0;
   }
@@ -1223,7 +1223,7 @@ static int64_t procfs_read(void *fs_data, void *private, char *buf,
     priv->len = procfs_render_status(priv->buf, PROCFS_BUF, target);
   }
   if ((priv->type == PROCFS_STATM || priv->type == PROCFS_COMM ||
-       priv->type == PROCFS_ENVIRON || priv->type == PROCFS_FDINFO_FILE) &&
+       priv->type == PROCFS_FDINFO_FILE) &&
       *offset == 0) {
     struct proc *target = procfs_find_target(priv->pid);
     if (!target)
@@ -1232,8 +1232,6 @@ static int64_t procfs_read(void *fs_data, void *private, char *buf,
       priv->len = procfs_render_statm(priv->buf, PROCFS_BUF, target);
     else if (priv->type == PROCFS_COMM)
       priv->len = procfs_render_comm(priv->buf, PROCFS_BUF, target);
-    else if (priv->type == PROCFS_ENVIRON)
-      priv->len = procfs_render_environ(priv->buf, PROCFS_BUF, target);
     else
       priv->len = procfs_render_fdinfo(priv->buf, PROCFS_BUF, target, priv->fd);
     if (priv->len < 0)
@@ -1251,6 +1249,26 @@ static int64_t procfs_read(void *fs_data, void *private, char *buf,
 
   if (priv->type == PROCFS_MAPS)
     return procfs_read_maps(priv, buf, count, offset);
+
+  if (priv->type == PROCFS_ENVIRON) {
+    /* BF: environ can be a full page, so stream from the process snapshot
+     * instead of truncating reads through the fixed procfs render buffer. */
+    struct proc *target = procfs_find_target(priv->pid);
+    if (!target)
+      return -ENOENT;
+    if (*offset < 0)
+      return -EINVAL;
+    int64_t off = *offset;
+    int64_t len = (int64_t)target->environ_len;
+    if (off >= len)
+      return 0;
+    int64_t avail = len - off;
+    if ((int64_t)count > avail)
+      count = (uint64_t)avail;
+    memcpy(buf, target->environ + off, count);
+    *offset += (int64_t)count;
+    return (int64_t)count;
+  }
 
   if (procfs_is_dir(priv->type))
     return -EISDIR;
