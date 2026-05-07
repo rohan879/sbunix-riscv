@@ -2,8 +2,8 @@
  * procfstest.c -- /proc filesystem tests
  *
  * Exercises /proc/self/status, /proc/self/stat, /proc/self/exe,
- * /proc/self/cwd, /proc/self/maps, /proc/<pid>/status, /proc/meminfo,
- * /proc/uptime, /proc/version, and readlink on /proc/self.
+ * /proc/self/cwd, /proc/self/root, /proc/self/maps, /proc/<pid>/status,
+ * /proc/meminfo, /proc/uptime, /proc/version, and readlink on /proc/self.
  *
  * Run from the shell:  procfstest
  */
@@ -121,6 +121,25 @@ static unsigned long proc_status_vmsize_kb(const char *buf) {
     while (*p && (*p < '0' || *p > '9'))
         p++;
     return simple_atoul(p);
+}
+
+static unsigned long proc_labeled_value(const char *buf, const char *label) {
+    int len = strlen(label);
+    const char *p = buf;
+
+    while (*p) {
+        if (strncmp(p, label, len) == 0) {
+            p += len;
+            while (*p == ' ' || *p == '\t')
+                p++;
+            return simple_atoul(p);
+        }
+        while (*p && *p != '\n')
+            p++;
+        if (*p == '\n')
+            p++;
+    }
+    return 0;
 }
 
 static const char *find_status_line(const char *buf, const char *label) {
@@ -486,6 +505,20 @@ static void test_proc_self_cwd(void) {
     }
 }
 
+static void test_proc_self_root(void) {
+    char buf[256];
+    struct stat st;
+    int n = readlink("/proc/self/root", buf, sizeof(buf) - 1);
+    CHECK("procfs: proc_self_root returns data", n > 0);
+    if (n > 0) {
+        buf[n] = '\0';
+        CHECK("procfs: proc_self_root is /", strcmp(buf, "/") == 0);
+        CHECK("procfs: proc_self_root lstat is sized symlink",
+              lstat("/proc/self/root", &st) == 0 && S_ISLNK(st.st_mode) &&
+              st.st_size == n);
+    }
+}
+
 /* -----------------------------------------------------------------------
  * 7. proc_self_maps -- contains at least one entry with rwx permissions
  * ---------------------------------------------------------------------- */
@@ -559,6 +592,53 @@ static void test_proc_meminfo(void) {
               strstr(buf, "MemTotal:") != NULL);
         CHECK("procfs: proc_meminfo contains MemFree:",
               strstr(buf, "MemFree:") != NULL);
+        CHECK("procfs: proc_meminfo contains KernelStack:",
+              proc_labeled_value(buf, "KernelStack:") > 0);
+        CHECK("procfs: proc_meminfo contains PageTables:",
+              proc_labeled_value(buf, "PageTables:") > 0);
+        CHECK("procfs: proc_meminfo contains CommitLimit:",
+              proc_labeled_value(buf, "CommitLimit:") > 0);
+        CHECK("procfs: proc_meminfo contains Committed_AS:",
+              proc_labeled_value(buf, "Committed_AS:") > 0);
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * 9b. proc_status_meminfo -- per-process memory accounting fields
+ * ---------------------------------------------------------------------- */
+
+static void test_proc_status_meminfo(void) {
+    char buf[512];
+    int n = read_file("/proc/self/status", buf, sizeof(buf));
+    CHECK("procfs: proc_status_meminfo readable", n > 0);
+    if (n > 0) {
+        unsigned long kstack = proc_labeled_value(buf, "KStack:");
+        unsigned long kernel_stack = proc_labeled_value(buf, "KernelStack:");
+
+        CHECK("procfs: proc_status_meminfo contains VmPeak",
+              proc_labeled_value(buf, "VmPeak:") > 0);
+        CHECK("procfs: proc_status_meminfo contains VmSize",
+              proc_labeled_value(buf, "VmSize:") > 0);
+        CHECK("procfs: proc_status_meminfo contains VmRSS",
+              proc_labeled_value(buf, "VmRSS:") > 0);
+        CHECK("procfs: proc_status_meminfo contains VmData",
+              proc_labeled_value(buf, "VmData:") > 0);
+        CHECK("procfs: proc_status_meminfo contains VmStk",
+              proc_labeled_value(buf, "VmStk:") > 0);
+        CHECK("procfs: proc_status_meminfo contains VmExe",
+              proc_labeled_value(buf, "VmExe:") > 0);
+        CHECK("procfs: proc_status_meminfo contains VmLib",
+              find_status_line(buf, "VmLib:") != NULL);
+        CHECK("procfs: proc_status_meminfo contains VmPTE",
+              proc_labeled_value(buf, "VmPTE:") > 0);
+        CHECK("procfs: proc_status_meminfo contains VmSwap",
+              find_status_line(buf, "VmSwap:") != NULL);
+        CHECK("procfs: proc_status_meminfo contains KStack",
+              kstack > 0);
+        CHECK("procfs: proc_status_meminfo contains KernelStack",
+              kernel_stack > 0);
+        CHECK("procfs: proc_status_meminfo stack labels agree",
+              kstack == kernel_stack);
     }
 }
 
@@ -969,9 +1049,11 @@ int main(void) {
     test_proc_self_stat();
     test_proc_self_exe();
     test_proc_self_cwd();
+    test_proc_self_root();
     test_proc_self_maps();
     test_proc_pid_readable();
     test_proc_meminfo();
+    test_proc_status_meminfo();
     test_proc_uptime();
     test_proc_version();
     test_proc_nonexistent();

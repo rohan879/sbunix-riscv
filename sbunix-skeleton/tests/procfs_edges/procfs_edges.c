@@ -78,6 +78,7 @@ static void test_stat_fstat_agreement(void) {
     "/proc/self/stat",
     "/proc/self/maps",
     "/proc/self/fd",
+    "/proc/self/root",
     "/proc/meminfo",
     "/proc/mounts",
     "/proc/cpuinfo",
@@ -313,6 +314,12 @@ static void test_self_and_procfd_links(void) {
     check("procfs_edges: self stat follows to dir",
           stat("/proc/self", &st_self) == 0 && S_ISDIR(st_self.st_mode));
   }
+
+  n = readlink("/proc/self/root", link, sizeof(link) - 1);
+  check("procfs_edges: root readlink returns /", n == 1 && link[0] == '/');
+  check("procfs_edges: root lstat is link",
+        lstat("/proc/self/root", &st_link) == 0 &&
+        S_ISLNK(st_link.st_mode) && st_link.st_size == 1);
 
   unlink(path);
   fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
