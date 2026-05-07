@@ -44,6 +44,7 @@
 #define ENOTEMPTY    39   /* directory not empty */
 #define ELOOP        40   /* too many levels of symbolic links */
 #define EOVERFLOW    75   /* value too large for defined data type */
+#define EILSEQ       84   /* illegal byte sequence */
 #define ETIMEDOUT   110   /* connection timed out */
 
 #endif /* _KERNEL_ERRNO_H */

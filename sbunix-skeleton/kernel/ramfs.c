@@ -14,6 +14,7 @@
 #include <kmalloc.h>
 #include <kalloc.h>
 #include <timekeeping.h>
+#include <proc.h>
 
 /* ================================================================== */
 /* Inode / directory-entry structures                                   */
@@ -21,7 +22,7 @@
 
 #define RAMFS_MAX_INODES   256
 #define RAMFS_MAX_CHILDREN  64
-#define RAMFS_NAME_MAX      60
+#define RAMFS_NAME_MAX      256
 #define RAMFS_MAX_BLOCKS    64   /* max 4KB blocks per file = 256KB */
 
 #define RAMFS_INO_ROOT       1
@@ -42,12 +43,15 @@ struct ramfs_inode {
   uint64_t         atime_sec;  /* last access time */
   uint64_t         mtime_sec;  /* last modification time */
   uint64_t         ctime_sec;  /* last status change time */
+  uint32_t         uid;
+  uint32_t         gid;
   /* File data blocks (each is a kalloc page = 4096 bytes) */
   char            *blocks[RAMFS_MAX_BLOCKS];
   int              nblocks;
   /* Directory children */
   struct ramfs_dirent {
-    char              name[RAMFS_NAME_MAX];
+    char              *name;
+    uint16_t          name_len;
     struct ramfs_inode *inode;
   } children[RAMFS_MAX_CHILDREN];
   int              nchildren;
@@ -63,6 +67,14 @@ static uint64_t next_ino = RAMFS_INO_ROOT;
 /* Helpers                                                              */
 /* ================================================================== */
 
+static void ramfs_dirent_clear(struct ramfs_dirent *de) {
+  if (!de)
+    return;
+  if (de->name)
+    kmfree(de->name, (uint64_t)de->name_len + 1);
+  memset(de, 0, sizeof(*de));
+}
+
 static struct ramfs_inode *ramfs_alloc_inode(enum ramfs_type type, uint32_t mode) {
   for (int i = 0; i < RAMFS_MAX_INODES; i++) {
     if (inodes[i].ino == 0) {
@@ -75,6 +87,8 @@ static struct ramfs_inode *ramfs_alloc_inode(enum ramfs_type type, uint32_t mode
       inodes[i].atime_sec = now;
       inodes[i].mtime_sec = now;
       inodes[i].ctime_sec = now;
+      inodes[i].uid = current_proc ? (uint32_t)current_proc->uid : 0;
+      inodes[i].gid = current_proc ? (uint32_t)current_proc->gid : 0;
       return &inodes[i];
     }
   }
@@ -83,6 +97,10 @@ static struct ramfs_inode *ramfs_alloc_inode(enum ramfs_type type, uint32_t mode
 
 static void ramfs_free_inode(struct ramfs_inode *ino) {
   if (!ino) return;
+  /* BF: Directory entry names live out of line so long basenames do not
+   * inflate every static ramfs inode.  Free them before recycling the inode. */
+  for (int i = 0; i < ino->nchildren; i++)
+    ramfs_dirent_clear(&ino->children[i]);
   /* Free file data blocks */
   for (int i = 0; i < ino->nblocks; i++) {
     if (ino->blocks[i]) {
@@ -97,7 +115,8 @@ static void ramfs_free_inode(struct ramfs_inode *ino) {
 static struct ramfs_inode *ramfs_dir_lookup(struct ramfs_inode *dir, const char *name) {
   if (!dir || dir->type != RAMFS_DIR) return NULL;
   for (int i = 0; i < dir->nchildren; i++) {
-    if (strcmp(dir->children[i].name, name) == 0)
+    if (dir->children[i].name &&
+        strcmp(dir->children[i].name, name) == 0)
       return dir->children[i].inode;
   }
   return NULL;
@@ -109,11 +128,19 @@ static int ramfs_dir_add(struct ramfs_inode *dir, const char *name, struct ramfs
   if (dir->nchildren >= RAMFS_MAX_CHILDREN) return -28; /* -ENOSPC */
   int nlen = (int)strlen(name);
   if (nlen >= RAMFS_NAME_MAX) return -36; /* -ENAMETOOLONG */
+  char *name_copy = (char *)kmalloc((uint64_t)nlen + 1);
+  if (!name_copy)
+    return -12; /* -ENOMEM */
+  memcpy(name_copy, name, nlen);
+  name_copy[nlen] = '\0';
   struct ramfs_dirent *de = &dir->children[dir->nchildren++];
-  memcpy(de->name, name, nlen);
-  de->name[nlen] = '\0';
+  de->name = name_copy;
+  de->name_len = (uint16_t)nlen;
   de->inode = child;
   child->parent = dir;
+  /* ENH: Directory metadata changes after successful link creation. */
+  dir->mtime_sec = timekeeping_now_seconds();
+  dir->ctime_sec = dir->mtime_sec;
   return 0;
 }
 
@@ -121,12 +148,17 @@ static int ramfs_dir_add(struct ramfs_inode *dir, const char *name, struct ramfs
 static int ramfs_dir_remove(struct ramfs_inode *dir, const char *name) {
   if (!dir || dir->type != RAMFS_DIR) return -1;
   for (int i = 0; i < dir->nchildren; i++) {
-    if (strcmp(dir->children[i].name, name) == 0) {
+    if (dir->children[i].name &&
+        strcmp(dir->children[i].name, name) == 0) {
       /* Swap-remove */
+      ramfs_dirent_clear(&dir->children[i]);
       dir->nchildren--;
-      if (i < dir->nchildren)
+      if (i < dir->nchildren) {
         dir->children[i] = dir->children[dir->nchildren];
-      memset(&dir->children[dir->nchildren], 0, sizeof(struct ramfs_dirent));
+        memset(&dir->children[dir->nchildren], 0, sizeof(struct ramfs_dirent));
+      }
+      dir->mtime_sec = timekeeping_now_seconds();
+      dir->ctime_sec = dir->mtime_sec;
       return 0;
     }
   }
@@ -491,6 +523,8 @@ static void ramfs_fill_stat(uint8_t *st, struct ramfs_inode *ino) {
   else
     mode = (uint32_t)(0x8000 | ino->mode); /* S_IFREG */
   uint32_t nlink = (uint32_t)ino->nlink;
+  uint32_t uid = ino->uid;
+  uint32_t gid = ino->gid;
   int64_t size = (int64_t)ino->size;
   int32_t blksz = 4096;
   int64_t blks = ((int64_t)ino->size + 511) / 512;
@@ -499,6 +533,8 @@ static void ramfs_fill_stat(uint8_t *st, struct ramfs_inode *ino) {
   memcpy(st + 8, &ino_val, 8);   /* st_ino */
   memcpy(st + 16, &mode, 4);     /* st_mode */
   memcpy(st + 20, &nlink, 4);    /* st_nlink */
+  memcpy(st + 24, &uid, 4);      /* st_uid */
+  memcpy(st + 28, &gid, 4);      /* st_gid */
   memcpy(st + 48, &size, 8);     /* st_size */
   memcpy(st + 56, &blksz, 4);    /* st_blksize */
   memcpy(st + 64, &blks, 8);     /* st_blocks */
@@ -792,6 +828,50 @@ static int ramfs_link(void *fs_data, const char *oldpath, const char *newpath) {
   return 0;
 }
 
+static int ramfs_chmod(void *fs_data, const char *path, uint32_t mode, int flags) {
+  (void)fs_data;
+  (void)flags;
+  struct ramfs_inode *ino = ramfs_walk(path);
+  if (!ino)
+    return -2;
+  /* ENH: fchmodat(AT_SYMLINK_NOFOLLOW) validates symlink metadata and is a
+   * no-op for link permissions, matching common POSIX behavior. */
+  if (ino->type != RAMFS_SYMLINK)
+    ino->mode = mode & 07777;
+  ino->ctime_sec = timekeeping_now_seconds();
+  return 0;
+}
+
+static int ramfs_chown(void *fs_data, const char *path, int uid, int gid, int flags) {
+  (void)fs_data;
+  (void)flags;
+  struct ramfs_inode *ino = ramfs_walk(path);
+  if (!ino)
+    return -2;
+  if (uid >= 0)
+    ino->uid = (uint32_t)uid;
+  if (gid >= 0)
+    ino->gid = (uint32_t)gid;
+  ino->ctime_sec = timekeeping_now_seconds();
+  return 0;
+}
+
+static int ramfs_utimens(void *fs_data, const char *path,
+                         uint64_t atime_sec, uint64_t mtime_sec,
+                         int set_atime, int set_mtime, int flags) {
+  (void)fs_data;
+  (void)flags;
+  struct ramfs_inode *ino = ramfs_walk(path);
+  if (!ino)
+    return -2;
+  if (set_atime)
+    ino->atime_sec = atime_sec;
+  if (set_mtime)
+    ino->mtime_sec = mtime_sec;
+  ino->ctime_sec = timekeeping_now_seconds();
+  return 0;
+}
+
 /* ================================================================== */
 /* VFS ops table                                                        */
 /* ================================================================== */
@@ -813,6 +893,9 @@ struct vfs_ops ramfs_ops = {
   .readlink = ramfs_readlink,
   .rename  = ramfs_rename,
   .link    = ramfs_link,
+  .chmod   = ramfs_chmod,
+  .chown   = ramfs_chown,
+  .utimens = ramfs_utimens,
 };
 
 /* ================================================================== */
@@ -829,4 +912,9 @@ void ramfs_init(void) {
   root->mode = 01777;  /* sticky + rwxrwxrwx, like /tmp */
   root->nlink = 1;
   root->parent = root; /* root is its own parent */
+  root->atime_sec = timekeeping_now_seconds();
+  root->mtime_sec = root->atime_sec;
+  root->ctime_sec = root->atime_sec;
+  root->uid = 0;
+  root->gid = 0;
 }

@@ -2,6 +2,7 @@
 #include <printk.h>
 #include <riscv.h>
 #include <proc.h>
+#include <procfs_internal.h>
 #include <vfs.h>
 #include <syscall.h>
 #include <uart.h>
@@ -263,6 +264,8 @@ static void display_time(void) {
 static void handle_external_interrupt(void) {
     int irq = plic_claim();
     if (irq == UART_IRQ) {
+        procfs_diag_external_interrupts++;
+        procfs_diag_uart_interrupts++;
         int c;
         while ((c = uart_getc()) != -1) {
             tty_input((char)c);
@@ -291,6 +294,8 @@ static void handle_timer_interrupt(void) {
     int heartbeat = 0;
     int woke_deadline = 0;
     int catchup = 0;
+
+    procfs_diag_timer_interrupts++;
 
     while (now >= next_heartbeat_ticks) {
         ticks++;

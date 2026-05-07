@@ -461,6 +461,8 @@ static pid_t sys_clone(struct trapframe *caller_tf) {
     memcpy(p->exe_path, current_proc->exe_path, sizeof(p->exe_path));
     memcpy(p->cmdline, current_proc->cmdline, sizeof(p->cmdline));
     p->cmdline_len = current_proc->cmdline_len;
+    memcpy(p->environ, current_proc->environ, sizeof(p->environ));
+    p->environ_len = current_proc->environ_len;
     p->umask_val = current_proc->umask_val;
     memcpy(p->name, current_proc->name, sizeof(p->name));
 
@@ -1074,6 +1076,18 @@ long sys_execve_handler(struct trapframe *tf) {
             out = nl + 1;
         }
         current_proc->cmdline_len = (uint16_t)out;
+    }
+
+    /* ENH: Snapshot the exact envp byte stream for /proc/<pid>/environ.
+     * execve already stores env strings NUL-separated in kenvbuf. */
+    if (kenvbuf && kenvoff > 0) {
+        int envlen = kenvoff;
+        if (envlen > (int)sizeof(current_proc->environ))
+            envlen = (int)sizeof(current_proc->environ);
+        memcpy(current_proc->environ, kenvbuf, envlen);
+        current_proc->environ_len = (uint16_t)envlen;
+    } else {
+        current_proc->environ_len = 0;
     }
 
     /* POSIX: close file descriptors marked with FD_CLOEXEC.

@@ -6,6 +6,9 @@
 #include <string.h>
 #include <printk.h>
 #include <errno.h>  /* RF: Use symbolic errno constants instead of hardcoded values */
+#include <proc.h>
+#include <timekeeping.h>
+#include <pathres.h>
 
 /* ================================================================== */
 /* Globals                                                             */
@@ -271,6 +274,8 @@ static struct ext2_inode_mem *icache_get(struct ext2_fs *fs, uint32_t ino) {
           di.indirect = icache[i].indirect;
           di.mode = icache[i].mode;
           di.rdev = icache[i].rdev;
+          di.uid = icache[i].uid;
+          di.gid = icache[i].gid;
           di.ctime = icache[i].ctime;
           di.mtime = icache[i].mtime;
           ext2_write_dinode(fs, icache[i].ino, &di);
@@ -302,6 +307,8 @@ static struct ext2_inode_mem *icache_get(struct ext2_fs *fs, uint32_t ino) {
   ip->indirect = di.indirect;
   ip->mode = di.mode;
   ip->rdev = di.rdev;
+  ip->uid = di.uid;
+  ip->gid = di.gid;
   ip->ctime = di.ctime;
   ip->mtime = di.mtime;
   return ip;
@@ -324,6 +331,8 @@ static void icache_writeback(struct ext2_fs *fs, struct ext2_inode_mem *ip) {
   di.indirect = ip->indirect;
   di.mode = ip->mode;
   di.rdev = ip->rdev;
+  di.uid = ip->uid;
+  di.gid = ip->gid;
   /* BF: Preserve timestamps on writeback -- the eviction path (lines 273-274)
    * correctly copies these, but icache_writeback was omitting them, causing
    * on-disk timestamps to be zeroed on every explicit writeback (write, close,
@@ -366,6 +375,12 @@ static int ext2_alloc_inode(struct ext2_fs *fs, uint16_t type) {
         di.mode = 0777;
       else
         di.mode = 0644;
+      /* ENH: New inodes carry creator credentials and initial timestamps so
+       * symlink/stat metadata reflects the process that created them. */
+      di.uid = current_proc ? (uint32_t)current_proc->uid : 0;
+      di.gid = current_proc ? (uint32_t)current_proc->gid : 0;
+      di.ctime = timekeeping_now_seconds();
+      di.mtime = di.ctime;
       ext2_write_dinode(fs, ino, &di);
       sb.free_inodes--;
       sb.dirty = 1;
@@ -718,6 +733,8 @@ static int ext2_dir_add(struct ext2_fs *fs, struct ext2_inode_mem *dir,
                         const char *name,
                         uint32_t ino, uint8_t file_type) {
   uint32_t name_len = strlen(name);
+  if (name_len > EXT2_NAME_MAX)
+    return -ENAMETOOLONG;
   uint32_t needed = ext2_dirent_size(name_len);
   uint32_t nblocks = (dir->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
 
@@ -1315,6 +1332,8 @@ static int ext2_stat(void *fs_data, const char *path, uint8_t *st) {
   else
     mode = (uint32_t)(0x8000 | (ip->mode & 0xfff));
   uint32_t nlink = ip->link_count;
+  uint32_t uid = ip->uid;
+  uint32_t gid = ip->gid;
   int64_t size = (int64_t)ip->size;
   int32_t blksz = 4096;
   int64_t blks = ((int64_t)ip->size + 511) / 512;
@@ -1324,7 +1343,8 @@ static int ext2_stat(void *fs_data, const char *path, uint8_t *st) {
   memcpy(st + 8, &ino, 8);
   memcpy(st + 16, &mode, 4);
   memcpy(st + 20, &nlink, 4);
-  /* uid=0, gid=0 already zeroed */
+  memcpy(st + 24, &uid, 4);
+  memcpy(st + 28, &gid, 4);
   memcpy(st + 32, &rdev, 8);  /* st_rdev */
   memcpy(st + 48, &size, 8);
   memcpy(st + 56, &blksz, 4);
@@ -1363,6 +1383,8 @@ static int ext2_fstat(void *fs_data, void *private, uint8_t *st) {
   else
     mode = (uint32_t)(0x8000 | (ip->mode & 0xfff));
   uint32_t nlink = ip->link_count;
+  uint32_t uid = ip->uid;
+  uint32_t gid = ip->gid;
   int64_t size = (int64_t)ip->size;
   int32_t blksz = 4096;
   int64_t blks = ((int64_t)ip->size + 511) / 512;
@@ -1372,7 +1394,8 @@ static int ext2_fstat(void *fs_data, void *private, uint8_t *st) {
   memcpy(st + 8, &ino, 8);
   memcpy(st + 16, &mode, 4);
   memcpy(st + 20, &nlink, 4);
-  /* uid=0, gid=0 already zeroed */
+  memcpy(st + 24, &uid, 4);
+  memcpy(st + 28, &gid, 4);
   memcpy(st + 32, &rdev, 8);  /* st_rdev */
   memcpy(st + 48, &size, 8);
   memcpy(st + 56, &blksz, 4);
@@ -1726,8 +1749,8 @@ static int ext2_symlink(void *fs_data, const char *target,
         return -1;
 
     int targetlen = strlen(target);
-    if (targetlen == 0 || targetlen >= EXT2_BLOCK_SIZE)
-        return targetlen == 0 ? -EINVAL : -ENAMETOOLONG;
+    if (targetlen > KSYMLINK_MAX)
+        return -ENAMETOOLONG;
 
     char parent_path[256];
     const char *basename = path_parent(linkpath, parent_path, sizeof(parent_path));
@@ -1761,19 +1784,22 @@ static int ext2_symlink(void *fs_data, const char *target,
     ip->mode = 0777;
     ip->size = (uint32_t)targetlen;
 
-    /* Allocate data block and write target */
-    uint32_t blk = ext2_bmap_alloc(fs, ip, 0);
-    if (blk == 0) {
-        icache_release(ip);
-        icache_release(parent);
-        return -ENOSPC;
-    }
+    if (targetlen > 0) {
+        /* Allocate data block and write target */
+        uint32_t blk = ext2_bmap_alloc(fs, ip, 0);
+        if (blk == 0) {
+            icache_release(ip);
+            ext2_free_inode(fs, (uint32_t)ino);
+            icache_release(parent);
+            return -ENOSPC;
+        }
 
-    struct bcache_entry *be = bcache_get(fs, blk);
-    memset(be->data, 0, EXT2_BLOCK_SIZE);
-    memcpy(be->data, target, (uint32_t)targetlen);
-    bcache_mark_dirty(be);
-    bcache_release(be);
+        struct bcache_entry *be = bcache_get(fs, blk);
+        memset(be->data, 0, EXT2_BLOCK_SIZE);
+        memcpy(be->data, target, (uint32_t)targetlen);
+        bcache_mark_dirty(be);
+        bcache_release(be);
+    }
 
     ip->dirty = 1;
     icache_writeback(fs, ip);
@@ -1782,6 +1808,10 @@ static int ext2_symlink(void *fs_data, const char *target,
     /* Add directory entry */
     int ret = ext2_dir_add(fs, parent, basename, (uint32_t)ino,
                            EXT2_FT_SYMLINK);
+    if (ret == 0) {
+        parent->mtime = timekeeping_now_seconds();
+        parent->ctime = parent->mtime;
+    }
     icache_writeback(fs, parent);
     icache_release(parent);
 
@@ -1814,6 +1844,10 @@ static int ext2_readlink(void *fs_data, const char *path, char *buf,
     int copylen = (int)ip->size;
     if (copylen > bufsiz)
         copylen = bufsiz;
+    if (copylen == 0) {
+        icache_release(ip);
+        return 0;
+    }
 
     uint32_t blk = ext2_bmap(fs, ip, 0);
     if (blk == 0) {
@@ -2041,6 +2075,72 @@ static int ext2_rmdir(void *fs_data, const char *path) {
   return 0;
 }
 
+static int ext2_chmod_path(void *fs_data, const char *path, uint32_t mode, int flags) {
+  (void)flags;
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted)
+    return -EROFS;
+  while (*path == '/') path++;
+  struct ext2_inode_mem *ip = ext2_namei(fs, path);
+  if (!ip)
+    return -ENOENT;
+  /* ENH: chmod on a symlink itself validates existence but keeps 0777 link
+   * permissions stable, matching the nofollow policy used by fchmodat. */
+  if (ip->type != EXT2_TYPE_SYMLINK)
+    ip->mode = mode & 07777;
+  ip->ctime = timekeeping_now_seconds();
+  ip->dirty = 1;
+  icache_writeback(fs, ip);
+  icache_release(ip);
+  bcache_sync(fs);
+  return 0;
+}
+
+static int ext2_chown_path(void *fs_data, const char *path, int uid, int gid,
+                           int flags) {
+  (void)flags;
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted)
+    return -EROFS;
+  while (*path == '/') path++;
+  struct ext2_inode_mem *ip = ext2_namei(fs, path);
+  if (!ip)
+    return -ENOENT;
+  if (uid >= 0)
+    ip->uid = (uint32_t)uid;
+  if (gid >= 0)
+    ip->gid = (uint32_t)gid;
+  ip->ctime = timekeeping_now_seconds();
+  ip->dirty = 1;
+  icache_writeback(fs, ip);
+  icache_release(ip);
+  bcache_sync(fs);
+  return 0;
+}
+
+static int ext2_utimens_path(void *fs_data, const char *path,
+                             uint64_t atime_sec, uint64_t mtime_sec,
+                             int set_atime, int set_mtime, int flags) {
+  (void)atime_sec;
+  (void)set_atime;
+  (void)flags;
+  struct ext2_fs *fs = (struct ext2_fs *)fs_data;
+  if (!fs || !ext2_mounted)
+    return -EROFS;
+  while (*path == '/') path++;
+  struct ext2_inode_mem *ip = ext2_namei(fs, path);
+  if (!ip)
+    return -ENOENT;
+  if (set_mtime)
+    ip->mtime = mtime_sec;
+  ip->ctime = timekeeping_now_seconds();
+  ip->dirty = 1;
+  icache_writeback(fs, ip);
+  icache_release(ip);
+  bcache_sync(fs);
+  return 0;
+}
+
 /* ================================================================== */
 /* VFS ops struct                                                      */
 /* ================================================================== */
@@ -2061,6 +2161,9 @@ struct vfs_ops ext2_ops = {
   .symlink  = ext2_symlink,
   .readlink = ext2_readlink,
   .rename   = ext2_rename,
+  .chmod    = ext2_chmod_path,
+  .chown    = ext2_chown_path,
+  .utimens  = ext2_utimens_path,
 };
 
 /* ================================================================== */
@@ -2145,6 +2248,10 @@ static int ext2_mkfs(struct ext2_fs *fs, uint64_t capacity_sectors) {
   root_di.size = EXT2_BLOCK_SIZE;
   root_di.direct[0] = data_start;
   root_di.mode = 0755;
+  root_di.uid = 0;
+  root_di.gid = 0;
+  root_di.ctime = timekeeping_now_seconds();
+  root_di.mtime = root_di.ctime;
 
   /* Write root inode into inode table block */
   memset(fmt_buf, 0, EXT2_BLOCK_SIZE);
@@ -2310,6 +2417,7 @@ int ext2_fchmod_ino(void *fs_data, uint32_t ino, uint32_t mode) {
   struct ext2_inode_mem *ip = icache_get(fs, ino);
   if (!ip) return -1;
   ip->mode = mode & 07777;
+  ip->ctime = timekeeping_now_seconds();
   ip->dirty = 1;
   icache_writeback(fs, ip);
   icache_release(ip);

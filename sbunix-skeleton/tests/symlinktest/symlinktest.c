@@ -592,7 +592,7 @@ static void test_symlink_ramfs_max_target(void) {
 }
 
 /* -----------------------------------------------------------------------
- * 17. symlink_empty_paths -- empty symlink operands fail with ENOENT
+ * 17. symlink_empty_paths -- empty target is opaque, empty paths fail
  * ---------------------------------------------------------------------- */
 
 static void test_symlink_empty_paths(void) {
@@ -601,9 +601,9 @@ static void test_symlink_empty_paths(void) {
     unlink("/mnt/sl_empty_target_link");
     errno = 0;
     int r = symlink("", "/mnt/sl_empty_target_link");
-    CHECK("symlink: symlink_empty_paths empty target returns -1", r == -1);
-    CHECK("symlink: symlink_empty_paths empty target errno ENOENT",
-          errno == ENOENT);
+    CHECK("symlink: symlink_empty_paths empty target succeeds", r == 0);
+    int n = readlink("/mnt/sl_empty_target_link", buf, sizeof(buf));
+    CHECK("symlink: symlink_empty_paths empty target readlink zero", n == 0);
     unlink("/mnt/sl_empty_target_link");
 
     errno = 0;
@@ -612,7 +612,7 @@ static void test_symlink_empty_paths(void) {
     CHECK("symlink: symlink_empty_paths symlink errno ENOENT", errno == ENOENT);
 
     errno = 0;
-    int n = readlink("", buf, sizeof(buf));
+    n = readlink("", buf, sizeof(buf));
     CHECK("symlink: symlink_empty_paths readlink returns -1", n == -1);
     CHECK("symlink: symlink_empty_paths readlink errno ENOENT", errno == ENOENT);
 }

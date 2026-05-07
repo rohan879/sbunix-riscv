@@ -206,6 +206,8 @@ found:
   p->exe_path[0] = '\0';
   p->cmdline[0] = '\0';
   p->cmdline_len = 0;
+  p->environ[0] = '\0';
+  p->environ_len = 0;
 
   // Initialize VMA list and mmap base
   p->vma_list = NULL;
@@ -289,6 +291,7 @@ void userinit(void) {
   for(int i=0; i<5; i++) p->name[i] = name[i];
   memcpy(p->cmdline, "init", 5);
   p->cmdline_len = 5;
+  p->environ_len = 0;
 }
 
 // Wake any process sleeping on UART input (waiting_for_uart==1 only).

@@ -31,6 +31,13 @@ struct vfs_ops {
   /* ENH: Hard link support for linkat(2).  Creates a new directory entry
    * (newpath) that refers to the same inode as oldpath. */
   int (*link)(void *fs_data, const char *oldpath, const char *newpath);
+  /* ENH: Optional metadata hooks.  Paths arrive after syscall-level symlink
+   * policy has been applied; flags carries AT_SYMLINK_NOFOLLOW when relevant. */
+  int (*chmod)(void *fs_data, const char *path, uint32_t mode, int flags);
+  int (*chown)(void *fs_data, const char *path, int uid, int gid, int flags);
+  int (*utimens)(void *fs_data, const char *path,
+                 uint64_t atime_sec, uint64_t mtime_sec,
+                 int set_atime, int set_mtime, int flags);
 };
 
 /* Open file description -- stored in proc->ofile[] */
