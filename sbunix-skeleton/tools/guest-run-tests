@@ -165,10 +165,12 @@ run_test waitid_wnowait_stop
 run_test safetyabitest
 run_test dirtest
 run_test procfstest
+run_test procfs_cwd_edges
 run_test procfs_edges
 run_test procfs_execfd
 run_test procfd_semantics
 run_test pathwalk_edges
+run_test path_dotdot_symlink_edges
 run_test path_semantics_edges
 run_test cowtest
 run_test lazytest

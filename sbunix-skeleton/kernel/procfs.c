@@ -29,6 +29,7 @@ enum procfs_type {
   PROCFS_STAT_FILE, /* /proc/<pid>/stat (single-line format) */
   PROCFS_EXE_LINK,  /* /proc/<pid>/exe symlink */
   PROCFS_CWD_LINK,  /* /proc/<pid>/cwd symlink */
+  PROCFS_CWD_FILE,  /* readable direct-open view of /proc/<pid>/cwd */
   PROCFS_DMESG,     /* /proc/dmesg */
   PROCFS_MOUNTS,    /* /proc/mounts */
   PROCFS_CPUINFO,   /* /proc/cpuinfo */
@@ -168,6 +169,19 @@ static int procfs_is_dir(enum procfs_type type) {
 static int procfs_is_link(enum procfs_type type) {
   return type == PROCFS_FDLINK || type == PROCFS_EXE_LINK ||
          type == PROCFS_CWD_LINK;
+}
+
+static int procfs_render_cwd_file(char *buf, int bufsz, struct proc *target) {
+  const char *cwd = "/";
+  int len;
+
+  if (target && target->cwd[0])
+    cwd = target->cwd;
+  len = strlen(cwd);
+  if (len > bufsz)
+    len = bufsz;
+  memcpy(buf, cwd, len);
+  return len;
 }
 
 static int procfs_pid_file_type(const char *name, enum procfs_type *type) {
@@ -1030,6 +1044,12 @@ static int64_t procfs_read(void *fs_data, void *private, char *buf,
       return -ENOENT;
     priv->len = procfs_render_status(priv->buf, PROCFS_BUF, target);
   }
+  if (priv->type == PROCFS_CWD_FILE && *offset == 0) {
+    struct proc *target = procfs_find_target(priv->pid);
+    if (!target)
+      return -ENOENT;
+    priv->len = procfs_render_cwd_file(priv->buf, PROCFS_BUF, target);
+  }
 
   if (priv->type == PROCFS_MAPS)
     return procfs_read_maps(priv, buf, count, offset);
@@ -1070,6 +1090,30 @@ static int procfs_close(void *fs_data, void *private) {
   (void)fs_data;
   if (private)
     kmfree(private, sizeof(struct procfs_private));
+  return 0;
+}
+
+int procfs_open_cwd_direct(pid_t pid, int flags, void **private) {
+  int flag_ret = procfs_check_read_open_flags(flags);
+  if (flag_ret < 0)
+    return flag_ret;
+
+  struct proc *target = procfs_find_target(pid);
+  if (!target)
+    return -ENOENT;
+
+  struct procfs_private *priv =
+    (struct procfs_private *)kmalloc(sizeof(struct procfs_private));
+  if (!priv)
+    return -ENOMEM;
+
+  memset(priv, 0, sizeof(*priv));
+  priv->type = PROCFS_CWD_FILE;
+  priv->pid = pid;
+  /* BF: Direct opens of /proc/<pid>/cwd expose a readable procfs entry while
+   * path stat/readlink still see the conventional symlink. */
+  priv->len = procfs_render_cwd_file(priv->buf, PROCFS_BUF, target);
+  *private = priv;
   return 0;
 }
 
@@ -1301,6 +1345,11 @@ static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
       uint64_t ino=(uint64_t)(2000 + priv->pid * 10 + 2);
       uint64_t sz=(uint64_t)procfs_link_target_len(target, PROCFS_CWD_LINK, -1);
       memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); memcpy(st+48,&sz,8); break; }
+  case PROCFS_CWD_FILE:
+    { struct proc *target = procfs_find_target(priv->pid);
+      uint64_t ino=(uint64_t)(7000 + priv->pid);
+      uint64_t sz=(uint64_t)procfs_link_target_len(target, PROCFS_CWD_LINK, -1);
+      memcpy(st+8,&ino,8); memcpy(st+16,&reg_mode,4); memcpy(st+48,&sz,8); break; }
   case PROCFS_STATUS:
   case PROCFS_CMDLINE:
   case PROCFS_MAPS:

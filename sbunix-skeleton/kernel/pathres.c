@@ -98,6 +98,55 @@ int normalize_path(const char *in, char *out) {
     return 0;
 }
 
+static int normalize_path_for_lookup(const char *in, char *out) {
+    char tmp[KPATH_MAX];
+    int tlen = 0;
+    const char *p = in;
+
+    while (*p == '/') p++;
+    tmp[tlen++] = '/';
+
+    while (*p) {
+        const char *start = p;
+        while (*p && *p != '/') p++;
+        int clen = (int)(p - start);
+
+        if (clen == 0 || (clen == 1 && start[0] == '.')) {
+            /* skip */
+        } else if (clen == 2 && start[0] == '.' && start[1] == '.') {
+            if (tlen == 1) {
+                /* Leading .. stays at root. */
+            } else {
+                if (tlen > 1) {
+                    if (tlen >= (int)sizeof(tmp) - 1)
+                        return -ENAMETOOLONG;
+                    tmp[tlen++] = '/';
+                }
+                if (tlen + 2 > (int)sizeof(tmp) - 1)
+                    return -ENAMETOOLONG;
+                tmp[tlen++] = '.';
+                tmp[tlen++] = '.';
+            }
+        } else {
+            if (tlen > 1) {
+                if (tlen >= (int)sizeof(tmp) - 1)
+                    return -ENAMETOOLONG;
+                tmp[tlen++] = '/';
+            }
+            if (tlen + clen > (int)sizeof(tmp) - 1)
+                return -ENAMETOOLONG;
+            memcpy(tmp + tlen, start, clen);
+            tlen += clen;
+        }
+
+        while (*p == '/') p++;
+    }
+
+    tmp[tlen] = '\0';
+    memcpy(out, tmp, tlen + 1);
+    return 0;
+}
+
 int copy_user_path_arg(uint64_t uaddr, char *dst, int dstsz, int allow_empty) {
     if (!dst || dstsz <= 0)
         return -EFAULT;
@@ -162,8 +211,10 @@ int resolve_path(const char *cwd, const char *path, char *out) {
         raw[cwdlen + pathlen] = '\0';
     }
 
-    /* BF: Propagate ENAMETOOLONG from normalize_path */
-    return normalize_path(raw, out);
+    /* BF: Preserve component/.. pairs until symlink-aware lookup.  Collapsing
+     * them here would make symlink/.. resolve relative to the link's parent
+     * instead of the target directory's parent. */
+    return normalize_path_for_lookup(raw, out);
 }
 
 /* BF: Centralize dirfd semantics for implemented *at syscalls so relative
@@ -408,6 +459,23 @@ restart:
         int tmp_wi = wi;
         while (tmp_wi < rlen && work[tmp_wi] == '/') tmp_wi++;
         int is_last = (tmp_wi >= rlen);
+
+        if (comp_len == 1 && work[comp_start] == '.')
+            continue;
+
+        if (comp_len == 2 && work[comp_start] == '.' &&
+            work[comp_start + 1] == '.') {
+            if (bi > 1) {
+                while (bi > 1 && built[bi - 1] == '/')
+                    bi--;
+                while (bi > 1 && built[bi - 1] != '/')
+                    bi--;
+                if (bi > 1 && built[bi - 1] == '/')
+                    bi--;
+            }
+            built[bi] = '\0';
+            continue;
+        }
 
         /* Append separator if needed */
         if (bi > 0 && built[bi - 1] != '/') {
