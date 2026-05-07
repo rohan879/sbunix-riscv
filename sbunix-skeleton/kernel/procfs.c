@@ -2,7 +2,8 @@
  * procfs.c — /proc virtual filesystem for SBUnix.
  *
  * Exposes per-PID directories with status, cmdline, fd, and maps pseudo-files.
- * Also exposes global files: dmesg, mounts, cpuinfo, version, uptime, meminfo.
+ * Also exposes global files: dmesg, mounts, cpuinfo, version, uptime, meminfo,
+ * and loadavg.
  * /proc/self is a magic entry that resolves to /proc/<current_pid>.
  * Read-only; follows the same VFS ops pattern as devfs.c.
  */
@@ -36,6 +37,7 @@ enum procfs_type {
   PROCFS_VERSION,   /* /proc/version */
   PROCFS_UPTIME,    /* /proc/uptime */
   PROCFS_MEMINFO,   /* /proc/meminfo */
+  PROCFS_LOADAVG,   /* /proc/loadavg */
 };
 
 /* Buffer size for rendered content */
@@ -622,6 +624,32 @@ static int procfs_render_uptime(char *buf, int bufsz) {
   return pos;
 }
 
+/* Render /proc/loadavg */
+static int procfs_render_loadavg(char *buf, int bufsz) {
+  int pos = 0;
+  int runnable = 0;
+  int total = 0;
+  int last_pid = nextpid > 1 ? nextpid - 1 : 0;
+
+  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+    if (p->state == UNUSED)
+      continue;
+    total++;
+    if (p->state == RUNNABLE || p->state == RUNNING)
+      runnable++;
+  }
+
+  /* ENH: Keep the Linux field shape while SBUnix lacks sampled load history. */
+  pos = append_str(buf, bufsz, pos, "0.00 0.00 0.00 ");
+  pos = append_int(buf, bufsz, pos, runnable);
+  if (pos < bufsz) buf[pos++] = '/';
+  pos = append_int(buf, bufsz, pos, total);
+  if (pos < bufsz) buf[pos++] = ' ';
+  pos = append_int(buf, bufsz, pos, last_pid);
+  if (pos < bufsz) buf[pos++] = '\n';
+  return pos;
+}
+
 /* Render /proc/meminfo */
 static int procfs_render_meminfo(char *buf, int bufsz) {
   int pos = 0;
@@ -737,6 +765,9 @@ static int procfs_rendered_size(enum procfs_type type, struct proc *target,
   case PROCFS_MEMINFO:
     *size_out = (uint64_t)procfs_render_meminfo(tmp, PROCFS_BUF);
     break;
+  case PROCFS_LOADAVG:
+    *size_out = (uint64_t)procfs_render_loadavg(tmp, PROCFS_BUF);
+    break;
   case PROCFS_STATUS:
     *size_out = target ? (uint64_t)procfs_render_status(tmp, PROCFS_BUF, target) : 0;
     break;
@@ -808,6 +839,12 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
   if (strcmp(p, "meminfo") == 0) {
     priv->type = PROCFS_MEMINFO;
     priv->len = procfs_render_meminfo(priv->buf, PROCFS_BUF);
+    *private = priv;
+    return 0;
+  }
+  if (strcmp(p, "loadavg") == 0) {
+    priv->type = PROCFS_LOADAVG;
+    priv->len = procfs_render_loadavg(priv->buf, PROCFS_BUF);
     *private = priv;
     return 0;
   }
@@ -1038,6 +1075,9 @@ static int64_t procfs_read(void *fs_data, void *private, char *buf,
   if (priv->type == PROCFS_MEMINFO && *offset == 0) {
     priv->len = procfs_render_meminfo(priv->buf, PROCFS_BUF);
   }
+  if (priv->type == PROCFS_LOADAVG && *offset == 0) {
+    priv->len = procfs_render_loadavg(priv->buf, PROCFS_BUF);
+  }
   if (priv->type == PROCFS_STATUS && *offset == 0) {
     struct proc *target = procfs_find_target(priv->pid);
     if (!target)
@@ -1198,6 +1238,7 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
   if (strcmp(p, "version") == 0)  { STAT_RENDERED_FILE(204, PROCFS_VERSION, 0); }
   if (strcmp(p, "uptime") == 0)   { STAT_RENDERED_FILE(205, PROCFS_UPTIME, 0); }
   if (strcmp(p, "meminfo") == 0)  { STAT_RENDERED_FILE(206, PROCFS_MEMINFO, 0); }
+  if (strcmp(p, "loadavg") == 0)  { STAT_RENDERED_FILE(208, PROCFS_LOADAVG, 0); }
 
   /* /proc/self — symlink to current PID */
   pid_t self_pid = current_proc ? current_proc->pid : 1;
@@ -1326,6 +1367,8 @@ static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
     { uint64_t ino = 205; uint64_t sz=(uint64_t)priv->len; memcpy(st+8,&ino,8); memcpy(st+16,&reg_mode,4); memcpy(st+48,&sz,8); break; }
   case PROCFS_MEMINFO:
     { uint64_t ino = 206; uint64_t sz=(uint64_t)priv->len; memcpy(st+8,&ino,8); memcpy(st+16,&reg_mode,4); memcpy(st+48,&sz,8); break; }
+  case PROCFS_LOADAVG:
+    { uint64_t ino = 208; uint64_t sz=(uint64_t)priv->len; memcpy(st+8,&ino,8); memcpy(st+16,&reg_mode,4); memcpy(st+48,&sz,8); break; }
   case PROCFS_PIDDIR:
     { uint64_t ino=(uint64_t)(300+priv->pid); memcpy(st+8,&ino,8); memcpy(st+16,&dir_mode,4); break; }
   case PROCFS_FDDIR:
@@ -1417,6 +1460,8 @@ static int procfs_readdir(void *fs_data, void *private, char *ubuf,
     EMIT_DIRENT("version", 204, 8);
     EMIT_DIRENT("uptime",  205, 8);
     EMIT_DIRENT("meminfo", 206, 8);
+    /* ENH: Expose Linux-shaped scheduler summary data for user tools. */
+    EMIT_DIRENT("loadavg", 208, 8);
     /* /proc/self as a symlink entry */
     EMIT_DIRENT("self", 207, 10); /* DT_LNK */
 
@@ -1532,7 +1577,7 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
       if (*p == '\0' || strcmp(p, "dmesg") == 0 ||
           strcmp(p, "mounts") == 0 || strcmp(p, "cpuinfo") == 0 ||
           strcmp(p, "version") == 0 || strcmp(p, "uptime") == 0 ||
-          strcmp(p, "meminfo") == 0)
+          strcmp(p, "meminfo") == 0 || strcmp(p, "loadavg") == 0)
         return -22; /* EINVAL */
       return -2; /* ENOENT */
     }

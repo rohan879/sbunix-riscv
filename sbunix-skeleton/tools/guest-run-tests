@@ -166,6 +166,7 @@ run_test safetyabitest
 run_test dirtest
 run_test procfstest
 run_test procfs_cwd_edges
+run_test procfs_loadavg_edges
 run_test procfs_edges
 run_test procfs_execfd
 run_test procfd_semantics
