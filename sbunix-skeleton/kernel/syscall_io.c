@@ -40,6 +40,7 @@ enum {
 };
 
 #define PROCFS_FD_NOT_LINK    ((long)-4096)
+#define PROCFS_CWD_NOT_LINK   ((long)-4097)
 
 static void set_open_fd_flags(int fd, int flags);
 
@@ -174,6 +175,91 @@ static int parse_procfs_fd_path(const char *path, pid_t *pid_out, int *fd_out) {
     *pid_out = (pid_t)pid;
     *fd_out = fd;
     return 1;
+}
+
+static int parse_procfs_cwd_path(const char *path, pid_t *pid_out) {
+    const char *p = path;
+    int pid = 0;
+
+    if (strncmp(p, "/proc/", 6) != 0)
+        return 0;
+    p += 6;
+    if (strncmp(p, "self", 4) == 0 && p[4] == '/') {
+        if (!current_proc)
+            return 0;
+        pid = current_proc->pid;
+        p += 5;
+    } else {
+        if (parse_uint_component(&p, &pid) < 0 || *p != '/')
+            return 0;
+        p++;
+    }
+    if (strcmp(p, "cwd") != 0)
+        return 0;
+
+    *pid_out = (pid_t)pid;
+    return 1;
+}
+
+static long open_procfs_cwd_link_direct(const char *resolved, int flags,
+                                        int trailing_slash) {
+    pid_t pid;
+    int matched = parse_procfs_cwd_path(resolved, &pid);
+    if (!matched)
+        return PROCFS_CWD_NOT_LINK;
+
+    if ((flags & KERN_O_NOFOLLOW) && !trailing_slash)
+        return (long)-ELOOP;
+
+    if (trailing_slash || (flags & KERN_O_DIRECTORY))
+        return PROCFS_CWD_NOT_LINK;
+
+    int accmode = flags & 3;
+    if (accmode == 1 || accmode == 2)
+        return (long)-EACCES;
+    if (flags & (KERN_O_CREAT | KERN_O_TRUNC))
+        return (long)-EROFS;
+
+    const char *relpath;
+    struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
+    if (!mnt || mnt->ops != &procfs_ops)
+        return PROCFS_CWD_NOT_LINK;
+
+    void *priv = NULL;
+    int ret = procfs_open_cwd_direct(pid, flags, &priv);
+    if (ret < 0)
+        return (long)ret;
+
+    struct open_file *f = vfs_alloc_file();
+    if (!f) {
+        if (procfs_ops.close)
+            procfs_ops.close(mnt->fs_data, priv);
+        return (long)-EMFILE;
+    }
+    int fd = alloc_fd();
+    if (fd < 0) {
+        if (procfs_ops.close)
+            procfs_ops.close(mnt->fs_data, priv);
+        vfs_free_file(f);
+        return (long)-EMFILE;
+    }
+
+    f->ops = &procfs_ops;
+    f->fs_data = mnt->fs_data;
+    f->private = priv;
+    f->offset = 0;
+    f->flags = flags;
+    f->is_pipe = 0;
+    /* BF: Keep proc cwd direct opens readable as procfs snapshots; ordinary
+     * symlink traversal still uses the target directory path below. */
+    int plen = strlen(resolved);
+    if (plen > 255)
+        plen = 255;
+    memcpy(f->path, resolved, plen);
+    f->path[plen] = '\0';
+    proc_ofile(current_proc)[fd] = f;
+    set_open_fd_flags(fd, flags);
+    return (long)fd;
 }
 
 static long open_procfs_fd_link(const char *resolved, int flags,
@@ -574,6 +660,13 @@ long sys_openat_handler(struct trapframe *tf) {
         long procfd = open_procfs_fd_link(resolved, flags, trailing_slash);
         if (procfd != PROCFS_FD_NOT_LINK)
             return procfd;
+    }
+
+    {
+        long proccwd = open_procfs_cwd_link_direct(resolved, flags,
+                                                  trailing_slash);
+        if (proccwd != PROCFS_CWD_NOT_LINK)
+            return proccwd;
     }
 
     /* Resolve symlinks: intermediate always, final unless O_NOFOLLOW */

@@ -2,7 +2,8 @@
  * procfs.c — /proc virtual filesystem for SBUnix.
  *
  * Exposes per-PID directories with status, cmdline, fd, and maps pseudo-files.
- * Also exposes global files: dmesg, mounts, cpuinfo, version, uptime, meminfo.
+ * Also exposes global files: dmesg, mounts, cpuinfo, version, uptime, meminfo,
+ * and loadavg.
  * /proc/self is a magic entry that resolves to /proc/<current_pid>.
  * Read-only; follows the same VFS ops pattern as devfs.c.
  */
@@ -29,12 +30,14 @@ enum procfs_type {
   PROCFS_STAT_FILE, /* /proc/<pid>/stat (single-line format) */
   PROCFS_EXE_LINK,  /* /proc/<pid>/exe symlink */
   PROCFS_CWD_LINK,  /* /proc/<pid>/cwd symlink */
+  PROCFS_CWD_FILE,  /* readable direct-open view of /proc/<pid>/cwd */
   PROCFS_DMESG,     /* /proc/dmesg */
   PROCFS_MOUNTS,    /* /proc/mounts */
   PROCFS_CPUINFO,   /* /proc/cpuinfo */
   PROCFS_VERSION,   /* /proc/version */
   PROCFS_UPTIME,    /* /proc/uptime */
   PROCFS_MEMINFO,   /* /proc/meminfo */
+  PROCFS_LOADAVG,   /* /proc/loadavg */
 };
 
 /* Buffer size for rendered content */
@@ -104,6 +107,15 @@ static int append_hex_min(char *buf, int bufsz, int pos, uint64_t v) {
   return append_str(buf, bufsz, pos, tmp);
 }
 
+static int append_octal4(char *buf, int bufsz, int pos, unsigned int v) {
+  v &= 0777;
+  for (int shift = 9; shift >= 0; shift -= 3) {
+    if (pos < bufsz)
+      buf[pos++] = (char)('0' + ((v >> shift) & 7));
+  }
+  return pos;
+}
+
 /* Helper: parse a decimal PID from a string. Returns -1 on failure. */
 static int parse_pid(const char *s) {
   if (!s || !*s) return -1;
@@ -159,6 +171,19 @@ static int procfs_is_dir(enum procfs_type type) {
 static int procfs_is_link(enum procfs_type type) {
   return type == PROCFS_FDLINK || type == PROCFS_EXE_LINK ||
          type == PROCFS_CWD_LINK;
+}
+
+static int procfs_render_cwd_file(char *buf, int bufsz, struct proc *target) {
+  const char *cwd = "/";
+  int len;
+
+  if (target && target->cwd[0])
+    cwd = target->cwd;
+  len = strlen(cwd);
+  if (len > bufsz)
+    len = bufsz;
+  memcpy(buf, cwd, len);
+  return len;
 }
 
 static int procfs_pid_file_type(const char *name, enum procfs_type *type) {
@@ -279,6 +304,17 @@ static uint64_t procfs_vmsize_bytes(struct proc *p) {
   return total;
 }
 
+static int procfs_sigqueue_count(struct proc *p) {
+  int count = 0;
+
+  for (int i = 0; i < NSIGQUEUE; i++) {
+    if (p->sigqueue_buf[i].valid)
+      count++;
+  }
+
+  return count;
+}
+
 /* Render /proc/<pid>/status */
 static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   int pos = 0;
@@ -288,9 +324,19 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   pos = append_str(buf, bufsz, pos, p->name);
   if (pos < bufsz) buf[pos++] = '\n';
 
+  pos = append_str(buf, bufsz, pos, "Umask:\t");
+  pos = append_octal4(buf, bufsz, pos, p->umask_val);
+  if (pos < bufsz) buf[pos++] = '\n';
+
   pos = append_str(buf, bufsz, pos, "State:\t");
   pos = append_str(buf, bufsz, pos, state_name(p->state));
   if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "Tgid:\t");
+  pos = append_int(buf, bufsz, pos, p->pid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "Ngid:\t0\n");
 
   pos = append_str(buf, bufsz, pos, "Pid:\t");
   pos = append_int(buf, bufsz, pos, p->pid);
@@ -300,8 +346,8 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   pos = append_int(buf, bufsz, pos, ppid);
   if (pos < bufsz) buf[pos++] = '\n';
 
-  /* BF: Report tracked process identity so proc status matches job-control
-   * and credential syscalls instead of hard-coded root values. */
+  /* BF: Report job-control identity from the process table so userspace
+   * process scanners can correlate pipelines and sessions from procfs. */
   pos = append_str(buf, bufsz, pos, "Pgid:\t");
   pos = append_int(buf, bufsz, pos, p->pgid);
   if (pos < bufsz) buf[pos++] = '\n';
@@ -309,6 +355,8 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   pos = append_str(buf, bufsz, pos, "Sid:\t");
   pos = append_int(buf, bufsz, pos, p->sid);
   if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "TracerPid:\t0\n");
 
   pos = append_str(buf, bufsz, pos, "Uid:\t");
   pos = append_int(buf, bufsz, pos, p->uid);
@@ -330,12 +378,52 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   pos = append_int(buf, bufsz, pos, p->gid);
   if (pos < bufsz) buf[pos++] = '\n';
 
+  pos = append_str(buf, bufsz, pos, "FDSize:\t");
+  pos = append_int(buf, bufsz, pos, NOFILE);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "Groups:\t");
+  pos = append_int(buf, bufsz, pos, p->gid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  /* ENH: SBUnix has one PID namespace, so namespace identifiers are the
+   * tracked process IDs.  Linux-style labels keep common proc parsers happy. */
+  pos = append_str(buf, bufsz, pos, "NStgid:\t");
+  pos = append_int(buf, bufsz, pos, p->pid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "NSpid:\t");
+  pos = append_int(buf, bufsz, pos, p->pid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "NSpgid:\t");
+  pos = append_int(buf, bufsz, pos, p->pgid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "NSsid:\t");
+  pos = append_int(buf, bufsz, pos, p->sid);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "Kthread:\t0\n");
+
   pos = append_str(buf, bufsz, pos, "VmSize:\t");
   pos = append_int(buf, bufsz, pos, (long)(procfs_vmsize_bytes(p) / 1024));
   pos = append_str(buf, bufsz, pos, " kB\n");
 
+  pos = append_str(buf, bufsz, pos, "Threads:\t1\n");
+
+  pos = append_str(buf, bufsz, pos, "SigQ:\t");
+  pos = append_int(buf, bufsz, pos, procfs_sigqueue_count(p));
+  if (pos < bufsz) buf[pos++] = '/';
+  pos = append_int(buf, bufsz, pos, NSIGQUEUE);
+  if (pos < bufsz) buf[pos++] = '\n';
+
   pos = append_str(buf, bufsz, pos, "SigPnd:\t");
   pos = append_hex16(buf, bufsz, pos, p->sigpending);
+  if (pos < bufsz) buf[pos++] = '\n';
+
+  pos = append_str(buf, bufsz, pos, "ShdPnd:\t");
+  pos = append_hex16(buf, bufsz, pos, 0);
   if (pos < bufsz) buf[pos++] = '\n';
 
   pos = append_str(buf, bufsz, pos, "SigBlk:\t");
@@ -536,6 +624,32 @@ static int procfs_render_uptime(char *buf, int bufsz) {
   return pos;
 }
 
+/* Render /proc/loadavg */
+static int procfs_render_loadavg(char *buf, int bufsz) {
+  int pos = 0;
+  int runnable = 0;
+  int total = 0;
+  int last_pid = nextpid > 1 ? nextpid - 1 : 0;
+
+  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+    if (p->state == UNUSED)
+      continue;
+    total++;
+    if (p->state == RUNNABLE || p->state == RUNNING)
+      runnable++;
+  }
+
+  /* ENH: Keep the Linux field shape while SBUnix lacks sampled load history. */
+  pos = append_str(buf, bufsz, pos, "0.00 0.00 0.00 ");
+  pos = append_int(buf, bufsz, pos, runnable);
+  if (pos < bufsz) buf[pos++] = '/';
+  pos = append_int(buf, bufsz, pos, total);
+  if (pos < bufsz) buf[pos++] = ' ';
+  pos = append_int(buf, bufsz, pos, last_pid);
+  if (pos < bufsz) buf[pos++] = '\n';
+  return pos;
+}
+
 /* Render /proc/meminfo */
 static int procfs_render_meminfo(char *buf, int bufsz) {
   int pos = 0;
@@ -651,6 +765,9 @@ static int procfs_rendered_size(enum procfs_type type, struct proc *target,
   case PROCFS_MEMINFO:
     *size_out = (uint64_t)procfs_render_meminfo(tmp, PROCFS_BUF);
     break;
+  case PROCFS_LOADAVG:
+    *size_out = (uint64_t)procfs_render_loadavg(tmp, PROCFS_BUF);
+    break;
   case PROCFS_STATUS:
     *size_out = target ? (uint64_t)procfs_render_status(tmp, PROCFS_BUF, target) : 0;
     break;
@@ -722,6 +839,12 @@ static int procfs_open(void *fs_data, const char *path, int flags, void **privat
   if (strcmp(p, "meminfo") == 0) {
     priv->type = PROCFS_MEMINFO;
     priv->len = procfs_render_meminfo(priv->buf, PROCFS_BUF);
+    *private = priv;
+    return 0;
+  }
+  if (strcmp(p, "loadavg") == 0) {
+    priv->type = PROCFS_LOADAVG;
+    priv->len = procfs_render_loadavg(priv->buf, PROCFS_BUF);
     *private = priv;
     return 0;
   }
@@ -952,11 +1075,20 @@ static int64_t procfs_read(void *fs_data, void *private, char *buf,
   if (priv->type == PROCFS_MEMINFO && *offset == 0) {
     priv->len = procfs_render_meminfo(priv->buf, PROCFS_BUF);
   }
+  if (priv->type == PROCFS_LOADAVG && *offset == 0) {
+    priv->len = procfs_render_loadavg(priv->buf, PROCFS_BUF);
+  }
   if (priv->type == PROCFS_STATUS && *offset == 0) {
     struct proc *target = procfs_find_target(priv->pid);
     if (!target)
       return -ENOENT;
     priv->len = procfs_render_status(priv->buf, PROCFS_BUF, target);
+  }
+  if (priv->type == PROCFS_CWD_FILE && *offset == 0) {
+    struct proc *target = procfs_find_target(priv->pid);
+    if (!target)
+      return -ENOENT;
+    priv->len = procfs_render_cwd_file(priv->buf, PROCFS_BUF, target);
   }
 
   if (priv->type == PROCFS_MAPS)
@@ -998,6 +1130,30 @@ static int procfs_close(void *fs_data, void *private) {
   (void)fs_data;
   if (private)
     kmfree(private, sizeof(struct procfs_private));
+  return 0;
+}
+
+int procfs_open_cwd_direct(pid_t pid, int flags, void **private) {
+  int flag_ret = procfs_check_read_open_flags(flags);
+  if (flag_ret < 0)
+    return flag_ret;
+
+  struct proc *target = procfs_find_target(pid);
+  if (!target)
+    return -ENOENT;
+
+  struct procfs_private *priv =
+    (struct procfs_private *)kmalloc(sizeof(struct procfs_private));
+  if (!priv)
+    return -ENOMEM;
+
+  memset(priv, 0, sizeof(*priv));
+  priv->type = PROCFS_CWD_FILE;
+  priv->pid = pid;
+  /* BF: Direct opens of /proc/<pid>/cwd expose a readable procfs entry while
+   * path stat/readlink still see the conventional symlink. */
+  priv->len = procfs_render_cwd_file(priv->buf, PROCFS_BUF, target);
+  *private = priv;
   return 0;
 }
 
@@ -1082,6 +1238,7 @@ static int procfs_stat(void *fs_data, const char *path, uint8_t *st) {
   if (strcmp(p, "version") == 0)  { STAT_RENDERED_FILE(204, PROCFS_VERSION, 0); }
   if (strcmp(p, "uptime") == 0)   { STAT_RENDERED_FILE(205, PROCFS_UPTIME, 0); }
   if (strcmp(p, "meminfo") == 0)  { STAT_RENDERED_FILE(206, PROCFS_MEMINFO, 0); }
+  if (strcmp(p, "loadavg") == 0)  { STAT_RENDERED_FILE(208, PROCFS_LOADAVG, 0); }
 
   /* /proc/self — symlink to current PID */
   pid_t self_pid = current_proc ? current_proc->pid : 1;
@@ -1210,6 +1367,8 @@ static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
     { uint64_t ino = 205; uint64_t sz=(uint64_t)priv->len; memcpy(st+8,&ino,8); memcpy(st+16,&reg_mode,4); memcpy(st+48,&sz,8); break; }
   case PROCFS_MEMINFO:
     { uint64_t ino = 206; uint64_t sz=(uint64_t)priv->len; memcpy(st+8,&ino,8); memcpy(st+16,&reg_mode,4); memcpy(st+48,&sz,8); break; }
+  case PROCFS_LOADAVG:
+    { uint64_t ino = 208; uint64_t sz=(uint64_t)priv->len; memcpy(st+8,&ino,8); memcpy(st+16,&reg_mode,4); memcpy(st+48,&sz,8); break; }
   case PROCFS_PIDDIR:
     { uint64_t ino=(uint64_t)(300+priv->pid); memcpy(st+8,&ino,8); memcpy(st+16,&dir_mode,4); break; }
   case PROCFS_FDDIR:
@@ -1229,6 +1388,11 @@ static int procfs_fstat(void *fs_data, void *private, uint8_t *st) {
       uint64_t ino=(uint64_t)(2000 + priv->pid * 10 + 2);
       uint64_t sz=(uint64_t)procfs_link_target_len(target, PROCFS_CWD_LINK, -1);
       memcpy(st+8,&ino,8); memcpy(st+16,&lnk_mode,4); memcpy(st+48,&sz,8); break; }
+  case PROCFS_CWD_FILE:
+    { struct proc *target = procfs_find_target(priv->pid);
+      uint64_t ino=(uint64_t)(7000 + priv->pid);
+      uint64_t sz=(uint64_t)procfs_link_target_len(target, PROCFS_CWD_LINK, -1);
+      memcpy(st+8,&ino,8); memcpy(st+16,&reg_mode,4); memcpy(st+48,&sz,8); break; }
   case PROCFS_STATUS:
   case PROCFS_CMDLINE:
   case PROCFS_MAPS:
@@ -1296,6 +1460,8 @@ static int procfs_readdir(void *fs_data, void *private, char *ubuf,
     EMIT_DIRENT("version", 204, 8);
     EMIT_DIRENT("uptime",  205, 8);
     EMIT_DIRENT("meminfo", 206, 8);
+    /* ENH: Expose Linux-shaped scheduler summary data for user tools. */
+    EMIT_DIRENT("loadavg", 208, 8);
     /* /proc/self as a symlink entry */
     EMIT_DIRENT("self", 207, 10); /* DT_LNK */
 
@@ -1411,7 +1577,7 @@ static int procfs_readlink(void *fs_data, const char *path, char *buf,
       if (*p == '\0' || strcmp(p, "dmesg") == 0 ||
           strcmp(p, "mounts") == 0 || strcmp(p, "cpuinfo") == 0 ||
           strcmp(p, "version") == 0 || strcmp(p, "uptime") == 0 ||
-          strcmp(p, "meminfo") == 0)
+          strcmp(p, "meminfo") == 0 || strcmp(p, "loadavg") == 0)
         return -22; /* EINVAL */
       return -2; /* ENOENT */
     }

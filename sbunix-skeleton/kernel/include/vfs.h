@@ -83,6 +83,7 @@ extern struct vfs_ops ext2_ops;
 extern struct vfs_ops procfs_ops;
 extern struct vfs_ops sysfs_ops;
 extern struct vfs_ops ramfs_ops;
+int procfs_open_cwd_direct(pid_t pid, int flags, void **private);
 
 /* ramfs init (creates in-memory root inode) */
 void ramfs_init(void);

@@ -82,6 +82,7 @@ static void test_stat_fstat_agreement(void) {
     "/proc/mounts",
     "/proc/cpuinfo",
     "/proc/version",
+    "/proc/loadavg",
   };
   const char *dynamic_paths[] = {
     "/proc/uptime",
