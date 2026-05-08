@@ -81,6 +81,7 @@ static void cleanup_all(void) {
     unlink("/mnt/sl_dangle");
     unlink("/mnt/sl_dangle_create");
     unlink("/mnt/sl_dangle_create_target");
+    unlink("/mnt/sl_rla_file");
     unlink("/mnt/sl_rla_dir/child");
     unlink("/mnt/sl_rla_dir/child_target");
     rmdir("/mnt/sl_rla_dir");
@@ -99,6 +100,19 @@ static void cleanup_all(void) {
     unlink("/tmp/sl_linkat_sym");
     unlink("/tmp/sl_linkat_target");
     unlink("/tmp/sl_nl_devlink");
+    unlink("/tmp/sl_nl_binlink");
+    unlink("/tmp/sl_nl_syslink");
+    unlink("/tmp/sl_nl_proclink");
+    unlink("/tmp/sl_nl_rla_bin");
+    unlink("/tmp/sl_nl_rla_procself");
+    unlink("/tmp/sl_nl_ramfs_file");
+    rmdir("/tmp/sl_nl_ramfs_dir");
+    unlink("/tmp/sl_rla_file");
+    rmdir("/tmp/sl_rla_dir");
+    unlink("/tmp/sl_nl_ramfs_parent_real/file");
+    rmdir("/tmp/sl_nl_ramfs_parent_real/dir");
+    unlink("/tmp/sl_nl_ramfs_parent_link");
+    rmdir("/tmp/sl_nl_ramfs_parent_real");
     unlink("/mnt/sl_dtype_link");
     unlink("/mnt/sl_nl_parent_real/file");
     rmdir("/mnt/sl_nl_parent_real/dir");
@@ -296,12 +310,254 @@ static void test_readlink_nonlink_variants(void) {
           readlink("/tmp/sl_nl_devlink/no-such", buf, sizeof(buf)) == -1 &&
           errno == ENOENT);
 
+    CHECK("symlink: readlink_nonlink_variants ramfs file setup",
+          write_file("/tmp/sl_nl_ramfs_file", "x", 1) == 0);
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants ramfs file EINVAL",
+          readlink("/tmp/sl_nl_ramfs_file", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    CHECK("symlink: readlink_nonlink_variants ramfs dir setup",
+          mkdir("/tmp/sl_nl_ramfs_dir", 0755) == 0);
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants ramfs dir EINVAL",
+          readlink("/tmp/sl_nl_ramfs_dir", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    CHECK("symlink: readlink_nonlink_variants ramfs parent setup",
+          mkdir("/tmp/sl_nl_ramfs_parent_real", 0755) == 0 &&
+          mkdir("/tmp/sl_nl_ramfs_parent_real/dir", 0755) == 0 &&
+          write_file("/tmp/sl_nl_ramfs_parent_real/file", "x", 1) == 0 &&
+          symlink("/tmp/sl_nl_ramfs_parent_real",
+                  "/tmp/sl_nl_ramfs_parent_link") == 0);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants ramfs file via parent symlink EINVAL",
+          readlink("/tmp/sl_nl_ramfs_parent_link/file", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants ramfs dir via parent symlink EINVAL",
+          readlink("/tmp/sl_nl_ramfs_parent_link/dir", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants ramfs missing via parent symlink ENOENT",
+          readlink("/tmp/sl_nl_ramfs_parent_link/no-such", buf, sizeof(buf)) == -1 &&
+          errno == ENOENT);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants tarfs file EINVAL",
+          readlink("/bin/echo", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants tarfs dir EINVAL",
+          readlink("/bin", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    CHECK("symlink: readlink_nonlink_variants tarfs parent symlink setup",
+          symlink("/bin", "/tmp/sl_nl_binlink") == 0);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants tarfs file via parent symlink EINVAL",
+          readlink("/tmp/sl_nl_binlink/echo", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants tarfs missing via parent symlink ENOENT",
+          readlink("/tmp/sl_nl_binlink/no-such", buf, sizeof(buf)) == -1 &&
+          errno == ENOENT);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants sysfs file EINVAL",
+          readlink("/sys/kernel/version", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants sysfs dir EINVAL",
+          readlink("/sys/devices", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    CHECK("symlink: readlink_nonlink_variants sysfs parent symlink setup",
+          symlink("/sys", "/tmp/sl_nl_syslink") == 0);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants sysfs file via parent symlink EINVAL",
+          readlink("/tmp/sl_nl_syslink/kernel/version", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants sysfs missing via parent symlink ENOENT",
+          readlink("/tmp/sl_nl_syslink/no-such", buf, sizeof(buf)) == -1 &&
+          errno == ENOENT);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants procfs file EINVAL",
+          readlink("/proc/self/status", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants procfs dir EINVAL",
+          readlink("/proc/self/fd", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    CHECK("symlink: readlink_nonlink_variants procfs parent symlink setup",
+          symlink("/proc/self", "/tmp/sl_nl_proclink") == 0);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants procfs file via parent symlink EINVAL",
+          readlink("/tmp/sl_nl_proclink/status", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants procfs missing via parent symlink ENOENT",
+          readlink("/tmp/sl_nl_proclink/no-such", buf, sizeof(buf)) == -1 &&
+          errno == ENOENT);
+
     unlink("/mnt/sl_nl_parent_real/file");
     rmdir("/mnt/sl_nl_parent_real/dir");
     unlink("/mnt/sl_nl_parent_link");
     rmdir("/mnt/sl_nl_parent_real");
     unlink("/tmp/sl_nl_devlink");
+    unlink("/tmp/sl_nl_binlink");
+    unlink("/tmp/sl_nl_syslink");
+    unlink("/tmp/sl_nl_proclink");
+    unlink("/tmp/sl_nl_ramfs_file");
+    rmdir("/tmp/sl_nl_ramfs_dir");
+    unlink("/tmp/sl_nl_ramfs_parent_real/file");
+    rmdir("/tmp/sl_nl_ramfs_parent_real/dir");
+    unlink("/tmp/sl_nl_ramfs_parent_link");
+    rmdir("/tmp/sl_nl_ramfs_parent_real");
     rmdir("/mnt/sl_nl_dir");
+}
+
+/* -----------------------------------------------------------------------
+ * 6c. readlinkat_nonlink_variants -- relative readlinkat also rejects non-links
+ * ---------------------------------------------------------------------- */
+
+static void test_readlinkat_nonlink_variants(void) {
+    char buf[64];
+    int dirfd;
+
+    cleanup_all();
+
+    CHECK("symlink: readlinkat_nonlink_variants ext2 setup",
+          write_file("/mnt/sl_rla_file", "x", 1) == 0 &&
+          mkdir("/mnt/sl_rla_dir", 0755) == 0);
+    dirfd = open("/mnt", O_RDONLY | O_DIRECTORY);
+    CHECK("symlink: readlinkat_nonlink_variants ext2 dirfd open", dirfd >= 0);
+    if (dirfd >= 0) {
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants ext2 file EINVAL",
+              readlinkat(dirfd, "sl_rla_file", buf, sizeof(buf)) == -1 &&
+              errno == EINVAL);
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants ext2 dir EINVAL",
+              readlinkat(dirfd, "sl_rla_dir", buf, sizeof(buf)) == -1 &&
+              errno == EINVAL);
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants ext2 missing ENOENT",
+              readlinkat(dirfd, "sl_rla_missing", buf, sizeof(buf)) == -1 &&
+              errno == ENOENT);
+        close(dirfd);
+    }
+
+    CHECK("symlink: readlinkat_nonlink_variants ramfs setup",
+          write_file("/tmp/sl_rla_file", "x", 1) == 0 &&
+          mkdir("/tmp/sl_rla_dir", 0755) == 0);
+    dirfd = open("/tmp", O_RDONLY | O_DIRECTORY);
+    CHECK("symlink: readlinkat_nonlink_variants ramfs dirfd open", dirfd >= 0);
+    if (dirfd >= 0) {
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants ramfs file EINVAL",
+              readlinkat(dirfd, "sl_rla_file", buf, sizeof(buf)) == -1 &&
+              errno == EINVAL);
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants ramfs dir EINVAL",
+              readlinkat(dirfd, "sl_rla_dir", buf, sizeof(buf)) == -1 &&
+              errno == EINVAL);
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants ramfs missing ENOENT",
+              readlinkat(dirfd, "sl_rla_missing", buf, sizeof(buf)) == -1 &&
+              errno == ENOENT);
+        close(dirfd);
+    }
+
+    dirfd = open("/bin", O_RDONLY | O_DIRECTORY);
+    CHECK("symlink: readlinkat_nonlink_variants tarfs dirfd open", dirfd >= 0);
+    if (dirfd >= 0) {
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants tarfs file EINVAL",
+              readlinkat(dirfd, "echo", buf, sizeof(buf)) == -1 &&
+              errno == EINVAL);
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants tarfs missing ENOENT",
+              readlinkat(dirfd, "no-such", buf, sizeof(buf)) == -1 &&
+              errno == ENOENT);
+        close(dirfd);
+    }
+
+    dirfd = open("/sys/kernel", O_RDONLY | O_DIRECTORY);
+    CHECK("symlink: readlinkat_nonlink_variants sysfs dirfd open", dirfd >= 0);
+    if (dirfd >= 0) {
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants sysfs file EINVAL",
+              readlinkat(dirfd, "version", buf, sizeof(buf)) == -1 &&
+              errno == EINVAL);
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants sysfs missing ENOENT",
+              readlinkat(dirfd, "no-such", buf, sizeof(buf)) == -1 &&
+              errno == ENOENT);
+        close(dirfd);
+    }
+
+    dirfd = open("/proc/self", O_RDONLY | O_DIRECTORY);
+    CHECK("symlink: readlinkat_nonlink_variants procfs dirfd open", dirfd >= 0);
+    if (dirfd >= 0) {
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants procfs file EINVAL",
+              readlinkat(dirfd, "status", buf, sizeof(buf)) == -1 &&
+              errno == EINVAL);
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants procfs missing ENOENT",
+              readlinkat(dirfd, "no-such", buf, sizeof(buf)) == -1 &&
+              errno == ENOENT);
+        close(dirfd);
+    }
+
+    CHECK("symlink: readlinkat_nonlink_variants tarfs symlinked dirfd setup",
+          symlink("/bin", "/tmp/sl_nl_rla_bin") == 0);
+    dirfd = open("/tmp/sl_nl_rla_bin", O_RDONLY | O_DIRECTORY);
+    CHECK("symlink: readlinkat_nonlink_variants tarfs symlinked dirfd open",
+          dirfd >= 0);
+    if (dirfd >= 0) {
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants tarfs symlinked file EINVAL",
+              readlinkat(dirfd, "echo", buf, sizeof(buf)) == -1 &&
+              errno == EINVAL);
+        close(dirfd);
+    }
+
+    CHECK("symlink: readlinkat_nonlink_variants procfs symlinked dirfd setup",
+          symlink("/proc/self", "/tmp/sl_nl_rla_procself") == 0);
+    dirfd = open("/tmp/sl_nl_rla_procself", O_RDONLY | O_DIRECTORY);
+    CHECK("symlink: readlinkat_nonlink_variants procfs symlinked dirfd open",
+          dirfd >= 0);
+    if (dirfd >= 0) {
+        errno = 0;
+        CHECK("symlink: readlinkat_nonlink_variants procfs symlinked file EINVAL",
+              readlinkat(dirfd, "status", buf, sizeof(buf)) == -1 &&
+              errno == EINVAL);
+        close(dirfd);
+    }
+
+    unlink("/mnt/sl_rla_file");
+    rmdir("/mnt/sl_rla_dir");
+    unlink("/tmp/sl_rla_file");
+    rmdir("/tmp/sl_rla_dir");
+    unlink("/tmp/sl_nl_rla_bin");
+    unlink("/tmp/sl_nl_rla_procself");
 }
 
 /* -----------------------------------------------------------------------
@@ -896,6 +1152,7 @@ int main(void) {
     test_symlink_loop_eloop();
     test_readlink_not_symlink();
     test_readlink_nonlink_variants();
+    test_readlinkat_nonlink_variants();
     test_stat_follows_symlink();
     test_lstat_no_follow();
     test_symlink_relative_target();

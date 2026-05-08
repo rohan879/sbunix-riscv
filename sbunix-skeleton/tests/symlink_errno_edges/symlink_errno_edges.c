@@ -45,6 +45,7 @@ static void fill_chars(char *buf, int len, char ch) {
 static void cleanup(void) {
   unlink("/tmp/see_exist");
   unlink("/tmp/see_file");
+  rmdir("/tmp/see_dir");
   unlink("/tmp/see_loop_a");
   unlink("/tmp/see_loop_b");
   unlink("/tmp/see_dang");
@@ -73,6 +74,8 @@ int main(void) {
 
   check("symlink_errno_edges: nondir newdirfd setup",
         write_file("/tmp/see_file", "x") == 0);
+  check("symlink_errno_edges: directory setup",
+        mkdir("/tmp/see_dir", 0755) == 0);
   fd = open("/tmp/see_file", O_RDONLY);
   check("symlink_errno_edges: nondir newdirfd open", fd >= 0);
   if (fd >= 0) {
@@ -141,8 +144,16 @@ int main(void) {
   check("symlink_errno_edges: readlinkat dirfd open", dirfd >= 0);
   if (dirfd >= 0) {
     errno = 0;
+    expect_errno("symlink_errno_edges: readlinkat empty path ENOENT",
+                 readlinkat(dirfd, "", buf, sizeof(buf)), ENOENT);
+
+    errno = 0;
     expect_errno("symlink_errno_edges: readlinkat bad dirfd EBADF",
                  readlinkat(99, "see_empty_target", buf, sizeof(buf)), EBADF);
+
+    errno = 0;
+    expect_errno("symlink_errno_edges: readlinkat absolute path ignores dirfd",
+                 readlinkat(99, "/tmp/see_file", buf, sizeof(buf)), EINVAL);
 
     memset(buf, 'Q', sizeof(buf));
     check("symlink_errno_edges: readlinkat truncates without NUL",
@@ -150,11 +161,27 @@ int main(void) {
           memcmp(buf, "abcd", 4) == 0 &&
           buf[4] == 'Q');
 
+    errno = 0;
+    expect_errno("symlink_errno_edges: readlinkat file trailing slash ENOTDIR",
+                 readlinkat(dirfd, "see_file/", buf, sizeof(buf)), ENOTDIR);
+
+    errno = 0;
+    expect_errno("symlink_errno_edges: readlinkat dir trailing slash EINVAL",
+                 readlinkat(dirfd, "see_dir/", buf, sizeof(buf)), EINVAL);
+
     filefd = open("/tmp/see_file", O_RDONLY);
     check("symlink_errno_edges: readlinkat nondir fd open", filefd >= 0);
     errno = 0;
     expect_errno("symlink_errno_edges: readlinkat nondir dirfd ENOTDIR",
                  readlinkat(filefd, "child", buf, sizeof(buf)), ENOTDIR);
+
+    errno = 0;
+    expect_errno("symlink_errno_edges: readlink regular file trailing slash ENOTDIR",
+                 readlink("/tmp/see_file/", buf, sizeof(buf)), ENOTDIR);
+
+    errno = 0;
+    expect_errno("symlink_errno_edges: readlink directory trailing slash EINVAL",
+                 readlink("/tmp/see_dir/", buf, sizeof(buf)), EINVAL);
 
     if (filefd >= 0)
       close(filefd);
