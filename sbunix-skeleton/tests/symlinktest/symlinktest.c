@@ -91,7 +91,13 @@ static void cleanup_all(void) {
     unlink("/tmp/sl_linkat_hard");
     unlink("/tmp/sl_linkat_sym");
     unlink("/tmp/sl_linkat_target");
+    unlink("/tmp/sl_nl_devlink");
     unlink("/mnt/sl_dtype_link");
+    unlink("/mnt/sl_nl_parent_real/file");
+    rmdir("/mnt/sl_nl_parent_real/dir");
+    unlink("/mnt/sl_nl_parent_link");
+    rmdir("/mnt/sl_nl_parent_real");
+    rmdir("/mnt/sl_nl_dir");
 }
 
 /* -----------------------------------------------------------------------
@@ -236,6 +242,59 @@ static void test_readlink_not_symlink(void) {
     CHECK("symlink: readlink_not_symlink errno EINVAL", errno == EINVAL);
 
     unlink("/mnt/sl_regfile");
+}
+
+/* -----------------------------------------------------------------------
+ * 6b. readlink_nonlink_variants -- non-links report -1/EINVAL consistently
+ * ---------------------------------------------------------------------- */
+
+static void test_readlink_nonlink_variants(void) {
+    char buf[64];
+
+    cleanup_all();
+
+    CHECK("symlink: readlink_nonlink_variants dir setup",
+          mkdir("/mnt/sl_nl_dir", 0755) == 0);
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants dir errno EINVAL",
+          readlink("/mnt/sl_nl_dir", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    CHECK("symlink: readlink_nonlink_variants parent setup",
+          mkdir("/mnt/sl_nl_parent_real", 0755) == 0 &&
+          mkdir("/mnt/sl_nl_parent_real/dir", 0755) == 0 &&
+          write_file("/mnt/sl_nl_parent_real/file", "x", 1) == 0 &&
+          symlink("/mnt/sl_nl_parent_real", "/mnt/sl_nl_parent_link") == 0);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants file via parent symlink EINVAL",
+          readlink("/mnt/sl_nl_parent_link/file", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants dir via parent symlink EINVAL",
+          readlink("/mnt/sl_nl_parent_link/dir", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    CHECK("symlink: readlink_nonlink_variants dev parent symlink setup",
+          symlink("/dev", "/tmp/sl_nl_devlink") == 0);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants dev file via parent symlink EINVAL",
+          readlink("/tmp/sl_nl_devlink/null", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants dev missing via parent symlink ENOENT",
+          readlink("/tmp/sl_nl_devlink/no-such", buf, sizeof(buf)) == -1 &&
+          errno == ENOENT);
+
+    unlink("/mnt/sl_nl_parent_real/file");
+    rmdir("/mnt/sl_nl_parent_real/dir");
+    unlink("/mnt/sl_nl_parent_link");
+    rmdir("/mnt/sl_nl_parent_real");
+    unlink("/tmp/sl_nl_devlink");
+    rmdir("/mnt/sl_nl_dir");
 }
 
 /* -----------------------------------------------------------------------
@@ -753,6 +812,7 @@ int main(void) {
     test_symlink_chain();
     test_symlink_loop_eloop();
     test_readlink_not_symlink();
+    test_readlink_nonlink_variants();
     test_stat_follows_symlink();
     test_lstat_no_follow();
     test_symlink_relative_target();
