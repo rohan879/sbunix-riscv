@@ -312,6 +312,116 @@ static uint64_t procfs_vmsize_bytes(struct proc *p) {
   return total;
 }
 
+enum procfs_vma_kind {
+  PROCFS_VMA_EXEC = 1,
+  PROCFS_VMA_DATA = 2,
+  PROCFS_VMA_RSS = 3,
+};
+
+static uint64_t procfs_vma_bytes(struct proc *p, enum procfs_vma_kind kind) {
+  uint64_t total = 0;
+
+  if (!p)
+    return 0;
+
+  for (struct vm_area *vma = p->vma_list; vma; vma = vma->next) {
+    uint64_t bytes;
+
+    if (vma->end <= vma->start)
+      continue;
+    bytes = vma->end - vma->start;
+
+    if (kind == PROCFS_VMA_EXEC && (vma->prot & PROT_EXEC)) {
+      if (total > (uint64_t)-1 - bytes)
+        return (uint64_t)-1;
+      total += bytes;
+    } else if (kind == PROCFS_VMA_DATA && !(vma->flags & VMA_STACK) &&
+               !(vma->prot & PROT_EXEC) && (vma->prot & PROT_WRITE)) {
+      if (total > (uint64_t)-1 - bytes)
+        return (uint64_t)-1;
+      total += bytes;
+    } else if (kind == PROCFS_VMA_RSS) {
+      /* When reclaim metadata is disabled, resident_pages is not tracked. */
+      if (!ENABLE_RECLAIM_METADATA)
+        continue;
+      if (!vma->resident_pages)
+        continue;
+      if (vma->resident_pages > ((uint64_t)-1 / PAGE_SIZE))
+        return (uint64_t)-1;
+      bytes = vma->resident_pages * PAGE_SIZE;
+      if (total > (uint64_t)-1 - bytes)
+        return (uint64_t)-1;
+      total += bytes;
+    }
+  }
+  return total;
+}
+
+static uint64_t procfs_kstack_bytes(struct proc *p) {
+  int pages;
+
+  if (!p || !p->kstack)
+    return 0;
+  pages = p->kstack_npages > 0 ? p->kstack_npages : KSTACK_PAGES;
+  return (uint64_t)pages * PAGE_SIZE;
+}
+
+static uint64_t procfs_total_kstack_bytes(void) {
+  uint64_t total = 0;
+
+  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+    uint64_t kstack_bytes;
+
+    if (p->state == UNUSED)
+      continue;
+    kstack_bytes = procfs_kstack_bytes(p);
+    if (total > (uint64_t)-1 - kstack_bytes)
+      return (uint64_t)-1;
+    total += kstack_bytes;
+  }
+  return total;
+}
+
+static uint64_t procfs_total_vmsize_bytes(void) {
+  uint64_t total = 0;
+
+  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+    uint64_t vmsize;
+
+    if (p->state == UNUSED)
+      continue;
+    vmsize = procfs_vmsize_bytes(p);
+    if (vmsize == (uint64_t)-1)
+      return (uint64_t)-1;
+    if (total > (uint64_t)-1 - vmsize)
+      return (uint64_t)-1;
+    total += vmsize;
+  }
+  return total;
+}
+
+static long procfs_kb_or_sentinel(uint64_t bytes) {
+  if (bytes == (uint64_t)-1)
+    return -1;
+  return (long)(bytes / 1024);
+}
+
+static uint64_t procfs_total_pagetable_bytes(void) {
+  uint64_t pages = 0;
+
+  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+    if (p->state != UNUSED && p->pagetable)
+      pages++;
+  }
+  return pages * PAGE_SIZE;
+}
+
+static uint64_t procfs_user_stack_bytes(struct proc *p) {
+  if (!p || p->stack_top <= p->stack_bottom)
+    return 0;
+  return p->stack_top - p->stack_bottom;
+}
+
 static int procfs_sigqueue_count(struct proc *p) {
   int count = 0;
 
@@ -327,6 +437,7 @@ static int procfs_sigqueue_count(struct proc *p) {
 static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
   int pos = 0;
   pid_t ppid = p->parent ? p->parent->pid : 0;
+  uint64_t vmsize_bytes = procfs_vmsize_bytes(p);
 
   pos = append_str(buf, bufsz, pos, "Name:\t");
   pos = append_str(buf, bufsz, pos, p->name);
@@ -414,8 +525,42 @@ static int procfs_render_status(char *buf, int bufsz, struct proc *p) {
 
   pos = append_str(buf, bufsz, pos, "Kthread:\t0\n");
 
+  pos = append_str(buf, bufsz, pos, "VmPeak:\t");
+  pos = append_int(buf, bufsz, pos, procfs_kb_or_sentinel(vmsize_bytes));
+  pos = append_str(buf, bufsz, pos, " kB\n");
+
   pos = append_str(buf, bufsz, pos, "VmSize:\t");
-  pos = append_int(buf, bufsz, pos, (long)(procfs_vmsize_bytes(p) / 1024));
+  pos = append_int(buf, bufsz, pos, procfs_kb_or_sentinel(vmsize_bytes));
+  pos = append_str(buf, bufsz, pos, " kB\n");
+
+  pos = append_str(buf, bufsz, pos, "VmRSS:\t");
+  pos = append_int(buf, bufsz, pos, procfs_kb_or_sentinel(procfs_vma_bytes(p, PROCFS_VMA_RSS)));
+  pos = append_str(buf, bufsz, pos, " kB\n");
+
+  pos = append_str(buf, bufsz, pos, "VmData:\t");
+  pos = append_int(buf, bufsz, pos, procfs_kb_or_sentinel(procfs_vma_bytes(p, PROCFS_VMA_DATA)));
+  pos = append_str(buf, bufsz, pos, " kB\n");
+
+  pos = append_str(buf, bufsz, pos, "VmStk:\t");
+  pos = append_int(buf, bufsz, pos, (long)(procfs_user_stack_bytes(p) / 1024));
+  pos = append_str(buf, bufsz, pos, " kB\n");
+
+  pos = append_str(buf, bufsz, pos, "VmExe:\t");
+  pos = append_int(buf, bufsz, pos, procfs_kb_or_sentinel(procfs_vma_bytes(p, PROCFS_VMA_EXEC)));
+  pos = append_str(buf, bufsz, pos, " kB\n");
+
+  pos = append_str(buf, bufsz, pos, "VmLib:\t0 kB\n");
+  pos = append_str(buf, bufsz, pos, "VmPTE:\t");
+  pos = append_int(buf, bufsz, pos, (long)(p->pagetable ? PAGE_SIZE / 1024 : 0));
+  pos = append_str(buf, bufsz, pos, " kB\n");
+  pos = append_str(buf, bufsz, pos, "VmSwap:\t0 kB\n");
+
+  pos = append_str(buf, bufsz, pos, "KStack:\t");
+  pos = append_int(buf, bufsz, pos, (long)(procfs_kstack_bytes(p) / 1024));
+  pos = append_str(buf, bufsz, pos, " kB\n");
+
+  pos = append_str(buf, bufsz, pos, "KernelStack:\t");
+  pos = append_int(buf, bufsz, pos, (long)(procfs_kstack_bytes(p) / 1024));
   pos = append_str(buf, bufsz, pos, " kB\n");
 
   pos = append_str(buf, bufsz, pos, "Threads:\t1\n");
@@ -685,8 +830,20 @@ static int procfs_render_meminfo(char *buf, int bufsz) {
 
   pos = append_str(buf, bufsz, pos, "Buffers:\t0 kB\n");
   pos = append_str(buf, bufsz, pos, "Cached:\t\t0 kB\n");
+  pos = append_str(buf, bufsz, pos, "KernelStack:\t");
+  pos = append_int(buf, bufsz, pos, procfs_kb_or_sentinel(procfs_total_kstack_bytes()));
+  pos = append_str(buf, bufsz, pos, " kB\n");
+  pos = append_str(buf, bufsz, pos, "PageTables:\t");
+  pos = append_int(buf, bufsz, pos, (long)(procfs_total_pagetable_bytes() / 1024));
+  pos = append_str(buf, bufsz, pos, " kB\n");
   pos = append_str(buf, bufsz, pos, "SwapTotal:\t0 kB\n");
   pos = append_str(buf, bufsz, pos, "SwapFree:\t0 kB\n");
+  pos = append_str(buf, bufsz, pos, "CommitLimit:\t");
+  pos = append_int(buf, bufsz, pos, total_kb);
+  pos = append_str(buf, bufsz, pos, " kB\n");
+  pos = append_str(buf, bufsz, pos, "Committed_AS:\t");
+  pos = append_int(buf, bufsz, pos, procfs_kb_or_sentinel(procfs_total_vmsize_bytes()));
+  pos = append_str(buf, bufsz, pos, " kB\n");
 
   return pos;
 }

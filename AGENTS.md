@@ -276,6 +276,29 @@ tmux -S /tmp/tmux-debug new-session -d -s qemu \
 ```
 - Use this only when you know the disk images already contain the binaries you want; otherwise rebuild first.
 
+### Subagent-Only QEMU Execution
+
+When using a delegated subagent for runtime validation, prefer a single-runner model:
+
+- Exactly one agent should run QEMU at a time (preferably the subagent).
+- The main agent should avoid launching QEMU/tmux while the subagent is active.
+- Use one shared tmux socket/session (`/tmp/tmux-debug`, session `qemu`) so ownership is explicit.
+
+Recommended workflow:
+
+1. Main agent prepares test plan and exact guest commands.
+2. Subagent runs build/boot/tests in tmux and captures output.
+3. Main agent only consumes output and applies code changes.
+
+Before starting a new guest run, clear stale sessions/locks:
+
+```bash
+tmux -S /tmp/tmux-debug kill-session -t qemu 2>/dev/null || true
+rm -f /tmp/tmux-debug 2>/dev/null || true
+```
+
+If `make qemu` reports `build/disk.img` (or `build/test-disk.img`) is locked, do not start a second instance. Stop the stale QEMU owner first, then rerun.
+
 ### Testing Notes
 
 Boot now includes optional regression testing — `/etc/rc` prints `SBUnix booting...`, then gives a 3-second Ctrl-C timeout before running `run-tests` automatically. Users can press Ctrl-C during the countdown to skip automatic tests and go directly to the interactive shell (using `sleep 1 || exit 0` for clean interruption handling).

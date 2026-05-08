@@ -59,6 +59,36 @@ static void fmt_mode(unsigned int mode, char *out) {
     out[10] = '\0';
 }
 
+static void print_long_path(const char *path, const char *name) {
+    struct stat st;
+    char modestr[12];
+    char szbuf[16];
+    char linkbuf[256];
+    int linklen = -1;
+
+    if (lstat(path, &st) < 0) {
+        printf("??????????   0        ?        %s\n", name);
+        return;
+    }
+
+    fmt_mode(st.st_mode, modestr);
+    fmt_size(st.st_size, szbuf, sizeof(szbuf));
+
+    if (S_ISLNK(st.st_mode)) {
+        linklen = readlink(path, linkbuf, sizeof(linkbuf) - 1);
+        if (linklen >= 0)
+            linkbuf[linklen] = '\0';
+    }
+
+    if (linklen >= 0) {
+        printf("%s %d %s %s -> %s\n",
+               modestr, (int)st.st_nlink, szbuf, name, linkbuf);
+    } else {
+        printf("%s %d %s %s\n",
+               modestr, (int)st.st_nlink, szbuf, name);
+    }
+}
+
 /* -----------------------------------------------------------------------
  * Single-entry display
  * ---------------------------------------------------------------------- */
@@ -76,25 +106,7 @@ static void print_entry(const char *dirpath, const char *name) {
         snprintf(full, sizeof(full), "%s/%s", dirpath, name);
     }
 
-    struct stat st;
-    if (stat(full, &st) < 0) {
-        /* fallback: no stat available */
-        printf("??????????   0        ?        %s\n", name);
-        return;
-    }
-
-    char modestr[12];
-    fmt_mode(st.st_mode, modestr);
-
-    char szbuf[16];
-    fmt_size(st.st_size, szbuf, sizeof(szbuf));
-
-    /* nlink as a narrow field */
-    printf("%s %d %s %s\n",
-           modestr,
-           (int)st.st_nlink,
-           szbuf,
-           name);
+    print_long_path(full, name);
 }
 
 /* -----------------------------------------------------------------------
@@ -110,13 +122,8 @@ static int ls_dir(const char *path) {
             /* extract basename */
             const char *slash = strrchr(path, '/');
             if (slash) name = slash + 1;
-            if (stat(path, &st) == 0) {
-                char modestr[12];
-                fmt_mode(st.st_mode, modestr);
-                char szbuf[16];
-                fmt_size(st.st_size, szbuf, sizeof(szbuf));
-                printf("%s %3d %s %s\n",
-                       modestr, (int)st.st_nlink, szbuf, name);
+            if (lstat(path, &st) == 0) {
+                print_long_path(path, name);
                 return 0;
             }
         }

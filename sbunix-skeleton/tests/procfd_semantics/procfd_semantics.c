@@ -295,6 +295,7 @@ static void test_common_proc_nodes(void) {
     "/proc/self/maps",
     "/proc/self/exe",
     "/proc/self/cwd",
+    "/proc/self/root",
     "/proc/meminfo",
     "/proc/mounts",
     "/proc/cpuinfo",
