@@ -639,6 +639,8 @@ long sys_fchownat_handler(struct trapframe *tf) {
         return (long)ops->chown(mnt->fs_data, relpath, (int)tf->a2,
                                 (int)tf->a3, flags);
     }
+    if ((int)tf->a2 != -1 || (int)tf->a3 != -1)
+        return (long)-EROFS;
     return (long)0;
 }
 

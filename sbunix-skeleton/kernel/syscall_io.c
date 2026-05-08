@@ -1637,16 +1637,14 @@ long sys_renameat2_handler(struct trapframe *tf) {
       if (rr < 0) return (long)rr; }
     { int rr = resolve_path_at(newdirfd, knew, new_resolved);
       if (rr < 0) return (long)rr; }
-    /* BF: renameat2 normally leaves source/destination basenames unresolved
-     * so renaming a symlink acts on the link itself.  A trailing slash on the
-     * source is different: POSIX pathname rules require resolving the final
-     * symlink and then requiring that the target is a directory. */
+    /* BF: renameat2 operates on final pathnames themselves.  Leave the
+     * source basename unresolved even with a trailing slash so a final
+     * symlink is rejected as ENOTDIR instead of renaming its target. */
+    { int sr = resolve_symlinks_in_path(old_resolved, KSYMLINK_MAX_HOPS, 0);
+      if (sr < 0) return (long)sr; }
     if (old_trailing) {
-        int sr = path_resolve_trailing_slash_dir_target(old_resolved, 0);
-        if (sr < 0) return (long)sr;
-    } else {
-        int sr = resolve_symlinks_in_path(old_resolved, KSYMLINK_MAX_HOPS, 0);
-        if (sr < 0) return (long)sr;
+        int tr = path_require_dir(old_resolved);
+        if (tr < 0) return (long)tr;
     }
     { int sr = resolve_symlinks_in_path(new_resolved, KSYMLINK_MAX_HOPS, 0);
       if (sr < 0) return (long)sr; }
@@ -1760,7 +1758,7 @@ long sys_readlinkat_handler(struct trapframe *tf) {
     int trailing_slash = path_has_trailing_slash(kpath);
 
     int bufsiz = (int)tf->a3;
-    if (bufsiz <= 0)
+    if (bufsiz < 0)
         return (long)-22;
 
     char resolved[KPATH_MAX];
@@ -1795,19 +1793,31 @@ long sys_readlinkat_handler(struct trapframe *tf) {
     }
 
     int maxread = bufsiz > EXT2_BLOCK_SIZE ? EXT2_BLOCK_SIZE : bufsiz;
-    char *kbuf = (char *)kmalloc((uint64_t)maxread);
+    uint64_t allocsz = maxread > 0 ? (uint64_t)maxread : 1;
+    char *kbuf = (char *)kmalloc(allocsz);
     if (!kbuf)
         return (long)-ENOMEM;
 
     int ret = ops->readlink(mnt->fs_data, relpath, kbuf, maxread);
+    if ((ret == -ENOENT || ret >= 0) && ops->stat) {
+        uint8_t st[128];
+        uint32_t mode;
+        int st_ret = ops->stat(mnt->fs_data, relpath, st);
+        if (st_ret == 0) {
+            memcpy(&mode, st + 16, 4);
+            if ((mode & 0xF000) != 0xA000)
+                ret = -EINVAL;
+        }
+    }
     if (ret < 0)
         goto out;
 
-    if (copyout(current_proc->pagetable, tf->a2, kbuf, (uint64_t)ret) < 0)
+    if (ret > 0 &&
+        copyout(current_proc->pagetable, tf->a2, kbuf, (uint64_t)ret) < 0)
         ret = -EFAULT;
 
 out:
-    kmfree(kbuf, (uint64_t)maxread);
+    kmfree(kbuf, allocsz);
     return (long)ret;
 }
 
@@ -1847,6 +1857,7 @@ long sys_symlinkat_handler(struct trapframe *tf) {
         int sr = path_resolve_trailing_slash_dir_target(resolved, 0);
         if (sr < 0)
             return (long)sr;
+        return (long)-ENOTDIR;
     } else {
         { int sr = resolve_symlinks_in_path(resolved, KSYMLINK_MAX_HOPS, 0);
           if (sr < 0) return (long)sr; }

@@ -789,6 +789,8 @@ static int ramfs_readlink(void *fs_data, const char *path, char *buf, int bufsiz
   if (!ino) return -2; /* -ENOENT */
   if (ino->type != RAMFS_SYMLINK) return -22; /* -EINVAL: not a symlink */
 
+  ino->atime_sec = timekeeping_now_seconds();
+
   int copylen = (int)ino->size;
   if (copylen > bufsiz)
     copylen = bufsiz;
