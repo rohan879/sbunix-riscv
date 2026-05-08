@@ -69,6 +69,13 @@ static void cleanup_all(void) {
     unlink("/mnt/sl_rp_dir/link");
     unlink("/mnt/sl_rp_dir/target");
     rmdir("/mnt/sl_rp_dir");
+    unlink("/mnt/sl_rp_file");
+    unlink("/mnt/sl_rp_rel_parent/up");
+    unlink("/mnt/sl_rp_rel_sib/file");
+    rmdir("/mnt/sl_rp_rel_parent");
+    rmdir("/mnt/sl_rp_rel_sib");
+    unlink("/mnt/sl_rp_loop_a");
+    unlink("/mnt/sl_rp_loop_b");
     unlink("/mnt/sl_unlink_link");
     unlink("/mnt/sl_unlink_target");
     unlink("/mnt/sl_dangle");
@@ -418,6 +425,82 @@ static void test_realpath_relative_symlink_parent(void) {
     unlink("/mnt/sl_rp_dir/link");
     unlink("/mnt/sl_rp_dir/target");
     rmdir("/mnt/sl_rp_dir");
+}
+
+/* -----------------------------------------------------------------------
+ * 10b. realpath_errno_edges -- missing paths and nondirectory prefixes fail
+ * ---------------------------------------------------------------------- */
+
+static void test_realpath_errno_edges(void) {
+    char resolved[256];
+    char *rp;
+
+    unlink("/mnt/sl_rp_file");
+
+    errno = 0;
+    rp = realpath("/mnt/sl_rp_missing", resolved);
+    CHECK("symlink: realpath_errno_edges missing returns NULL", rp == NULL);
+    CHECK("symlink: realpath_errno_edges missing errno ENOENT",
+          errno == ENOENT);
+
+    CHECK("symlink: realpath_errno_edges file setup",
+          write_file("/mnt/sl_rp_file", "x", 1) == 0);
+
+    errno = 0;
+    rp = realpath("/mnt/sl_rp_file/child", resolved);
+    CHECK("symlink: realpath_errno_edges nondir returns NULL", rp == NULL);
+    CHECK("symlink: realpath_errno_edges nondir errno ENOTDIR",
+          errno == ENOTDIR);
+
+    unlink("/mnt/sl_rp_file");
+}
+
+/* -----------------------------------------------------------------------
+ * 10c. realpath_complex_edges -- relative .. targets, loops, trailing slash
+ * ---------------------------------------------------------------------- */
+
+static void test_realpath_complex_edges(void) {
+    char resolved[256];
+    char *rp;
+
+    cleanup_all();
+
+    CHECK("symlink: realpath_complex_edges parent mkdir",
+          mkdir("/mnt/sl_rp_rel_parent", 0755) == 0);
+    CHECK("symlink: realpath_complex_edges sibling mkdir",
+          mkdir("/mnt/sl_rp_rel_sib", 0755) == 0);
+    CHECK("symlink: realpath_complex_edges sibling file",
+          write_file("/mnt/sl_rp_rel_sib/file", "z", 1) == 0);
+    CHECK("symlink: realpath_complex_edges relative dotdot link",
+          symlink("../sl_rp_rel_sib", "/mnt/sl_rp_rel_parent/up") == 0);
+
+    errno = 0;
+    rp = realpath("/mnt/sl_rp_rel_parent/up/file", resolved);
+    CHECK("symlink: realpath_complex_edges relative dotdot resolves",
+          rp == resolved && strcmp(resolved, "/mnt/sl_rp_rel_sib/file") == 0);
+
+    errno = 0;
+    rp = realpath("/mnt/sl_rp_rel_sib/file/", resolved);
+    CHECK("symlink: realpath_complex_edges trailing slash on file NULL",
+          rp == NULL);
+    CHECK("symlink: realpath_complex_edges trailing slash on file ENOTDIR",
+          errno == ENOTDIR);
+
+    CHECK("symlink: realpath_complex_edges loop setup",
+          symlink("/mnt/sl_rp_loop_b", "/mnt/sl_rp_loop_a") == 0 &&
+          symlink("/mnt/sl_rp_loop_a", "/mnt/sl_rp_loop_b") == 0);
+    errno = 0;
+    rp = realpath("/mnt/sl_rp_loop_a", resolved);
+    CHECK("symlink: realpath_complex_edges loop returns NULL", rp == NULL);
+    CHECK("symlink: realpath_complex_edges loop errno ELOOP",
+          errno == ELOOP);
+
+    unlink("/mnt/sl_rp_rel_parent/up");
+    unlink("/mnt/sl_rp_rel_sib/file");
+    rmdir("/mnt/sl_rp_rel_parent");
+    rmdir("/mnt/sl_rp_rel_sib");
+    unlink("/mnt/sl_rp_loop_a");
+    unlink("/mnt/sl_rp_loop_b");
 }
 
 /* -----------------------------------------------------------------------
@@ -817,6 +900,8 @@ int main(void) {
     test_lstat_no_follow();
     test_symlink_relative_target();
     test_realpath_relative_symlink_parent();
+    test_realpath_errno_edges();
+    test_realpath_complex_edges();
     test_symlink_unlink();
     test_symlink_dangling();
     test_symlink_dangling_create();

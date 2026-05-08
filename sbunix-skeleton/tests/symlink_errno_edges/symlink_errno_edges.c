@@ -49,6 +49,7 @@ static void cleanup(void) {
   unlink("/tmp/see_loop_b");
   unlink("/tmp/see_dang");
   unlink("/tmp/see_empty_target");
+  unlink("/tmp/see_trunc");
 }
 
 int main(void) {
@@ -56,6 +57,8 @@ int main(void) {
   char long_target[257];
   char long_linkpath[400];
   int fd;
+  int dirfd;
+  int filefd;
 
   printf("=== symlink_errno_edges ===\n");
   cleanup();
@@ -125,6 +128,39 @@ int main(void) {
   check("symlink_errno_edges: empty target readlink zero",
         readlink("/tmp/see_empty_target", buf, sizeof(buf)) == 0 &&
         buf[0] == 'Q');
+
+  check("symlink_errno_edges: truncation setup",
+        symlinkat("abcdef", AT_FDCWD, "/tmp/see_trunc") == 0);
+  memset(buf, 'Q', sizeof(buf));
+  check("symlink_errno_edges: readlink truncates without NUL",
+        readlink("/tmp/see_trunc", buf, 3) == 3 &&
+        memcmp(buf, "abc", 3) == 0 &&
+        buf[3] == 'Q');
+
+  dirfd = open("/tmp", O_RDONLY | O_DIRECTORY);
+  check("symlink_errno_edges: readlinkat dirfd open", dirfd >= 0);
+  if (dirfd >= 0) {
+    errno = 0;
+    expect_errno("symlink_errno_edges: readlinkat bad dirfd EBADF",
+                 readlinkat(99, "see_empty_target", buf, sizeof(buf)), EBADF);
+
+    memset(buf, 'Q', sizeof(buf));
+    check("symlink_errno_edges: readlinkat truncates without NUL",
+          readlinkat(dirfd, "see_trunc", buf, 4) == 4 &&
+          memcmp(buf, "abcd", 4) == 0 &&
+          buf[4] == 'Q');
+
+    filefd = open("/tmp/see_file", O_RDONLY);
+    check("symlink_errno_edges: readlinkat nondir fd open", filefd >= 0);
+    errno = 0;
+    expect_errno("symlink_errno_edges: readlinkat nondir dirfd ENOTDIR",
+                 readlinkat(filefd, "child", buf, sizeof(buf)), ENOTDIR);
+
+    if (filefd >= 0)
+      close(filefd);
+
+    close(dirfd);
+  }
 
   cleanup();
   printf("=== symlink_errno_edges: %d passed, %d failed ===\n",
