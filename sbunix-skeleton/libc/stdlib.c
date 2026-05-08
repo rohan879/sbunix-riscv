@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <limits.h>
+#include <sys/stat.h>
 
 /* -----------------------------------------------------------------------
  * String-to-number conversions
@@ -762,10 +763,16 @@ char *realpath(const char *path, char *resolved_path) {
         rlen += slen;
         result[rlen] = '\0';
 
-        /* Check if this path is a symlink */
-        char link_buf[PATH_MAX];
-        ssize_t llen = readlink(result, link_buf, sizeof(link_buf) - 1);
-        if (llen >= 0) {
+        /* Verify the component exists, then follow it only if it is a symlink. */
+        struct stat st;
+        if (lstat(result, &st) < 0)
+            REALPATH_FAIL(errno);
+
+        if (S_ISLNK(st.st_mode)) {
+            char link_buf[PATH_MAX];
+            ssize_t llen = readlink(result, link_buf, sizeof(link_buf) - 1);
+            if (llen < 0)
+                REALPATH_FAIL(errno);
             /* It is a symlink */
             if (++symlinks > 40) {
                 REALPATH_FAIL(ELOOP);
@@ -826,8 +833,17 @@ char *realpath(const char *path, char *resolved_path) {
             }
             strcpy(work, newwork);
             p = work;
+        } else {
+            const char *rest = p;
+            int had_trailing_slash = 0;
+            while (*rest == '/')
+            {
+                had_trailing_slash = 1;
+                rest++;
+            }
+            if ((*rest != '\0' || had_trailing_slash) && !S_ISDIR(st.st_mode))
+                REALPATH_FAIL(ENOTDIR);
         }
-        /* Not a symlink — continue with next component */
     }
 
     /* Remove trailing '/' unless the result is just "/" */

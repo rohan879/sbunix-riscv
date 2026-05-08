@@ -373,6 +373,49 @@ static void test_self_and_procfd_links(void) {
   unlink(path);
 }
 
+static void test_procfs_readlinkat_dirfd(void) {
+  char buf[64];
+  char small[2];
+  int dirfd;
+  int selfdirfd;
+  int n;
+
+  dirfd = open("/proc", O_RDONLY | O_DIRECTORY);
+  check("procfs_edges: proc readlinkat dirfd open", dirfd >= 0);
+  if (dirfd >= 0) {
+    errno = 0;
+    n = readlinkat(dirfd, "self", buf, sizeof(buf) - 1);
+    check("procfs_edges: proc readlinkat self returns data", n > 0);
+    if (n > 0) {
+      buf[n] = '\0';
+      check("procfs_edges: proc readlinkat self matches getpid",
+            simple_atoi(buf) == (int)getpid());
+    }
+
+    errno = 0;
+    n = readlinkat(dirfd, "meminfo", buf, sizeof(buf));
+    check("procfs_edges: proc readlinkat file EINVAL",
+          n == -1 && errno == EINVAL);
+
+    errno = 0;
+    n = readlinkat(dirfd, "no-such-entry", buf, sizeof(buf));
+    check("procfs_edges: proc readlinkat missing ENOENT",
+          n == -1 && errno == ENOENT);
+    close(dirfd);
+  }
+
+  selfdirfd = open("/proc/self", O_RDONLY | O_DIRECTORY);
+  check("procfs_edges: proc self dirfd open", selfdirfd >= 0);
+  if (selfdirfd >= 0) {
+    memset(small, 'X', sizeof(small));
+    n = readlinkat(selfdirfd, "root", small, 1);
+    check("procfs_edges: proc readlinkat root exact length", n == 1);
+    check("procfs_edges: proc readlinkat root no implicit NUL",
+          small[0] == '/' && small[1] == 'X');
+    close(selfdirfd);
+  }
+}
+
 int main(void) {
   printf("=== procfs_edges ===\n");
   test_stat_fstat_agreement();
@@ -381,6 +424,7 @@ int main(void) {
   test_regular_eof_reseek();
   test_tiny_getdents();
   test_self_and_procfd_links();
+  test_procfs_readlinkat_dirfd();
   printf("=== procfs_edges: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

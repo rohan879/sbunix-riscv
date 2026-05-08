@@ -1781,8 +1781,18 @@ long sys_readlinkat_handler(struct trapframe *tf) {
     const char *relpath;
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
-    if (!ops || !ops->readlink)
-        return (long)-22; /* EINVAL */
+    if (!ops)
+        return (long)-ENOENT;
+    if (!ops->readlink) {
+        if (ops->stat) {
+            uint8_t st[128];
+            int ret = ops->stat(mnt->fs_data, relpath, st);
+            if (ret == 0)
+                return (long)-EINVAL;
+            return (long)(int64_t)ret;
+        }
+        return (long)-ENOENT;
+    }
 
     int maxread = bufsiz > EXT2_BLOCK_SIZE ? EXT2_BLOCK_SIZE : bufsiz;
     char *kbuf = (char *)kmalloc((uint64_t)maxread);
@@ -1846,13 +1856,15 @@ long sys_symlinkat_handler(struct trapframe *tf) {
     struct mount *mnt = vfs_lookup_mount_entry(resolved, &relpath);
     struct vfs_ops *ops = mnt ? mnt->ops : NULL;
     int ret = -30; /* EROFS */
+    if (!ops)
+        return (long)-ENOENT;
     if (ops && ops->stat) {
         uint8_t st[128];
-        ret = ops->stat(mnt->fs_data, relpath, st);
-        if (ret == 0)
+        int sret = ops->stat(mnt->fs_data, relpath, st);
+        if (sret == 0)
             return (long)-EEXIST;
-        if (ret < 0 && ret != -ENOENT)
-            return (long)(int64_t)ret;
+        if (sret < 0 && sret != -ENOENT)
+            return (long)(int64_t)sret;
     }
 
     ktarget = (char *)kmalloc(KSYMLINK_MAX + 1);
