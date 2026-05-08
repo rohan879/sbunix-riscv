@@ -332,9 +332,13 @@ static uint64_t procfs_vma_bytes(struct proc *p, enum procfs_vma_kind kind) {
     bytes = vma->end - vma->start;
 
     if (kind == PROCFS_VMA_EXEC && (vma->prot & PROT_EXEC)) {
+      if (total > (uint64_t)-1 - bytes)
+        return (uint64_t)-1;
       total += bytes;
     } else if (kind == PROCFS_VMA_DATA && !(vma->flags & VMA_STACK) &&
                !(vma->prot & PROT_EXEC) && (vma->prot & PROT_WRITE)) {
+      if (total > (uint64_t)-1 - bytes)
+        return (uint64_t)-1;
       total += bytes;
     } else if (kind == PROCFS_VMA_RSS) {
       /* When reclaim metadata is disabled, resident_pages is not tracked. */
@@ -827,7 +831,7 @@ static int procfs_render_meminfo(char *buf, int bufsz) {
   pos = append_str(buf, bufsz, pos, "Buffers:\t0 kB\n");
   pos = append_str(buf, bufsz, pos, "Cached:\t\t0 kB\n");
   pos = append_str(buf, bufsz, pos, "KernelStack:\t");
-  pos = append_int(buf, bufsz, pos, (long)(procfs_total_kstack_bytes() / 1024));
+  pos = append_int(buf, bufsz, pos, procfs_kb_or_sentinel(procfs_total_kstack_bytes()));
   pos = append_str(buf, bufsz, pos, " kB\n");
   pos = append_str(buf, bufsz, pos, "PageTables:\t");
   pos = append_int(buf, bufsz, pos, (long)(procfs_total_pagetable_bytes() / 1024));
