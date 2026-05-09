@@ -78,10 +78,12 @@ SKIP_BOOT_TESTS ?= 0
 # BF: Test builds carry a /test disk, so keep bulky userland payloads there
 # instead of embedding every utility and TCC support archive in kernel tarfs.
 SLIM_TEST_ROOTFS ?= $(if $(BUILD_TESTS),1,0)
-STAGE_THIRDPARTY_LOCAL ?= 0
 # BF: Required third-party mode turns missing vendored workload payloads into
 # build failures instead of allowing guest tests to skip the coverage silently.
 REQUIRE_THIRDPARTY_PAYLOADS ?= 0
+THIRDPARTY_SRC_DIR ?= build/thirdparty-src
+THIRDPARTY_PAYLOAD_DIR ?= build/thirdparty-payload
+THIRDPARTY_PAYLOAD_MARKER := $(THIRDPARTY_PAYLOAD_DIR)/.complete
 
 -include Makefile.local
 
@@ -179,17 +181,18 @@ endif
 CORE_TEST_TARGETS := $(patsubst tests/%,build/testfs-core/bin/%,$(TEST_SRC_DIRS))
 
 ROOTFS_STAGE_INPUTS := $(shell find rootfs -mindepth 1 \( -type f -o -type d \) -print 2>/dev/null)
-THIRDPARTY_LOCAL_STAGE_INPUTS := $(shell find thirdparty-local -mindepth 1 \( -type f -o -type d \) -print 2>/dev/null)
 THIRDPARTY_MICROPYTHON_BIN := thirdparty/python/ports/unix/build-minimal/micropython
-ifeq ($(STAGE_THIRDPARTY_LOCAL),1)
-THIRDPARTY_STAGE_INPUTS := $(THIRDPARTY_LOCAL_STAGE_INPUTS)
+ifeq ($(REQUIRE_THIRDPARTY_PAYLOADS),1)
+THIRDPARTY_STAGE_INPUTS := $(THIRDPARTY_PAYLOAD_MARKER)
 else
 THIRDPARTY_STAGE_INPUTS :=
 endif
+ifneq ($(REQUIRE_THIRDPARTY_PAYLOADS),1)
 ifneq ($(wildcard $(THIRDPARTY_MICROPYTHON_BIN)),)
 THIRDPARTY_STAGE_INPUTS += $(THIRDPARTY_MICROPYTHON_BIN)
 endif
-ROOTFS_BUILD_MODE := BUILD_TESTS=$(if $(BUILD_TESTS),1,0) RUN_CI_TESTS=$(RUN_CI_TESTS) SKIP_BOOT_PRIORITY_TESTS=$(SKIP_BOOT_PRIORITY_TESTS) SKIP_BOOT_TESTS=$(SKIP_BOOT_TESTS) STAGE_THIRDPARTY_LOCAL=$(STAGE_THIRDPARTY_LOCAL) REQUIRE_THIRDPARTY_PAYLOADS=$(REQUIRE_THIRDPARTY_PAYLOADS)
+endif
+ROOTFS_BUILD_MODE := BUILD_TESTS=$(if $(BUILD_TESTS),1,0) RUN_CI_TESTS=$(RUN_CI_TESTS) SKIP_BOOT_PRIORITY_TESTS=$(SKIP_BOOT_PRIORITY_TESTS) SKIP_BOOT_TESTS=$(SKIP_BOOT_TESTS) REQUIRE_THIRDPARTY_PAYLOADS=$(REQUIRE_THIRDPARTY_PAYLOADS) THIRDPARTY_PAYLOAD_DIR=$(THIRDPARTY_PAYLOAD_DIR)
 build/testfs-core/.dirs:
 	@mkdir -p build/testfs-core/bin
 	@touch $@
@@ -256,7 +259,7 @@ build/tarfs-rootfs/.prepared: build/rootfs/.prepared tools/slim-test-rootfs.sh t
 	rm -rf build/tarfs-rootfs
 	mkdir -p build/tarfs-rootfs
 	cp -a build/rootfs/. build/tarfs-rootfs/
-	STAGE_THIRDPARTY_LOCAL=$(STAGE_THIRDPARTY_LOCAL) REQUIRE_THIRDPARTY_PAYLOADS=$(REQUIRE_THIRDPARTY_PAYLOADS) tools/stage-thirdparty.sh build/tarfs-rootfs rootfs
+	THIRDPARTY_PAYLOAD_DIR=$(THIRDPARTY_PAYLOAD_DIR) REQUIRE_THIRDPARTY_PAYLOADS=$(REQUIRE_THIRDPARTY_PAYLOADS) tools/stage-thirdparty.sh build/tarfs-rootfs rootfs
 ifeq ($(SLIM_TEST_ROOTFS),1)
 	tools/slim-test-rootfs.sh build/tarfs-rootfs build/testfs build/testfs-core
 endif
@@ -331,12 +334,16 @@ build/tarfs.o: build/tarfs-rootfs/.prepared # MODIFIED: originally just : $(USER
 build/kernel.elf: $(KERN_ALL) build/tarfs.o
 	$(LD) -T kernel/kernel.ld $(KERN_ALL) build/tarfs.o -o $@
 
-thirdparty: build/libc/crt.S.o build/libc.a
-	$(MAKE) build/rootfs/.prepared
-	$(MAKE) -C thirdparty install
-	STAGE_THIRDPARTY_LOCAL=$(STAGE_THIRDPARTY_LOCAL) REQUIRE_THIRDPARTY_PAYLOADS=$(REQUIRE_THIRDPARTY_PAYLOADS) tools/stage-thirdparty.sh build/rootfs rootfs
+$(THIRDPARTY_PAYLOAD_MARKER): build/libc/crt.S.o build/libc.a tools/build-thirdparty-ci.sh
+	THIRDPARTY_SRC_DIR=$(THIRDPARTY_SRC_DIR) THIRDPARTY_PAYLOAD_DIR=$(THIRDPARTY_PAYLOAD_DIR) MAKE_JOBS=$(SUBMAKE_JOBS) tools/build-thirdparty-ci.sh
+
+thirdparty-ci: $(THIRDPARTY_PAYLOAD_MARKER)
+
+thirdparty: thirdparty-ci
+	$(MAKE) THIRDPARTY_PAYLOAD_DIR=$(THIRDPARTY_PAYLOAD_DIR) REQUIRE_THIRDPARTY_PAYLOADS=1 build/rootfs/.prepared
+	THIRDPARTY_PAYLOAD_DIR=$(THIRDPARTY_PAYLOAD_DIR) REQUIRE_THIRDPARTY_PAYLOADS=1 tools/stage-thirdparty.sh build/rootfs rootfs
 	@rm -f build/tarfs-rootfs/.prepared build/tarfs.o
-	$(MAKE) build/kernel.elf
+	$(MAKE) THIRDPARTY_PAYLOAD_DIR=$(THIRDPARTY_PAYLOAD_DIR) REQUIRE_THIRDPARTY_PAYLOADS=1 build/kernel.elf
 
 build/tools/mkfs: tools/mkfs.c
 	@mkdir -p $(@D)
@@ -449,4 +456,4 @@ submit:
 	echo "Submitted to $(SUBMIT_DIR)/sbunix"
 
 .PRECIOUS: build/%.S.o build/%.c.o
-.PHONY: all qemu clean thirdparty submit test # MODIFIED: added test
+.PHONY: all qemu clean thirdparty thirdparty-ci submit test # MODIFIED: added test

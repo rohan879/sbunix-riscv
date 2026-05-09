@@ -11,13 +11,27 @@ mode=${2:-rootfs}
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 thirdparty_dir=$repo_root/thirdparty
-thirdparty_local_dir=$repo_root/thirdparty-local
+thirdparty_payload_dir=${THIRDPARTY_PAYLOAD_DIR:-}
 payload_dir=$thirdparty_dir
-stage_thirdparty_local=${STAGE_THIRDPARTY_LOCAL:-0}
 require_thirdparty_payloads=${REQUIRE_THIRDPARTY_PAYLOADS:-0}
 
-if [ "$stage_thirdparty_local" = "1" ] && [ -d "$thirdparty_local_dir" ]; then
-  payload_dir=$thirdparty_local_dir
+if [ -n "$thirdparty_payload_dir" ]; then
+  case $thirdparty_payload_dir in
+    /*) ;;
+    *) thirdparty_payload_dir=$repo_root/$thirdparty_payload_dir ;;
+  esac
+fi
+
+if [ "$require_thirdparty_payloads" = "1" ]; then
+  # BF: Required CI staging must consume the disposable payload built for
+  # this checkout, not stale vendored or developer-local fallback trees.
+  if [ -z "$thirdparty_payload_dir" ]; then
+    echo "stage-thirdparty: THIRDPARTY_PAYLOAD_DIR is required in required mode" >&2
+    exit 1
+  fi
+  payload_dir=$thirdparty_payload_dir
+elif [ -n "$thirdparty_payload_dir" ] && [ -d "$thirdparty_payload_dir" ]; then
+  payload_dir=$thirdparty_payload_dir
 fi
 
 missing_payload=0
@@ -54,10 +68,8 @@ require_staged_exec() {
 if [ "$require_thirdparty_payloads" = "1" ]; then
   # BF: Validate the selected payload tree before staging so required
   # third-party coverage fails at build time rather than degrading to skips.
-  if [ ! -f "$payload_dir/bin/micropython" ] &&
-     [ ! -f "$thirdparty_dir/python/ports/unix/build-minimal/micropython" ]; then
-    mark_missing_payload "$payload_dir/bin/micropython"
-  fi
+  require_input_file "$payload_dir/.complete"
+  require_input_file "$payload_dir/bin/micropython"
   require_input_file "$payload_dir/bin/tcc"
   require_input_file "$payload_dir/bin/pdpmake"
   require_input_file "$payload_dir/bin/busybox"
@@ -113,7 +125,8 @@ copy_micropython_payload() {
   local src=""
   if [ -f "$payload_dir/bin/micropython" ]; then
     src="$payload_dir/bin/micropython"
-  elif [ -f "$thirdparty_dir/python/ports/unix/build-minimal/micropython" ]; then
+  elif [ "$require_thirdparty_payloads" != "1" ] &&
+       [ -f "$thirdparty_dir/python/ports/unix/build-minimal/micropython" ]; then
     # ENH: Let a source-built MicroPython survive root build cleanups by
     # staging the binary from the thirdparty source tree into each image.
     src="$thirdparty_dir/python/ports/unix/build-minimal/micropython"
@@ -124,7 +137,11 @@ copy_micropython_payload() {
     install -D -m 0755 "$src" "$dest_root/bin/python"
   fi
 
-  if [ -d "$thirdparty_dir/python-examples" ]; then
+  if [ -d "$payload_dir/python-examples" ]; then
+    mkdir -p "$dest_root/home"
+    cp -a "$payload_dir/python-examples"/. "$dest_root/home"/
+  elif [ "$require_thirdparty_payloads" != "1" ] &&
+       [ -d "$thirdparty_dir/python-examples" ]; then
     mkdir -p "$dest_root/home"
     cp -a "$thirdparty_dir/python-examples"/. "$dest_root/home"/
   fi
