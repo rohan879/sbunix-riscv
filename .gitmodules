@@ -7,3 +7,9 @@
 [submodule "sbunix-skeleton/thirdparty/python"]
 	path = sbunix-skeleton/thirdparty/python
 	url = https://github.com/micropython/micropython
+[submodule "sbunix-skeleton/thirdparty/make"]
+	path = sbunix-skeleton/thirdparty/make
+	url = https://github.com/rmyorston/pdpmake
+[submodule "sbunix-skeleton/thirdparty/tcc"]
+	path = sbunix-skeleton/thirdparty/tcc
+	url = https://github.com/mirror/tinycc
