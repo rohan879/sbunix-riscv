@@ -13,3 +13,6 @@
 [submodule "sbunix-skeleton/thirdparty/tcc"]
 	path = sbunix-skeleton/thirdparty/tcc
 	url = https://github.com/mirror/tinycc
+[submodule "sbunix-skeleton/thirdparty/busybox"]
+	path = sbunix-skeleton/thirdparty/busybox
+	url = https://git.busybox.net/busybox
