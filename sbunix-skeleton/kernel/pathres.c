@@ -355,6 +355,15 @@ static int follow_symlinks_budget(char *resolved, int *remaining, int bufsiz,
             kmfree(target, KSYMLINK_MAX + 1);
             return 0;
         }
+        if (ret == -ENOENT || ret >= 0) {
+            uint32_t mode;
+            int st_ret = path_stat_mode(resolved, &mode);
+            if (st_ret == 0 && (mode & 0xF000) != 0xA000) {
+                kmfree(new_resolved, KPATH_MAX);
+                kmfree(target, KSYMLINK_MAX + 1);
+                return 0;
+            }
+        }
         if (ret < 0) {
             kmfree(new_resolved, KPATH_MAX);
             kmfree(target, KSYMLINK_MAX + 1);

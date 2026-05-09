@@ -15,6 +15,7 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <dirent.h>
 
 static int g_pass = 0, g_fail = 0;
@@ -93,12 +94,22 @@ static void cleanup_all(void) {
     unlink("/mnt/sl_long_target_link");
     unlink("/tmp/sl_ramfs_long_link");
     unlink("/mnt/sl_empty_target_link");
+    unlink("/mnt/sl_zero_target_link");
+    unlink("/mnt/sl_zero_target_file");
+    unlink("/mnt/sl_symlink_trailing_link");
+    rmdir("/mnt/sl_symlink_trailing_dir");
     unlink("/mnt/sl_nofollow_link");
     unlink("/mnt/sl_nofollow_target");
     unlink("/mnt/sl_overlong_link");
     unlink("/tmp/sl_linkat_hard");
     unlink("/tmp/sl_linkat_sym");
     unlink("/tmp/sl_linkat_target");
+    unlink("/mnt/sl_rename_src_link");
+    rmdir("/mnt/sl_rename_src_target");
+    rmdir("/mnt/sl_rename_src_new");
+    unlink("/mnt/sl_rename_dst_file");
+    unlink("/mnt/sl_rename_dst_link");
+    rmdir("/mnt/sl_rename_dst_target");
     unlink("/tmp/sl_nl_devlink");
     unlink("/tmp/sl_nl_binlink");
     unlink("/tmp/sl_nl_syslink");
@@ -299,6 +310,11 @@ static void test_readlink_nonlink_variants(void) {
 
     CHECK("symlink: readlink_nonlink_variants dev parent symlink setup",
           symlink("/dev", "/tmp/sl_nl_devlink") == 0);
+
+    errno = 0;
+    CHECK("symlink: readlink_nonlink_variants dev file EINVAL",
+          readlink("/dev/null", buf, sizeof(buf)) == -1 &&
+          errno == EINVAL);
 
     errno = 0;
     CHECK("symlink: readlink_nonlink_variants dev file via parent symlink EINVAL",
@@ -1016,6 +1032,54 @@ static void test_symlink_empty_paths(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * symlink_posix_spec_edges -- Issue 8 edge cases for symlink/readlink/lchown
+ * ---------------------------------------------------------------------- */
+
+static void test_symlink_posix_spec_edges(void) {
+    char b = 'x';
+    struct stat st;
+
+    unlink("/mnt/sl_zero_target_link");
+    unlink("/mnt/sl_zero_target_file");
+    CHECK("symlink: posix_spec_edges zero target setup",
+          write_file("/mnt/sl_zero_target_file", "z", 1) == 0);
+    CHECK("symlink: posix_spec_edges zero link setup",
+          symlink("/mnt/sl_zero_target_file",
+                  "/mnt/sl_zero_target_link") == 0);
+
+    errno = 0;
+    CHECK("symlink: posix_spec_edges readlink zero buffer succeeds",
+          readlink("/mnt/sl_zero_target_link", &b, 0) == 0 &&
+          errno == 0 && b == 'x');
+
+    errno = 0;
+    CHECK("symlink: posix_spec_edges readlink zero nonlink EINVAL",
+          readlink("/mnt/sl_zero_target_file", &b, 0) == -1 &&
+          errno == EINVAL && b == 'x');
+
+    unlink("/mnt/sl_symlink_trailing_link");
+    rmdir("/mnt/sl_symlink_trailing_dir");
+    CHECK("symlink: posix_spec_edges trailing dir setup",
+          mkdir("/mnt/sl_symlink_trailing_dir", 0755) == 0);
+    errno = 0;
+    CHECK("symlink: posix_spec_edges symlink trailing slash ENOTDIR",
+          symlink("target", "/mnt/sl_symlink_trailing_dir/") == -1 &&
+          errno == ENOTDIR);
+    CHECK("symlink: posix_spec_edges trailing dir preserved",
+          stat("/mnt/sl_symlink_trailing_dir", &st) == 0 &&
+          S_ISDIR(st.st_mode));
+
+    errno = 0;
+    CHECK("symlink: posix_spec_edges lchown read-only EROFS",
+          lchown("/bin/sh", 1, (gid_t)-1) == -1 && errno == EROFS);
+
+    unlink("/mnt/sl_zero_target_link");
+    unlink("/mnt/sl_zero_target_file");
+    unlink("/mnt/sl_symlink_trailing_link");
+    rmdir("/mnt/sl_symlink_trailing_dir");
+}
+
+/* -----------------------------------------------------------------------
  * 18. symlink_nofollow_open -- O_NOFOLLOW rejects final symlink
  * ---------------------------------------------------------------------- */
 
@@ -1136,6 +1200,64 @@ static void test_symlink_dirent_metadata(void) {
 }
 
 /* -----------------------------------------------------------------------
+ * 22. symlink_rename_trailing -- rename rejects final symlink plus slash
+ * ---------------------------------------------------------------------- */
+
+static void test_rename_trailing_symlink(void) {
+    struct stat st;
+
+    unlink("/mnt/sl_rename_src_link");
+    rmdir("/mnt/sl_rename_src_target");
+    rmdir("/mnt/sl_rename_src_new");
+    unlink("/mnt/sl_rename_dst_file");
+    unlink("/mnt/sl_rename_dst_link");
+    rmdir("/mnt/sl_rename_dst_target");
+
+    CHECK("symlink: rename_trailing source dir setup",
+          mkdir("/mnt/sl_rename_src_target", 0755) == 0);
+    CHECK("symlink: rename_trailing source link setup",
+          symlink("/mnt/sl_rename_src_target",
+                  "/mnt/sl_rename_src_link") == 0);
+
+    errno = 0;
+    int r = rename("/mnt/sl_rename_src_link/", "/mnt/sl_rename_src_new");
+    CHECK("symlink: rename_trailing source link slash ENOTDIR",
+          r == -1 && errno == ENOTDIR);
+    CHECK("symlink: rename_trailing source target preserved",
+          stat("/mnt/sl_rename_src_target", &st) == 0 &&
+          S_ISDIR(st.st_mode));
+    CHECK("symlink: rename_trailing source link preserved",
+          lstat("/mnt/sl_rename_src_link", &st) == 0 &&
+          S_ISLNK(st.st_mode));
+
+    CHECK("symlink: rename_trailing destination file setup",
+          write_file("/mnt/sl_rename_dst_file", "r", 1) == 0);
+    CHECK("symlink: rename_trailing destination dir setup",
+          mkdir("/mnt/sl_rename_dst_target", 0755) == 0);
+    CHECK("symlink: rename_trailing destination link setup",
+          symlink("/mnt/sl_rename_dst_target",
+                  "/mnt/sl_rename_dst_link") == 0);
+
+    errno = 0;
+    r = rename("/mnt/sl_rename_dst_file", "/mnt/sl_rename_dst_link/");
+    CHECK("symlink: rename_trailing destination link slash ENOTDIR",
+          r == -1 && errno == ENOTDIR);
+    CHECK("symlink: rename_trailing source file preserved",
+          stat("/mnt/sl_rename_dst_file", &st) == 0 &&
+          S_ISREG(st.st_mode));
+    CHECK("symlink: rename_trailing destination link preserved",
+          lstat("/mnt/sl_rename_dst_link", &st) == 0 &&
+          S_ISLNK(st.st_mode));
+
+    unlink("/mnt/sl_rename_src_link");
+    rmdir("/mnt/sl_rename_src_target");
+    rmdir("/mnt/sl_rename_src_new");
+    unlink("/mnt/sl_rename_dst_file");
+    unlink("/mnt/sl_rename_dst_link");
+    rmdir("/mnt/sl_rename_dst_target");
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 
@@ -1167,10 +1289,12 @@ int main(void) {
     test_symlink_long_target();
     test_symlink_ramfs_max_target();
     test_symlink_empty_paths();
+    test_symlink_posix_spec_edges();
     test_symlink_nofollow_open();
     test_symlink_overlong_target();
     test_linkat_symlink_follow();
     test_symlink_dirent_metadata();
+    test_rename_trailing_symlink();
 
     printf("=== symlinktest: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
