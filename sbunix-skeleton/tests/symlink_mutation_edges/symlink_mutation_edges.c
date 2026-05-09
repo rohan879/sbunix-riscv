@@ -223,8 +223,8 @@ static void test_trailing_slash_directory_target(void) {
                mknodat(AT_FDCWD, "/tmp/sme_dirlink/",
                        S_IFCHR | 0600, 0), EEXIST);
   errno = 0;
-  expect_errno("symlink_mutation_edges: symlinkat existing dir link EEXIST",
-               symlinkat("x", AT_FDCWD, "/tmp/sme_dirlink/"), EEXIST);
+  expect_errno("symlink_mutation_edges: symlinkat slash dir link ENOTDIR",
+               symlinkat("x", AT_FDCWD, "/tmp/sme_dirlink/"), ENOTDIR);
 
   unlink("/tmp/sme_filelink");
   unlink("/tmp/sme_file");
@@ -314,18 +314,18 @@ static void test_rename_source_trailing_slash(void) {
         write_file("/tmp/sme_rename_dir/child", "d") == 0);
   check("symlink_mutation_edges: rename source dir link",
         symlink("/tmp/sme_rename_dir", "/tmp/sme_rename_dirlink") == 0);
-  check("symlink_mutation_edges: rename source slash follows dir",
-        renameat(AT_FDCWD, "/tmp/sme_rename_dirlink/", AT_FDCWD,
-                 "/tmp/sme_rename_moved") == 0);
-  check("symlink_mutation_edges: rename moved target directory",
-        read_file("/tmp/sme_rename_moved/child", buf, sizeof(buf)) == 1 &&
-        strcmp(buf, "d") == 0);
+  expect_errno("symlink_mutation_edges: rename source slash dir link ENOTDIR",
+               renameat(AT_FDCWD, "/tmp/sme_rename_dirlink/", AT_FDCWD,
+                        "/tmp/sme_rename_moved"), ENOTDIR);
   errno = 0;
   check("symlink_mutation_edges: rename source link preserved",
         lstat("/tmp/sme_rename_dirlink", &st) == 0 && S_ISLNK(st.st_mode));
+  check("symlink_mutation_edges: rename target directory preserved",
+        read_file("/tmp/sme_rename_dir/child", buf, sizeof(buf)) == 1 &&
+        strcmp(buf, "d") == 0);
   errno = 0;
-  expect_errno("symlink_mutation_edges: rename old target gone",
-               stat("/tmp/sme_rename_dir", &st), ENOENT);
+  expect_errno("symlink_mutation_edges: rename moved path absent",
+               stat("/tmp/sme_rename_moved", &st), ENOENT);
 
   check("symlink_mutation_edges: rename source file setup",
         write_file("/tmp/sme_rename_file", "f") == 0);
@@ -358,8 +358,8 @@ static void test_rename_source_trailing_slash(void) {
         lstat("/tmp/sme_rename_destlink", &st) == 0 && S_ISLNK(st.st_mode));
 
   unlink("/tmp/sme_rename_dirlink");
-  unlink("/tmp/sme_rename_moved/child");
-  rmdir("/tmp/sme_rename_moved");
+  unlink("/tmp/sme_rename_dir/child");
+  rmdir("/tmp/sme_rename_dir");
   unlink("/tmp/sme_rename_filelink");
   unlink("/tmp/sme_rename_file");
   unlink("/tmp/sme_rename_file_moved");
