@@ -1,6 +1,7 @@
 #include "sbush.h"
 #include <stdlib.h>
 #include <fcntl.h>
+#include <errno.h>
 
 int last_exit_status = 0;
 pid_t last_bg_pid = 0;
@@ -270,7 +271,7 @@ int execute_pipeline(struct pipeline *pl) {
                 jobcmd[jlen++] = *a++;
         }
         jobcmd[jlen] = '\0';
-        int jid = job_add(last_bg_pid, jobcmd);
+        int jid = job_add(pgid, pids, pl->ncmds, jobcmd);
         printf("[%d] %d\n", jid, (int)last_bg_pid);
         if (prev_fd >= 0) close(prev_fd);
         sigprocmask(SIG_SETMASK, &saved_mask, NULL);
@@ -280,42 +281,54 @@ int execute_pipeline(struct pipeline *pl) {
     /* Foreground pipeline: give terminal to the pipeline process group */
     tcsetpgrp(STDIN_FILENO, pgid);
 
-    /* Track foreground PID for signal forwarding */
+    /* Track foreground process group for signal forwarding */
     fg_pid = pgid;
 
     /* wait for all processes; return exit status of last */
     int last_status = 0;
+    int stopped_job_added = 0;
     for (int i = 0; i < pl->ncmds; i++) {
         int status = 0;
-        waitpid(pids[i], &status, WUNTRACED);
+        pid_t w;
+        do {
+            w = waitpid(pids[i], &status, WUNTRACED);
+        } while (w < 0 && errno == EINTR);
+        if (w < 0)
+            continue;
         if (WIFSTOPPED(status)) {
-            /* Child was stopped (e.g. by SIGTSTP / Ctrl-Z).
-             * Add it to the job table as stopped. */
-            char jobcmd[128] = "";
-            int jlen = 0;
-            for (int j = 0; j < pl->cmds[i].argc && jlen < 100; j++) {
-                if (j > 0) jobcmd[jlen++] = ' ';
-                const char *a = pl->cmds[i].argv[j];
-                while (*a && jlen < 126)
-                    jobcmd[jlen++] = *a++;
+            if (!stopped_job_added) {
+                /* BF: Store the whole foreground process group so fg/bg
+                 * resume the job that Ctrl-Z stopped, not a stale child PID. */
+                char jobcmd[128] = "";
+                int jlen = 0;
+                for (int j = 0; j < pl->cmds[0].argc && jlen < 100; j++) {
+                    if (j > 0) jobcmd[jlen++] = ' ';
+                    const char *a = pl->cmds[0].argv[j];
+                    while (*a && jlen < 126)
+                        jobcmd[jlen++] = *a++;
+                }
+                jobcmd[jlen] = '\0';
+                struct job *existing = job_find_pgid(pgid);
+                if (existing) {
+                    existing->state = JOB_STOPPED;
+                } else {
+                    job_add(pgid, pids, pl->ncmds, jobcmd);
+                    job_set_state(pgid, JOB_STOPPED);
+                }
+                struct job *sj = job_find_pgid(pgid);
+                if (sj)
+                    printf("[%d] Stopped\t%s\n", sj->id, sj->cmd);
+                stopped_job_added = 1;
             }
-            jobcmd[jlen] = '\0';
-            /* Check if already in job table (e.g. from SIGCHLD handler) */
-            struct job *existing = job_find_pid(pids[i]);
-            if (existing) {
-                existing->state = JOB_STOPPED;
-            } else {
-                job_add(pids[i], jobcmd);
-                job_set_state(pids[i], JOB_STOPPED);
-            }
-            /* Find the job to print notification */
-            struct job *sj = job_find_pid(pids[i]);
-            if (sj)
-                printf("[%d] Stopped\t%s\n", sj->id, sj->cmd);
             if (i == pl->ncmds - 1)
                 last_status = 128 + WSTOPSIG(status);
         } else if (i == pl->ncmds - 1) {
-            last_status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+            if (WIFEXITED(status))
+                last_status = WEXITSTATUS(status);
+            else if (WIFSIGNALED(status))
+                last_status = 128 + WTERMSIG(status);
+            else
+                last_status = 1;
         }
     }
 

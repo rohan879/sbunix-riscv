@@ -7,16 +7,23 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <sys/wait.h>
 
 /* Wait macros not provided by syscall.h but needed for job control */
 #ifndef WUNTRACED
 #define WUNTRACED  2
+#endif
+#ifndef WCONTINUED
+#define WCONTINUED 8
 #endif
 #ifndef WIFSTOPPED
 #define WIFSTOPPED(s)   (((s) & 0xff) == 0x7f)
 #endif
 #ifndef WSTOPSIG
 #define WSTOPSIG(s)     (((s) >> 8) & 0xff)
+#endif
+#ifndef WIFCONTINUED
+#define WIFCONTINUED(s) ((s) == 0xffff)
 #endif
 
 #define MAX_LINE  1024
@@ -63,20 +70,26 @@ enum job_state { JOB_RUNNING, JOB_STOPPED, JOB_DONE };
 
 struct job {
     int            id;       /* job number [1..N] */
-    pid_t          pid;      /* lead process PID */
+    pid_t          pgid;     /* process group controlled by this job */
+    pid_t          pids[MAX_PIPES];
+    int            npids;
     enum job_state state;
     char           cmd[128]; /* command string for display */
 };
 
 /* jobs.c */
-int         job_add(pid_t pid, const char *cmd);
-void        job_remove(pid_t pid);
-void        job_set_state(pid_t pid, enum job_state state);
+int         job_add(pid_t pgid, const pid_t *pids, int npids, const char *cmd);
+void        job_remove(pid_t pgid);
+void        job_set_state(pid_t pgid, enum job_state state);
 struct job *job_find(int id);
+struct job *job_find_pgid(pid_t pgid);
 struct job *job_find_pid(pid_t pid);
 void        job_list(void);
 void        job_reap(void);
 struct job *job_last(void);
+struct job *job_last_stopped(void);
+void        job_mark_status(pid_t pid, int status, int notify_done);
+void        job_sync(int notify_done);
 
 /* is_name_char: check if char is valid in a variable/function name */
 static inline int is_name_char(char c) {

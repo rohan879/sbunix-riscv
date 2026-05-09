@@ -1,6 +1,7 @@
 #include <tty.h>
 #include <uart.h>
 #include <proc.h>
+#include <trap_internal.h>
 #include <string.h>
 #include <errno.h>
 
@@ -118,10 +119,9 @@ static void tty_signal_fg(int sig) {
         /* If a foreground group is set, only signal that group */
         if (target_pgid > 0 && p->pgid != target_pgid)
             continue;
-        /* BF: Capture sender metadata for SA_SIGINFO delivery */
-        sig_set_pending(p, sig, 0, 0, 0);
-        if (p->state == SLEEPING)
-            p->state = RUNNABLE;
+        /* BF: Use the normal signal-delivery path so Ctrl-Z immediately
+         * records a job-control stop instead of waking read() to return EINTR. */
+        kill_deliver(p, sig);
     }
 }
 

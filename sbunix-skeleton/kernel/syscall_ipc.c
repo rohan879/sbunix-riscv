@@ -198,7 +198,8 @@ long sys_futex_handler(struct trapframe *tf) {
         int woken = 0;
         uint32_t max_wake = val;
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->state == SLEEPING && p->futex_addr == uaddr) {
+            if (p->state == SLEEPING && proc_event_wake_allowed(p) &&
+                p->futex_addr == uaddr) {
                 p->state = RUNNABLE;
                 p->futex_addr = 0;
                 woken++;

@@ -301,7 +301,8 @@ void uart_wakeup(void) {
   for (p = proc; p < &proc[NPROC]; p++) {
     /* BF: Skip wait4 sleepers — UART input is irrelevant for processes
      * blocked in waitpid; waking them causes spurious wakeups. */
-    if (p->state == SLEEPING && p->waiting_for_uart == PROC_WAIT_UART && !p->waiting_for_child) {
+    if (p->state == SLEEPING && proc_event_wake_allowed(p) &&
+        p->waiting_for_uart == PROC_WAIT_UART && !p->waiting_for_child) {
       p->waiting_for_uart = PROC_WAIT_NONE;
       p->state = RUNNABLE;
     }

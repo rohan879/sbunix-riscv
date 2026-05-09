@@ -269,7 +269,8 @@ void release_vfork_parent(struct proc *child) {
      * exits cannot spuriously release a parent that is blocked on another pid. */
     if (child->parent->waiting_for_vfork == child->pid) {
         child->parent->waiting_for_vfork = 0;
-        if (child->parent->state == SLEEPING)
+        if (child->parent->state == SLEEPING &&
+            proc_event_wake_allowed(child->parent))
             child->parent->state = RUNNABLE;
     }
 }
@@ -284,7 +285,8 @@ static struct proc *find_initproc(void) {
 
 static void wake_exit_waiters(struct proc *exiting) {
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-        if (p->state == SLEEPING && p != exiting &&
+        if (p->state == SLEEPING && proc_event_wake_allowed(p) &&
+            p != exiting &&
             p->waiting_for_uart == PROC_WAIT_NONE)
             p->state = RUNNABLE;
     }
@@ -301,13 +303,14 @@ static void publish_zombie_current(struct proc *p) {
         p->state = ZOMBIE;
         release_vfork_parent(p);
         sig_set_pending_ex(par, SIGCHLD, (int32_t)p->pid, 0, code, status);
-        if (par->state == SLEEPING)
+        if (par->state == SLEEPING && proc_event_wake_allowed(par))
             par->state = RUNNABLE;
 
         if (psa[SIGCHLD].flags & 0x00000002) { /* SA_NOCLDWAIT */
             struct proc *initproc = find_initproc();
             p->parent = initproc;
-            if (initproc && initproc->state == SLEEPING)
+            if (initproc && initproc->state == SLEEPING &&
+                proc_event_wake_allowed(initproc))
                 initproc->state = RUNNABLE;
         }
     } else {
@@ -319,7 +322,8 @@ static void publish_zombie_current(struct proc *p) {
     for (struct proc *child = proc; child < &proc[NPROC]; child++) {
         if (child->parent == p && child != p) {
             child->parent = initproc;
-            if (initproc && initproc->state == SLEEPING)
+            if (initproc && initproc->state == SLEEPING &&
+                proc_event_wake_allowed(initproc))
                 initproc->state = RUNNABLE;
         }
     }
@@ -1552,7 +1556,8 @@ long sys_setpgid_handler(struct trapframe *tf) {
      * A blanket wake was too broad (hit pipe/poll sleepers).  The
      * waiting_for_child flag precisely targets wait4 sleepers. */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-        if (p->state == SLEEPING && p->waiting_for_child)
+        if (p->state == SLEEPING && proc_event_wake_allowed(p) &&
+            p->waiting_for_child)
             p->state = RUNNABLE;
     }
     return 0;
@@ -1571,7 +1576,8 @@ long sys_setsid_handler(struct trapframe *tf) {
      * only woke the parent with a waiting_for_uart check, which missed
      * non-parent waiters and used the wrong sleep classification. */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-        if (p->state == SLEEPING && p->waiting_for_child)
+        if (p->state == SLEEPING && proc_event_wake_allowed(p) &&
+            p->waiting_for_child)
             p->state = RUNNABLE;
     }
     return (long)current_proc->pid;

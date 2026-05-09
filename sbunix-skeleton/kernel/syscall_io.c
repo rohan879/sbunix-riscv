@@ -534,7 +534,8 @@ long sys_write_handler(struct trapframe *tf) {
                 n -= chunk;
             }
             for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-                if (p->state == SLEEPING && p != current_proc &&
+                if (p->state == SLEEPING && proc_event_wake_allowed(p) &&
+                    p != current_proc &&
                     p->waiting_for_uart != PROC_WAIT_TIMER)
                     p->state = RUNNABLE;
             }
@@ -611,7 +612,8 @@ long sys_read_handler(struct trapframe *tf) {
         }
         /* Wake any blocked pipe writers since we freed buffer space */
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->state == SLEEPING && p != current_proc &&
+            if (p->state == SLEEPING && proc_event_wake_allowed(p) &&
+                p != current_proc &&
                 p->waiting_for_uart != PROC_WAIT_TIMER)
                 p->state = RUNNABLE;
         }
