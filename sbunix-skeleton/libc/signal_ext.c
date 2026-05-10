@@ -17,6 +17,11 @@ int killpg(pid_t pgrp, int sig) {
     errno = EINVAL;
     return -1;
   }
+  /* killpg(getpgrp(), sig) must target the caller's own process group even
+   * when that group id is 1.  Encoding it as kill(-1, sig) would instead
+   * hit the special "broadcast" kill() path and can skip self-delivery. */
+  if (pgrp == getpgrp())
+    return kill(0, sig);
   return kill(-pgrp, sig);
 }
 
