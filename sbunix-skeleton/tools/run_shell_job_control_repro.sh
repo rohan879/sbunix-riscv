@@ -3,7 +3,8 @@ set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-artifact_dir=${SBUNIX_FG_REPRO_ARTIFACT_DIR:-/home/adebayo/test-findings/test-findings-38-artifacts/shell-fg/$(date +%Y%m%d-%H%M%S)}
+# BF: Default to a repo-local build path so the repro runs outside one host.
+artifact_dir=${SBUNIX_FG_REPRO_ARTIFACT_DIR:-$repo_root/build/shell-fg-repro/$(date +%Y%m%d-%H%M%S)}
 timeout_s=${TIMEOUT:-300}
 make_jobs=${MAKE_JOBS:-1}
 qemu_mem=${QEMU_MEM:-128M}

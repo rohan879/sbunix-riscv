@@ -83,7 +83,8 @@ SLIM_TEST_ROOTFS ?= $(if $(BUILD_TESTS),1,0)
 REQUIRE_THIRDPARTY_PAYLOADS ?= 0
 THIRDPARTY_SRC_DIR ?= build/thirdparty-src
 THIRDPARTY_PAYLOAD_DIR ?= build/thirdparty-payload
-THIRDPARTY_PAYLOAD_MARKER := $(THIRDPARTY_PAYLOAD_DIR)/.complete
+# BF: Keep the marker tied to Makefile.local THIRDPARTY_PAYLOAD_DIR overrides.
+THIRDPARTY_PAYLOAD_MARKER = $(THIRDPARTY_PAYLOAD_DIR)/.complete
 
 -include Makefile.local
 
