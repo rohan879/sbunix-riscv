@@ -127,8 +127,10 @@ fi
 # BF: BusyBox env uses clearenv(), which SBUnix libc does not export.  Add the
 # prototype and weak shim only to the disposable CI source tree.
 printf '\nint clearenv(void);\n' >>"$src_dir/include/stdlib.h"
+printf '\nint fileno_unlocked(FILE *stream);\nint ferror_unlocked(FILE *stream);\n' >>"$src_dir/include/stdio.h"
 printf '\nchar *strchrnul(const char *s, int c);\nint strverscmp(const char *a, const char *b);\n' >>"$src_dir/include/string.h"
 printf '\nint sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask);\n' >>"$src_dir/include/sched.h"
+printf '\n#define TCIFLUSH 0\n#define TCOFLUSH 1\n#define TCIOFLUSH 2\nint tcflush(int fd, int queue_selector);\n' >>"$src_dir/include/termios.h"
 cat >>"$src_dir/compat.c" <<'EOF'
 
 W int clearenv(void) {
@@ -158,6 +160,20 @@ W int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask) {
 	}
 	memset(mask, 0, cpusetsize);
 	mask->__bits[0] = 1;
+	return 0;
+}
+
+W int fileno_unlocked(FILE *stream) {
+	return fileno(stream);
+}
+
+W int ferror_unlocked(FILE *stream) {
+	return ferror(stream);
+}
+
+W int tcflush(int fd, int queue_selector) {
+	(void)fd;
+	(void)queue_selector;
 	return 0;
 }
 EOF
