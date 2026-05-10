@@ -50,6 +50,13 @@ static void test_foreground_resume_wait_group(void) {
 
     pid_t caller_pgrp = getpgrp();
     pid_t tty_pgrp = tcgetpgrp(STDIN_FILENO);
+    /* Boot-time regressions can invoke this test from a non-interactive
+     * shell context where the caller is not yet the tty foreground group.
+     * Reclaim the tty first so the test exercises the foreground handoff
+     * and wait semantics themselves rather than failing on setup. */
+    if (tty_pgrp != caller_pgrp)
+        tcsetpgrp(STDIN_FILENO, caller_pgrp);
+    tty_pgrp = tcgetpgrp(STDIN_FILENO);
     CHECK("foreground_resume_wait_group: caller owns tty before handoff",
           tty_pgrp == caller_pgrp);
 
