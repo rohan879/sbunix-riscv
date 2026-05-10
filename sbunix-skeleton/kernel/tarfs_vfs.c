@@ -19,6 +19,45 @@ struct tarfs_private {
   int is_dir;                /* 1 if this is a directory */
 };
 
+static uint64_t tarfs_parse_octal(const char *field, int len) {
+  uint64_t value = 0;
+  int seen_digit = 0;
+
+  for (int i = 0; i < len; i++) {
+    char c = field[i];
+    if (c == '\0')
+      break;
+    if (c == ' ' && !seen_digit)
+      continue;
+    if (c < '0' || c > '7')
+      break;
+    seen_digit = 1;
+    value = (value << 3) | (uint64_t)(c - '0');
+  }
+
+  return seen_digit ? value : 0;
+}
+
+static int64_t tarfs_mtime_sec(const struct posix_header *hdr) {
+  uint64_t sec = hdr ? tarfs_parse_octal(hdr->mtime, sizeof(hdr->mtime)) : 0;
+  if (sec < 1)
+    sec = 1;
+  return (int64_t)sec;
+}
+
+static void tarfs_fill_stat_times(uint8_t *st, const struct posix_header *hdr) {
+  /* BF: tarfs is read-only, but build tools still need nonzero mtimes. */
+  int64_t sec = tarfs_mtime_sec(hdr);
+  int64_t nsec = 0;
+
+  memcpy(st + 72, &sec, 8);   /* st_atim.tv_sec */
+  memcpy(st + 80, &nsec, 8);  /* st_atim.tv_nsec */
+  memcpy(st + 88, &sec, 8);   /* st_mtim.tv_sec */
+  memcpy(st + 96, &nsec, 8);  /* st_mtim.tv_nsec */
+  memcpy(st + 104, &sec, 8);  /* st_ctim.tv_sec */
+  memcpy(st + 112, &nsec, 8); /* st_ctim.tv_nsec */
+}
+
 /* RF: Removed static to_tarfs_path duplicate — canonical extern
  * implementation lives in kernel/pathres.c (declared in pathres.h).
  * All internal callers use the extern 3-param signature. */
@@ -216,6 +255,7 @@ static int tarfs_fstat(void *fs_data, void *private, uint8_t *st) {
   memcpy(st + 48, &size, 8);
   memcpy(st + 56, &blksz, 4);
   memcpy(st + 64, &blks, 8);
+  tarfs_fill_stat_times(st, priv->hdr);
   return 0;
 }
 
@@ -255,6 +295,7 @@ static int tarfs_stat(void *fs_data, const char *path, uint8_t *st) {
       memcpy(st + 16, &mode, 4);
       memcpy(st + 20, &nlink, 4);
       memcpy(st + 56, &blksz, 4);
+      tarfs_fill_stat_times(st, NULL);
       return 0;
     }
     return -2; /* -ENOENT */
@@ -289,6 +330,7 @@ static int tarfs_stat(void *fs_data, const char *path, uint8_t *st) {
   memcpy(st + 48, &size, 8);
   memcpy(st + 56, &blksz, 4);
   memcpy(st + 64, &blks, 8);
+  tarfs_fill_stat_times(st, hdr);
   return 0;
 }
 

@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      THIRDPARTY_CI_SKIP_BUSYBOX: "1"
 
     # Set the permissions to the lowest permissions possible needed for your steps.
     permissions:
