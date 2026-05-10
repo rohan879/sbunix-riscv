@@ -158,6 +158,19 @@ copy_micropython_payload() {
   fi
 }
 
+copy_tcc_examples() {
+  if [ -d "$payload_dir/tcc-examples" ]; then
+    mkdir -p "$dest_root/home"
+    cp -a "$payload_dir/tcc-examples"/. "$dest_root/home"/
+  elif [ "$require_thirdparty_payloads" != "1" ] &&
+       [ -d "$thirdparty_dir/tcc-examples" ]; then
+    # BF: Local focused builds need the same /home make inputs as the
+    # disposable payload path, even when the payload has not been built.
+    mkdir -p "$dest_root/home"
+    cp -a "$thirdparty_dir/tcc-examples"/. "$dest_root/home"/
+  fi
+}
+
 strip_guest_archives() {
   local dir=$1
   if [ ! -d "$dir" ] || ! command -v riscv64-unknown-elf-strip >/dev/null 2>&1; then
@@ -176,6 +189,7 @@ mkdir -p "$dest_root/bin" "$dest_root/usr/lib"
 # ENH: Promote the vendored workload binaries into every guest image so the
 # workload tests exercise the same payloads instead of ad hoc manual copies.
 copy_micropython_payload
+copy_tcc_examples
 copy_binary "$payload_dir/bin/tcc" "$dest_root/bin/tcc"
 copy_binary "$payload_dir/bin/pdpmake" "$dest_root/bin/pdpmake"
 if [ "$skip_busybox" = "0" ]; then
@@ -255,6 +269,8 @@ if [ "$require_thirdparty_payloads" = "1" ]; then
   require_staged_exec "$dest_root/bin/tcc"
   require_staged_exec "$dest_root/bin/pdpmake"
   require_staged_file "$dest_root/bin/make"
+  require_staged_file "$dest_root/home/Makefile"
+  require_staged_file "$dest_root/home/hello.c"
   require_staged_file "$dest_root/usr/lib/tcc/include/stdio.h"
   require_staged_file "$dest_root/usr/lib/tcc/lib/crt1.o"
   require_staged_file "$dest_root/usr/lib/tcc/lib/libc.a"

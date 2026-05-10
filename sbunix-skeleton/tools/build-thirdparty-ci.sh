@@ -211,6 +211,7 @@ if [ "$skip_busybox" = "0" ]; then
   copy_dir "$busybox_root" "$payload_dir/busybox-root"
 fi
 copy_dir "$src_dir/python-examples" "$payload_dir/python-examples"
+copy_dir "$src_dir/tcc-examples" "$payload_dir/tcc-examples"
 copy_dir "$busybox_root/lib/tcc/include" "$payload_dir/tcc-sysroot/include"
 copy_dir "$busybox_root/include" "$payload_dir/tcc-sysroot/include"
 
@@ -225,6 +226,8 @@ required_paths=(
   "$payload_dir/bin/micropython"
   "$payload_dir/bin/tcc"
   "$payload_dir/bin/pdpmake"
+  "$payload_dir/tcc-examples/Makefile"
+  "$payload_dir/tcc-examples/hello.c"
   "$payload_dir/tcc-sysroot/include/stdio.h"
   "$payload_dir/tcc-sysroot/lib/crt1.o"
   "$payload_dir/tcc-sysroot/lib/libc.a"
