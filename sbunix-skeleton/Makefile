@@ -84,7 +84,7 @@ REQUIRE_THIRDPARTY_PAYLOADS ?= 0
 THIRDPARTY_SRC_DIR ?= build/thirdparty-src
 THIRDPARTY_PAYLOAD_DIR ?= build/thirdparty-payload
 THIRDPARTY_CI_SKIP_BUSYBOX ?= 0
-THIRDPARTY_CI_SKIP_BUSYBOX_MODE := $(if $(filter 1,$(THIRDPARTY_CI_SKIP_BUSYBOX)),1,0)
+THIRDPARTY_CI_SKIP_BUSYBOX_MODE = $(if $(filter 1,$(THIRDPARTY_CI_SKIP_BUSYBOX)),1,0)
 # BF: Keep the marker tied to Makefile.local payload and CI payload-mode overrides.
 THIRDPARTY_PAYLOAD_MARKER = $(THIRDPARTY_PAYLOAD_DIR)/.complete.skip-busybox-$(THIRDPARTY_CI_SKIP_BUSYBOX_MODE)
 
