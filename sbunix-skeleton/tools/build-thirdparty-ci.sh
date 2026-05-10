@@ -8,6 +8,11 @@ src_dir=${THIRDPARTY_SRC_DIR:-$repo_root/build/thirdparty-src}
 payload_dir=${THIRDPARTY_PAYLOAD_DIR:-$repo_root/build/thirdparty-payload}
 work_top=$repo_root/build/thirdparty-work
 jobs=${MAKE_JOBS:-$(nproc 2>/dev/null || echo 4)}
+skip_busybox=0
+
+if [ "${THIRDPARTY_CI_SKIP_BUSYBOX:-0}" = "1" ]; then
+  skip_busybox=1
+fi
 
 case $src_dir in
   /*) ;;
@@ -92,7 +97,12 @@ copy_dir "$source_root/include" "$src_dir/include"
 copy_dir "$source_root/python-examples" "$src_dir/python-examples"
 copy_dir "$source_root/tcc-examples" "$src_dir/tcc-examples"
 
-for submodule in busybox python tcc make; do
+submodules=(python tcc make)
+if [ "$skip_busybox" = "0" ]; then
+  submodules=(busybox "${submodules[@]}")
+fi
+
+for submodule in "${submodules[@]}"; do
   copy_submodule_clean "$submodule"
 done
 
@@ -107,10 +117,12 @@ perl -0pi -e 's#define CONFIG_TCCDIR "/lib/tcc"#define CONFIG_TCCDIR "/usr/lib/t
               s/ environ\.c//g' \
   "$src_dir/Makefile"
 
-# BF: SBUnix libc exposes an itoa(value, buf, base) extension, while BusyBox
-# has a private itoa(int) helper.  Rename only the disposable BusyBox copy.
-find "$src_dir/busybox" -type f \( -name '*.[ch]' -o -name '*.src' \) \
-  -exec perl -0pi -e 's/\bitoa\b/bb_itoa/g' {} +
+if [ "$skip_busybox" = "0" ]; then
+  # BF: SBUnix libc exposes an itoa(value, buf, base) extension, while BusyBox
+  # has a private itoa(int) helper.  Rename only the disposable BusyBox copy.
+  find "$src_dir/busybox" -type f \( -name '*.[ch]' -o -name '*.src' \) \
+    -exec perl -0pi -e 's/\bitoa\b/bb_itoa/g' {} +
+fi
 
 # BF: BusyBox env uses clearenv(), which SBUnix libc does not export.  Add the
 # prototype and weak shim only to the disposable CI source tree.
@@ -145,7 +157,7 @@ W int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask) {
 		return -1;
 	}
 	memset(mask, 0, cpusetsize);
-	CPU_SET(0, mask);
+	mask->__bits[0] = 1;
 	return 0;
 }
 EOF
@@ -158,7 +170,12 @@ make_ci() {
   $(command -v make) -C "$src_dir" "$@"
 }
 
-make_ci -j"$jobs" busybox-install python tcc-install pdpmake
+build_targets=(python tcc-install pdpmake)
+if [ "$skip_busybox" = "0" ]; then
+  build_targets=(busybox-install "${build_targets[@]}")
+fi
+
+make_ci -j"$jobs" "${build_targets[@]}"
 
 copy_executable() {
   local src=$1
@@ -183,12 +200,16 @@ copy_required_payload_file() {
 busybox_root=$src_dir/../build/rootfs
 tcc_build=$src_dir/../build/tcc
 
-copy_executable "$busybox_root/bin/busybox" "$payload_dir/bin/busybox"
+if [ "$skip_busybox" = "0" ]; then
+  copy_executable "$busybox_root/bin/busybox" "$payload_dir/bin/busybox"
+fi
 copy_executable "$src_dir/python/ports/unix/build-minimal/micropython" "$payload_dir/bin/micropython"
 copy_executable "$tcc_build/cc" "$payload_dir/bin/tcc"
 copy_executable "$work_top/build/thirdparty/make/make" "$payload_dir/bin/pdpmake"
 
-copy_dir "$busybox_root" "$payload_dir/busybox-root"
+if [ "$skip_busybox" = "0" ]; then
+  copy_dir "$busybox_root" "$payload_dir/busybox-root"
+fi
 copy_dir "$src_dir/python-examples" "$payload_dir/python-examples"
 copy_dir "$busybox_root/lib/tcc/include" "$payload_dir/tcc-sysroot/include"
 copy_dir "$busybox_root/include" "$payload_dir/tcc-sysroot/include"
@@ -204,20 +225,25 @@ required_paths=(
   "$payload_dir/bin/micropython"
   "$payload_dir/bin/tcc"
   "$payload_dir/bin/pdpmake"
-  "$payload_dir/bin/busybox"
   "$payload_dir/tcc-sysroot/include/stdio.h"
   "$payload_dir/tcc-sysroot/lib/crt1.o"
   "$payload_dir/tcc-sysroot/lib/libc.a"
   "$payload_dir/tcc-sysroot/lib/libtcc1.a"
-  "$payload_dir/busybox-root/bin/cat"
-  "$payload_dir/busybox-root/bin/cp"
-  "$payload_dir/busybox-root/bin/echo"
-  "$payload_dir/busybox-root/bin/ls"
-  "$payload_dir/busybox-root/bin/mkdir"
-  "$payload_dir/busybox-root/bin/mv"
-  "$payload_dir/busybox-root/bin/rm"
-  "$payload_dir/busybox-root/bin/rmdir"
 )
+
+if [ "$skip_busybox" = "0" ]; then
+  required_paths+=(
+    "$payload_dir/bin/busybox"
+    "$payload_dir/busybox-root/bin/cat"
+    "$payload_dir/busybox-root/bin/cp"
+    "$payload_dir/busybox-root/bin/echo"
+    "$payload_dir/busybox-root/bin/ls"
+    "$payload_dir/busybox-root/bin/mkdir"
+    "$payload_dir/busybox-root/bin/mv"
+    "$payload_dir/busybox-root/bin/rm"
+    "$payload_dir/busybox-root/bin/rmdir"
+  )
+fi
 
 for path in "${required_paths[@]}"; do
   if [ ! -e "$path" ]; then
@@ -226,4 +252,5 @@ for path in "${required_paths[@]}"; do
   fi
 done
 
-printf 'complete\n' >"$payload_dir/.complete"
+printf 'THIRDPARTY_CI_SKIP_BUSYBOX=%s\n' "$skip_busybox" >"$payload_dir/.complete"
+cp "$payload_dir/.complete" "$payload_dir/.complete.skip-busybox-$skip_busybox"

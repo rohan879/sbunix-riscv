@@ -118,6 +118,14 @@ require_thirdparty_payloads() {
     if test ! -f /usr/lib/.thirdparty-required; then
         return
     fi
+    set skip_busybox 0
+    if test -f /usr/lib/.thirdparty-payload-mode; then
+        grep -q "THIRDPARTY_CI_SKIP_BUSYBOX=1" /usr/lib/.thirdparty-payload-mode
+        set grep_rc $?
+        if test "$grep_rc" = "0"; then
+            set skip_busybox 1
+        fi
+    fi
 
     echo "=== Required Third-Party Payloads ==="
     # BF: Required staging mode must fail in the normal guest runner when a
@@ -127,19 +135,21 @@ require_thirdparty_payloads() {
     require_guest_payload -x /bin/tcc "thirdparty payload: tcc"
     require_guest_payload -x /bin/pdpmake "thirdparty payload: pdpmake"
     require_guest_payload -f /bin/make "thirdparty payload: make alias"
-    require_guest_payload -x /bin/busybox "thirdparty payload: busybox"
     require_guest_payload -f /usr/lib/tcc/include/stdio.h "thirdparty payload: tcc headers"
     require_guest_payload -f /usr/lib/tcc/lib/crt1.o "thirdparty payload: tcc crt"
     require_guest_payload -f /usr/lib/tcc/lib/libc.a "thirdparty payload: tcc libc"
     require_guest_payload -f /usr/lib/tcc/lib/libtcc1.a "thirdparty payload: tcc runtime"
-    require_guest_payload -x /usr/lib/busybox/bin/cat "thirdparty payload: busybox cat"
-    require_guest_payload -x /usr/lib/busybox/bin/cp "thirdparty payload: busybox cp"
-    require_guest_payload -x /usr/lib/busybox/bin/echo "thirdparty payload: busybox echo"
-    require_guest_payload -x /usr/lib/busybox/bin/ls "thirdparty payload: busybox ls"
-    require_guest_payload -x /usr/lib/busybox/bin/mkdir "thirdparty payload: busybox mkdir"
-    require_guest_payload -x /usr/lib/busybox/bin/mv "thirdparty payload: busybox mv"
-    require_guest_payload -x /usr/lib/busybox/bin/rm "thirdparty payload: busybox rm"
-    require_guest_payload -x /usr/lib/busybox/bin/rmdir "thirdparty payload: busybox rmdir"
+    if test "$skip_busybox" = "0"; then
+        require_guest_payload -x /bin/busybox "thirdparty payload: busybox"
+        require_guest_payload -x /usr/lib/busybox/bin/cat "thirdparty payload: busybox cat"
+        require_guest_payload -x /usr/lib/busybox/bin/cp "thirdparty payload: busybox cp"
+        require_guest_payload -x /usr/lib/busybox/bin/echo "thirdparty payload: busybox echo"
+        require_guest_payload -x /usr/lib/busybox/bin/ls "thirdparty payload: busybox ls"
+        require_guest_payload -x /usr/lib/busybox/bin/mkdir "thirdparty payload: busybox mkdir"
+        require_guest_payload -x /usr/lib/busybox/bin/mv "thirdparty payload: busybox mv"
+        require_guest_payload -x /usr/lib/busybox/bin/rm "thirdparty payload: busybox rm"
+        require_guest_payload -x /usr/lib/busybox/bin/rmdir "thirdparty payload: busybox rmdir"
+    fi
 }
 
 echo === C Binary Tests ===
