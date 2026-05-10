@@ -273,16 +273,11 @@ static void handle_external_interrupt(void) {
             tty_input((char)c);
             last_key = (unsigned char)c;
         }
-        /* tty_input() calls uart_wakeup() internally when data is ready */
-        /* Also wake any process sleeping in wait4 so it can reap zombies.
-         * Only wake waitpid sleepers (waiting_for_uart==0); do NOT wake
-         * timed sleeps (waiting_for_uart==2) or UART-input sleeps (==1,
-         * already handled by uart_wakeup above). */
-        for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->state == SLEEPING && proc_event_wake_allowed(p) &&
-                p->waiting_for_uart == PROC_WAIT_NONE)
-                p->state = RUNNABLE;
-        }
+        /* tty_input() calls uart_wakeup() internally when data is ready.
+         * Child stop/continue/exit paths wake waitpid sleepers directly;
+         * do not also wake them merely because a UART byte arrived.  That
+         * broad wakeup races foreground Ctrl-Z handling by reviving the
+         * shell before the child stop has fully settled. */
         #ifdef TIMER_DISPLAY
         display_time();
         #endif

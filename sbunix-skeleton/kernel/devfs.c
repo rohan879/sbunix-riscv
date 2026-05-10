@@ -310,7 +310,14 @@ static int devfs_open(void *fs_data, const char *path, int flags, void **private
       }
       if (devices[i].is_tty) {
         init_devfs_termios(&priv->tty_termios);
-        priv->is_global_tty = strcmp(devices[i].name, "tty") == 0;
+        /* BF: The boot shell inherits /dev/console as stdin/stdout, and
+         * job-control ioctls such as tcsetpgrp()/tcgetpgrp() must affect the
+         * shared terminal foreground group seen by tty_input().  Treat both
+         * /dev/tty and /dev/console as views of the same global tty state
+         * rather than keeping a private per-open foreground pgid for
+         * console-backed file descriptors. */
+        priv->is_global_tty = (strcmp(devices[i].name, "tty") == 0 ||
+                               strcmp(devices[i].name, "console") == 0);
         if (!priv->is_global_tty &&
             !(flags & O_NOCTTY) &&
             current_proc &&
