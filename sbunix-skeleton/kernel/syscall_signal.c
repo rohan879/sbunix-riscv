@@ -242,7 +242,7 @@ long sys_rt_sigqueueinfo_handler(struct trapframe *tf) {
             target->sig_sender[sig].valid = 1;
         }
         target->sigpending |= signal_bit(sig);
-        if (target->state == SLEEPING)
+        if (target->state == SLEEPING && proc_event_wake_allowed(target))
             target->state = RUNNABLE;
     } else {
         /* BF: Standard signals still need kill_deliver's stop/continue and

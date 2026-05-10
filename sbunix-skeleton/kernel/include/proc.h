@@ -322,6 +322,12 @@ static inline struct kern_sigaction *proc_sigactions(struct proc *p) {
   return p->shared_sa ? p->shared_sa->actions : p->sigactions;
 }
 
+static inline int proc_event_wake_allowed(struct proc *p) {
+  /* BF: Generic IO/timer/futex wakeups must not resume a job-control stop;
+   * SIGCONT and fatal termination paths handle those transitions explicitly. */
+  return p && p->stopped_signal == 0;
+}
+
 static inline uint64_t signal_bit(int signum) {
   return 1UL << (signum - 1);
 }

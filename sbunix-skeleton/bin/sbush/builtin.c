@@ -1,5 +1,6 @@
 #include "sbush.h"
 #include <sys/stat.h>
+#include <errno.h>
 
 /* -----------------------------------------------------------------------
  * Alias table
@@ -462,37 +463,73 @@ int run_builtin(struct command *cmd) {
     }
 
     if (strcmp(cmd->argv[0], "jobs") == 0) {
+        job_sync(0);
         job_list();
         return 0;
     }
 
     if (strcmp(cmd->argv[0], "fg") == 0) {
         int id = cmd->argc > 1 ? atoi(cmd->argv[1]) : -1;
-        struct job *j = (id > 0) ? job_find(id) : job_last();
-        if (!j) {
+        job_sync(0);
+        struct job *j = (id > 0) ? job_find(id) : job_last_stopped();
+        if (!j || j->state == JOB_DONE) {
             printf("fg: no such job\n");
             return 1;
         }
+        pid_t pgid = j->pgid;
+        char jobcmd[128];
+        strncpy(jobcmd, j->cmd, sizeof(jobcmd) - 1);
+        jobcmd[sizeof(jobcmd) - 1] = '\0';
+
+        sigset_t block_chld, saved_mask;
+        sigemptyset(&block_chld);
+        sigaddset(&block_chld, SIGCHLD);
+        sigprocmask(SIG_BLOCK, &block_chld, &saved_mask);
+
         /* Give terminal to the job's process group */
-        tcsetpgrp(STDIN_FILENO, j->pid);
+        tcsetpgrp(STDIN_FILENO, pgid);
         /* Track as foreground for signal forwarding */
-        fg_pid = j->pid;
-        /* Resume the stopped process */
-        kill(j->pid, SIGCONT);
+        fg_pid = pgid;
+        /* Resume the whole process group; stale entries are removed on ESRCH. */
+        if (kill(-pgid, SIGCONT) < 0) {
+            fg_pid = 0;
+            tcsetpgrp(STDIN_FILENO, getpgrp());
+            job_remove(pgid);
+            sigprocmask(SIG_SETMASK, &saved_mask, NULL);
+            printf("fg: no such job\n");
+            return 1;
+        }
         j->state = JOB_RUNNING;
-        printf("%s\n", j->cmd);
-        int status;
-        waitpid(j->pid, &status, WUNTRACED);
+        printf("%s\n", jobcmd);
+        int status = 0;
+        int result = 0;
+        while (1) {
+            pid_t w = waitpid(-pgid, &status, WUNTRACED);
+            if (w < 0) {
+                if (errno == EINTR)
+                    continue;
+                break;
+            }
+            job_mark_status(w, status, 0);
+            if (WIFSTOPPED(status)) {
+                job_set_state(pgid, JOB_STOPPED);
+                struct job *sj = job_find_pgid(pgid);
+                printf("[%d] Stopped\t%s\n", sj ? sj->id : id, jobcmd);
+                result = 128 + WSTOPSIG(status);
+                break;
+            }
+            if (WIFEXITED(status))
+                result = WEXITSTATUS(status);
+            else if (WIFSIGNALED(status))
+                result = 128 + WTERMSIG(status);
+            if (!job_find_pgid(pgid))
+                break;
+        }
         /* Reclaim terminal */
         fg_pid = 0;
         tcsetpgrp(STDIN_FILENO, getpgrp());
-        if (WIFSTOPPED(status)) {
-            j->state = JOB_STOPPED;
-            printf("[%d] Stopped\t%s\n", j->id, j->cmd);
-            return 128 + WSTOPSIG(status);
-        }
-        job_remove(j->pid);
-        return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+        sigprocmask(SIG_SETMASK, &saved_mask, NULL);
+        return result;
     }
 
     if (strcmp(cmd->argv[0], "return") == 0) {
@@ -610,13 +647,18 @@ int run_builtin(struct command *cmd) {
 
     if (strcmp(cmd->argv[0], "bg") == 0) {
         int id = cmd->argc > 1 ? atoi(cmd->argv[1]) : -1;
-        struct job *j = (id > 0) ? job_find(id) : job_last();
-        if (!j) {
+        job_sync(0);
+        struct job *j = (id > 0) ? job_find(id) : job_last_stopped();
+        if (!j || j->state == JOB_DONE) {
             printf("bg: no such job\n");
             return 1;
         }
         /* Resume in background — no terminal change, no wait */
-        kill(j->pid, SIGCONT);
+        if (kill(-j->pgid, SIGCONT) < 0) {
+            job_remove(j->pgid);
+            printf("bg: no such job\n");
+            return 1;
+        }
         j->state = JOB_RUNNING;
         printf("[%d] %s &\n", j->id, j->cmd);
         return 0;
@@ -724,14 +766,19 @@ int run_builtin(struct command *cmd) {
 
     if (strcmp(cmd->argv[0], "wait") == 0) {
         int status;
+        job_sync(0);
         if (cmd->argc > 1) {
             pid_t pid = (pid_t)atoi(cmd->argv[1]);
-            waitpid(pid, &status, 0);
+            pid_t w = waitpid(pid, &status, 0);
+            if (w > 0)
+                job_mark_status(w, status, 0);
         } else {
             /* Wait for all background children */
-            while (waitpid(-1, &status, 0) > 0)
-                ;
+            pid_t w;
+            while ((w = waitpid(-1, &status, 0)) > 0)
+                job_mark_status(w, status, 0);
         }
+        job_sync(0);
         return 0;
     }
 

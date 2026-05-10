@@ -29,6 +29,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1
+          cd sbunix-skeleton/thirdparty/python
+          git submodule update --init --recursive
+          cd "$GITHUB_WORKSPACE"
+
           install_apt() {
             sudo apt-get update -qq
             sudo apt-get install -y -qq \
@@ -74,15 +80,15 @@ jobs:
           pwd
           source tools/cisourceme.sh
           make clean
-          make thirdparty -j16
-          RUN_CI_TESTS=1 make -j$(nproc)
+          MAKE_JOBS=16 make thirdparty-ci
+          RUN_CI_TESTS=1 REQUIRE_THIRDPARTY_PAYLOADS=1 make -j$(nproc)
       - name: Boot OS in QEMU and run custom boot tests, Sortix os-test, and open-posix-test suites
         id: qemu_tests
         run: |
           set -euo pipefail
           cd sbunix-skeleton/
           source tools/cisourceme.sh
-          RUN_CI_TESTS=1 make qemu 2>&1 | tee /tmp/sbunix-qemu.log
+          RUN_CI_TESTS=1 REQUIRE_THIRDPARTY_PAYLOADS=1 make qemu 2>&1 | tee /tmp/sbunix-qemu.log
       - name: Build commit comment body
         run: |
           set -euo pipefail

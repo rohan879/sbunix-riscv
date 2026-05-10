@@ -112,7 +112,8 @@ void close_ofile(struct proc *p, int fd) {
         pipes[pid].used = 0;
       /* Wake any sleeping pipe readers/writers */
       for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
-        if (pp->state == SLEEPING && pp->waiting_for_uart != PROC_WAIT_TIMER)
+        if (pp->state == SLEEPING && proc_event_wake_allowed(pp) &&
+            pp->waiting_for_uart != PROC_WAIT_TIMER)
           pp->state = RUNNABLE;
       }
     }
@@ -121,7 +122,8 @@ void close_ofile(struct proc *p, int fd) {
       if (pipes[pid].read_open <= 0 && pipes[pid].write_open <= 0)
         pipes[pid].used = 0;
       for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
-        if (pp->state == SLEEPING && pp->waiting_for_uart != PROC_WAIT_TIMER)
+        if (pp->state == SLEEPING && proc_event_wake_allowed(pp) &&
+            pp->waiting_for_uart != PROC_WAIT_TIMER)
           pp->state = RUNNABLE;
       }
     }
@@ -277,7 +279,8 @@ static void handle_external_interrupt(void) {
          * timed sleeps (waiting_for_uart==2) or UART-input sleeps (==1,
          * already handled by uart_wakeup above). */
         for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-            if (p->state == SLEEPING && p->waiting_for_uart == PROC_WAIT_NONE)
+            if (p->state == SLEEPING && proc_event_wake_allowed(p) &&
+                p->waiting_for_uart == PROC_WAIT_NONE)
                 p->state = RUNNABLE;
         }
         #ifdef TIMER_DISPLAY
@@ -342,7 +345,7 @@ static void handle_timer_interrupt(void) {
 
     /* Wake processes whose timed sleep has expired */
     for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-        if (p->state == SLEEPING &&
+        if (p->state == SLEEPING && proc_event_wake_allowed(p) &&
             (p->waiting_for_uart == PROC_WAIT_TIMER ||
              p->waiting_for_uart == PROC_WAIT_EVENT_TIMER) &&
             now >= p->sleep_until) {
@@ -358,7 +361,7 @@ static void handle_timer_interrupt(void) {
             p->alarm_ticks = 0;  /* one-shot */
             /* BF: Capture timer metadata for SA_SIGINFO delivery */
             sig_set_pending(p, 14, 0, 0, K_SI_TIMER);
-            if (p->state == SLEEPING) {
+            if (p->state == SLEEPING && proc_event_wake_allowed(p)) {
                 p->state = RUNNABLE;
                 woke_deadline = 1;
             }
@@ -381,7 +384,7 @@ static void handle_timer_interrupt(void) {
                 /* BF: Capture timer metadata for SA_SIGINFO delivery */
                 if (p->timers[i].signo != 0) {
                     sig_set_pending(p, p->timers[i].signo, 0, 0, K_SI_TIMER);
-                    if (p->state == SLEEPING) {
+                    if (p->state == SLEEPING && proc_event_wake_allowed(p)) {
                         p->state = RUNNABLE;
                         woke_deadline = 1;
                     }
@@ -612,7 +615,8 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
                      * sig_set_pending_ex checks pending internally. */
                     sig_set_pending_ex(p->parent, SIGCHLD,
                                        (int32_t)p->pid, 0, K_CLD_CONTINUED, 0);
-                    if (p->parent->state == SLEEPING)
+                    if (p->parent->state == SLEEPING &&
+                        proc_event_wake_allowed(p->parent))
                         p->parent->state = RUNNABLE;
                 }
             }
@@ -639,7 +643,8 @@ void deliver_signal(struct trapframe *tf, struct proc *p) {
                      * deliver_signal path, distinct from kill_deliver Fix 2+3c. */
                     sig_set_pending_ex(p->parent, SIGCHLD,
                                        (int32_t)p->pid, 0, K_CLD_STOPPED, signum);
-                    if (p->parent->state == SLEEPING)
+                    if (p->parent->state == SLEEPING &&
+                        proc_event_wake_allowed(p->parent))
                         p->parent->state = RUNNABLE;
                 }
             }
@@ -895,7 +900,8 @@ void kill_deliver(struct proc *target, int sig) {
                     sig_set_pending_ex(target->parent, SIGCHLD,
                                        (int32_t)target->pid, 0,
                                        K_CLD_CONTINUED, SIGCONT);
-                    if (target->parent->state == SLEEPING)
+                    if (target->parent->state == SLEEPING &&
+                        proc_event_wake_allowed(target->parent))
                         target->parent->state = RUNNABLE;
                 }
             }
@@ -938,11 +944,12 @@ void kill_deliver(struct proc *target, int sig) {
                     sig_set_pending_ex(target->parent, SIGCHLD,
                                        (int32_t)target->pid, 0, K_CLD_STOPPED,
                                        sig /* si_status = stop signal */);
-                    if (target->parent->state == SLEEPING)
+                    if (target->parent->state == SLEEPING &&
+                        proc_event_wake_allowed(target->parent))
                         target->parent->state = RUNNABLE;
                 }
             }
-        } else if (target->state == SLEEPING) {
+        } else if (target->state == SLEEPING && proc_event_wake_allowed(target)) {
             target->state = RUNNABLE;
         }
     }

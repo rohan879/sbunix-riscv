@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <fcntl.h>
 
-/* Foreground child PID (0 when shell is at idle prompt) */
+/* Foreground process group (0 when shell is at idle prompt) */
 volatile sig_atomic_t fg_pid = 0;
 
 /* Flag set by SIGCHLD handler; main loop checks and prints notifications */
@@ -238,7 +238,7 @@ static void sigint_handler(int sig) {
     (void)sig;
     pid_t p = fg_pid;
     if (p > 0)
-        kill(p, SIGINT);
+        kill(-p, SIGINT);
     /* If no foreground child, do nothing — tty already echoed ^C\n, reprint prompt */
 }
 
@@ -249,7 +249,7 @@ static void sigquit_handler(int sig) {
     (void)sig;
     pid_t p = fg_pid;
     if (p > 0)
-        kill(p, SIGQUIT);
+        kill(-p, SIGQUIT);
     /* If no foreground child, do nothing — tty already echoed ^\\n */
 }
 
@@ -258,23 +258,16 @@ static void sigtstp_handler(int sig) {
     (void)sig;
     pid_t p = fg_pid;
     if (p > 0)
-        kill(p, SIGTSTP);
+        kill(-p, SIGTSTP);
     /* Shell itself must NOT stop */
 }
 
 /* SIGCHLD handler: reap children and set flag for main-loop notification */
 static void sigchld_handler(int sig) {
     (void)sig;
-    int saved_status;
-    pid_t p;
-    while ((p = waitpid(-1, &saved_status, WNOHANG | WUNTRACED)) > 0) {
-        if (WIFSTOPPED(saved_status)) {
-            job_set_state(p, JOB_STOPPED);
-        } else {
-            job_set_state(p, JOB_DONE);
-        }
-        g_sigchld_flag = 1;
-    }
+    /* BF: Defer waitpid() to normal shell flow so foreground waits own
+     * their child status and stale job cleanup happens at command boundaries. */
+    g_sigchld_flag = 1;
 }
 
 /* Install all three signal handlers at shell startup */
@@ -336,26 +329,12 @@ static void notify_jobs(void) {
     if (!g_sigchld_flag)
         return;
     g_sigchld_flag = 0;
-    job_reap();
+    job_sync(1);
 }
 
 static void reap_zombies(void) {
     notify_jobs();
-    /* Reap any remaining zombies and update job table */
-    int status;
-    pid_t p;
-    while ((p = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
-        struct job *j = job_find_pid(p);
-        if (j) {
-            if (WIFSTOPPED(status)) {
-                j->state = JOB_STOPPED;
-            } else {
-                printf("[%d] Done\t%s\n", j->id, j->cmd);
-                j->pid = 0;
-                j->id = 0;
-            }
-        }
-    }
+    job_sync(1);
 }
 
 int main(int argc, char *argv[], char *envp[]) {
