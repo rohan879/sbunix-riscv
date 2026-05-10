@@ -255,7 +255,35 @@ archives.
 Use this path when you want the standard host-side regression quickly. If you
 need the full guest-visible suite in one command, use the captured runner below.
 
-### Option 2: One-shot full guest suite (`tools/run_tests_capture.sh`)
+### Option 2: Targeted third-party workload integration only
+
+To run only the in-code vendored workload integration test, use the targeted
+QEMU runner:
+
+```bash
+cd sbunix-skeleton
+source tools/sourceme.sh
+unset THIRDPARTY_CI_SKIP_BUSYBOX
+MAKE_JOBS=4 REQUIRE_THIRDPARTY_PAYLOADS=1 \
+  tools/run_targeted_qemu.sh "/test/bin/thirdpartytest"
+```
+
+This compiles the local `tests/thirdpartytest` binary into the lightweight
+`build/test-disk-core.img` and does not compile or package the Sortix os-test
+or Open POSIX suites. It exercises MicroPython, BusyBox, `pdpmake`, TCC, and
+nested `sbush -c` dispatch against the rootfs-staged third-party payloads.
+
+The settings are:
+
+- Do not set `BUILD_TESTS=1`; the targeted runner defaults to
+  `build/test-disk-core.img`.
+- Set `REQUIRE_THIRDPARTY_PAYLOADS=1` to fail early if the rootfs payload is
+  missing.
+- Leave `THIRDPARTY_CI_SKIP_BUSYBOX` unset or `0` when you want BusyBox and the
+  nested `sbush` third-party checks to run. With `THIRDPARTY_CI_SKIP_BUSYBOX=1`,
+  BusyBox is intentionally absent and those portions skip.
+
+### Option 3: One-shot full guest suite (`tools/run_tests_capture.sh`)
 
 ```bash
 cd sbunix-skeleton
@@ -295,7 +323,7 @@ Important notes:
 - The wrapper assumes `BUILD_TESTS=1` support is available and will rebuild the
   test disk itself; you do not need to run `make BUILD_TESTS=1` separately.
 
-### Option 3: Manual via QEMU
+### Option 4: Manual via QEMU
 
 ```bash
 cd sbunix-skeleton
