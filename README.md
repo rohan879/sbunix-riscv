@@ -95,6 +95,42 @@ These payloads stay in the normal guest rootfs. They are not mirrored into
 `build/testfs` or `build/test-disk.img`; the separate test disk is reserved for
 `/test` binaries, manifests, logs, and persistence fixtures.
 
+### Local Testing With Third-Party Binaries
+
+Start local third-party binary testing by rebuilding and staging the payloads:
+
+```bash
+make thirdparty
+```
+
+`make thirdparty` builds the third-party payloads, stages them into
+`build/rootfs`, rebuilds the tarfs-backed kernel image, and fails if the
+required Python, make/TCC, or BusyBox payload files are missing.
+
+Then boot SBUnix:
+
+```bash
+QEMU_MEM=128M make qemu
+```
+
+From the `sbush$` prompt, run a smoke pass over the staged binaries:
+
+```sh
+/bin/python /home/hello.py
+
+/bin/printf 'all:\n\t/bin/tcc /home/hello.c -o /mnt/hello-make\n' > /mnt/thirdparty.mk
+/bin/make -f /mnt/thirdparty.mk all
+/mnt/hello-make
+/bin/tcc /home/hello.c -o /mnt/hello-tcc
+/mnt/hello-tcc
+
+/bin/busybox echo busybox-ok
+/usr/lib/busybox/bin/echo busybox-applet-ok
+```
+
+The temporary Makefile keeps the make/TCC smoke independent of the example
+file layout while still exercising `/bin/make` and `/bin/tcc` together.
+
 ### Refreshing After Third-Party Changes
 
 If you only replace files under `sbunix-skeleton/thirdparty/`, a plain
