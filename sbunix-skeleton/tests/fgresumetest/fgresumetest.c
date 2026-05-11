@@ -59,21 +59,30 @@ static int wait_for_byte(int fd, char want, int attempts)
   return 0;
 }
 
-static int read_pid(int fd, pid_t *pid_out)
+static int read_full_nonblock(int fd, unsigned char *buf, size_t len,
+                              size_t *done)
 {
-  pid_t pid = -1;
-  ssize_t n = read(fd, &pid, sizeof(pid));
-  if (n == (ssize_t)sizeof(pid)) {
-    *pid_out = pid;
-    return 1;
+  while (*done < len) {
+    ssize_t n = read(fd, buf + *done, len - *done);
+    if (n > 0) {
+      *done += (size_t)n;
+      continue;
+    }
+    if (n == 0)
+      return 0;
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      return 0;
+    return 0;
   }
-  return 0;
+  return 1;
 }
 
-static int wait_for_pid(int fd, pid_t *pid_out, int attempts)
+static int wait_for_pid(int fd, pid_t *pid_out, size_t *done, int attempts)
 {
+  unsigned char *p = (unsigned char *)pid_out;
+
   for (int i = 0; i < attempts; i++) {
-    if (read_pid(fd, pid_out))
+    if (read_full_nonblock(fd, p, sizeof(*pid_out), done))
       return 1;
     usleep(10000);
   }
@@ -106,23 +115,14 @@ struct fg_report {
   int reclaim_after_exit;
 };
 
-static int wait_for_report(int fd, struct fg_report *report, int attempts)
+static int wait_for_report(int fd, struct fg_report *report, size_t *done,
+                           int attempts)
 {
   unsigned char *p = (unsigned char *)report;
-  size_t done = 0;
 
   for (int i = 0; i < attempts; i++) {
-    ssize_t n = read(fd, p + done, sizeof(*report) - done);
-    if (n > 0) {
-      done += (size_t)n;
-      if (done == sizeof(*report))
-        return 1;
-      continue;
-    }
-    if (n == 0)
-      return 0;
-    if (errno != EAGAIN && errno != EWOULDBLOCK)
-      return 0;
+    if (read_full_nonblock(fd, p, sizeof(*report), done))
+      return 1;
     usleep(10000);
   }
   return 0;
@@ -268,6 +268,8 @@ int main(void)
   int job_pipe[2];
   int got_report = 0;
   int supervisor_reclaim = 0;
+  size_t report_done = 0;
+  size_t job_pgrp_done = 0;
   pid_t controller;
   pid_t supervisor_pgrp;
   pid_t job_pgrp = -1;
@@ -319,16 +321,16 @@ int main(void)
     return 1;
   }
 
-  /* TEST: The supervisor uses pipes, not waitpid, for its watchdog.  This
-   * keeps the diagnostic from hanging when the broken path is wait/reap
-   * interaction with a stopped or continued foreground group. */
+  /* TEST: The supervisor uses pipes, not waitpid, for its watchdog.  Partial
+   * nonblocking reads are accumulated across polls so report/job-pgid bytes
+   * cannot be discarded before cleanup decides which process group to kill. */
   for (int i = 0; i < 1500 && !got_report; i++) {
-    got_report = wait_for_report(report_pipe[0], &r, 1);
+    got_report = wait_for_report(report_pipe[0], &r, &report_done, 1);
     if (job_pgrp <= 0)
-      wait_for_pid(job_pipe[0], &job_pgrp, 1);
+      wait_for_pid(job_pipe[0], &job_pgrp, &job_pgrp_done, 1);
   }
   if (job_pgrp <= 0)
-    wait_for_pid(job_pipe[0], &job_pgrp, 100);
+    wait_for_pid(job_pipe[0], &job_pgrp, &job_pgrp_done, 100);
 
   supervisor_reclaim = (tcsetpgrp(STDIN_FILENO, supervisor_pgrp) == 0 &&
                         tcgetpgrp(STDIN_FILENO) == supervisor_pgrp);

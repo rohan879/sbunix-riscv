@@ -149,7 +149,9 @@ static void test_kill_sigkill(void) {
 
 static void test_kill_sigstop_cont(void) {
     int pfd[2];
-    if (pipe(pfd) != 0) {
+    int status;
+
+    if (pipe2(pfd, O_NONBLOCK) != 0) {
         CHECK("kill_sigstop_cont: pipe setup", 0);
         return;
     }
@@ -179,32 +181,33 @@ static void test_kill_sigstop_cont(void) {
 
     close(pfd[1]);
 
-    /* Wait for child to be running */
-    char buf[1];
-    read(pfd[0], buf, 1); /* read "A" */
+    /* BF: Keep the initial readiness handshake bounded too; otherwise a
+     * failed child setup can pin the same CI path as a failed resume. */
+    if (!wait_for_byte(pfd[0], 'A', 200)) {
+        CHECK("kill_sigstop_cont: child ready", 0);
+        kill(pid, SIGKILL);
+        close(pfd[0]);
+        waitpid(pid, &status, WNOHANG);
+        return;
+    }
 
     /* Stop the child */
     kill(pid, SIGSTOP);
 
     /* Wait until child is actually stopped */
-    int status;
     waitpid(pid, &status, WUNTRACED);
     int child_stopped = WIFSTOPPED(status);
     CHECK("kill_sigstop_cont: child stopped", child_stopped);
 
     /* Resume the child */
-    int read_bounded = 0;
     if (child_stopped) {
-        int flags = fcntl(pfd[0], F_GETFL);
-        if (flags >= 0)
-            read_bounded = (fcntl(pfd[0], F_SETFL, flags | O_NONBLOCK) == 0);
         kill(pid, SIGCONT);
         /* Use SIGUSR1, not SIGCONT, as the deterministic post-resume wakeup. */
         kill(pid, SIGUSR1);
     }
 
     /* Child should now write "B" and exit */
-    int wrote_after_cont = read_bounded && wait_for_byte(pfd[0], 'B', 200);
+    int wrote_after_cont = child_stopped && wait_for_byte(pfd[0], 'B', 200);
     close(pfd[0]);
 
     int resumed_and_exited = (wrote_after_cont &&
@@ -224,6 +227,24 @@ static void test_kill_sigstop_cont(void) {
 /* -----------------------------------------------------------------------
  * 7. kill_group — kill(-pgid, SIGUSR1) reaches all group members
  * ---------------------------------------------------------------------- */
+
+static void test_killpg_current_group_self(void) {
+    pid_t self = getpid();
+
+    /* TEST: Exercise libc killpg(getpgrp(), sig) directly.  The process first
+     * isolates itself so the group signal cannot reach the parent shell. */
+    if (setpgid(0, self) != 0 && getpgrp() != self) {
+        CHECK("killpg_current_group: isolated process group", 0);
+        return;
+    }
+    CHECK("killpg_current_group: isolated process group", getpgrp() == self);
+
+    got_usr1 = 0;
+    signal(SIGUSR1, usr1_handler);
+    int r = killpg(getpgrp(), SIGUSR1);
+    CHECK("killpg_current_group: killpg returns 0", r == 0);
+    CHECK("killpg_current_group: handler ran", got_usr1 == 1);
+}
 
 static void test_kill_group(void) {
     pid_t parent_pid = getpid();
@@ -505,6 +526,7 @@ int main(void) {
     test_kill_nonexistent();
     test_kill_sigkill();
     test_kill_sigstop_cont();
+    test_killpg_current_group_self();
     test_kill_group();
     test_signal_default_term();
     test_signal_ignore();
