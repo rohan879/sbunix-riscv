@@ -2,7 +2,7 @@ diff --git a/include/platform.h b/include/platform.h
 index c449075b9..a4cbe852e 100644
 --- a/include/platform.h
 +++ b/include/platform.h
-@@ -558,6 +558,41 @@ typedef unsigned smalluint;
+@@ -558,6 +558,39 @@ typedef unsigned smalluint;
  # undef HAVE_PRINTF_PERCENTM
  #endif
  
@@ -17,9 +17,7 @@ index c449075b9..a4cbe852e 100644
 +# undef HAVE_MEMPCPY
 +# undef HAVE_STRCASESTR
 +# undef HAVE_STRCHRNUL
-+# ifndef SBU_HAS_STRSIGNAL
-+#  undef HAVE_STRSIGNAL
-+# endif
++# undef HAVE_STRSIGNAL
 +# undef HAVE_STRVERSCMP
 +# undef HAVE_VASPRINTF
 +# undef HAVE_UNLOCKED_STDIO
@@ -44,7 +42,7 @@ index c449075b9..a4cbe852e 100644
  /*
   * Now, define prototypes for all the functions defined in platform.c
   * These must come after all the HAVE_* macros are defined (or not)
-@@ -631,6 +666,7 @@ extern int usleep(unsigned) FAST_FUNC;
+@@ -631,6 +664,7 @@ extern int usleep(unsigned) FAST_FUNC;
  #endif
  
  #ifndef HAVE_VASPRINTF

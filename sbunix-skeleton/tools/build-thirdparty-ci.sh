@@ -43,8 +43,10 @@ fi
 require_build_path "$src_dir"
 require_build_path "$payload_dir"
 require_build_path "$work_top"
+generated_build_dir=$(CDPATH= cd -- "$(dirname -- "$src_dir")" && pwd)/build
+require_build_path "$generated_build_dir"
 
-rm -rf "$src_dir" "$payload_dir" "$work_top"
+rm -rf "$src_dir" "$payload_dir" "$work_top" "$generated_build_dir"
 mkdir -p "$src_dir" "$payload_dir/bin" "$work_top/build/libc" "$work_top/libc"
 
 if [ ! -f "$repo_root/build/libc/crt.S.o" ] || [ ! -f "$repo_root/build/libc.a" ]; then
@@ -110,6 +112,46 @@ done
 # by tools/stage-thirdparty.sh; editing only the disposable copy keeps source
 # submodules clean while producing reproducible CI payloads.
 sed -i "s|^TOP[[:space:]]*:=[[:space:]].*|TOP := $work_top|" "$src_dir/Makefile"
+# BF: The disposable submodule copies have .git metadata stripped.  In that
+# state, `git apply` run from busybox/ resolves against the outer repository
+# and silently skips the BusyBox patch, so use patch(1) only for the copy.
+perl -0pi -e 's/\@cd busybox && git apply \.\.\/busybox-sbunix\.patch/\@cd busybox && patch -p1 < ..\/busybox-sbunix.patch/g' \
+  "$src_dir/Makefile"
+if [ "$skip_busybox" = "0" ]; then
+  # BF: Keep the disposable BusyBox payload to the applets staged into the
+  # guest.  Wider defaults pull in shell/network/process pieces that are not
+  # part of the smoke workload and add unresolved freestanding dependencies.
+  perl -0pi -e '
+    s/^(?:CONFIG_|# CONFIG_)(?:SSL_SERVER|TLS|ASH|ASH_OPTIMIZE_FOR_SIZE|ASH_INTERNAL_GLOB|ASH_JOB_CONTROL|ASH_ALIAS|ASH_ECHO|ASH_TEST|ASH_HELP|ASH_GETOPTS|ASH_CMDCMD|SH_IS_ASH|KILL|PS|PSCAN|PSTREE)(?:=.*| is not set)\n//mg;
+    s/^# CONFIG_SH_IS_NONE is not set\n//mg;
+  ' "$src_dir/busybox_defconfig"
+  cat >>"$src_dir/busybox_defconfig" <<'EOF'
+# CONFIG_SSL_SERVER is not set
+# CONFIG_TLS is not set
+# CONFIG_ASH is not set
+# CONFIG_ASH_OPTIMIZE_FOR_SIZE is not set
+# CONFIG_ASH_INTERNAL_GLOB is not set
+# CONFIG_ASH_JOB_CONTROL is not set
+# CONFIG_ASH_ALIAS is not set
+# CONFIG_ASH_ECHO is not set
+# CONFIG_ASH_TEST is not set
+# CONFIG_ASH_HELP is not set
+# CONFIG_ASH_GETOPTS is not set
+# CONFIG_ASH_CMDCMD is not set
+# CONFIG_SH_IS_ASH is not set
+CONFIG_SH_IS_NONE=y
+# CONFIG_KILL is not set
+# CONFIG_PS is not set
+# CONFIG_PSCAN is not set
+# CONFIG_PSTREE is not set
+EOF
+
+  # BF: The RISC-V linker supports archive groups, but BusyBox's probe runs
+  # with SBUnix freestanding flags and can misclassify this support.  Keep
+  # groups enabled so applet archives resolve independent of object order.
+  perl -0pi -e 's/if ! check_cc "-Wl,--start-group -Wl,--end-group"; then/if false; then/' \
+    "$src_dir/busybox/scripts/trylink"
+fi
 perl -0pi -e 's#define CONFIG_TCCDIR "/lib/tcc"#define CONFIG_TCCDIR "/usr/lib/tcc"#g;
               s#define CONFIG_TCC_SYSINCLUDEPATHS "/lib/tcc/include"#define CONFIG_TCC_SYSINCLUDEPATHS "/usr/lib/tcc/include"#g;
               s#define CONFIG_TCC_LIBPATHS "/lib"#define CONFIG_TCC_LIBPATHS "/usr/lib/tcc/lib"#g;
@@ -126,9 +168,9 @@ fi
 
 # BF: BusyBox env uses clearenv(), which SBUnix libc does not export.  Add the
 # prototype and weak shim only to the disposable CI source tree.
-printf '\nint clearenv(void);\n' >>"$src_dir/include/stdlib.h"
-printf '\nint fileno_unlocked(FILE *stream);\nint ferror_unlocked(FILE *stream);\n' >>"$src_dir/include/stdio.h"
-printf '\nchar *strchrnul(const char *s, int c);\nint strverscmp(const char *a, const char *b);\n' >>"$src_dir/include/string.h"
+printf '\n#define alloca(size) __builtin_alloca(size)\nint clearenv(void);\n' >>"$src_dir/include/stdlib.h"
+printf '\nchar *fgets_unlocked(char *s, int n, FILE *stream);\nint fputs_unlocked(const char *s, FILE *stream);\nint feof_unlocked(FILE *stream);\nint fileno_unlocked(FILE *stream);\nint ferror_unlocked(FILE *stream);\n' >>"$src_dir/include/stdio.h"
+printf '\nvoid *mempcpy(void *dst, const void *src, size_t n);\nchar *strchrnul(const char *s, int c);\nint strverscmp(const char *a, const char *b);\n' >>"$src_dir/include/string.h"
 printf '\nint sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask);\n' >>"$src_dir/include/sched.h"
 printf '\n#define TCIFLUSH 0\n#define TCOFLUSH 1\n#define TCIOFLUSH 2\nint tcflush(int fd, int queue_selector);\n' >>"$src_dir/include/termios.h"
 cat >>"$src_dir/compat.c" <<'EOF'
@@ -152,6 +194,11 @@ W int strverscmp(const char *a, const char *b) {
 	return strcmp(a, b);
 }
 
+W void *mempcpy(void *dst, const void *src, size_t n) {
+	memcpy(dst, src, n);
+	return (char *)dst + n;
+}
+
 W int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask) {
 	(void)pid;
 	if (!mask || cpusetsize < sizeof(cpu_set_t)) {
@@ -161,6 +208,18 @@ W int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask) {
 	memset(mask, 0, cpusetsize);
 	mask->__bits[0] = 1;
 	return 0;
+}
+
+W char *fgets_unlocked(char *s, int n, FILE *stream) {
+	return fgets(s, n, stream);
+}
+
+W int fputs_unlocked(const char *s, FILE *stream) {
+	return fputs(s, stream);
+}
+
+W int feof_unlocked(FILE *stream) {
+	return feof(stream);
 }
 
 W int fileno_unlocked(FILE *stream) {
