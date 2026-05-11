@@ -119,9 +119,15 @@ static void tty_signal_fg(int sig) {
         /* If a foreground group is set, only signal that group */
         if (target_pgid > 0 && p->pgid != target_pgid)
             continue;
-        /* BF: Use the normal signal-delivery path so Ctrl-Z immediately
-         * records a job-control stop instead of waking read() to return EINTR. */
-        kill_deliver(p, sig);
+        /* BF: Keyboard-generated job-control signals should be queued and
+         * then delivered in normal process context.  Immediate stop-state
+         * transitions from inside the UART interrupt path left the console
+         * unable to receive further input after Ctrl-Z on a live foreground
+         * job.  Waking sleeping targets here lets their next trap/syscall
+         * return publish the stop or continue event in the usual way. */
+        sig_set_pending(p, sig, 0, 0, 0);
+        if (p->state == SLEEPING && proc_event_wake_allowed(p))
+            p->state = RUNNABLE;
     }
 }
 
@@ -303,6 +309,13 @@ void tty_input(char c) {
 int tty_read(char *buf, int len) {
   if (len <= 0)
     return 0;
+
+  /* BF: A process entering tty_read() is no longer blocked in wait4.
+   * Clear any stale waitpid sleeper marker so uart_wakeup() will not
+   * mistakenly suppress keyboard wakeups at the shell prompt after a
+   * foreground stop/continue sequence. */
+  if (current_proc)
+    current_proc->waiting_for_child = 0;
 
   uint32_t lflag = tty0.termios.c_lflag;
 
