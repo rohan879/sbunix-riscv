@@ -106,6 +106,28 @@ struct fg_report {
   int reclaim_after_exit;
 };
 
+static int wait_for_report(int fd, struct fg_report *report, int attempts)
+{
+  unsigned char *p = (unsigned char *)report;
+  size_t done = 0;
+
+  for (int i = 0; i < attempts; i++) {
+    ssize_t n = read(fd, p + done, sizeof(*report) - done);
+    if (n > 0) {
+      done += (size_t)n;
+      if (done == sizeof(*report))
+        return 1;
+      continue;
+    }
+    if (n == 0)
+      return 0;
+    if (errno != EAGAIN && errno != EWOULDBLOCK)
+      return 0;
+    usleep(10000);
+  }
+  return 0;
+}
+
 static int write_full(int fd, const void *buf, size_t len)
 {
   const unsigned char *p = buf;
@@ -148,7 +170,7 @@ static void child_job(int progress_fd, int release_fd)
   _exit((got_cont && fg == getpgrp()) ? 0 : 1);
 }
 
-static void controller_main(int start_fd, int report_fd, int job_fd)
+static void controller_main(int report_fd, int job_fd)
 {
   struct fg_report r;
   int progress[2];
@@ -158,13 +180,9 @@ static void controller_main(int start_fd, int report_fd, int job_fd)
   pid_t controller_pgrp;
   struct sigaction ignore_ttou;
   struct sigaction old_ttou;
-  char start = 0;
 
   memset(&r, 0, sizeof(r));
   controller_pgrp = getpgrp();
-
-  if (read(start_fd, &start, 1) != 1)
-    _exit(2);
 
   memset(&ignore_ttou, 0, sizeof(ignore_ttou));
   ignore_ttou.sa_handler = SIG_IGN;
@@ -225,8 +243,11 @@ static void controller_main(int start_fd, int report_fd, int job_fd)
   r.reclaim_after_exit = (tcsetpgrp(STDIN_FILENO, controller_pgrp) == 0 &&
                           tcgetpgrp(STDIN_FILENO) == controller_pgrp);
   if (!r.exit_reaped) {
+    /* TEST: Failed resume paths must not leave the controller stuck in a
+     * blocking cleanup wait when this diagnostic runs in the full suite. */
+    kill(-child, SIGCONT);
     kill(-child, SIGKILL);
-    waitpid(child, &status, 0);
+    wait_status(child, &status, 0, 200);
   }
 
   close(progress[0]);
@@ -244,12 +265,8 @@ int main(void)
 {
   struct fg_report r;
   int report_pipe[2];
-  int start_pipe[2];
   int job_pipe[2];
-  int status = 0;
   int got_report = 0;
-  int controller_done = 0;
-  int controller_stopped = 0;
   int supervisor_reclaim = 0;
   pid_t controller;
   pid_t supervisor_pgrp;
@@ -278,7 +295,7 @@ int main(void)
         tcsetpgrp(STDIN_FILENO, supervisor_pgrp) == 0 &&
         tcgetpgrp(STDIN_FILENO) == supervisor_pgrp);
 
-  if (pipe(report_pipe) != 0 || pipe(start_pipe) != 0 ||
+  if (pipe2(report_pipe, O_NONBLOCK) != 0 ||
       pipe2(job_pipe, O_NONBLOCK) != 0) {
     CHECK("pipe setup", 0);
     sigaction(SIGTTOU, &old_ttou, NULL);
@@ -288,62 +305,53 @@ int main(void)
   controller = fork();
   if (controller == 0) {
     close(report_pipe[0]);
-    close(start_pipe[1]);
     close(job_pipe[0]);
-    controller_main(start_pipe[0], report_pipe[1], job_pipe[1]);
+    controller_main(report_pipe[1], job_pipe[1]);
   }
 
   close(report_pipe[1]);
-  close(start_pipe[0]);
   close(job_pipe[1]);
   if (controller < 0) {
     CHECK("fork controller", 0);
     close(report_pipe[0]);
-    close(start_pipe[1]);
     close(job_pipe[0]);
     sigaction(SIGTTOU, &old_ttou, NULL);
     return 1;
   }
 
-  write(start_pipe[1], "S", 1);
-  close(start_pipe[1]);
-
-  for (int i = 0; i < 1500; i++) {
-    pid_t got = waitpid(controller, &status, WNOHANG | WUNTRACED);
-    if (got == controller) {
-      if (WIFSTOPPED(status))
-        controller_stopped = 1;
-      else
-        controller_done = 1;
-      break;
-    }
-    usleep(10000);
+  /* TEST: The supervisor uses pipes, not waitpid, for its watchdog.  This
+   * keeps the diagnostic from hanging when the broken path is wait/reap
+   * interaction with a stopped or continued foreground group. */
+  for (int i = 0; i < 1500 && !got_report; i++) {
+    got_report = wait_for_report(report_pipe[0], &r, 1);
+    if (job_pgrp <= 0)
+      wait_for_pid(job_pipe[0], &job_pgrp, 1);
   }
-  if (controller_done) {
-    wait_for_pid(job_pipe[0], &job_pgrp, 1);
-    got_report = (read(report_pipe[0], &r, sizeof(r)) == (ssize_t)sizeof(r));
-  } else {
-    /* BF: A timed-out controller may already have created the foreground
-     * job.  Poll the nonblocking pid pipe before cleanup so the job group
-     * does not survive into later tty tests. */
+  if (job_pgrp <= 0)
     wait_for_pid(job_pipe[0], &job_pgrp, 100);
-  }
 
   supervisor_reclaim = (tcsetpgrp(STDIN_FILENO, supervisor_pgrp) == 0 &&
                         tcgetpgrp(STDIN_FILENO) == supervisor_pgrp);
 
-  if (!controller_done) {
-    if (job_pgrp > 0)
+  if (!got_report) {
+    if (job_pgrp > 0) {
+      kill(-job_pgrp, SIGCONT);
       kill(-job_pgrp, SIGKILL);
+    }
+    /* TEST: Keep cleanup best-effort and bounded so a foreground-resume
+     * regression is reported as a failed check instead of pinning CI. */
+    kill(controller, SIGCONT);
     kill(controller, SIGKILL);
-    waitpid(controller, &status, 0);
+    supervisor_reclaim = (tcsetpgrp(STDIN_FILENO, supervisor_pgrp) == 0 &&
+                          tcgetpgrp(STDIN_FILENO) == supervisor_pgrp) &&
+                         supervisor_reclaim;
   }
 
   close(report_pipe[0]);
   close(job_pipe[0]);
   sigaction(SIGTTOU, &old_ttou, NULL);
 
-  CHECK("controller returned before watchdog", got_report && !controller_stopped);
+  CHECK("controller returned before watchdog", got_report);
   CHECK("supervisor reclaimed tty after controller", supervisor_reclaim);
   CHECK("controller owns tty before job handoff", got_report && r.controller_owns_tty);
   CHECK("child became process-group leader", got_report && r.child_pgrp);
