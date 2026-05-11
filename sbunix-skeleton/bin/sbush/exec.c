@@ -124,12 +124,16 @@ int execute_pipeline(struct pipeline *pl) {
     int prev_fd = -1;
     pid_t pgid = 0;  /* process group for this pipeline */
 
-    /* Block SIGCHLD before forking so the handler can't reap children
-     * before our foreground waitpid loop captures the status. */
     sigset_t block_chld, saved_mask;
-    sigemptyset(&block_chld);
-    sigaddset(&block_chld, SIGCHLD);
-    sigprocmask(SIG_BLOCK, &block_chld, &saved_mask);
+    if (shell_is_interactive) {
+        /* Block SIGCHLD before forking so the handler can't reap children
+         * before our foreground waitpid loop captures the status. */
+        sigemptyset(&block_chld);
+        sigaddset(&block_chld, SIGCHLD);
+        sigprocmask(SIG_BLOCK, &block_chld, &saved_mask);
+    } else {
+        sigemptyset(&saved_mask);
+    }
 
     for (int i = 0; i < pl->ncmds; i++) {
         int pipefd[2] = {-1, -1};
@@ -151,8 +155,13 @@ int execute_pipeline(struct pipeline *pl) {
         }
 
         if (pid == 0) {
-            /* child: join (or create) the pipeline's process group */
-            setpgid(0, pgid);  /* pgid==0 for first child creates new group */
+            /* BF: Only the interactive top-level shell creates a separate
+             * job-control process group for pipelines.  Non-interactive
+             * script/-c shells must keep their children in the shell's own
+             * process group so Ctrl-C/Ctrl-Z applies to the whole foreground
+             * job rather than only the innermost command. */
+            if (shell_is_interactive)
+                setpgid(0, pgid);  /* pgid==0 for first child creates group */
 
             /* Restore default signal dispositions and mask in children */
             struct sigaction sa;
@@ -246,9 +255,11 @@ int execute_pipeline(struct pipeline *pl) {
         }
 
         /* parent: set the child into the pipeline process group (race-free) */
-        if (i == 0)
-            pgid = pid;  /* first child's PID becomes the group ID */
-        setpgid(pid, pgid);
+        if (shell_is_interactive) {
+            if (i == 0)
+                pgid = pid;  /* first child's PID becomes the group ID */
+            setpgid(pid, pgid);
+        }
 
         pids[i] = pid;
         if (prev_fd >= 0)
@@ -261,6 +272,10 @@ int execute_pipeline(struct pipeline *pl) {
     if (pl->background) {
         /* don't wait; shell continues immediately */
         last_bg_pid = pids[pl->ncmds - 1];
+        if (!shell_is_interactive) {
+            if (prev_fd >= 0) close(prev_fd);
+            return 0;
+        }
         /* Build command string for job display */
         char jobcmd[128] = "";
         int jlen = 0;
@@ -276,6 +291,28 @@ int execute_pipeline(struct pipeline *pl) {
         if (prev_fd >= 0) close(prev_fd);
         sigprocmask(SIG_SETMASK, &saved_mask, NULL);
         return 0;
+    }
+
+    if (!shell_is_interactive) {
+        int last_status = 0;
+        for (int i = 0; i < pl->ncmds; i++) {
+            int status = 0;
+            pid_t w;
+            do {
+                w = waitpid(pids[i], &status, 0);
+            } while (w < 0 && errno == EINTR);
+            if (w < 0)
+                continue;
+            if (i == pl->ncmds - 1) {
+                if (WIFEXITED(status))
+                    last_status = WEXITSTATUS(status);
+                else if (WIFSIGNALED(status))
+                    last_status = 128 + WTERMSIG(status);
+                else
+                    last_status = 1;
+            }
+        }
+        return last_status;
     }
 
     /* Foreground pipeline: give terminal to the pipeline process group */
