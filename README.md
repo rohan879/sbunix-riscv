@@ -2,6 +2,10 @@
 
 SBUnix course workspace for CSE506 Operating Systems.
 
+**NOTE:** 
+- The `cheri` branch was an attempt to enable running the system `cheri` architecture -- which is RISC-V extended to enable detection of memory safety issues at the hardware level.
+- The `vm-setup` branch contains information and instructions to setup your local virtual machine.
+
 ## Repository Layout
 
 - `sbunix-skeleton/` - the SBUnix kernel, libc, userspace programs, and build tools
