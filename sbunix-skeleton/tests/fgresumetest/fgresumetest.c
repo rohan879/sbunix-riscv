@@ -35,18 +35,11 @@ static int g_skip = 0;
 } while (0)
 
 static volatile sig_atomic_t got_cont = 0;
-static volatile sig_atomic_t alarm_fired = 0;
 
 static void cont_handler(int sig)
 {
   (void)sig;
   got_cont = 1;
-}
-
-static void alarm_handler(int sig)
-{
-  (void)sig;
-  alarm_fired = 1;
 }
 
 static int wait_for_byte(int fd, char want, int attempts)
@@ -73,6 +66,16 @@ static int read_pid(int fd, pid_t *pid_out)
   if (n == (ssize_t)sizeof(pid)) {
     *pid_out = pid;
     return 1;
+  }
+  return 0;
+}
+
+static int wait_for_pid(int fd, pid_t *pid_out, int attempts)
+{
+  for (int i = 0; i < attempts; i++) {
+    if (read_pid(fd, pid_out))
+      return 1;
+    usleep(10000);
   }
   return 0;
 }
@@ -253,8 +256,6 @@ int main(void)
   pid_t job_pgrp = -1;
   struct sigaction ignore_ttou;
   struct sigaction old_ttou;
-  struct sigaction alarm_action;
-  struct sigaction old_alarm;
 
   memset(&r, 0, sizeof(r));
 
@@ -272,11 +273,6 @@ int main(void)
   ignore_ttou.sa_handler = SIG_IGN;
   sigemptyset(&ignore_ttou.sa_mask);
   sigaction(SIGTTOU, &ignore_ttou, &old_ttou);
-
-  memset(&alarm_action, 0, sizeof(alarm_action));
-  alarm_action.sa_handler = alarm_handler;
-  sigemptyset(&alarm_action.sa_mask);
-  sigaction(SIGALRM, &alarm_action, &old_alarm);
 
   CHECK("supervisor owns tty before job-control sequence",
         tcsetpgrp(STDIN_FILENO, supervisor_pgrp) == 0 &&
@@ -312,19 +308,25 @@ int main(void)
   write(start_pipe[1], "S", 1);
   close(start_pipe[1]);
 
-  alarm_fired = 0;
-  alarm(15);
-  pid_t got = waitpid(controller, &status, WUNTRACED);
-  alarm(0);
-  if (got == controller) {
-    if (WIFSTOPPED(status))
-      controller_stopped = 1;
-    else
-      controller_done = 1;
+  for (int i = 0; i < 1500; i++) {
+    pid_t got = waitpid(controller, &status, WNOHANG | WUNTRACED);
+    if (got == controller) {
+      if (WIFSTOPPED(status))
+        controller_stopped = 1;
+      else
+        controller_done = 1;
+      break;
+    }
+    usleep(10000);
   }
   if (controller_done) {
-    read_pid(job_pipe[0], &job_pgrp);
+    wait_for_pid(job_pipe[0], &job_pgrp, 1);
     got_report = (read(report_pipe[0], &r, sizeof(r)) == (ssize_t)sizeof(r));
+  } else {
+    /* BF: A timed-out controller may already have created the foreground
+     * job.  Poll the nonblocking pid pipe before cleanup so the job group
+     * does not survive into later tty tests. */
+    wait_for_pid(job_pipe[0], &job_pgrp, 100);
   }
 
   supervisor_reclaim = (tcsetpgrp(STDIN_FILENO, supervisor_pgrp) == 0 &&
@@ -340,10 +342,8 @@ int main(void)
   close(report_pipe[0]);
   close(job_pipe[0]);
   sigaction(SIGTTOU, &old_ttou, NULL);
-  sigaction(SIGALRM, &old_alarm, NULL);
 
-  CHECK("controller returned before watchdog",
-        got_report && !controller_stopped && !alarm_fired);
+  CHECK("controller returned before watchdog", got_report && !controller_stopped);
   CHECK("supervisor reclaimed tty after controller", supervisor_reclaim);
   CHECK("controller owns tty before job handoff", got_report && r.controller_owns_tty);
   CHECK("child became process-group leader", got_report && r.child_pgrp);
