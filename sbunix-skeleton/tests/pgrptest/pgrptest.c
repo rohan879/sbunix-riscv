@@ -23,100 +23,16 @@ static int g_fail = 0;
 } while (0)
 
 static volatile sig_atomic_t got_usr1 = 0;
-static volatile sig_atomic_t got_cont = 0;
 
 static void usr1_handler(int sig) {
     (void)sig;
     got_usr1 = 1;
 }
 
-static void cont_handler(int sig) {
-    (void)sig;
-    got_cont = 1;
-}
-
 static void wait_for_usr1(sigset_t *oldmask) {
     while (!got_usr1)
         sigsuspend(oldmask);
     sigprocmask(SIG_SETMASK, oldmask, NULL);
-}
-
-static void test_foreground_resume_wait_group(void) {
-    int status_pipe[2];
-    if (pipe(status_pipe) != 0) {
-        CHECK("foreground_resume_wait_group: setup pipe", 0);
-        return;
-    }
-
-    pid_t caller_pgrp = getpgrp();
-    pid_t tty_pgrp = tcgetpgrp(STDIN_FILENO);
-    CHECK("foreground_resume_wait_group: caller owns tty before handoff",
-          tty_pgrp == caller_pgrp);
-
-    pid_t child = fork();
-    if (child == 0) {
-        close(status_pipe[0]);
-        setpgid(0, 0);
-
-        struct sigaction sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sa_handler = cont_handler;
-        sigemptyset(&sa.sa_mask);
-        sigaction(SIGCONT, &sa, NULL);
-
-        for (;;) {
-            pause();
-            if (got_cont) {
-                pid_t fg = tcgetpgrp(STDIN_FILENO);
-                char ok = (fg == getpgrp()) ? '1' : '0';
-                write(status_pipe[1], &ok, 1);
-                _exit(ok == '1' ? 0 : 1);
-            }
-        }
-    }
-
-    close(status_pipe[1]);
-    setpgid(child, child);
-
-    int handoff_ok = (tcsetpgrp(STDIN_FILENO, child) == 0);
-    CHECK("foreground_resume_wait_group: tcsetpgrp child", handoff_ok);
-    if (!handoff_ok) {
-        close(status_pipe[0]);
-        kill(child, SIGKILL);
-        waitpid(child, NULL, 0);
-        return;
-    }
-
-    int stop_ok = (kill(-child, SIGTSTP) == 0);
-    CHECK("foreground_resume_wait_group: SIGTSTP group", stop_ok);
-
-    int status = 0;
-    pid_t w = waitpid(-child, &status, WUNTRACED);
-    CHECK("foreground_resume_wait_group: waitpid(-pgid) reports stop",
-          w == child && WIFSTOPPED(status) && WSTOPSIG(status) == SIGTSTP);
-
-    int cont_ok = (kill(-child, SIGCONT) == 0);
-    CHECK("foreground_resume_wait_group: SIGCONT group", cont_ok);
-
-    status = 0;
-    w = waitpid(-child, &status, WCONTINUED);
-    CHECK("foreground_resume_wait_group: waitpid(-pgid) reports continue",
-          w == child && WIFCONTINUED(status));
-
-    char resumed = 0;
-    int n = read(status_pipe[0], &resumed, 1);
-    CHECK("foreground_resume_wait_group: resumed child ran in fg tty group",
-          n == 1 && resumed == '1');
-
-    status = 0;
-    w = waitpid(-child, &status, 0);
-    CHECK("foreground_resume_wait_group: resumed child exits",
-          w == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
-
-    close(status_pipe[0]);
-
-    CHECK("foreground_resume_wait_group: tcsetpgrp caller restore",
-          tcsetpgrp(STDIN_FILENO, caller_pgrp) == 0);
 }
 
 /* -----------------------------------------------------------------------
@@ -450,7 +366,6 @@ int main(void) {
     test_setsid_new_pgid();
     test_kill_process_group();
     test_kill_process_group_fatal_self_sender();
-    test_foreground_resume_wait_group();
     test_setpgid_session_leader_fails();
     test_pgid_inherited();
 

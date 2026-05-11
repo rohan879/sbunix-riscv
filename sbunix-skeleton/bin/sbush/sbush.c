@@ -7,7 +7,6 @@ volatile sig_atomic_t fg_pid = 0;
 
 /* Flag set by SIGCHLD handler; main loop checks and prints notifications */
 volatile sig_atomic_t g_sigchld_flag = 0;
-int shell_is_interactive = 0;
 
 static int exec_depth = 0;
 static struct cmdlist cl_stack[MAX_EXEC_DEPTH];
@@ -339,20 +338,11 @@ static void reap_zombies(void) {
 }
 
 int main(int argc, char *argv[], char *envp[]) {
-    shell_is_interactive = (argc < 2) &&
-                           isatty(STDIN_FILENO) &&
-                           isatty(STDOUT_FILENO);
-
     env_init(envp);
     positional_set_zero(argv[0]);
 
-    /* BF: Only the interactive top-level shell should intercept job-control
-     * keys and forward them to a tracked foreground child.  Script and -c
-     * shells must keep default SIGINT/SIGQUIT/SIGTSTP behavior so the whole
-     * foreground job stops or terminates together when run under another
-     * interactive shell. */
-    if (shell_is_interactive)
-        install_signal_handlers();
+    /* Install signal handlers before entering REPL */
+    install_signal_handlers();
 
     /* set defaults */
     if (!var_get("PATH"))
@@ -386,16 +376,6 @@ int main(int argc, char *argv[], char *envp[]) {
     /* interactive REPL */
     static char line[MAX_LINE];
     while (1) {
-        if (shell_is_interactive) {
-            /* BF: Reassert shell ownership of the controlling terminal
-             * before every prompt/read cycle.  Foreground job stop paths
-             * should already restore this, but if a nested script or an
-             * interrupted tcsetpgrp sequence leaves the tty on another
-             * process group, the prompt becomes visible while keyboard
-             * input appears dead. */
-            fg_pid = 0;
-            tcsetpgrp(STDIN_FILENO, getpgrp());
-        }
         reap_zombies();
         char *ps1;
         if (cf_active() || heredoc_active() || func_def_active())

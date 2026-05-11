@@ -179,4 +179,3 @@ extern int set_flag_u;
 /* signal globals (sbush.c) */
 extern volatile sig_atomic_t fg_pid;
 extern volatile sig_atomic_t g_sigchld_flag;
-extern int shell_is_interactive;
