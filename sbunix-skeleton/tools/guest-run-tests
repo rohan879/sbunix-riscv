@@ -192,6 +192,8 @@ run_test lazytest
 run_test alloc1gb
 run_test brk_enomem
 run_test pgrptest
+run_test fgresumetest
+run_test largeworkloadtest
 run_test symlinktest
 run_test symlink_mutation_edges
 run_test symlink_posix_edges

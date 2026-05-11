@@ -7,6 +7,7 @@
  * Tests signal delivery and kill().
  */
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -31,6 +32,21 @@ static volatile sig_atomic_t got_usr2 = 0;
 
 static void usr1_handler(int sig) { (void)sig; got_usr1 = 1; }
 static void usr2_handler(int sig) { (void)sig; got_usr2 = 1; }
+
+static int wait_for_byte(int fd, char want, int attempts) {
+    for (int i = 0; i < attempts; i++) {
+        char ch = 0;
+        ssize_t n = read(fd, &ch, 1);
+        if (n == 1)
+            return ch == want;
+        if (n == 0)
+            return 0;
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+            return 0;
+        usleep(10000);
+    }
+    return 0;
+}
 
 /* -----------------------------------------------------------------------
  * 1. kill_self — kill(getpid(), SIGUSR1) with handler installed
@@ -133,7 +149,12 @@ static void test_kill_sigkill(void) {
 
 static void test_kill_sigstop_cont(void) {
     int pfd[2];
-    pipe(pfd);
+    int status;
+
+    if (pipe2(pfd, O_NONBLOCK) != 0) {
+        CHECK("kill_sigstop_cont: pipe setup", 0);
+        return;
+    }
 
     pid_t pid = fork();
     if (pid == 0) {
@@ -151,40 +172,79 @@ static void test_kill_sigstop_cont(void) {
         close(pfd[1]);
         _exit(0);
     }
+    if (pid < 0) {
+        CHECK("kill_sigstop_cont: fork child", 0);
+        close(pfd[0]);
+        close(pfd[1]);
+        return;
+    }
 
     close(pfd[1]);
 
-    /* Wait for child to be running */
-    char buf[1];
-    read(pfd[0], buf, 1); /* read "A" */
+    /* BF: Keep the initial readiness handshake bounded too; otherwise a
+     * failed child setup can pin the same CI path as a failed resume. */
+    if (!wait_for_byte(pfd[0], 'A', 200)) {
+        CHECK("kill_sigstop_cont: child ready", 0);
+        kill(pid, SIGKILL);
+        close(pfd[0]);
+        waitpid(pid, &status, WNOHANG);
+        return;
+    }
 
     /* Stop the child */
     kill(pid, SIGSTOP);
 
     /* Wait until child is actually stopped */
-    int status;
     waitpid(pid, &status, WUNTRACED);
-    CHECK("kill_sigstop_cont: child stopped", WIFSTOPPED(status));
+    int child_stopped = WIFSTOPPED(status);
+    CHECK("kill_sigstop_cont: child stopped", child_stopped);
 
     /* Resume the child */
-    kill(pid, SIGCONT);
-    /* Use SIGUSR1, not SIGCONT, as the deterministic post-resume wakeup. */
-    kill(pid, SIGUSR1);
+    if (child_stopped) {
+        kill(pid, SIGCONT);
+        /* Use SIGUSR1, not SIGCONT, as the deterministic post-resume wakeup. */
+        kill(pid, SIGUSR1);
+    }
 
     /* Child should now write "B" and exit */
-    char buf2[1] = {0};
-    read(pfd[0], buf2, 1);
+    int wrote_after_cont = child_stopped && wait_for_byte(pfd[0], 'B', 200);
     close(pfd[0]);
 
-    waitpid(pid, &status, 0);
-    CHECK("kill_sigstop_cont: child resumed and exited",
-          WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    CHECK("kill_sigstop_cont: child wrote after CONT", buf2[0] == 'B');
+    int resumed_and_exited = (wrote_after_cont &&
+                              waitpid(pid, &status, 0) == pid &&
+                              WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    if (!resumed_and_exited) {
+        /* BF: Keep post-resume cleanup best-effort and nonblocking so this
+         * signal regression reports failure rather than hanging CI. */
+        kill(pid, SIGCONT);
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, WNOHANG);
+    }
+    CHECK("kill_sigstop_cont: child resumed and exited", resumed_and_exited);
+    CHECK("kill_sigstop_cont: child wrote after CONT", wrote_after_cont);
 }
 
 /* -----------------------------------------------------------------------
  * 7. kill_group — kill(-pgid, SIGUSR1) reaches all group members
  * ---------------------------------------------------------------------- */
+
+static void test_killpg_current_group_self(void) {
+    pid_t self = getpid();
+
+    /* TEST: Exercise libc killpg(getpgrp(), sig) directly.  The process first
+     * isolates itself so the group signal cannot reach the parent shell. */
+    if (setpgid(0, self) != 0 && getpgrp() != self) {
+        CHECK("killpg_current_group: isolated process group", 0);
+        return;
+    }
+    CHECK("killpg_current_group: isolated process group", getpgrp() == self);
+
+    got_usr1 = 0;
+    signal(SIGUSR1, usr1_handler);
+    int r = killpg(getpgrp(), SIGUSR1);
+    CHECK("killpg_current_group: killpg returns 0", r == 0);
+    CHECK("killpg_current_group: handler ran", got_usr1 == 1);
+}
 
 static void test_kill_group(void) {
     pid_t parent_pid = getpid();
@@ -466,6 +526,7 @@ int main(void) {
     test_kill_nonexistent();
     test_kill_sigkill();
     test_kill_sigstop_cont();
+    test_killpg_current_group_self();
     test_kill_group();
     test_signal_default_term();
     test_signal_ignore();
