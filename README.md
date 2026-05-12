@@ -69,12 +69,6 @@ The old manually managed third-party payload directory was moved from
 `thirdparty` tree unless you are intentionally testing the legacy local staging
 path.
 
-The MicroPython source submodule is pinned to the course-container-compatible
-fork at
-`https://github.com/AdebayoBraimah/micropython/tree/sbunix-course-python`
-instead of upstream MicroPython. This fork preserves the course-specific
-changes needed by the SBUnix third-party workload build.
-
 ### What Gets Included
 
 On a fresh `make`, `make qemu`, or any build that recreates `build/rootfs`, the
