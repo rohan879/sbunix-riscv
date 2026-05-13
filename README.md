@@ -9,8 +9,11 @@ tarfs root filesystem, and can attach ext2 block images for `/mnt` and `/test`.
 User programs are statically linked against the in-tree libc and are discovered
 from `bin/*/*.c` and `bin/*/*.rs` by the Makefile.
 
-The old `cheri` and `vm-setup` branches are historical notes. Current build,
-run, and validation work should start from `sbunix-skeleton/`.
+Current build, run, and validation work should start from `sbunix-skeleton/`.
+
+The other branches:
+- The `cheri` branch was an attempt to enable running the system `cheri` architecture -- which is RISC-V extended to enable detection of memory safety issues at the hardware level.
+- The `vm-setup` branch contains information and instructions to setup your local virtual machine.
 
 ## Repository Layout
 
